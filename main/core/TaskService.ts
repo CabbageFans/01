@@ -287,7 +287,7 @@ export class TaskService {
       return {
         id: this.id(), prompt, assignedAccountId: null, status: 'queued', mode,
         executionIntent: params.executionIntent || 'hold',
-        videoConfig: params.videoConfig, attachments: params.attachments,
+        petstory: params.petstory, videoConfig: params.videoConfig, attachments: params.attachments,
         audioAttachment: params.audioAttachment, result: null, outputs: [], artifacts: [],
         runHistory: [], source: 'manual', dependsOnTaskIds: [],
         projectId: params.projectId || this.deps.defaultProjectId(),
@@ -297,6 +297,17 @@ export class TaskService {
     tasks.push(...created);
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true, data: created };
+  }
+
+  /** 采用 P3 已有未运行 hold 草稿时，仅补业务归属，不重建任务。 */
+  bindPetStory(taskId: string, binding: NonNullable<Task['petstory']>): TaskServiceResult<Task> {
+    const tasks = this.readTasks();
+    const task = tasks?.find((item: Task): boolean => item.id === taskId);
+    if (!tasks || !task || task.status !== 'queued' || task.executionIntent !== 'hold' || task.runtime || task.outputs.length
+      || (task.petstory && JSON.stringify(task.petstory) !== JSON.stringify(binding))) return { success: false, error: '仅允许绑定尚未运行的原 hold 草稿' };
+    task.petstory = binding;
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: true, data: task };
   }
 
   assign(params: TaskAssignParams): TaskServiceResult<Task> {
@@ -385,11 +396,15 @@ export class TaskService {
     return { success: true };
   }
 
-  retry(taskId: string): TaskServiceResult<Task> {
+  retry(taskId: string, executionIntent: TaskExecutionIntent = 'armed'): TaskServiceResult<Task> {
     const tasks = this.readTasks();
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === taskId);
     if (!task) return { success: false, error: '任务不存在' };
+    // PetStory 附件恢复先保存 hold，再显式绑定新 run；任何提交证据都禁止此路径。
+    if (executionIntent === 'hold' && (task.runtime?.submittedAt || task.runtime?.acceptanceObservation || task.runtime?.chatResponse)) {
+      return { success: false, error: '原任务已有提交或回复证据，禁止附件重试' };
+    }
     if (requiresSubmissionReconciliation(task)) {
       return { success: false, error: '任务存在已提交记录，请先核对平台结果；为避免重复扣费，禁止重新发送' };
     }
@@ -401,8 +416,8 @@ export class TaskService {
     if (isDependencyBlockedTask(task)) {
       return { success: false, error: '依赖阻断错误不能直接重试，请先修复依赖关系' };
     }
-    // 重试是明确的重新执行动作，必须显式 armed 后才能被调度器启动。
-    this.resetTaskForQueue(task, this.now(), 'armed');
+    // 通用重试显式 armed；PetStory 先保持 hold，待项目绑定新 run 后再授权执行。
+    this.resetTaskForQueue(task, this.now(), executionIntent);
     // 依赖已恢复并允许重新入队时，必须同时清除历史阻断证据，避免恢复后仍显示旧阻断。
     task.blockedByTaskIds = undefined;
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
@@ -609,6 +624,13 @@ export class TaskService {
       const authoritative = this.readPersistedTask(params.taskId);
       if (!authoritative) return { success: false, error: '任务状态写入后回读失败，无法确认落盘结果' };
       return { success: false, error: '任务状态已被并发修改，已返回权威回读状态', task: authoritative };
+    }
+    if (params.runtime?.chatResponse) {
+      const saved = this.readPersistedTask(params.taskId);
+      if (!saved || saved.runtime?.runId !== task.runtime?.runId || saved.runtime?.chatResponse?.text !== params.runtime.chatResponse.text || saved.runtime.chatResponse.capturedAt !== params.runtime.chatResponse.capturedAt) {
+        return { success: false, error: 'Chat 正文写入后回读不一致，禁止重新发送', task: saved || undefined };
+      }
+      return { success: true, data: saved };
     }
     return { success: true, data: task };
   }
@@ -959,6 +981,23 @@ export class TaskService {
   }
 
   /** 只读查询：导出诊断用的脱敏任务投影（路径名经注入 basename 收敛，零写入） */
+  /** Chat正文只留在本机任务／项目，不进入 CLI、MCP 或诊断导出。 */
+  private diagnosticRuntime(runtime: TaskRunSnapshot | undefined): TaskRunSnapshot | undefined {
+    if (!runtime) return undefined;
+    return {
+      ...runtime,
+      chatResponse: undefined,
+      conversationUrl: runtime.conversationUrl ? '[已脱敏]' : undefined,
+      acceptanceObservation: runtime.acceptanceObservation ? { ...runtime.acceptanceObservation, conversationUrl: '[已脱敏]' } : undefined,
+      input: {
+        ...runtime.input,
+        prompt: `[已脱敏，长度 ${runtime.input.prompt.length}]`,
+        attachments: runtime.input.attachments.map((item: string): string => this.basename(item)),
+        audioAttachment: runtime.input.audioAttachment ? this.basename(runtime.input.audioAttachment) : undefined,
+      },
+    };
+  }
+
   buildTaskDiagnostics(): TaskServiceResult<Task[]> {
     const tasks = this.readTasks();
     if (!tasks) return { success: false, error: WRITE_ERROR };
@@ -967,6 +1006,7 @@ export class TaskService {
       data: tasks.map((task) => ({
         ...task,
         prompt: `[已脱敏，长度 ${task.prompt.length}]`,
+        runtime: this.diagnosticRuntime(task.runtime),
         attachments: (task.attachments || []).map((item) => this.basename(item)),
         audioAttachment: task.audioAttachment ? this.basename(task.audioAttachment) : undefined,
         outputs: task.outputs.map((_, index) => `[产物地址 ${index + 1}]`),

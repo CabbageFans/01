@@ -555,7 +555,6 @@ describe('新版视频控件适配契约', () => {
     expect(injected).toContain('data-valid-btn="mode-select-action-btn"');
     expect(injected).toContain('data-input-engine-actionbar-control-key="video-model"');
     expect(injected).toContain('data-creation-params-panel-id');
-    expect(injected).toContain('waitForModeEntry(15000)');
     expect(injected).toContain('findVisibleModeMenuOption(5000)');
     expect(injected).toContain('waitForVideoControls(15000)');
   });

@@ -9,7 +9,7 @@
  * 4. 窗口生命周期管理
  */
 
-import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, session, shell } from 'electron';
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -21,6 +21,7 @@ import {
   registerTaskIPC,
 } from './ipc/tasks';
 import { loadProjects, registerProjectIPC } from './ipc/projects';
+import { registerPetStoryIPC } from './ipc/petstory';
 import { registerSystemIPC } from './ipc/system';
 import { writeCrashLog } from './utils/logger';
 import { replaceIpcHandlers } from './ipc/lifecycle';
@@ -37,11 +38,19 @@ import {
   WEBVIEW_NETWORK_RECOVERY_VERSION,
 } from './utils/webviewNetworkRecovery';
 import { getDataDir, readJSON } from './utils/store';
+import { configureDevelopmentProfile } from './utils/developmentProfile';
+import { prepareWindowForNativeInput, retainMacWindowOnClose, revealRetainedWindow } from './utils/windowLifecycle';
 
 // ==================== 常量 ====================
 
 const isDev = !app.isPackaged;
 const PRELOAD_PATH = path.join(__dirname, 'preload.js');
+
+// 导入的模块仅定义惰性读取函数；此处早于单实例锁、ready 与 Session 初始化。
+const developmentProfile = configureDevelopmentProfile(app, process.argv.slice(1));
+if (developmentProfile) {
+  console.log(`[Profile] ${developmentProfile.name} userData=${developmentProfile.userData}`);
+}
 
 /** 豆包网页地址 */
 const DOUBAO_URL = 'https://www.doubao.com';
@@ -182,16 +191,20 @@ function createMainWindow(): BrowserWindow {
     title: '豆包工作室 Doubao Studio',
     backgroundColor: '#0f0f14',
     show: false, // 等待 ready-to-show 后再显示，避免白屏闪烁
-    frame: false, // 无边框窗口（自定义标题栏）
-    titleBarStyle: 'hidden', // macOS 隐藏原生标题栏
+    // macOS 使用原生标题栏，为系统窗口按钮保留空间，避免遮挡工具栏。
+    frame: process.platform === 'darwin',
+    titleBarStyle: process.platform === 'darwin' ? 'default' : 'hidden',
     webPreferences: {
       preload: PRELOAD_PATH,
       // 开启 webview 标签支持
       webviewTag: true,
+      // 创作控件依赖动画帧完成挂载；主窗口被遮挡时仍需绘制，避免接力误读隐藏测量层。
+      backgroundThrottling: false,
       // 安全策略
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false, // 需要 preload 访问 Node API
+      // preload 仅使用 Electron 的 sandbox 支持 API，不需要完整 Node 权限。
+      sandbox: true,
     },
   });
 
@@ -216,10 +229,18 @@ function createMainWindow(): BrowserWindow {
 
   // 在默认浏览器中打开外部链接
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
 
+  win.on('close', (event: Electron.Event): void => {
+    retainMacWindowOnClose(event, win, process.platform, isQuitting);
+  });
+  // 每个实际创建的窗口均接入控制桥生命周期，防止意外销毁后重建遗漏监听。
+  win.webContents.on('did-start-navigation', (_event, _url, _isInPlace, isMainFrame): void => {
+    if (isMainFrame) controlBroker?.markUnavailable();
+  });
+  win.webContents.on('render-process-gone', (): void => controlBroker?.markUnavailable());
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
   });
@@ -236,16 +257,32 @@ function registerIPC(): void {
     registerAccountIPC(),
     registerProjectIPC(),
     registerTaskIPC(),
+    registerPetStoryIPC(),
     registerSystemIPC(),
   ];
 
-  disposers.push(replaceIpcHandlers(ipcMain, ['system:getVersion']));
+  disposers.push(replaceIpcHandlers(ipcMain, ['system:getVersion', 'window:prepareNativeInput']));
 
   // ---- 系统级 IPC ----
 
   // 获取应用版本
   ipcMain.handle('system:getVersion', () => {
     return app.getVersion();
+  });
+  ipcMain.handle('window:prepareNativeInput', (event: Electron.IpcMainInvokeEvent): Promise<boolean> => {
+    const win = mainWindow;
+    // 只允许宿主 preload 请求准备自己的窗口，不接受 guest 或任意窗口 ID。
+    if (!win || win.isDestroyed() || event.sender.id !== win.webContents.id) return Promise.resolve(false);
+    return prepareWindowForNativeInput(win, (): void => {
+      if (process.platform === 'darwin') app.focus({ steal: true });
+    }).then((ready: boolean): boolean => {
+      if (!ready && !win.isDestroyed()) {
+        console.warn('[NativeInput] 窗口焦点未就绪', {
+          focused: win.isFocused(), visible: win.isVisible(), minimized: win.isMinimized(), focusable: win.isFocusable(),
+        });
+      }
+      return ready;
+    });
   });
 
   // 窗口控制
@@ -305,16 +342,7 @@ if (!gotLock) {
   // 第二实例启动时，聚焦并恢复已有主窗口
   app.on('second-instance', () => {
     if (isQuitting) return;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      // 窗口最小化时恢复
-      if (mainWindow.isMinimized()) {
-        mainWindow.restore();
-      }
-      if (!mainWindow.isVisible()) {
-        mainWindow.show();
-      }
-      mainWindow.focus();
-    }
+    revealRetainedWindow(mainWindow);
   });
 
   // ==================== 全局异常兜底 ====================
@@ -346,10 +374,24 @@ if (!gotLock) {
   // ==================== 应用生命周期 ====================
 
   app.whenReady().then(async () => {
+    if (process.platform === 'darwin') {
+      // Mac 使用系统 getaddrinfo，并行尝试 IPv4/IPv6；避免不可达 IPv6 阻断页面资源。
+      // 只影响本应用，沿用系统 DNS/代理与正常证书校验，不设置自定义 DNS 地址。
+      app.configureHostResolver({ enableBuiltInResolver: false, enableHappyEyeballs: true });
+      // 原生 Edit roles 将 Cmd+C/V/A/X/Z 路由到当前焦点（包括 guest Webview）。
+      Menu.setApplicationMenu(Menu.buildFromTemplate([
+        { role: 'appMenu' },
+        { role: 'fileMenu' },
+        { role: 'editMenu' },
+        { role: 'viewMenu' },
+        { role: 'windowMenu' },
+      ]));
+    }
     if (localCdp.enabled) {
       console.log(`[CDP] 本机验收入口已开启 ${localCdp.address}:${localCdp.port}`);
     }
-    await runOneTimeWebviewNetworkRecovery();
+    // 独立开发/测试 profile 不需要生产历史缓存迁移，避免跟随旧 junction 操作目录。
+    if (!developmentProfile) await runOneTimeWebviewNetworkRecovery();
     // 注册 IPC
     registerIPC();
 
@@ -362,12 +404,6 @@ if (!gotLock) {
 
     // 创建主窗口
     mainWindow = createMainWindow();
-    // 只有主 Renderer 自身开始导航时才撤销调度桥就绪。did-start-loading
-    // 会被后台 Webview/子资源加载放大，账号顺序预热期间会误把健康桥降级。
-    mainWindow.webContents.on('did-start-navigation', (_event, _url, _isInPlace, isMainFrame) => {
-      if (isMainFrame) controlBroker?.markUnavailable();
-    });
-    mainWindow.webContents.on('render-process-gone', () => controlBroker?.markUnavailable());
     await startLocalControl(requestedControlPort);
 
     // macOS: 点击 Dock 图标时重新创建窗口
@@ -376,6 +412,8 @@ if (!gotLock) {
       if (isQuitting) return;
       if (BrowserWindow.getAllWindows().length === 0) {
         mainWindow = createMainWindow();
+      } else {
+        revealRetainedWindow(mainWindow);
       }
     });
   }).catch((reason: unknown) => {

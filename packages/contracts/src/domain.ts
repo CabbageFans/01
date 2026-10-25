@@ -210,6 +210,8 @@ export interface TaskRunSnapshot {
       outcome: 'detected' | 'confirmed' | 'uncertain';
     };
   };
+  /** 本次普通 Chat 最终正文；独立于媒体产物，不进入日志。 */
+  chatResponse?: { text: string; capturedAt: string };
   manualObservation?: {
     startedAt: string;
     expiresAt: string;
@@ -223,6 +225,7 @@ export interface TaskRunSnapshot {
     videoConfig?: Task['videoConfig'];
     attachments: string[];
     audioAttachment?: string;
+    petstory?: import('./dto/petstory').PetStoryTaskBinding;
   };
 }
 
@@ -297,6 +300,8 @@ export interface Task {
   status: TaskStatus;
   /** 生成模式 */
   mode: GenerationMode;
+  /** PetStory 步骤归属，重开后也必须经过项目绑定门禁。 */
+  petstory?: import('./dto/petstory').PetStoryTaskBinding;
   /** 视频生成配置 */
   videoConfig?: {
     model: VideoModel;

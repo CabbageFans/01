@@ -1,0 +1,41 @@
+schema: spec-driven
+
+context: |
+  - 唯一业务需求以 docs/PRODUCT_REQUIREMENTS.md 的 PetStory Studio v1.2 为准。
+  - 来源改为抖音链接记录、手机豆包提取提示词和用户故事回填，桌面不再通过链接读取视频；不导入本地原视频。
+  - 基于现有 Mac doubao-studio 工作区增量开发，复用当前可运行环境。
+  - 运行时 AI 只使用豆包普通对话及实际开放的创作入口。
+  - 动态分镜，固定噜噜、噜妹主演加必要配角，内置 Seedream/Seedance 提示词优化。
+  - 保持一个业务页、project.json 和 FFmpeg 的最小实现。
+  - 真实账号和视频内容由用户手动验收。
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

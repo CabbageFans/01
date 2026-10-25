@@ -96,3 +96,6 @@ logs/
 .codegraphfix_dropdown.py
 
 data/
+
+# Mac 本机验收：日志、截图、临时测试数据不进入版本库
+/artifacts/mac/

@@ -77,6 +77,22 @@ const taskService = new TaskService({
   basename: (value) => require('path').basename(value),
 });
 
+/** PetStory 同进程接线：仍经过正式 TaskService/Repository，仅创建 hold 草稿。 */
+export function createPetStoryTask(params: import('@doubao-studio/contracts').TaskAddParams, accountId: string): Task {
+  const created = taskService.create({ ...params, executionIntent: 'hold' });
+  if (!created.success) throw new Error(created.error);
+  const assigned = taskService.assign({ taskId: created.data[0].id, accountId });
+  if (!assigned.success) throw new Error(assigned.error);
+  return assigned.data;
+}
+
+/** 仅供同进程业务恢复；不 arm、不启动队列，仍由项目绑定门禁授权新 run。 */
+export function retryPetStoryTask(taskId: string): Task {
+  const result = taskService.retry(taskId, 'hold');
+  if (!result.success) throw new Error(result.error);
+  return result.data;
+}
+
 /** 仅供同进程本机控制面只读使用；返回脱敏由控制面负责。 */
 export function listTasksForLocalControl(): Task[] {
   const result = taskService.getTasks();
@@ -369,6 +385,138 @@ const TASK_IPC_CHANNELS = [
   'tasks:exportDiagnostics', 'tasks:validateArtifact', 'tasks:saveAdapterReport',
   'tasks:selectAdapterRules', 'settings:get', 'settings:save', 'tasks:selectSaveDir',
 ] as const;
+
+/** PetStory 与原 IPC 共用同一 Session 下载、作业登记及文件校验链。 */
+export async function downloadTaskOutputs(params: TaskDownloadOutputsParams): Promise<import('@doubao-studio/contracts').TaskDownloadOutputsResult> {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const { app } = require('electron');
+
+        // 默认下载目录
+        const defaultDir = path.join(app.getPath('downloads'), '豆包工作室产物');
+        const saveDir = params.saveDir || defaultDir;
+
+        // 确保目录存在
+        if (!fs.existsSync(saveDir)) {
+          fs.mkdirSync(saveDir, { recursive: true });
+        }
+
+        let downloadedCount = 0;
+        const failures: string[] = [];
+        const jobs = loadDownloadJobs();
+        const jobIds: string[] = [];
+        const accounts = readJSON<Array<{ id: string; partition: string }>>('accounts.json', []);
+
+        for (const task of params.outputs) {
+          const account = accounts.find((item) => item.id === task.accountId);
+          const accountSession = account
+            ? session.fromPartition(`persist:doubao_${account.partition}`)
+            : session.defaultSession;
+          for (let outputIndex = 0; outputIndex < task.outputs.length; outputIndex++) {
+            const url = task.outputs[outputIndex];
+            let parsedUrl: URL;
+            try {
+              parsedUrl = new URL(url);
+              if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('不支持的地址协议');
+            } catch {
+              failures.push(`${task.taskId.slice(0, 8)}: 产物地址无效`);
+              continue;
+            }
+            const now = new Date().toISOString();
+            const job: DownloadJob = {
+              id: uuidv4(),
+              taskId: task.taskId,
+              accountId: task.accountId,
+              mode: task.mode,
+              url,
+              status: 'downloading',
+              attempts: 1,
+              saveDir,
+              createdAt: now,
+              updatedAt: now,
+            };
+            jobs.push(job);
+            jobIds.push(job.id);
+            saveDownloadJobs(jobs);
+            let temporaryPath: string | undefined;
+            try {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 60000);
+              const response = await accountSession.fetch(url, {
+                headers: {
+                  Referer: 'https://www.doubao.com/',
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+                },
+                signal: controller.signal,
+              }).finally(() => clearTimeout(timeout));
+
+              const buffer = Buffer.from(await response.arrayBuffer());
+              const contentType = response.headers.get('content-type') || '';
+
+              // 统一验证：HTTP 状态、非空文件、视频 content-type
+              const validation = validateDownloadResponse(response.status, contentType, buffer.length, task.mode);
+              if (!validation.valid) {
+                const failure = validation.message || '下载验证失败';
+                failures.push(`${task.taskId.slice(0, 8)}: ${failure}`);
+                job.status = 'failed';
+                job.error = failure;
+                job.updatedAt = new Date().toISOString();
+                saveDownloadJobs(jobs);
+                continue;
+              }
+
+              let ext = path.extname(parsedUrl.pathname).toLowerCase();
+              if (!ext || ext.length > 6) {
+                if (contentType.includes('video/mp4') || task.mode === 'video') ext = '.mp4';
+                else if (contentType.includes('webp')) ext = '.webp';
+                else if (contentType.includes('jpeg')) ext = '.jpg';
+                else ext = '.png';
+              }
+              const fileName = `${task.taskId.substring(0, 8)}_${outputIndex + 1}${ext}`;
+              const filePath = getAvailableDownloadPath(fs, path, saveDir, fileName);
+              temporaryPath = `${filePath}.${job.id}.part`;
+              fs.writeFileSync(temporaryPath, buffer);
+              fs.renameSync(temporaryPath, filePath);
+              job.status = 'done';
+              job.filePath = filePath;
+              job.bytes = buffer.length;
+              job.updatedAt = new Date().toISOString();
+              saveDownloadJobs(jobs);
+              downloadedCount++;
+            } catch (e: any) {
+              try {
+                removeExactDownloadPart(fs, path, saveDir, temporaryPath, job.id);
+              } catch {}
+              const classified = classifyDownloadException(e);
+              failures.push(`${task.taskId.slice(0, 8)}: ${classified.message}`);
+              job.status = 'failed';
+              job.error = classified.message;
+              job.updatedAt = new Date().toISOString();
+              saveDownloadJobs(jobs);
+              console.warn(`[tasks:downloadOutputs] 下载产物失败 (${classified.type}):`, e.message);
+            }
+          }
+        }
+
+        return {
+          success: downloadedCount > 0,
+          count: downloadedCount,
+          failed: failures.length,
+          saveDir,
+          error: failures.length ? failures.slice(0, 3).join('；') : undefined,
+          jobIds,
+        };
+      } catch (err: any) {
+        return { success: false, count: 0, failed: 0, error: err.message };
+      }
+}
+export function listTaskDownloads(): DownloadJob[] { return loadDownloadJobs(); }
+export function bindPetStoryTask(taskId: string, binding: NonNullable<Task['petstory']>): Task {
+  const result = taskService.bindPetStory(taskId, binding);
+  if (!result.success) throw new Error(result.error);
+  return result.data;
+}
 
 export function registerTaskIPC(): () => void {
   const dispose = replaceIpcHandlers(ipcMain, TASK_IPC_CHANNELS);
@@ -668,137 +816,7 @@ export function registerTaskIPC(): () => void {
     }
   );
 
-  // ---- 批量下载产物 ----
-  ipcMain.handle(
-    'tasks:downloadOutputs',
-    async (
-      _event,
-      params: TaskDownloadOutputsParams
-    ): Promise<{ success: boolean; count: number; failed: number; saveDir?: string; error?: string; jobIds?: string[] }> => {
-      try {
-        const fs = require('fs');
-        const path = require('path');
-        const { app } = require('electron');
-
-        // 默认下载目录
-        const defaultDir = path.join(app.getPath('downloads'), '豆包工作室产物');
-        const saveDir = params.saveDir || defaultDir;
-
-        // 确保目录存在
-        if (!fs.existsSync(saveDir)) {
-          fs.mkdirSync(saveDir, { recursive: true });
-        }
-
-        let downloadedCount = 0;
-        const failures: string[] = [];
-        const jobs = loadDownloadJobs();
-        const jobIds: string[] = [];
-        const accounts = readJSON<Array<{ id: string; partition: string }>>('accounts.json', []);
-
-        for (const task of params.outputs) {
-          const account = accounts.find((item) => item.id === task.accountId);
-          const accountSession = account
-            ? session.fromPartition(`persist:doubao_${account.partition}`)
-            : session.defaultSession;
-          for (let outputIndex = 0; outputIndex < task.outputs.length; outputIndex++) {
-            const url = task.outputs[outputIndex];
-            let parsedUrl: URL;
-            try {
-              parsedUrl = new URL(url);
-              if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('不支持的地址协议');
-            } catch {
-              failures.push(`${task.taskId.slice(0, 8)}: 产物地址无效`);
-              continue;
-            }
-            const now = new Date().toISOString();
-            const job: DownloadJob = {
-              id: uuidv4(),
-              taskId: task.taskId,
-              accountId: task.accountId,
-              mode: task.mode,
-              url,
-              status: 'downloading',
-              attempts: 1,
-              saveDir,
-              createdAt: now,
-              updatedAt: now,
-            };
-            jobs.push(job);
-            jobIds.push(job.id);
-            saveDownloadJobs(jobs);
-            let temporaryPath: string | undefined;
-            try {
-              const controller = new AbortController();
-              const timeout = setTimeout(() => controller.abort(), 60000);
-              const response = await accountSession.fetch(url, {
-                headers: {
-                  Referer: 'https://www.doubao.com/',
-                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-                },
-                signal: controller.signal,
-              }).finally(() => clearTimeout(timeout));
-
-              const buffer = Buffer.from(await response.arrayBuffer());
-              const contentType = response.headers.get('content-type') || '';
-
-              // 统一验证：HTTP 状态、非空文件、视频 content-type
-              const validation = validateDownloadResponse(response.status, contentType, buffer.length, task.mode);
-              if (!validation.valid) {
-                const failure = validation.message || '下载验证失败';
-                failures.push(`${task.taskId.slice(0, 8)}: ${failure}`);
-                job.status = 'failed';
-                job.error = failure;
-                job.updatedAt = new Date().toISOString();
-                saveDownloadJobs(jobs);
-                continue;
-              }
-
-              let ext = path.extname(parsedUrl.pathname).toLowerCase();
-              if (!ext || ext.length > 6) {
-                if (contentType.includes('video/mp4') || task.mode === 'video') ext = '.mp4';
-                else if (contentType.includes('webp')) ext = '.webp';
-                else if (contentType.includes('jpeg')) ext = '.jpg';
-                else ext = '.png';
-              }
-              const fileName = `${task.taskId.substring(0, 8)}_${outputIndex + 1}${ext}`;
-              const filePath = getAvailableDownloadPath(fs, path, saveDir, fileName);
-              temporaryPath = `${filePath}.${job.id}.part`;
-              fs.writeFileSync(temporaryPath, buffer);
-              fs.renameSync(temporaryPath, filePath);
-              job.status = 'done';
-              job.filePath = filePath;
-              job.bytes = buffer.length;
-              job.updatedAt = new Date().toISOString();
-              saveDownloadJobs(jobs);
-              downloadedCount++;
-            } catch (e: any) {
-              try {
-                removeExactDownloadPart(fs, path, saveDir, temporaryPath, job.id);
-              } catch {}
-              const classified = classifyDownloadException(e);
-              failures.push(`${task.taskId.slice(0, 8)}: ${classified.message}`);
-              job.status = 'failed';
-              job.error = classified.message;
-              job.updatedAt = new Date().toISOString();
-              saveDownloadJobs(jobs);
-              console.warn(`[tasks:downloadOutputs] 下载产物失败 (${classified.type}):`, e.message);
-            }
-          }
-        }
-
-        return {
-          success: downloadedCount > 0,
-          count: downloadedCount,
-          failed: failures.length,
-          saveDir,
-          error: failures.length ? failures.slice(0, 3).join('；') : undefined,
-          jobIds,
-        };
-      } catch (err: any) {
-        return { success: false, count: 0, failed: 0, error: err.message };
-      }
-    }
-  );
+  ipcMain.handle('tasks:downloadOutputs', async (_event, params: TaskDownloadOutputsParams): Promise<import('@doubao-studio/contracts').TaskDownloadOutputsResult> => downloadTaskOutputs(params));
 
   ipcMain.handle('tasks:listDownloads', async (): Promise<DownloadJob[]> => {
     return loadDownloadJobs();

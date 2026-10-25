@@ -1,0 +1,509 @@
+{
+  "checkedAt": "2026-10-24",
+  "timezone": "Asia/Shanghai",
+  "repository": {
+    "directory": "/Users/zarkding/Documents/doubao-studio",
+    "origin": "https://github.com/dorakoo/doubao-studio.git",
+    "sha": "7eeb7b67a518e47ee4296c36e5c5f17942a9cff0",
+    "reviewedBaselineTag": "v2.3.8",
+    "matchesReviewedBaseline": true,
+    "branch": "main",
+    "preExistingChangesPreserved": [
+      "main/main.ts: macOS native title bar"
+    ],
+    "committed": false,
+    "pushed": false,
+    "releaseCreated": false,
+    "workingTreeMatchesReviewedBaseline": false,
+    "baselineCommitMatches": true
+  },
+  "host": {
+    "platform": "darwin",
+    "macOS": "15.3.1",
+    "build": "24D70",
+    "arch": "arm64",
+    "rosetta": false
+  },
+  "toolchain": {
+    "node": "24.15.0",
+    "nodePath": "/Users/zarkding/.nvm/versions/node/v24.15.0/bin/node",
+    "nodeArch": "arm64",
+    "npm": "11.12.1",
+    "pnpm": "11.0.0",
+    "pnpmPath": "/Users/zarkding/.local/share/doubao-studio-tools/pnpm-11.0.0/node_modules/.bin/pnpm",
+    "originalPnpm": "10.33.2",
+    "electron": "43.8.3",
+    "electronArch": "arm64",
+    "electronMaintenance": "SUPPORTED",
+    "electronEndOfLife": "2027-01-05",
+    "electronEndOfLifeTentative": true,
+    "electronMaintenanceCheckedAt": "2026-10-24",
+    "electronPinnedExactly": true
+  },
+  "profile": {
+    "development": "mac-dev",
+    "userData": "/Users/zarkding/Library/Application Support/DoubaoStudioDevelopment/mac-dev",
+    "sessionData": "/Users/zarkding/Library/Application Support/DoubaoStudioDevelopment/mac-dev",
+    "automatedTest": "mac-test",
+    "automatedTestPath": "/var/folders/s7/pw20tfcx1b51dr2w_683mrcm0000gn/T/doubao-studio-mac-test-yyD5xN",
+    "accountsCreated": 1,
+    "tasksCreated": 4,
+    "realLoginPerformed": true,
+    "realGenerationSubmitted": true,
+    "projectsCreated": 1,
+    "realMediaGenerationSubmitted": false,
+    "cookieImportPerformed": false
+  },
+  "launch": {
+    "workingDirectory": "/Users/zarkding/Documents/doubao-studio",
+    "preparation": [
+      "source \"$HOME/.nvm/nvm.sh\"",
+      "nvm use 24.15.0",
+      "export PATH=\"$HOME/.local/share/doubao-studio-tools/pnpm-11.0.0/node_modules/.bin:$PATH\""
+    ],
+    "command": "pnpm run dev:mac",
+    "verifiedDiagnosticCommand": "pnpm run dev:mac --local-control --local-cdp-port=9334",
+    "actualViteHost": "127.0.0.1",
+    "actualVitePort": 5173,
+    "stop": "Ctrl+C in launching terminal, or kill -TERM the launcher PID printed by that launch",
+    "cdpEnabledByDefault": false
+  },
+  "stages": {
+    "workspaceProtection": "PASS",
+    "nativeMacEnvironment": "PASS",
+    "frozenInstall": "PASS",
+    "contractsBuild": "PASS",
+    "missingContractsDevelopmentLaunch": "PASS",
+    "typescript": "PASS",
+    "lint": "PASS",
+    "projectChecks": "PASS",
+    "tests": "PASS",
+    "build": "PASS",
+    "validate": "PASS",
+    "electronMain": "PASS",
+    "preloadAndIPC": "PASS",
+    "actualRendererScreenshots": "PASS",
+    "settings": "PASS",
+    "taskDialog": "PASS",
+    "localWebview": "PASS",
+    "doubaoUnloggedReachability": "PASS",
+    "repeatedMacDevLaunch": "PASS",
+    "portConflictHandling": "PASS",
+    "electronRunAsNodeIsolation": "PASS",
+    "failureCleanup": "PASS",
+    "safeStop": "PASS",
+    "windowsRuntime": "NOT TESTED",
+    "realAccountAndGeneration": "BLOCKED",
+    "dolaEndToEnd": "NOT TESTED",
+    "electronSecurityUpgrade": "PASS",
+    "nativeWindowInteractions": "PASS",
+    "dockReopen": "PASS",
+    "cmdQ": "PASS",
+    "standardEditRoles": "PASS",
+    "editShortcuts": "PASS",
+    "chineseInputMethod": "PASS",
+    "hostChineseMultilineLongText": "PASS",
+    "guestDraftInput": "PASS",
+    "projectAccountTaskPersistence": "PASS",
+    "manualLogin": "PASS",
+    "sessionPersistence": "PASS",
+    "chatPageRoundTrip": "PASS",
+    "chatLocalCompletion": "PASS",
+    "chatBodyArtifact": "FAIL",
+    "resumeIdempotency": "PASS",
+    "nativeFilePicker": "PASS",
+    "chineseSpaceFileRead": "PASS",
+    "imageGeneration": "BLOCKED",
+    "videoGeneration": "BLOCKED",
+    "realArtifactDownload": "BLOCKED",
+    "videoPlayback": "BLOCKED",
+    "sleepOrNetworkInterruption": "NOT TESTED",
+    "platformColdStartStability": "FAIL",
+    "originalConversationAfterQuit": "PASS",
+    "nativeInputFocusUnitTests": "PASS",
+    "nativeInputFocusIntegration": "PASS",
+    "latestChatRecheck": "PASS",
+    "screenUnlocked": "PASS",
+    "guestChineseInputMethod": "NOT TESTED",
+    "fullMediaGenerationWorkflow": "BLOCKED"
+  },
+  "validation": {
+    "testFilesPassed": 61,
+    "testsPassed": 1184,
+    "profileBoundaryTestsAdded": 8,
+    "lintErrors": 0,
+    "lintWarnings": 148,
+    "warningThresholdChanged": false,
+    "lockfileChanged": true,
+    "allowBuildsChanged": false,
+    "existingBuildWarning": "Vite chunk over 500 kB",
+    "upstreamUnresolvedGateFailures": [],
+    "windowLifecycleTestsAdded": 12,
+    "resumeSafetyTestsAdded": 4,
+    "lockfileChangeReason": "Only Electron and its transitive dependencies; login security prerequisite",
+    "finalLog": "artifacts/mac/restart-2026-10-24/validate-after-ready-root.log",
+    "exitCode": 0,
+    "nativeInputFocusTestsAdded": 8,
+    "chatReadbackTestsAdded": 11
+  },
+  "processes": {
+    "startedAndStopped": [
+      {
+        "profile": "mac-test",
+        "launcher": 10013,
+        "vite": 10016,
+        "electron": 10020
+      },
+      {
+        "profile": "mac-dev",
+        "launcher": 10162,
+        "vite": 10189,
+        "electron": 10197
+      },
+      {
+        "profile": "mac-dev",
+        "launcher": 10278,
+        "vite": 10286,
+        "electron": 10288
+      }
+    ],
+    "remainingOwnedProcesses": [],
+    "preExistingVitePidPreserved": 7471,
+    "preExistingElectronPidPreserved": 7474,
+    "preExistingProcessesAliveAfterStop": false,
+    "diagnosticCdpPortClosed": true,
+    "ownedVitePortClosed": true,
+    "maintainedAfterSession": false,
+    "round2StartedAndStopped": [
+      {
+        "log": "launch-after-login.log",
+        "launcher": 16354,
+        "vite": 16357,
+        "electron": 16359
+      },
+      {
+        "log": "launch-chat-acceptance.log",
+        "launcher": 16919,
+        "vite": 16922,
+        "electron": 16924
+      },
+      {
+        "log": "launch-control-fix.log",
+        "launcher": 17441,
+        "vite": 17444,
+        "electron": 17446
+      },
+      {
+        "log": "launch-final-guard.log",
+        "launcher": 18767,
+        "vite": 18773,
+        "electron": 18775
+      },
+      {
+        "log": "launch-final-restart.log",
+        "launcher": 18118,
+        "vite": 18128,
+        "electron": 18130
+      },
+      {
+        "log": "launch-first.log",
+        "launcher": 14540,
+        "vite": 14549,
+        "electron": 14551
+      },
+      {
+        "log": "launch-network-fix.log",
+        "launcher": 15001,
+        "vite": 15006,
+        "electron": 15008
+      },
+      {
+        "log": "launch-system-resolver.log",
+        "launcher": 15251,
+        "vite": 15254,
+        "electron": 15256
+      }
+    ],
+    "finalAudit": "artifacts/mac/restart-2026-10-24/final-process-audit.json",
+    "networkRecheckStartedAndStopped": [
+      {
+        "log": "launch-first.log",
+        "launcher": 19886,
+        "vite": 19897,
+        "electron": 19899
+      },
+      {
+        "log": "launch-focus-diagnostic.log",
+        "launcher": 21362,
+        "vite": 21366,
+        "electron": 21368
+      },
+      {
+        "log": "launch-focus-fix.log",
+        "launcher": 21146,
+        "vite": 21154,
+        "electron": 21156
+      }
+    ],
+    "repeat20261024StartedAndStopped": [
+      {
+        "launcher": 30307,
+        "vite": 30319,
+        "electron": 30321
+      },
+      {
+        "launcher": 31092,
+        "vite": 31095,
+        "electron": 31097
+      },
+      {
+        "launcher": 31722,
+        "vite": 31725,
+        "electron": 31727
+      },
+      {
+        "launcher": 31890,
+        "vite": 31896,
+        "electron": 31898
+      }
+    ],
+    "nativeObserverRelaunchStopped": {
+      "pid": 31864,
+      "children": [
+        31865,
+        31866,
+        31867
+      ],
+      "reason": "Native UI observation after Quit re-launched same Electron executable; stopped by exact PID"
+    },
+    "previousDayProcessesNote": "7471/7474 were already absent before this repeat; not terminated by this run. Separate current unrelated Node PIDs remained alive.",
+    "unrelatedSurvivingPids": [
+      7726,
+      7728,
+      7729
+    ],
+    "otherObservedPidsEndedWithoutTargetedSignal": [
+      9470,
+      9471
+    ]
+  },
+  "blockers": [
+    {
+      "scope": "Free image/video, media download and playback",
+      "status": "BLOCKED",
+      "observed": "Image/video entries visible, official free entitlement/allowance unknown; no media task created or submitted"
+    },
+    {
+      "scope": "Chat body artifact",
+      "status": "FAIL",
+      "observed": "New Chat reached done after real scoped assistant reply; outputs=0, original product does not persist text body as an artifact. No JSON extractor added"
+    },
+    {
+      "scope": "Remote cold-start stability",
+      "status": "FAIL",
+      "observed": "One fresh-root navigation stayed loading about 78 seconds and blocked the first local attempt before any input/submission. Verified empty root is now reused; intermittent resource errors remain"
+    },
+    {
+      "scope": "Chinese IME inside remote guest; real sleep/network interruption",
+      "status": "NOT TESTED",
+      "observed": "Host OS Chinese IME confirmed by user; both inputs tested with native Cmd keys and Chinese multiline paste. No actual sleep/network changes"
+    },
+    {
+      "scope": "Historical uncertain Chat tasks",
+      "status": "FAIL",
+      "observed": "Original old reply is recoverable today, but its old local task remains paused; second old submission acceptance remains unknown. Neither task was retried or resent"
+    }
+  ],
+  "nextRoundPrerequisites": [
+    "No additional Chat/media request under this repeat; new real requests require user instruction",
+    "Official free media entitlement, available free duration/aspect controls and one-shot media safety must be established before image/video tests",
+    "Investigate remaining slow remote loading without changing system network settings",
+    "Chat text artifact remains a separate original capability gap; no full JSON extraction in this round",
+    "Host and ordinary text prerequisites for a later local packaging round are satisfied; packaging/signing not performed here"
+  ],
+  "evidenceDirectory": "artifacts/mac/",
+  "evidenceIgnoredByGit": true,
+  "localBootstrapOutcome": "PASS",
+  "productionReadinessClaimed": false,
+  "latestReport": "docs/MAC_SMOKE_TEST_REPORT.md",
+  "security": {
+    "hostSandbox": true,
+    "contextIsolation": true,
+    "remoteNodeIntegration": false,
+    "webSecurityDisabled": false,
+    "guestPopupsAllowed": false,
+    "certificateChecksDisabled": false,
+    "legacyRequestRewriteEnabled": false,
+    "experimentalNoWatermarkEnabled": false,
+    "systemNetworkSettingsChanged": false,
+    "cacheOrLoginStorageCleared": false,
+    "guestUAUsesCurrentChromiumAndPlatform": true
+  },
+  "macNetwork": {
+    "applicationOnly": true,
+    "enableBuiltInResolver": false,
+    "enableHappyEyeballs": true,
+    "defaultConfigurationFailedAfterElectronUpgrade": true,
+    "ordinaryChatAndRealReplyObserved": true,
+    "intermittentColdStartFailureObserved": true,
+    "rootCauseFullyEstablished": false,
+    "slowLoadDuplicateProbeFixed": true,
+    "finalGuardStartupAuthenticatedChatAvailable": true,
+    "emptyReadyChatRootReused": true,
+    "currentRepeatSlowResourceLoadObserved": true,
+    "currentRepeatListenerWarningCount": 1
+  },
+  "smokeOutcome": "BLOCKED",
+  "checkedAtTime": "2026-10-24T08:24:37.562268+08:00",
+  "historicalSmoke20261023": {
+    "heldTaskId": "e69f6146-afe1-4e3d-8fe3-fa5e4ded567e",
+    "chatTaskId": "7c4ec9f3-c4ba-4c26-8f4a-a324a44b727d",
+    "projectId": "9ba569bf-7618-4c0f-999c-10810c527302",
+    "accountId": "0ac68864-8559-491d-afb7-280b347b0267",
+    "chatRunId": "7c4ec9f3-c4ba-4c26-8f4a-a324a44b727d-1792762528747",
+    "attempt": 1,
+    "localStartCommands": 2,
+    "localStartRejectedBeforePlatform": 1,
+    "localStartAccepted": 1,
+    "platformChatSubmissionsObserved": 1,
+    "realAssistantRepliesObserved": 1,
+    "imageTasksCreated": 0,
+    "imageSubmissions": 0,
+    "videoTasksCreated": 0,
+    "videoSubmissions": 0,
+    "officialQuota": "UNKNOWN",
+    "officialQuotaChange": "UNKNOWN",
+    "localQuotaEstimateIsOfficialBalance": false,
+    "chatLocalState": "paused",
+    "chatErrorCode": "submission_uncertain",
+    "chatOutputs": 0,
+    "submittedTaskRetried": false,
+    "chatConversationBound": true,
+    "heldTaskFinalIntent": "hold",
+    "heldTaskSubmitted": false,
+    "humanConfirmed": [
+      "manualLogin",
+      "nativeWindowInteractions",
+      "dockReopen",
+      "nativeFilePickerAndThumbnail",
+      "cmdQ"
+    ],
+    "programEvidence": [
+      "realMessageScopedExactMatch",
+      "stableTaskRunIdentity",
+      "sessionPersistence",
+      "holdIntentPersistence",
+      "controlBridgeReady",
+      "fileSignatureDimensionsAndHash",
+      "ownedProcessStop"
+    ],
+    "httpTransportRequestsCounted": false,
+    "requestCountMethod": "One persisted run and one matching visible user message; transport headers/bodies not captured",
+    "knownStaleHmrHoldIntentIncident": "Temporarily armed unassigned task; immediately restored to hold without any platform submission; cold-runtime verification passed",
+    "finalRestartAuthenticatedNavigation": true,
+    "finalRestartOriginalConversationReopened": false,
+    "finalRestartRedirectedToChatRoot": true,
+    "finalRestartResubmitted": false
+  },
+  "historicalNetworkRecheck20261023": {
+    "authorizedBy": "User explicitly requested repeat workflow after network repair",
+    "evidenceDirectory": "artifacts/mac/network-recheck/",
+    "nodeUnchanged": true,
+    "pnpmUnchanged": true,
+    "electronUnchanged": true,
+    "dependenciesReinstalled": false,
+    "coldStartHomepage": "PASS",
+    "loginPersistence": "PASS",
+    "projectAccountTaskPersistence": "PASS",
+    "originalConversationReopen": "FAIL",
+    "ordinaryChatNewRequest": "FAIL",
+    "taskId": "3f4f4db8-0f1d-49dc-8037-23daba96308b",
+    "runId": "3f4f4db8-0f1d-49dc-8037-23daba96308b-1792765235909",
+    "attempt": 1,
+    "localStarts": 1,
+    "localStartHttpStatus": 202,
+    "nativeSubmissionCallAttempts": 1,
+    "newPlatformMessagesConfirmed": 0,
+    "newPlatformRepliesConfirmed": 0,
+    "platformAcceptance": "UNKNOWN",
+    "submittedIntentPersisted": true,
+    "promptStillInDraftAtReadback": true,
+    "localTaskState": "paused",
+    "localErrorCode": "submission_uncertain",
+    "oldTaskRetried": false,
+    "newTaskRetried": false,
+    "imageSubmissions": 0,
+    "videoSubmissions": 0,
+    "officialQuota": "UNKNOWN",
+    "nativeFocusGuardAdded": true,
+    "focusGateClosedWhileLocked": true,
+    "nativeFocusIntegration": "BLOCKED",
+    "screenLockObservedByNativeGuiTool": true,
+    "manualUnlockRequired": true,
+    "screenLockBypassed": false,
+    "httpHeadersOrBodiesSaved": false,
+    "additionalChatAuthorized": false,
+    "guiWorkStoppedForLock": true,
+    "allDiagnosticProcessesStopped": true,
+    "listenerWarningRecurred": true
+  },
+  "smoke": {
+    "checkedAt": "2026-10-24",
+    "evidenceDirectory": "artifacts/mac/restart-2026-10-24/",
+    "heldTaskId": "e69f6146-afe1-4e3d-8fe3-fa5e4ded567e",
+    "chatTaskId": "a2af3db4-d541-4577-b963-678432535d3e",
+    "projectId": "9ba569bf-7618-4c0f-999c-10810c527302",
+    "accountId": "0ac68864-8559-491d-afb7-280b347b0267",
+    "chatRunId": "a2af3db4-d541-4577-b963-678432535d3e-1792801184897",
+    "attempt": 2,
+    "localStartCommands": 1,
+    "localUnsentRetryCommands": 1,
+    "firstAttemptSubmitted": false,
+    "sameRequestIdReplayVerified": true,
+    "platformChatSubmissionsObserved": 1,
+    "realAssistantRepliesObserved": 1,
+    "nativeSendBoundaryCallsInSubmittedRun": 1,
+    "imageTasksCreated": 0,
+    "imageSubmissions": 0,
+    "videoTasksCreated": 0,
+    "videoSubmissions": 0,
+    "officialQuota": "UNKNOWN",
+    "officialQuotaChange": "UNKNOWN",
+    "localQuotaEstimateIsOfficialBalance": false,
+    "chatLocalState": "done",
+    "chatErrorCode": null,
+    "chatOutputs": 0,
+    "submittedTaskRetried": false,
+    "chatConversationBound": true,
+    "heldTaskFinalIntent": "hold",
+    "heldTaskSubmitted": false,
+    "previousSubmittedTasksStillPaused": true,
+    "previousSubmittedTaskRunsUnchanged": true,
+    "humanConfirmed": [
+      "previous manual login",
+      "previous native window/Dock/file picker",
+      "host OS Chinese IME candidate selection and newline"
+    ],
+    "programEvidence": [
+      "native OS focus local fixture one trusted click",
+      "native Cmd+A/C/V/X/Z in host and guest",
+      "Chinese multiline long paste",
+      "scoped real user/assistant match",
+      "TaskService done without manual status override",
+      "same request ID replay retains run",
+      "close handler hides same renderer/guest",
+      "CmdQ PID exit",
+      "cold restart original conversation and reply retained",
+      "owned PID/port stop"
+    ],
+    "httpTransportRequestsCounted": false,
+    "requestCountMethod": "One real visible user message, one matching scoped assistant reply and one submitted run; pre-send attempt had no submittedAt and zero messages; headers and bodies never captured",
+    "finalRestartAuthenticatedNavigation": true,
+    "finalRestartOriginalConversationReopened": true,
+    "finalRestartRedirectedToChatRoot": false,
+    "finalRestartResubmitted": false
+  },
+  "smokeOutcomeScope": "Ordinary Chat and local Mac basics PASS; full media workflow BLOCKED; known text artifact gap FAIL",
+  "ordinaryChatOutcome": "PASS",
+  "macFoundationOutcome": "PASS"
+}

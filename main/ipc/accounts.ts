@@ -4,7 +4,7 @@
  * 负责：账号 CRUD、Session 分区管理、Cookie/Storage 隔离
  */
 
-import { ipcMain, session } from 'electron';
+import { app, ipcMain, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
 import { normalizeAccounts } from '../utils/persistenceNormalization';
 import { v4 as uuidv4 } from 'uuid';
@@ -130,9 +130,9 @@ function getSessionForAccount(accountId: string, partition: string, platform: Ac
   const sess = session.fromPartition(sessionPartition(platform, partition));
   activePartitions.add(partition);
 
-  // 配置 User-Agent（模拟 Chrome 浏览器）
+  // 使用当前 Electron 自带 Chromium 与本机平台，避免 Mac 被写死为 Windows/Chrome 120。
   sess.setUserAgent(
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    app.userAgentFallback.replace(/\s(?:Electron|doubao-studio-desktop)\/[\w.-]+/g, ''),
     'zh-CN'
   );
 
@@ -164,6 +164,11 @@ const ACCOUNT_IPC_CHANNELS = [
 
 export function registerAccountIPC(): () => void {
   const dispose = replaceIpcHandlers(ipcMain, ACCOUNT_IPC_CHANNELS);
+  // 重启后复用相同 partition，并在 Webview 首次导航前恢复本机 Chromium UA。
+  // 不重建账号、不清理 Session 或任何登录存储。
+  for (const account of loadAccounts()) {
+    getSessionForAccount(account.id, account.partition, accountPlatform(account));
+  }
   // ---- 获取所有账号 ----
   ipcMain.handle('accounts:list', async (): Promise<Account[]> => {
     // loadAccounts 已内置运行时归一化（额度日期重置、健康/调度补全、重复 ID 去重）

@@ -9,9 +9,11 @@ const require = createRequire(import.meta.url);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const host = '127.0.0.1';
 const preferredPort = 5173;
+/** @type {Set<import('node:child_process').ChildProcess>} */
 const children = new Set();
 let shuttingDown = false;
 
+/** @param {number} port @returns {Promise<boolean>} */
 function canListen(port) {
   return new Promise((resolve) => {
     const server = net.createServer();
@@ -23,6 +25,7 @@ function canListen(port) {
   });
 }
 
+/** @param {number} startPort @returns {Promise<number>} */
 async function findAvailablePort(startPort) {
   for (let port = startPort; port < startPort + 100; port += 1) {
     if (await canListen(port)) return port;
@@ -30,6 +33,7 @@ async function findAvailablePort(startPort) {
   throw new Error(`No available development port found from ${startPort} to ${startPort + 99}`);
 }
 
+/** @param {string} command @param {string[]} args @param {import('node:child_process').SpawnOptions} options @returns {import('node:child_process').ChildProcess} */
 function run(command, args, options = {}) {
   const child = spawn(command, args, {
     cwd: projectRoot,
@@ -38,9 +42,16 @@ function run(command, args, options = {}) {
   });
   children.add(child);
   child.once('exit', () => children.delete(child));
+  child.once('error', (error) => {
+    children.delete(child);
+    console.error(`[dev] ${error.message}`);
+    process.exitCode = 1;
+    stopChildren();
+  });
   return child;
 }
 
+/** @param {import('node:child_process').ChildProcess} child @param {string} label @returns {Promise<void>} */
 function waitForExit(child, label) {
   return new Promise((resolve, reject) => {
     child.once('error', reject);
@@ -51,10 +62,11 @@ function waitForExit(child, label) {
   });
 }
 
+/** @param {string} url @param {import('node:child_process').ChildProcess} viteProcess @param {number} timeoutMs @returns {Promise<void>} */
 async function waitForServer(url, viteProcess, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (viteProcess.exitCode !== null) {
+    if (shuttingDown || viteProcess.exitCode !== null || viteProcess.signalCode !== null) {
       throw new Error(`Vite exited before becoming ready (code ${viteProcess.exitCode})`);
     }
     try {
@@ -68,46 +80,77 @@ async function waitForServer(url, viteProcess, timeoutMs = 30_000) {
   throw new Error(`Timed out waiting for ${url}`);
 }
 
+/** @returns {void} */
 function stopChildren() {
   if (shuttingDown) return;
   shuttingDown = true;
   for (const child of children) {
-    if (child.exitCode === null && !child.killed) child.kill();
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+      // 只清理本轮持有的子进程；超时后升级信号，不按进程名称批量终止。
+      const timer = setTimeout(() => {
+        if (children.has(child)) child.kill('SIGKILL');
+      }, 5000);
+      timer.unref();
+      child.once('exit', () => clearTimeout(timer));
+    }
   }
 }
 
+/** @returns {Promise<void>} */
 async function main() {
+  const electronArgs = process.argv.slice(2);
+  // Mac 开发启动总是显式选择独立 profile；直接调用 Electron 的默认路径保持不变。
+  if (process.platform === 'darwin' && !electronArgs.some((arg) => arg.startsWith('--profile='))) {
+    electronArgs.push('--profile=mac-dev');
+  }
   const port = await findAvailablePort(preferredPort);
   const devServerUrl = `http://${host}:${port}`;
   if (port !== preferredPort) {
     console.log(`[dev] Port ${preferredPort} is occupied; using ${port} instead.`);
   }
 
+  const tscBin = path.join(projectRoot, 'node_modules', 'typescript', 'bin', 'tsc');
+  await waitForExit(run(process.execPath, [tscBin, '-p', 'packages/contracts/tsconfig.json']), 'Contracts build');
+  if (shuttingDown) return;
+  await waitForExit(run(process.execPath, [tscBin, '-p', 'tsconfig.main.json']), 'Main-process build');
+  if (shuttingDown) return;
+
   const viteBin = path.join(projectRoot, 'node_modules', 'vite', 'bin', 'vite.js');
   const viteProcess = run(process.execPath, [viteBin, '--host', host, '--port', String(port), '--strictPort']);
+  viteProcess.once('exit', (code) => {
+    if (shuttingDown) return;
+    console.error(`[dev] Vite exited (code ${code}); stopping this development session.`);
+    process.exitCode = code || 1;
+    stopChildren();
+  });
   await waitForServer(devServerUrl, viteProcess);
-
-  const tscBin = path.join(projectRoot, 'node_modules', 'typescript', 'bin', 'tsc');
-  await waitForExit(run(process.execPath, [tscBin, '-p', 'tsconfig.main.json']), 'Main-process build');
+  if (shuttingDown) return;
 
   const electronPath = require('electron');
-  const electronProcess = run(electronPath, ['.'], {
-    env: { ...process.env, VITE_DEV_SERVER_URL: devServerUrl },
+  const electronEnv = { ...process.env, VITE_DEV_SERVER_URL: devServerUrl };
+  // 编辑器可能设置此变量；仅从 GUI 子进程副本移除，不更改父进程环境。
+  delete electronEnv.ELECTRON_RUN_AS_NODE;
+  const electronProcess = run(electronPath, ['.', ...electronArgs], {
+    env: electronEnv,
   });
+  console.log(`[dev] launcher=${process.pid} vite=${viteProcess.pid} electron=${electronProcess.pid}`);
 
-  electronProcess.once('exit', (code) => {
+  electronProcess.once('exit', (code, signal) => {
+    if (shuttingDown) return;
+    if (signal) console.error(`[dev] Electron exited with ${signal}.`);
     stopChildren();
-    process.exitCode = code ?? 0;
+    process.exitCode = code ?? 1;
   });
 }
 
 process.once('SIGINT', () => {
+  process.exitCode = 130;
   stopChildren();
-  process.exit(130);
 });
 process.once('SIGTERM', () => {
+  process.exitCode = 143;
   stopChildren();
-  process.exit(143);
 });
 process.once('exit', stopChildren);
 

@@ -94,7 +94,7 @@ export function renewObservationLease(binding: AcceptanceObservation, now: strin
   };
 }
 
-export function completeAcceptedObservation(binding: AcceptanceObservation, artifactId: string, completedAt: string): AcceptanceObservation {
+export function completeAcceptedObservation(binding: AcceptanceObservation, artifactId: string | undefined, completedAt: string): AcceptanceObservation {
   return {
     ...binding,
     expectedArtifact: { ...binding.expectedArtifact, artifactId },

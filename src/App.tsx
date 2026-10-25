@@ -10,6 +10,8 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
 import BrowserPanel from './components/BrowserPanel';
+import { PetStoryPanel } from './components/PetStoryPanel';
+import { observePetStoryTasks } from './store/usePetStoryStore';
 import { Toolbar } from './components/Toolbar';
 import { useAccountStore } from './store/useAccountStore';
 import { useTaskStore } from './store/useTaskStore';
@@ -17,6 +19,7 @@ import { useProjectStore } from './store/useProjectStore';
 import { clampSidebarWidth } from './utils/resizeMath';
 import { millisecondsUntilNextLocalMidnight } from './utils/dailyReset';
 import { handleControlCommand } from './control/handleControlCommand';
+import type { Task } from './types';
 import './styles/global.css';
 
 // ==================== 常量 ====================
@@ -28,6 +31,8 @@ const DEFAULT_SIDEBAR_WIDTH = 340;
 // ==================== 组件 ====================
 
 const App: React.FC = () => {
+  const [petstoryVisible, setPetstoryVisible] = useState(false);
+  useEffect(() => observePetStoryTasks(), []);
   /** 左侧面板宽度 */
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   /** 是否折叠左侧面板 */
@@ -87,7 +92,12 @@ const App: React.FC = () => {
   useEffect(() => {
     const unsubscribe = window.electronAPI.control.onCommand(async (command) => {
       const response = await handleControlCommand(command, {
-        readTasks: () => window.electronAPI.tasks.list(),
+        readTasks: async (): Promise<Task[]> => {
+          const tasks = await window.electronAPI.tasks.list();
+          // 本机指派写入主进程后，控制动作必须使用同一份新快照，不能启动旧的未指派投影。
+          useTaskStore.setState({ tasks });
+          return tasks;
+        },
         start: (taskId) => useTaskStore.getState().startAutomation(taskId),
         retry: (taskId) => useTaskStore.getState().retryTask(taskId),
         getLastError: () => useTaskStore.getState().error,
@@ -209,12 +219,19 @@ const App: React.FC = () => {
 
         {/* 右侧浏览器 */}
         <div className="app-browser">
-          <BrowserPanel
-            accounts={accounts}
-            activeAccount={activeAccount}
-            refreshKey={0}
-            
-          />
+          <div className="flex gap-2 px-3 py-2 border-b border-gray-800">
+            <button className={`px-3 py-1 rounded ${!petstoryVisible ? 'bg-purple-700' : 'bg-gray-800'}`} onClick={(): void => setPetstoryVisible(false)}>Studio</button>
+            <button className={`px-3 py-1 rounded ${petstoryVisible ? 'bg-purple-700' : 'bg-gray-800'}`} onClick={(): void => setPetstoryVisible(true)}>萌宠短剧</button>
+          </div>
+          <div className="flex flex-1 min-h-0">
+            <div className={petstoryVisible ? 'w-1/2 min-w-0 border-r border-gray-800' : 'hidden'}>
+              <PetStoryPanel />
+            </div>
+            {/* 宿主始终常驻同一个位置，切换页签只改变业务面板宽度。 */}
+            <div className="flex-1 min-w-0 h-full">
+              <BrowserPanel accounts={accounts} activeAccount={activeAccount} refreshKey={0} />
+            </div>
+          </div>
         </div>
       </div>
     </div>

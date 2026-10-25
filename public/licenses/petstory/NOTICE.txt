@@ -1,0 +1,15 @@
+PetStory prompt rule adaptations — petstory-r11-v1
+
+Seedance:
+  silentbuilds/seedance-prompt-forge
+  https://github.com/silentbuilds/seedance-prompt-forge/tree/33fd93e0dbd1d5ccf85e4bb819300101d2e7284b
+  Adapted portions: skills/seedance-prompt-forge/SKILL.md and references/reference-materials.md, advanced-modes.md, checklist.md
+  MIT: seedance-prompt-forge.LICENSE
+
+Seedream:
+  a86582751/doubao-seedream-image-skill
+  https://github.com/a86582751/doubao-seedream-image-skill/tree/0f700d9d5c32ad57f91a9575cec1f62abcbd56e2
+  Adapted portions: SKILL.md (Prompt Optimization Rules), references/prompt-guide.md
+  MIT: doubao-seedream-image-skill.LICENSE
+
+Only prompt guidance is adapted. No upstream API client, model execution, key-reading code, platform capability claims or scripts are included.

@@ -27,7 +27,9 @@ import { useAccountStore } from './useAccountStore';
 import { automationEngine } from '../automation/AutomationEngine';
 import { useProjectStore } from './useProjectStore';
 import { findInteractiveAccountId } from '../utils/interactiveAccount';
-import { completeAcceptedObservation, renewObservationLease, shouldResumeAcceptedObservation } from '../utils/acceptedObservation';
+import { completeAcceptedObservation, hasPlatformAcceptance, renewObservationLease, shouldResumeAcceptedObservation } from '../utils/acceptedObservation';
+
+let resumeAllInFlight: Promise<boolean> | null = null;
 
 // 账号启动复检可能仍处于 unknown；队列遇到这种软阻断时不能永久停在那里。
 // 只对已满足依赖的 queued 任务做有界退避复检，ready 后由现有调度继续。
@@ -98,7 +100,7 @@ interface TaskState {
   clearError: () => void;
 
   // V3 自动化方法
-  startAutomation: (taskId: string) => Promise<boolean>;
+  startAutomation: (taskId: string, beforeDispatch?: (task: Task) => Promise<void>) => Promise<boolean>;
   setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage) => void;
   updateTaskRuntime: (taskId: string, patch: {
     status?: TaskStatus;
@@ -473,25 +475,52 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
   },
 
-  resumeAll: async () => {
-    const pausedTasks = get().tasks.filter((task) => task.status === 'paused');
-    const resumed = new Map<string, Task>();
-    const failures: string[] = [];
-    for (const task of pausedTasks) {
-      const result = await window.electronAPI.tasks.retry(task.id);
-      if (result.success && result.task) {
-        resumed.set(task.id, result.task);
-      } else {
-        failures.push(result.error || `任务 ${task.id.slice(0, 8)} 恢复失败`);
+  resumeAll: (): Promise<boolean> => {
+    if (resumeAllInFlight) return resumeAllInFlight;
+    resumeAllInFlight = (async (): Promise<boolean> => {
+      try {
+        const tasks = await window.electronAPI.tasks.list();
+        const resumed = new Map<string, Task>();
+        const failures: string[] = [];
+        for (const task of tasks.filter((item: Task): boolean => item.status === 'paused')) {
+          const accepted = hasPlatformAcceptance(task);
+          // “继续”不授予重发许可。结果不确定的已提交任务必须留在原会话人工核对。
+          if (task.runtime?.submittedAt && !accepted) {
+            failures.push(`任务 ${task.id.slice(0, 8)} 已提交，请核对原会话；未重新发送`);
+            continue;
+          }
+          if (task.lock?.ownerId) {
+            const released = await window.electronAPI.tasks.releaseLock(task.id, task.lock.ownerId);
+            if (!released.success) {
+              failures.push(`任务 ${task.id.slice(0, 8)} 执行锁未释放`);
+              continue;
+            }
+          }
+          const result = await window.electronAPI.tasks.updateRuntime(task.id, {
+            status: accepted ? 'manual_submission_observing' : 'queued',
+            executionIntent: task.executionIntent === 'armed' ? 'armed' : 'hold',
+            runtime: task.runtime ? {
+              ...task.runtime,
+              stage: accepted ? 'manual_submission_observing' : 'queued',
+              message: accepted ? '继续核对原会话，不重复发送' : '等待原执行意图的队列评估',
+            } : undefined,
+          });
+          if (result.success && result.task) resumed.set(task.id, result.task);
+          else failures.push(result.error || `任务 ${task.id.slice(0, 8)} 恢复失败`);
+        }
+        set({
+          schedulerPaused: false,
+          tasks: tasks.map((task: Task): Task => resumed.get(task.id) || task),
+          error: failures.length > 0 ? `部分任务未恢复：${failures.slice(0, 2).join('；')}` : null,
+        });
+        setTimeout((): void => { void get().processQueue(); }, 0);
+        return failures.length === 0;
+      } catch {
+        set({ error: '无法回读原任务，队列继续保持暂停' });
+        return false;
       }
-    }
-    set({
-      schedulerPaused: false,
-      tasks: get().tasks.map((task) => resumed.get(task.id) || task),
-      error: failures.length > 0 ? `部分任务未恢复：${failures.slice(0, 2).join('；')}` : null,
-    });
-    setTimeout(() => get().processQueue(), 0);
-    return failures.length === 0;
+    })().finally((): void => { resumeAllInFlight = null; });
+    return resumeAllInFlight;
   },
 
   getCompletedOutputs: async () => {
@@ -502,7 +531,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   // ---- V3 自动化方法 ----
 
-  startAutomation: async (taskId: string) => {
+  startAutomation: async (taskId: string, beforeDispatch?: (task: Task) => Promise<void>) => {
     if (get().schedulerPaused) {
       set({ error: '任务调度已暂停' });
       return false;
@@ -621,6 +650,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           videoConfig: task.videoConfig,
           attachments: [...(task.attachments || [])],
           audioAttachment: task.audioAttachment,
+          petstory: task.petstory,
         },
       },
       updatedAt: now,
@@ -639,6 +669,18 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       return false;
     }
     const runningTask = get().tasks.find((item) => item.id === taskId) || startedTask;
+
+    // 业务运行绑定必须在向 BrowserPanel 分派前持久化；失败保持 hold，不触碰页面。
+    if (beforeDispatch) {
+      try { await beforeDispatch(runningTask); }
+      catch (error: unknown) {
+        const message = error instanceof Error ? error.message : '业务运行绑定失败';
+        await get().updateTaskRuntime(taskId, { status: 'paused', executionIntent: 'hold', runtime: { stage: 'paused', message } });
+        await automationEngine.release(taskId);
+        set({ error: message });
+        return false;
+      }
+    }
 
     console.log('[TaskStore] 启动任务', taskId, '在账号', accountId);
     void window.electronAPI.logs.append({ level: 'info', scope: 'automation', message: '任务开始执行', taskId, accountId });
@@ -785,6 +827,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       });
       return false;
     }
+    if (patch.runtime?.chatResponse && written.runtime?.chatResponse?.text !== patch.runtime.chatResponse.text) {
+      set({ error: 'Chat 正文未确认落盘，已停止且不重发' });
+      return false;
+    }
     // 只校验本次显式请求的字段（与 TaskService.readBackMatches 同一口径）：
     // 未请求的字段不参与比较，明确请求清空的字段才要求回读为空。
     if (patch.status !== undefined && written.status !== patch.status) {
@@ -820,21 +866,28 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   completeAutomation: async (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => {
-    void window.electronAPI.logs.append({ level: 'info', scope: 'automation', message: `任务完成，发现 ${outputs?.length || 1} 个产物`, taskId, accountId });
-    const finalOutputs = outputs && outputs.length > 0 ? outputs : [resultUrl];
-    await window.electronAPI.tasks.updateStatus(taskId, 'done', resultUrl, finalOutputs);
-    await window.electronAPI.tasks.updateRuntime(taskId, {
+    const finalOutputs = outputs && outputs.length > 0 ? outputs : resultUrl ? [resultUrl] : [];
+    const current = get().tasks.find((task) => task.id === taskId);
+    if (current?.mode === 'chat' && !current.runtime?.chatResponse?.text.trim()) throw new Error('Chat 最终正文尚未保存，不能标记完成');
+    const completedAt = new Date().toISOString();
+    const completedObservation = current?.runtime?.acceptanceObservation
+      ? completeAcceptedObservation(current.runtime.acceptanceObservation, finalOutputs[0] ? artifactId(finalOutputs[0]) : undefined, completedAt)
+      : undefined;
+    void window.electronAPI.logs.append({ level: 'info', scope: 'automation', message: current?.mode === 'chat' ? 'Chat 最终正文已保存' : `任务完成，发现 ${finalOutputs.length} 个产物`, taskId, accountId });
+    const statusSaved = await window.electronAPI.tasks.updateStatus(taskId, 'done', resultUrl, finalOutputs);
+    if (!statusSaved.success) throw new Error('任务完成状态保存失败，保留原结果且不得重发');
+    const runtimeSaved = await window.electronAPI.tasks.updateRuntime(taskId, {
       status: 'done',
       runtime: {
         stage: 'completed',
         message: '生成完成',
         stageStartedAt: new Date().toISOString(),
         lastHeartbeatAt: new Date().toISOString(),
+        acceptanceObservation: completedObservation,
       },
       errorInfo: null,
     });
-
-    const completedAt = new Date().toISOString();
+    if (!runtimeSaved.success) throw new Error('任务完成运行保存失败，保留原结果且不得重发');
     const tasks = get().tasks.map((t) =>
       t.id === taskId
         ? {
@@ -848,9 +901,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
               ...t.runtime,
               stage: 'completed' as TaskStage,
               message: '生成完成',
-              acceptanceObservation: t.runtime.acceptanceObservation
-                ? completeAcceptedObservation(t.runtime.acceptanceObservation, artifactId(finalOutputs[0]), completedAt)
-                : undefined,
+              acceptanceObservation: completedObservation,
             } : t.runtime,
             updatedAt: completedAt,
           }

@@ -538,7 +538,10 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): 
         source: oneOf(r.manualObservation.source, ['stored_conversation', 'user_confirmed_url'] as const, 'stored_conversation'),
         outcome: oneOf(r.manualObservation.outcome, ['observing', 'completed', 'manual_review'] as const, 'observing'),
       } : undefined,
+    chatResponse: isObject(r.chatResponse) && typeof r.chatResponse.text === 'string' && isValidISODate(r.chatResponse.capturedAt)
+      ? { text: r.chatResponse.text, capturedAt: r.chatResponse.capturedAt } : undefined,
     input: {
+      petstory: isObject(input) ? input.petstory as Task['petstory'] : undefined,
       prompt: asString(isObject(input) ? input.prompt : '', ''),
       mode: oneOf(isObject(input) ? input.mode : taskMode, VALID_GENERATION_MODES, taskMode),
       videoConfig: isObject(videoConfig) ? normalizeVideoConfig(videoConfig) : undefined,

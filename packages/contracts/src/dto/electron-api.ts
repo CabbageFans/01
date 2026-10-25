@@ -78,7 +78,10 @@ import type {
  * - main/preload.ts 通过 `satisfies ElectronAPI` 约束暴露对象
  * - src/types/electron.d.ts 通过 `import type { ElectronAPI }` 声明全局 Window
  */
+import type { PetStoryAPI } from './petstory';
+
 export interface ElectronAPI {
+  petstory: PetStoryAPI;
   // ---- 本机受控自动化桥（不暴露网页、Cookie、Session 或任意脚本能力） ----
   control: {
     onCommand: (handler: (command: {
@@ -195,6 +198,7 @@ export interface ElectronAPI {
     checkUpdate: () => Promise<CheckUpdateResult>;
     minimize: () => void;
     toggleMaximize: () => void;
+    prepareNativeInput: () => Promise<boolean>;
     close: () => void;
   };
 }

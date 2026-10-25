@@ -116,3 +116,5 @@ export type {
 } from './dto/logs';
 
 export type { ElectronAPI } from './dto/electron-api';
+
+export type { PetStoryCapability, PetStoryEntryCapability, PetStoryFreeState, PetStoryResolvedMode, PetStoryModeResolution, PetStoryMediaValidation, PetStoryTaskBinding, PetStoryProductionStep, PetStoryShotMedia, PetStoryProduction, PetStoryProductionCounts, PetStoryExecutionGuard, PetStoryProductionResult, PetStoryMode, PetStoryPromptKind, PetStoryPrompt, PetStoryCharacter, PetStoryShot, PetStoryPlan, PetStoryAsset, PetStoryChatJob, PetStoryProject, PetStoryResult, PetStoryAPI } from './dto/petstory';

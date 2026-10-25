@@ -44,6 +44,7 @@ export interface TaskAddResult {
 // ==================== IPC 参数 DTO ====================
 
 export interface TaskAddParams {
+  petstory?: Task['petstory'];
   prompts: string[];
   mode?: GenerationMode;
   videoConfig?: Task['videoConfig'];
