@@ -99,3 +99,6 @@ data/
 
 # Mac 本机验收：日志、截图、临时测试数据不进入版本库
 /artifacts/mac/
+
+# UI 改版本机截图、验收快照（含个人数据，不进入版本库）
+/artifacts/ui-refactor/

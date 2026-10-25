@@ -10,13 +10,14 @@
 
 import { readAcceptedImageOutputs, checkPetStoryPageGuard, inspectPetStoryCapability, readPetStoryComposer, uploadPetStoryImages, verifyPetStoryUploads, PetStoryControlError } from '../utils/doubaoBridge';
 import React, { useRef, useEffect, useCallback, useState } from 'react';
-import { Input, message, Modal, notification, Switch, Tooltip } from 'antd';
+import { Button, Input, message, Modal, notification, Popover, Switch, Tooltip } from 'antd';
 import type { Account, AccountAvailability, AccountAvailabilitySource, Task, TaskUpdateInput } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
 import type { AutomationState } from '../store/useTaskStore';
 import { classifyTaskError } from '../utils/taskRuntime';
 import { evaluateVideoCapability, isRestrictionFailure } from '../utils/videoCapability';
+import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
 import { automationEngine } from '../automation/AutomationEngine';
 import { runAdapterSelfCheck } from '../automation/doubaoAdapter';
 import {
@@ -1220,8 +1221,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     const inspect = (event: Event): void => {
       const detail = (event as CustomEvent<{ accountId: string; freeConfirmed: boolean; resolve: (value: import('@doubao-studio/contracts').PetStoryCapability) => void; reject: (error: Error) => void }>).detail;
       const webview = registryRef.current.get(detail.accountId);
-      if (!webview || useTaskStore.getState().accountBusy[detail.accountId]) { detail.reject(new Error('原账号窗口未就绪或正在执行任务')); return; }
-      void performAvailabilityCheck(detail.accountId, webview, 'pre_task').then(async (availability): Promise<void> => {
+      if (!webview || !canSelectAccount(detail.accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState)) || useTaskStore.getState().accountBusy[detail.accountId]) { detail.reject(new Error('原账号窗口未就绪或正在执行任务')); return; }
+      // 核对的是项目原账号；沿用前台租约，只改变浏览选中与可见布局，不导航或提交。
+      useAccountStore.getState().selectAccount(detail.accountId);
+      void new Promise<void>((resolve): void => { requestAnimationFrame((): void => { requestAnimationFrame((): void => resolve()); }); }).then((): Promise<AccountAvailability> => performAvailabilityCheck(detail.accountId, webview, 'pre_task')).then(async (availability): Promise<void> => {
         if (availability.state !== 'ready') throw new Error('请先由本人处理登录或验证，未检查／上传／提交');
         detail.resolve(await inspectPetStoryCapability(webview, detail.accountId, detail.freeConfirmed));
       }).catch((error: unknown): void => detail.reject(error instanceof Error ? error : new Error('入口核对失败')));
@@ -2220,6 +2223,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           <button
             onClick={() => setPublicShareDialogOpen(true)}
             title="解析公开分享链接"
+            aria-label="解析公开分享链接"
             disabled={manualVideoExtracting}
             style={{
               width: 30,
@@ -2227,7 +2231,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
-              color: '#b8b4ff',
+              color: '#6855c9',
               opacity: manualVideoExtracting ? 0.45 : 1,
             }}
           >
@@ -2240,6 +2244,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           <button
             onClick={() => void handleExtractCurrentVideo()}
             title="提取当前对话视频"
+            aria-label="提取当前对话视频"
             disabled={manualVideoExtracting || !activeAccount || !!(activeAccount && accountBusy[activeAccount.id])}
             style={{
               width: 30,
@@ -2247,7 +2252,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
-              color: experimentalNoWatermark ? '#f59e0b' : '#b8b4ff',
+              color: experimentalNoWatermark ? '#f59e0b' : '#6855c9',
               opacity: manualVideoExtracting || !activeAccount || !!(activeAccount && accountBusy[activeAccount.id]) ? 0.45 : 1,
             }}
           >
@@ -2256,23 +2261,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             </svg>
           </button>
         </Tooltip>
-        <Tooltip
-          title={experimentalNoWatermark
-            ? '实验直取已开启：手动提取可能触发平台风控'
-            : '实验直取默认关闭；开启需确认平台条款与账号风险'}
-        >
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, marginLeft: 4 }}>
-            <Switch
-              size="small"
-              checked={experimentalNoWatermark}
-              onChange={toggleExperimentalNoWatermark}
-              style={{ transform: 'scale(0.8)' }}
-            />
-            <span style={{ fontSize: 10, color: experimentalNoWatermark ? '#f59e0b' : '#8a8f99', whiteSpace: 'nowrap' }}>
-              实验直取
-            </span>
-          </span>
-        </Tooltip>
+        <Popover trigger="click" placement="bottomRight" title="浏览器高级工具" content={<div className="browser-advanced"><label><Switch aria-label="实验直取" size="small" checked={experimentalNoWatermark} onChange={toggleExperimentalNoWatermark} /> 实验直取</label><p>默认关闭。仅影响手动提取，结果仍可能含水印；不代表正式平台能力已验收。</p></div>}>
+          <Button size="small">高级</Button>
+        </Popover>
       </div>
 
       <Modal
@@ -2284,7 +2275,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         onOk={() => void handleDownloadPublicShareMedia()}
         onCancel={() => !manualVideoExtracting && setPublicShareDialogOpen(false)}
       >
-        <p style={{ color: '#9898b8' }}>仅解析豆包公开分享页实际声明的媒体流，不使用账号 Cookie，不探测隐藏接口，也不会移除水印。</p>
+        <p style={{ color: '#6b6d7c' }}>仅解析豆包公开分享页实际声明的媒体流，不使用账号 Cookie，不探测隐藏接口，也不会移除水印。</p>
         <Input
           value={publicShareUrl}
           onChange={(event) => setPublicShareUrl(event.target.value)}
@@ -2296,7 +2287,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       <div className="browser-viewport">
         {!activeAccount && (
           <div className="browser-panel-empty" style={{ position: 'absolute', inset: 0, zIndex: 1 }}>
-            <div className="browser-empty-content"><p>正在为任务准备账号页面…</p></div>
+            <div className="browser-empty-content"><p>{accounts.length ? '请选择要查看的账号' : '尚无账号，请先添加本人豆包账号'}</p></div>
           </div>
         )}
         {activeLoading && (
@@ -2318,8 +2309,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         {activeAutoState === 'completed' && (
           <div className="automation-toast completed">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <circle cx="9" cy="9" r="8" stroke="#34d399" strokeWidth="2" />
-              <path d="M5.5 9l2.5 2.5 4.5-5" stroke="#34d399" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              <circle cx="9" cy="9" r="8" stroke="#238563" strokeWidth="2" />
+              <path d="M5.5 9l2.5 2.5 4.5-5" stroke="#238563" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
             <span>{activeAutoMsg}</span>
           </div>
@@ -2328,8 +2319,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         {activeAutoState === 'failed' && (
           <div className="automation-toast failed">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <circle cx="9" cy="9" r="8" stroke="#fb7185" strokeWidth="2" />
-              <path d="M6 6l6 6M12 6l-6 6" stroke="#fb7185" strokeWidth="2" strokeLinecap="round" />
+              <circle cx="9" cy="9" r="8" stroke="#c44352" strokeWidth="2" />
+              <path d="M6 6l6 6M12 6l-6 6" stroke="#c44352" strokeWidth="2" strokeLinecap="round" />
             </svg>
             <span>执行失败: {activeAutoMsg}</span>
           </div>

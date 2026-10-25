@@ -92,7 +92,7 @@ export const BatchManagerModal: React.FC<BatchManagerModalProps> = ({ open, onCl
       render: (_, row) => (
         <Space size={4}>
           <Tag color="success">完成 {row.done}</Tag>
-          <Tag color="processing">运行 {row.running}</Tag>
+          <Tag color="processing">运行/待处理 {row.running}</Tag>
           <Tag>排队 {row.queued}</Tag>
           <Tag color="error">失败 {row.failed}</Tag>
           {row.dependencyBlocked > 0 && <Tag color="warning">依赖阻断 {row.dependencyBlocked}</Tag>}

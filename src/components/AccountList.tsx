@@ -35,7 +35,6 @@ export const AccountList: React.FC = () => {
   const {
     accounts,
     selectedAccountId,
-    loading,
     error,
     addAccount,
     updateAccount,
@@ -98,39 +97,39 @@ export const AccountList: React.FC = () => {
       }
       const isBusy = accountBusy[accountId];
       if (isBusy) {
-        return { label: '忙碌', color: '#fbbf24', animated: true, detail: '' };
+        return { label: '忙碌', color: '#a76a12', animated: true, detail: '' };
       }
       if (availabilityChecking[accountId]) {
-        return { label: '检测中', color: '#60a5fa', animated: true, detail: '正在读取当前页面' };
+        return { label: '检测中', color: '#366ec0', animated: true, detail: '正在读取当前页面' };
       }
       const availability = account?.health?.availability;
       if (availability?.state === 'action_required') {
-        return { label: '需要人工验证', color: '#fb923c', animated: true, detail: availability.message };
+        return { label: '需要人工验证', color: '#ac6014', animated: true, detail: availability.message };
       }
       if (availability?.state === 'login_required') {
-        return { label: '需要登录', color: '#fb7185', animated: false, detail: availability.message };
+        return { label: '需要登录', color: '#c44352', animated: false, detail: availability.message };
       }
       if (availability?.state === 'unavailable') {
-        return { label: '自动化不可用', color: '#fb7185', animated: false, detail: availability.message };
+        return { label: '自动化不可用', color: '#c44352', animated: false, detail: availability.message };
       }
       if (availability?.state === 'unknown') {
-        return { label: '待确认', color: '#fbbf24', animated: false, detail: availability.message };
+        return { label: '待确认', color: '#a76a12', animated: false, detail: availability.message };
       }
       if (account?.health?.loginState === 'expired') {
-        return { label: '登录已失效', color: '#fb7185', animated: false, detail: '请重新登录' };
+        return { label: '登录已失效', color: '#c44352', animated: false, detail: '请重新登录' };
       }
       if (account?.scheduling?.enabled === false) {
-        return { label: '已停用', color: '#94a3b8', animated: false, detail: '不参与自动调度' };
+        return { label: '已停用', color: '#687486', animated: false, detail: '不参与自动调度' };
       }
       if (account?.scheduling?.manualCooldownUntil && new Date(account.scheduling.manualCooldownUntil).getTime() > Date.now()) {
-        return { label: '手动冷却', color: '#94a3b8', animated: false, detail: `至 ${new Date(account.scheduling.manualCooldownUntil).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` };
+        return { label: '手动冷却', color: '#687486', animated: false, detail: `至 ${new Date(account.scheduling.manualCooldownUntil).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` };
       }
       if (account?.health?.verificationRequired) {
-        return { label: '需要验证', color: '#fb923c', animated: false, detail: '完成验证后恢复' };
+        return { label: '需要验证', color: '#ac6014', animated: false, detail: '完成验证后恢复' };
       }
       if (account?.health?.cooldownUntil && new Date(account.health.cooldownUntil).getTime() > Date.now()) {
         return {
-          label: '冷却中', color: '#94a3b8', animated: false,
+          label: '冷却中', color: '#687486', animated: false,
           detail: `至 ${new Date(account.health.cooldownUntil).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
         };
       }
@@ -139,9 +138,9 @@ export const AccountList: React.FC = () => {
         const checkedLabel = Number.isFinite(checked.getTime())
           ? `${checked.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 检测`
           : '';
-        return { label: '自动化可用', color: '#4ade80', animated: false, detail: checkedLabel };
+        return { label: '自动化可用', color: '#238563', animated: false, detail: checkedLabel };
       }
-      return { label: '尚未检测', color: '#94a3b8', animated: false, detail: '启动后将自动检测' };
+      return { label: '尚未检测', color: '#687486', animated: false, detail: '启动后将自动检测' };
     },
     [accounts, accountAutomationState, accountBusy, accountAutoMessage, availabilityChecking]
   );
@@ -244,10 +243,7 @@ export const AccountList: React.FC = () => {
   // ---- 刷新账号 ----
   const handleRefreshAccount = useCallback(
     async (account: Account) => {
-      const success = await refreshAccount(account.id);
-      if (success) {
-        message.success('账号已刷新');
-      }
+      Modal.confirm({ title: '清除该账号登录并刷新？', content: `仅清除「${account.name}」的隔离会话，需要重新登录。`, okText: '清除并刷新', cancelText: '取消', onOk: async (): Promise<void> => { if (await refreshAccount(account.id)) message.success('账号已刷新'); } });
     },
     [refreshAccount]
   );
@@ -318,7 +314,7 @@ export const AccountList: React.FC = () => {
   );
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="account-list flex flex-col">
       {/* 面板标题栏 */}
       <div className="panel-header">
         <div className="flex items-center gap-2">
@@ -333,6 +329,7 @@ export const AccountList: React.FC = () => {
         <Tooltip title="添加账号">
           <button
             className="btn-ghost text-db-accent hover:!text-db-accent-light"
+            aria-label="添加账号"
             onClick={() => setAddModalOpen(true)}
           >
             <PlusOutlined />
@@ -341,7 +338,7 @@ export const AccountList: React.FC = () => {
       </div>
 
       {/* 搜索框 */}
-      {accounts.length > 3 && (
+      {accounts.length > 0 && (
         <div className="px-2 pb-1">
           <input
             type="text"
@@ -354,7 +351,7 @@ export const AccountList: React.FC = () => {
       )}
 
       {/* 账号列表 */}
-      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+      <div className="account-rows p-2 space-y-1">
         {sortedAccounts.length === 0 ? (
           <div className="flex items-center justify-center h-full">
             <Empty
@@ -378,7 +375,7 @@ export const AccountList: React.FC = () => {
                 trigger={['contextMenu']}
               >
                 <div
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-db cursor-pointer transition-all duration-200 border ${
+                  className={`account-row ${isSelected ? 'account-row-selected' : ''} flex items-center gap-3 px-3 py-2.5 rounded-db cursor-pointer transition-all duration-200 border ${
                     isSelected
                       ? 'bg-db-accent/15 border-db-accent/40 shadow-sm'
                       : 'bg-db-surface hover:bg-db-surface-hover border-transparent'
@@ -387,7 +384,7 @@ export const AccountList: React.FC = () => {
                 >
                   {/* 头像 */}
                   <div
-                    className={`flex items-center justify-center w-9 h-9 rounded-full flex-shrink-0 text-white text-sm font-semibold ${
+                    className={`account-avatar flex items-center justify-center w-9 h-9 rounded-full flex-shrink-0 text-white text-sm font-semibold ${
                       isSelected ? 'bg-db-accent' : 'bg-db-border'
                     }`}
                   >
@@ -438,14 +435,16 @@ export const AccountList: React.FC = () => {
                     {account.seedanceQuota && (
                       <div
                         className="text-2xs mt-0.5 truncate"
-                        style={{ color: account.seedanceQuota.exhausted ? '#fb7185' : '#818cf8' }}
-                        title="每日 6 单位；每 5 秒视频消耗 1 单位"
+                        style={{ color: account.seedanceQuota.exhausted ? '#c44352' : '#6855c9' }}
+                        title="仅为本地使用记录预测，不是豆包官方剩余额度；当前免费权益仍需本人核对"
                       >
                         {account.seedanceQuota.exhausted
-                          ? 'Seedance 今日额度已用尽'
-                          : `Seedance 预计剩余 ${Math.max(0, account.seedanceQuota.estimatedTotalUnits - account.seedanceQuota.usedUnits)} 单位`}
+                          ? '本地记录：额度已用尽'
+                          : `本地预测剩余 ${Math.max(0, account.seedanceQuota.estimatedTotalUnits - account.seedanceQuota.usedUnits)} 单位`}
                       </div>
                     )}
+                    {!account.seedanceQuota && <div className="text-2xs text-db-text-muted mt-1">额度来源：未知</div>}
+                    {account.platform === 'dola' && <div className="text-2xs text-db-text-muted mt-1">实验配置 · 尚未完成端到端验收</div>}
                     {!!account.health && (account.health.successCount > 0 || account.health.failureCount > 0) && (
                       <div className="text-2xs mt-0.5 text-db-text-muted truncate">
                         成功 {account.health.successCount} · 失败 {account.health.failureCount}
@@ -476,6 +475,7 @@ export const AccountList: React.FC = () => {
                     trigger={['click']}
                   >
                     <button
+                      aria-label={`${account.name}更多操作`}
                       className="btn-ghost w-7 h-7"
                       onClick={(e) => e.stopPropagation()}
                     >
@@ -510,7 +510,7 @@ export const AccountList: React.FC = () => {
           <Segmented
             value={newAccountPlatform}
             onChange={(value) => setNewAccountPlatform(value as AccountPlatform)}
-            options={[{ label: '豆包', value: 'doubao' }, { label: 'Dola', value: 'dola' }]}
+            options={[{ label: '豆包', value: 'doubao' }, { label: 'Dola（实验）', value: 'dola' }]}
             block
             style={{ marginBottom: 12 }}
           />

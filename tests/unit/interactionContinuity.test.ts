@@ -37,7 +37,7 @@ describe('视频任务执行连续性', () => {
     })).toBe('uncertain');
   });
 
-  it('分隔条计算有界，拖动期间只移动预览线且不重排真实面板', () => {
+  it('保留分隔条计算边界及旧面板预览；新外壳只声明一个稳定浏览器宿主', () => {
     expect(clampSidebarWidth(100)).toBe(280);
     expect(clampSidebarWidth(900)).toBe(500);
     expect(calculateSidebarSplitRatio(50, 0, 1000)).toBe(0.2);
@@ -45,11 +45,17 @@ describe('视频任务执行连续性', () => {
 
     const appSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'App.tsx'), 'utf8');
     const sidebarSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'Sidebar.tsx'), 'utf8');
-    expect(appSource).toContain('requestAnimationFrame');
+    expect(appSource.match(/<BrowserPanel\s/g)).toHaveLength(1);
+    expect(appSource).toContain('refreshKey={0}');
+    expect(appSource).not.toMatch(/<BrowserPanel[^>]*key=/);
     expect(sidebarSource).toContain('requestAnimationFrame');
-    expect(appSource).toContain('resizerRef.current.style.transform');
+    const css = readFileSync(resolve(__dirname, '..', '..', 'src', 'styles', 'global.css'), 'utf8');
+    const parked = css.match(/\.browser-host\.is-parked\s*\{([^}]+)\}/)?.[1] || '';
+    expect(parked).toContain('translate3d');
+    expect(parked).toContain('width:960px');
+    expect(parked).not.toMatch(/display\s*:\s*none|visibility\s*:\s*hidden/);
     expect(sidebarSource).toContain('splitResizerRef.current.style.transform');
-    expect(appSource).toContain('resize-capture-overlay-col');
+    expect(appSource).toContain('is-parked');
     expect(sidebarSource).toContain('resize-capture-overlay-row');
     expect(appSource).not.toContain('sidebarRef.current.style.width = `${current.pendingWidth}px`');
     expect(sidebarSource).not.toContain('accountPaneRef.current.style.height = `${current.pendingRatio * 100}%`');

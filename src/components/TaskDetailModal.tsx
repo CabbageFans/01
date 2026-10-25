@@ -58,7 +58,7 @@ const QUALITY_REJECTION_LABELS: Record<QualityRejectionTag, string> = {
 };
 
 const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, onEditAndRerun }) => {
-  const { retryTask, deleteTask, assignTask, startAutomation, setQualityVerdict, accountBusy } = useTaskStore();
+  const { tasks, retryTask, deleteTask, assignTask, startAutomation, setQualityVerdict, accountBusy } = useTaskStore();
   const accounts = useAccountStore((s) => s.accounts);
 
   const [imageBase64s, setImageBase64s] = useState<Record<string, string>>({});
@@ -102,10 +102,10 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
 
   const mustReconcile = requiresSubmissionReconciliation(task);
   const dependencyBlocked = isDependencyBlockedTask(task);
-  const canRetry = !mustReconcile && !dependencyBlocked &&
+  const canRetry = !task.petstory && !mustReconcile && !dependencyBlocked &&
     (task.status === 'fail' || task.status === 'done' || task.status === 'paused' ||
       task.status === 'cancelled' || task.status === 'waiting_verification' || task.status === 'waiting_generation_confirmation');
-  const canStart = task.status === 'queued' && task.assignedAccountId && !accountBusy[task.assignedAccountId];
+  const canStart = !task.petstory && task.status === 'queued' && task.assignedAccountId && !accountBusy[task.assignedAccountId];
   const canAssign = task.status === 'queued' && !task.assignedAccountId;
   const canObserveManualSubmission = task.mode === 'video' && !!task.assignedAccountId &&
     !['done', 'cancelled', 'manual_submission_observing'].includes(task.status);
@@ -190,7 +190,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span>任务详情</span>
           <Tag color={statusCfg.color} style={{ marginLeft: 8 }}>
-            {statusCfg.label}
+            {task.status === 'queued' && task.executionIntent !== 'armed' ? '待授权执行' : statusCfg.label}
           </Tag>
           <Tag
             style={{
@@ -206,7 +206,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
       open={open}
       onCancel={onClose}
       footer={
-        <Space>
+        <Space wrap>
           <Button danger icon={<DeleteOutlined />} onClick={handleDelete}>
             删除任务
           </Button>
@@ -257,7 +257,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
               我已手动提交
             </Button>
           )}
-          {!mustReconcile && <Button
+          {!mustReconcile && !task.petstory && <Button
             icon={<EditOutlined />}
             onClick={() => {
               onClose();
@@ -281,19 +281,19 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
           <Button onClick={onClose}>关闭</Button>
         </Space>
       }
-      width={640}
+      width={840}
       destroyOnClose
     >
-      <div style={{ color: '#d0d0e0' }}>
+      <div style={{ color: '#434552' }}>
         {/* 提示词 */}
         <div style={{ marginBottom: 16 }}>
-          <div style={{ color: '#9898b8', fontSize: 12, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+          <div style={{ color: '#6b6d7c', fontSize: 12, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
             <InfoCircleOutlined /> 提示词
           </div>
           <div
             style={{
-              background: '#1a1a24',
-              border: '1px solid #2a2a3e',
+              background: '#fafafb',
+              border: '1px solid #e2e3e8',
               borderRadius: 8,
               padding: '12px 14px',
               fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
@@ -313,7 +313,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         {/* 依赖阻断：结构化调度阻断，不是平台生成失败 */}
         {dependencyBlocked && (
           <div style={{ marginBottom: 16 }}>
-            <div style={{ color: '#fbbf24', fontSize: 12, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <div style={{ color: '#a76a12', fontSize: 12, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
               <CloseCircleOutlined /> 依赖阻断
             </div>
             <div
@@ -327,7 +327,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
               }}
             >
               <div>{describeDependencyBlock(task)}</div>
-              <div style={{ marginTop: 4, color: '#9898b8', fontSize: 12 }}>
+              <div style={{ marginTop: 4, color: '#6b6d7c', fontSize: 12 }}>
                 该错误不计入平台生成失败率与账号健康冷却，也不会自动重试；任务仍在调度队列中等待重新评估，依赖恢复后会自动继续。
               </div>
             </div>
@@ -337,7 +337,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         {/* 失败原因 */}
         {(task.status === 'fail' || task.status === 'paused' || task.status === 'cancelled') && task.result && (
           <div style={{ marginBottom: 16 }}>
-            <div style={{ color: '#fb7185', fontSize: 12, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <div style={{ color: '#c44352', fontSize: 12, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
               <CloseCircleOutlined /> 失败原因
             </div>
             <div
@@ -356,19 +356,19 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         )}
         {task.status === 'waiting_generation_confirmation' && (
           <div style={{ marginBottom: 16, background: 'rgba(249,115,22,0.10)', border: '1px solid rgba(249,115,22,0.35)', borderRadius: 8, padding: 12 }}>
-            <strong style={{ color: '#fb923c' }}>等待你在原豆包会话中确认视频参数</strong>
+            <strong style={{ color: '#ac6014' }}>等待你在原豆包会话中确认视频参数</strong>
             <div style={{ marginTop: 6 }}>系统不会自动回复“确认”，也不会创建新对话或重复发送。</div>
           </div>
         )}
         {task.status === 'manual_submission_observing' && (
           <div style={{ marginBottom: 16, background: 'rgba(56,189,248,0.10)', border: '1px solid rgba(56,189,248,0.35)', borderRadius: 8, padding: 12 }}>
-            <strong style={{ color: '#38bdf8' }}>正在只读观察人工提交</strong>
+            <strong style={{ color: '#277eab' }}>正在只读观察人工提交</strong>
             <div style={{ marginTop: 6 }}>账号观察租约不计为健康失败或冷却；系统只匹配原会话，不会重新发送。</div>
           </div>
         )}
         {canObserveManualSubmission && (
           <div style={{ marginBottom: 16 }}>
-            <div style={{ color: '#9898b8', fontSize: 12, marginBottom: 6 }}>人工提交会话 URL（可选）</div>
+            <div style={{ color: '#6b6d7c', fontSize: 12, marginBottom: 6 }}>人工提交会话 URL（可选）</div>
             <Input
               value={manualConversationUrl}
               onChange={(event) => setManualConversationUrl(event.target.value)}
@@ -381,7 +381,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         <Divider style={{ margin: '8px 0 14px' }}>人工质量裁决</Divider>
         <div style={{ marginBottom: 16 }}>
           {task.qualityVerdict && (
-            <div style={{ marginBottom: 8, fontSize: 12, color: task.qualityVerdict.status === 'accepted' ? '#34d399' : '#fb7185' }}>
+            <div style={{ marginBottom: 8, fontSize: 12, color: task.qualityVerdict.status === 'accepted' ? '#238563' : '#c44352' }}>
               当前：{task.qualityVerdict.status === 'accepted' ? '合格' : `拒收（${(task.qualityVerdict.rejectionTags || []).map((tag) => QUALITY_REJECTION_LABELS[tag]).join('、')}）`}
               {' · '}{new Date(task.qualityVerdict.decidedAt).toLocaleString('zh-CN')}
             </div>
@@ -406,8 +406,8 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         <Descriptions
           column={2}
           size="small"
-          labelStyle={{ color: '#9898b8', width: 80 }}
-          contentStyle={{ color: '#d0d0e0' }}
+          labelStyle={{ color: '#6b6d7c', width: 80 }}
+          contentStyle={{ color: '#434552' }}
           style={{ marginBottom: 16 }}
         >
           <Descriptions.Item label="任务ID">
@@ -422,11 +422,11 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
                 {assignedAccount.name}
               </Space>
             ) : canAssign ? (
-              <Space size={4} style={{ color: '#fbbf24' }}>
+              <Space size={4} style={{ color: '#a76a12' }}>
                 <span>未指派</span>
               </Space>
             ) : (
-              <span style={{ color: '#6b6b88' }}>未指派</span>
+              <span style={{ color: '#737584' }}>未指派</span>
             )}
           </Descriptions.Item>
           <Descriptions.Item label="创建时间">
@@ -456,9 +456,9 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
                 {new Date(task.runtime.lastHeartbeatAt).toLocaleString('zh-CN')}
               </Descriptions.Item>
               <Descriptions.Item label="可恢复">
-                {task.status === 'waiting_generation_confirmation'
+                {mustReconcile
                   ? '仅允许原会话只读回读'
-                  : task.errorInfo ? (task.errorInfo.recoverable ? '可以重新执行' : '需要更换账号或配置') : '是'}
+                  : task.errorInfo ? (task.errorInfo.recoverable ? '可以重新执行' : '请核对错误、账号与配置') : '是'}
               </Descriptions.Item>
               {task.runtime.conversationUrl && (
                 <Descriptions.Item label="原会话" span={2}>
@@ -467,7 +467,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
                   </Button>
                 </Descriptions.Item>
               )}
-              {task.runtime.controlReadiness && (
+              {(task.runtime.controlReadiness || task.runtime.executionDiagnostics?.upload) && <Descriptions.Item label="诊断" span={2}><details><summary>展开控件与上传诊断</summary><Descriptions column={1} size="small">              {task.runtime.controlReadiness && (
                 <Descriptions.Item label="控件诊断" span={2}>
                   {task.runtime.controlReadiness.failureStage
                     ? `失败阶段 ${task.runtime.controlReadiness.failureStage}`
@@ -481,6 +481,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
                   {task.runtime.executionDiagnostics.upload.failure ? ` · ${task.runtime.executionDiagnostics.upload.failure}` : ''}
                 </Descriptions.Item>
               )}
+</Descriptions></details></Descriptions.Item>}
               {task.runtime.manualObservation && (
                 <Descriptions.Item label="人工观察" span={2}>
                   {task.runtime.manualObservation.outcome} · 截止 {new Date(task.runtime.manualObservation.expiresAt).toLocaleTimeString('zh-CN')}
@@ -490,7 +491,10 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
           )}
           {task.batchId && <Descriptions.Item label="任务批次">{task.batchId}</Descriptions.Item>}
           {(task.dependsOnTaskIds?.length || 0) > 0 && (
-            <Descriptions.Item label="前置依赖">{task.dependsOnTaskIds!.length} 个任务</Descriptions.Item>
+            <Descriptions.Item label="前置依赖" span={2}><Space wrap>{task.dependsOnTaskIds?.map((id: string): React.ReactNode => {
+              const dependency = tasks.find((item: Task): boolean => item.id === id);
+              return <Button key={id} size="small" disabled={!dependency} onClick={(): void => { window.dispatchEvent(new CustomEvent('show-workspace-task', { detail: { taskId: id } })); }}>{id.slice(0, 8)} · {dependency ? TASK_STATUS_CONFIG[dependency.status].label : '原任务缺失'}</Button>;
+            })}</Space></Descriptions.Item>
           )}
           {task.lock && <Descriptions.Item label="执行锁">有效至 {new Date(task.lock.expiresAt).toLocaleTimeString('zh-CN')}</Descriptions.Item>}
         </Descriptions>
@@ -521,7 +525,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         {/* 视频配置 */}
         {task.mode === 'video' && task.videoConfig && (
           <div style={{ marginBottom: 16 }}>
-            <div style={{ color: '#9898b8', fontSize: 12, marginBottom: 8 }}>视频配置</div>
+            <div style={{ color: '#6b6d7c', fontSize: 12, marginBottom: 8 }}>视频配置</div>
             <Space size={8} wrap>
               <Tag color="blue">{VIDEO_MODEL_LABELS[task.videoConfig.model] || task.videoConfig.model}</Tag>
               <Tag color="purple">{task.videoConfig.duration}</Tag>
@@ -533,7 +537,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         {/* 参考图片 */}
         {task.attachments && task.attachments.length > 0 && (
           <div style={{ marginBottom: 16 }}>
-            <div style={{ color: '#9898b8', fontSize: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <div style={{ color: '#6b6d7c', fontSize: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 4 }}>
               <PictureOutlined /> 参考图片（{task.attachments.length} 张）
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
@@ -545,9 +549,9 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
                     width: 56,
                     height: 56,
                     borderRadius: 4,
-                    border: '1px solid #2a2a3e',
+                    border: '1px solid #e2e3e8',
                     overflow: 'hidden',
-                    background: '#1a1a24',
+                    background: '#fafafb',
                   }}
                 >
                   {imageBase64s[path] ? (
@@ -580,17 +584,17 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         {/* 参考音频 */}
         {(task as any).audioAttachment && (
           <div style={{ marginBottom: 16 }}>
-            <div style={{ color: '#9898b8', fontSize: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <div style={{ color: '#6b6d7c', fontSize: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 4 }}>
               <AudioOutlined /> 参考音频
             </div>
             <div
               style={{
-                background: '#1a1a24',
-                border: '1px solid #2a2a3e',
+                background: '#fafafb',
+                border: '1px solid #e2e3e8',
                 borderRadius: 6,
                 padding: '8px 12px',
                 fontSize: 12,
-                color: '#d0d0e0',
+                color: '#434552',
               }}
             >
               {(task as any).audioAttachment.split(/[/\\]/).pop()}
@@ -601,17 +605,17 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         {/* 产物列表 */}
         {task.outputs && task.outputs.length > 0 && (
           <div>
-            <Divider style={{ margin: '12px 0', borderColor: '#2a2a3e' }} />
-            <div style={{ color: '#9898b8', fontSize: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Divider style={{ margin: '12px 0', borderColor: '#e2e3e8' }} />
+            <div style={{ color: '#6b6d7c', fontSize: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 4 }}>
               <LinkOutlined /> 产物（{task.outputs.length} 个）
             </div>
             <List
               size="small"
               dataSource={task.outputs}
               style={{
-                background: '#1a1a24',
+                background: '#fafafb',
                 borderRadius: 6,
-                border: '1px solid #2a2a3e',
+                border: '1px solid #e2e3e8',
               }}
               renderItem={(url, idx) => (
                 <List.Item
@@ -625,7 +629,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
                     target="_blank"
                     rel="noreferrer"
                     style={{
-                      color: '#60a5fa',
+                      color: '#366ec0',
                       fontSize: 12,
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',

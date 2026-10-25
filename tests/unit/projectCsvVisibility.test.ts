@@ -169,7 +169,8 @@ describe('项目管理界面源码契约', () => {
     expect(switcher).toContain('管理项目');
     expect(modal).toContain('Popconfirm');
     expect(modal).toContain('不能删除');
-    expect(consoleSource).toContain('排队 {queuedCount}');
+    // queued 同时包含 hold 草稿，工作台准确称为待执行，不表示均已授权排队。
+    expect(consoleSource).toContain('待执行 {queuedCount}');
     expect(consoleSource).toContain('运行 {runningCount}');
     expect(consoleSource).toContain('完成 {doneCount}');
   });

@@ -124,28 +124,28 @@ export const GENERATION_MODE_CONFIG: Record<GenerationMode, {
   chat: {
     label: '对话',
     icon: '💬',
-    color: '#60a5fa',
+    color: '#366ec0',
     url: 'https://www.doubao.com/chat/',
     description: '智能对话、问答、写作',
   },
   image: {
     label: '图片',
     icon: '🎨',
-    color: '#a78bfa',
+    color: '#7755b9',
     url: 'https://www.doubao.com/chat/create-image/',
     description: 'AI 绘画、文生图、图生图',
   },
   video: {
     label: '视频',
     icon: '🎬',
-    color: '#f472b6',
+    color: '#b14580',
     url: 'https://www.doubao.com/chat/create-video/',
     description: 'AI 视频、文生视频、图生视频',
   },
   music: {
     label: '音乐',
     icon: '🎵',
-    color: '#34d399',
+    color: '#238563',
     url: 'https://www.doubao.com/chat/create-music/',
     description: 'AI 作曲、音乐生成',
   },
@@ -153,16 +153,16 @@ export const GENERATION_MODE_CONFIG: Record<GenerationMode, {
 
 /** 任务状态标签配置 */
 export const TASK_STATUS_CONFIG: Record<TaskStatus, { label: string; color: string; className: string }> = {
-  queued: { label: '排队中', color: '#60a5fa', className: 'queued' },
-  executing: { label: '注入中', color: '#a78bfa', className: 'executing' },
-  generating: { label: '生成中', color: '#fbbf24', className: 'generating' },
-  waiting_verification: { label: '等待验证', color: '#fb923c', className: 'waiting-verification' },
-  waiting_generation_confirmation: { label: '等待生成确认', color: '#f97316', className: 'waiting-generation-confirmation' },
-  manual_submission_observing: { label: '人工提交观察中', color: '#38bdf8', className: 'manual-submission-observing' },
-  paused: { label: '已暂停', color: '#94a3b8', className: 'paused' },
-  done: { label: '已完成', color: '#34d399', className: 'done' },
-  fail: { label: '失败', color: '#fb7185', className: 'fail' },
-  cancelled: { label: '已取消', color: '#94a3b8', className: 'cancelled' },
+  queued: { label: '排队中', color: '#366ec0', className: 'queued' },
+  executing: { label: '注入中', color: '#7755b9', className: 'executing' },
+  generating: { label: '生成中', color: '#a76a12', className: 'generating' },
+  waiting_verification: { label: '等待验证', color: '#ac6014', className: 'waiting-verification' },
+  waiting_generation_confirmation: { label: '等待生成确认', color: '#a55214', className: 'waiting-generation-confirmation' },
+  manual_submission_observing: { label: '人工提交观察中', color: '#277eab', className: 'manual-submission-observing' },
+  paused: { label: '已暂停', color: '#687486', className: 'paused' },
+  done: { label: '已完成', color: '#238563', className: 'done' },
+  fail: { label: '失败', color: '#c44352', className: 'fail' },
+  cancelled: { label: '已取消', color: '#687486', className: 'cancelled' },
 };
 
 export const TASK_STAGE_LABELS: Record<TaskStage, string> = {
@@ -187,17 +187,17 @@ export const TASK_STAGE_LABELS: Record<TaskStage, string> = {
 
 /** 账号状态标签配置 */
 export const ACCOUNT_STATUS_CONFIG: Record<AccountStatus, { label: string; color: string }> = {
-  idle: { label: '空闲', color: '#4ade80' },
-  busy: { label: '忙碌', color: '#fbbf24' },
-  error: { label: '异常', color: '#f87171' },
+  idle: { label: '空闲', color: '#238563' },
+  busy: { label: '忙碌', color: '#a76a12' },
+  error: { label: '异常', color: '#c44352' },
 };
 
 /** 自动化阶段 → UI 展示 */
 export const AUTO_STATE_DISPLAY: Record<string, { label: string; color: string; animated: boolean }> = {
-  idle: { label: '空闲', color: '#4ade80', animated: false },
-  injecting: { label: '注入中…', color: '#a78bfa', animated: true },
-  submitting: { label: '提交中…', color: '#818cf8', animated: true },
-  generating: { label: '生成中…', color: '#fbbf24', animated: true },
-  completed: { label: '已完成', color: '#34d399', animated: false },
-  failed: { label: '失败', color: '#f87171', animated: false },
+  idle: { label: '空闲', color: '#238563', animated: false },
+  injecting: { label: '注入中…', color: '#7755b9', animated: true },
+  submitting: { label: '提交中…', color: '#6855c9', animated: true },
+  generating: { label: '生成中…', color: '#a76a12', animated: true },
+  completed: { label: '已完成', color: '#238563', animated: false },
+  failed: { label: '失败', color: '#c44352', animated: false },
 };

@@ -16,6 +16,7 @@ interface ArtifactRecord {
 
 interface ArtifactCenterModalProps {
   open: boolean;
+  embedded?: boolean;
   onClose: () => void;
 }
 
@@ -26,7 +27,7 @@ const VALIDATION_LABELS = {
   invalid: { label: '不可用', color: 'error' },
 } as const;
 
-export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, onClose }) => {
+export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, onClose, embedded = false }) => {
   const tasks = useTaskStore((state) => state.tasks);
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const loadTasks = useTaskStore((state) => state.loadTasks);
@@ -104,10 +105,10 @@ export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, 
       render: (_, record) => accounts.find((account) => account.id === record.task.assignedAccountId)?.name || '未指派',
     },
     {
-      title: '状态', width: 105,
+      title: '地址 / 本地文件', width: 200,
       render: (_, record) => {
         const validation = VALIDATION_LABELS[record.artifact.validation?.state || 'unknown'];
-        return <Space size={4}><Tag color={validation.color}>{validation.label}</Tag>{record.localJob && <Tag color="green">本地</Tag>}</Space>;
+        return <Space direction="vertical" size={4}><Tag color={validation.color}>地址{validation.label}</Tag><Tag>{record.localJob ? '已下载 · 文件校验未检查' : '未下载'}</Tag></Space>;
       },
     },
     {
@@ -129,7 +130,7 @@ export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, 
 
   return (
     <>
-      <Modal title={`产物中心 (${records.length})`} open={open} onCancel={onClose} footer={null} width={1120}>
+      <ArtifactSurface embedded={embedded} open={open} onClose={onClose} count={records.length}>
         <Space style={{ marginBottom: 12 }} wrap>
           <Input.Search value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索提示词或任务 ID" style={{ width: 280 }} allowClear />
           <Select value={mode} onChange={setMode} style={{ width: 130 }} options={[
@@ -140,7 +141,7 @@ export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, 
           ]} />
         </Space>
         {records.length === 0 ? <Empty description="没有符合条件的产物" /> : <Table columns={columns} dataSource={records} size="small" pagination={{ pageSize: 12, showSizeChanger: false }} scroll={{ x: 980 }} />}
-      </Modal>
+      </ArtifactSurface>
       <Modal open={!!preview} onCancel={() => setPreview(null)} footer={null} width={preview?.artifact.kind === 'video' ? 820 : 680}>
         {preview?.artifact.kind === 'video'
           ? <video src={preview.artifact.url} controls autoPlay style={{ width: '100%', maxHeight: '75vh', background: '#000' }} />
@@ -148,4 +149,9 @@ export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, 
       </Modal>
     </>
   );
+};
+
+const ArtifactSurface: React.FC<{ embedded: boolean; open: boolean; onClose: () => void; count: number; children: React.ReactNode }> = ({ embedded, open, onClose, count, children }): React.ReactElement | null => {
+  if (embedded) return open ? <div className="embedded-assets">{children}</div> : null;
+  return <Modal title={`产物中心 (${count})`} open={open} onCancel={onClose} footer={null} width={1120}>{children}</Modal>;
 };

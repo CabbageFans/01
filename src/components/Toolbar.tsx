@@ -1,29 +1,13 @@
 /**
  * src/components/Toolbar.tsx
- * 顶部工具栏
- *
- * 包含：
- * - 应用标题「豆包工作室」
- * - 窗口控制按钮（最小化/最大化/关闭）
- * - 全局操作：全部暂停/继续、批量下载产物
+ * 页面工具与低频维护入口
+ * 复用原暂停、批次下载和维护处理函数，由六入口外壳决定展示位置。
  */
 
 import React from 'react';
-import {
-  MinusOutlined,
-  BorderOutlined,
-  CloseOutlined,
-  PauseCircleOutlined,
-  PlayCircleOutlined,
-  DownloadOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-  HistoryOutlined,
-  MoreOutlined,
-  AppstoreOutlined,
-} from '@ant-design/icons';
-import { Descriptions, Dropdown, message, Modal, Progress, Tooltip } from 'antd';
-import type { MenuProps } from 'antd';
+import { PauseCircleOutlined, PlayCircleOutlined, DownloadOutlined, FolderOpenOutlined, SettingOutlined, DatabaseOutlined, ToolOutlined, BarChartOutlined, UnorderedListOutlined } from '@ant-design/icons';
+import { Button, Descriptions, message, Modal, Progress, Segmented, Space } from 'antd';
+
 import { useTaskStore } from '../store/useTaskStore';
 import { SettingsModal } from './SettingsModal';
 import { OutputPreviewModal } from './OutputPreviewModal';
@@ -34,18 +18,17 @@ import { useAccountStore } from '../store/useAccountStore';
 import { ArtifactCenterModal } from './ArtifactCenterModal';
 import { BatchManagerModal } from './BatchManagerModal';
 import { installAdapterBundle, rollbackAdapterBundle } from '../automation/doubaoAdapter';
-import { ProjectSwitcher } from './ProjectSwitcher';
 import { LogCenterModal } from './LogCenterModal';
 import { ProjectOverviewModal } from './ProjectOverviewModal';
 import { useProjectStore } from '../store/useProjectStore';
+import type { WorkspacePage } from '../utils/workspace';
 import { calculatePlatformSuccessRate, getPlatformTaskStats } from '../utils/taskStats';
 
-interface ToolbarProps {
-  sidebarCollapsed: boolean;
-  onToggleSidebar: () => void;
-}
+interface ToolbarProps { page: WorkspacePage; }
 
-export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSidebar }) => {
+/** 页面工具保留旧处理函数和模态框，入口从顶栏移入对应业务页面。 */
+export const Toolbar: React.FC<ToolbarProps> = ({ page }): React.ReactElement => {
+  const [assetView, setAssetView] = React.useState<'outputs' | 'downloads'>('outputs');
   const { tasks, schedulerPaused, batchPause, resumeAll } = useTaskStore();
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const accounts = useAccountStore((state) => state.accounts);
@@ -57,7 +40,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   const [downloadJobs, setDownloadJobs] = React.useState<DownloadJob[]>([]);
   const [downloadJobsLoading, setDownloadJobsLoading] = React.useState(false);
   const [metricsOpen, setMetricsOpen] = React.useState(false);
-  const [artifactCenterOpen, setArtifactCenterOpen] = React.useState(false);
   const [adapterReport, setAdapterReport] = React.useState<AdapterSelfCheckReport | null>(null);
   const [adapterChecking, setAdapterChecking] = React.useState(false);
   const [batchManagerOpen, setBatchManagerOpen] = React.useState(false);
@@ -118,12 +100,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
     return () => window.removeEventListener('batch-download-outputs', handleBatchDownloadOutputs);
   }, []);
 
-  // 运行中的任务数（包含 executing + generating）
-  const runningCount = tasks.filter(
-    (t) => t.status === 'executing' || t.status === 'generating'
-  ).length;
-  // 排队中的任务数
-  const queuedCount = tasks.filter((t) => t.status === 'queued').length;
   // 当前项目内已完成且有产物的任务数
   const completedWithOutputs = tasks.filter(
     (t) => (t.projectId || 'default-project') === activeProjectId && t.status === 'done' && t.outputs.length > 0
@@ -202,7 +178,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   };
 
   // 更多操作菜单
-  const moreMenuItems: MenuProps['items'] = [
+  const moreMenuItems: Array<{ key: string; label: string; disabled?: boolean; onClick: () => void | Promise<void> }> = [
     {
       key: 'project-overview',
       label: '项目概览',
@@ -229,7 +205,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
     },
     {
       key: 'backup',
-      label: '导出完整备份',
+      label: '备份 Studio 数据',
       onClick: async () => {
         const result = await window.electronAPI.system.exportBackup();
         if (result.success) message.success(`备份已导出：${result.filePath}`);
@@ -238,7 +214,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
     },
     {
       key: 'restore',
-      label: '恢复完整备份',
+      label: '恢复 Studio 数据备份',
       onClick: async () => {
         const result = await window.electronAPI.system.restoreBackup();
         if (result.success) message.success('备份已恢复，请重新启动应用');
@@ -306,128 +282,35 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
       label: '偏好设置',
       onClick: () => setSettingsOpen(true),
     },
-    {
-      key: 'about',
-      label: '关于豆包工作室',
-    },
   ];
+
+  React.useEffect((): void => {
+    if (page === 'assets') void loadDownloadJobs();
+  }, [page, loadDownloadJobs]);
+
+  const toolButton = (key: string): React.ReactNode => {
+    const item = moreMenuItems?.find((entry): boolean => entry?.key === key);
+    if (!item || !('label' in item)) return null;
+    return <Button key={key} disabled={'disabled' in item && item.disabled} onClick={(): void => {
+      if ('onClick' in item && item.onClick) void item.onClick();
+    }}>{item.label}</Button>;
+  };
 
   return (
     <>
-    <div
-      className="flex items-center justify-between h-11 px-3 bg-db-bg-secondary border-b border-db-border"
-      style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
-    >
-      {/* 左侧：标题 + 面板切换 */}
-      <div className="flex items-center gap-3" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-        {/* 侧边栏折叠按钮 */}
-        <Tooltip title={sidebarCollapsed ? '展开面板' : '折叠面板'}>
-          <button className="btn-ghost" onClick={onToggleSidebar}>
-            {sidebarCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-          </button>
-        </Tooltip>
-
-        {/* 应用标题 */}
-        <div className="flex items-center gap-2">
-          <span className="text-lg font-bold text-db-accent tracking-tight">
-            豆包工作室
-          </span>
-          <span className="text-2xs text-db-text-muted bg-db-surface px-1.5 py-0.5 rounded">
-            v2.0
-          </span>
-        </div>
-        <ProjectSwitcher />
-
-        {/* 任务状态指示 */}
-        <div className="flex items-center gap-3 ml-4 text-xs text-db-text-secondary">
-          {runningCount > 0 && (
-            <span className="flex items-center gap-1">
-              <span className="status-dot busy" />
-              执行中 {runningCount}
-            </span>
-          )}
-          {queuedCount > 0 && (
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-blue-400" />
-              排队 {queuedCount}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* 中间：可拖拽区域 */}
-      <div className="flex-1" />
-
-      {/* 右侧：全局操作 + 窗口控制 */}
-      <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-        {/* 暂停/继续 */}
-        <Tooltip title={schedulerPaused ? '继续所有任务' : '暂停所有任务'}>
-          <button className="btn-ghost" onClick={handleTogglePause}>
-            {schedulerPaused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
-          </button>
-        </Tooltip>
-
-        {/* 批量下载 */}
-        <Tooltip title="产物中心">
-          <button className="btn-ghost" onClick={() => setArtifactCenterOpen(true)}>
-            <AppstoreOutlined />
-          </button>
-        </Tooltip>
-
-        {/* 批量下载：先选择当前项目的具体批次，禁止默认全历史 */}
-        <Tooltip title={completedWithOutputs > 0 ? `按批次下载：当前项目有 ${completedWithOutputs} 个含产物任务，选择批次后确认实际范围` : '当前项目暂无已完成产物'}>
-          <button
-            className={`btn-ghost flex items-center gap-1 ${completedWithOutputs === 0 ? 'opacity-40 cursor-not-allowed' : ''}`}
-            onClick={handleBatchDownload}
-            disabled={completedWithOutputs === 0}
-          >
-            <DownloadOutlined />
-            <span className="text-2xs">批量下载 · 已完成 {completedWithOutputs}</span>
-          </button>
-        </Tooltip>
-
-        <Tooltip title="下载记录">
-          <button
-            className="btn-ghost"
-            onClick={() => {
-              setDownloadQueueOpen(true);
-              void loadDownloadJobs();
-            }}
-          >
-            <HistoryOutlined />
-          </button>
-        </Tooltip>
-
-        <Dropdown menu={{ items: moreMenuItems }} trigger={['click']}>
-          <button className="btn-ghost" title="更多">
-            <MoreOutlined />
-          </button>
-        </Dropdown>
-
-        {/* 分隔线 */}
-        <div className="w-px h-5 bg-db-border mx-1" />
-
-        {/* 窗口控制按钮 */}
-        <Tooltip title="最小化">
-          <button className="btn-ghost" onClick={() => window.electronAPI?.system?.minimize()}>
-            <MinusOutlined style={{ fontSize: 12 }} />
-          </button>
-        </Tooltip>
-        <Tooltip title="最大化">
-          <button className="btn-ghost" onClick={() => window.electronAPI?.system?.toggleMaximize()}>
-            <BorderOutlined style={{ fontSize: 11 }} />
-          </button>
-        </Tooltip>
-        <Tooltip title="关闭">
-          <button
-            className="btn-ghost hover:!bg-red-500/20 hover:!text-red-400"
-            onClick={() => window.electronAPI?.system?.close()}
-          >
-            <CloseOutlined style={{ fontSize: 12 }} />
-          </button>
-        </Tooltip>
-      </div>
-    </div>
+      {page === 'overview' && <div className="page-tools"><Button icon={<FolderOpenOutlined />} onClick={(): void => setProjectOverviewOpen(true)}>当前项目概览与元数据导出</Button></div>}
+      {page === 'tasks' && <div className="page-tools"><Button icon={schedulerPaused ? <PlayCircleOutlined /> : <PauseCircleOutlined />} onClick={(): void => { void handleTogglePause(); }}>{schedulerPaused ? '继续全局调度' : '暂停全局调度'}</Button><Button icon={<UnorderedListOutlined />} onClick={(): void => setBatchManagerOpen(true)}>当前项目批次</Button><span className="muted-text">全局调度{schedulerPaused ? '已暂停' : '运行中'} · 任务列表按当前项目显示</span></div>}
+      {page === 'assets' && <section className="workspace-card asset-workspace">
+        <div className="section-heading"><Segmented value={assetView} onChange={(value): void => setAssetView(value as 'outputs' | 'downloads')} options={[{ label: '产物', value: 'outputs' }, { label: '下载记录', value: 'downloads' }]} /><Button icon={<DownloadOutlined />} disabled={!completedWithOutputs} onClick={handleBatchDownload}>按批次选择下载</Button></div>
+        <p className="muted-text asset-scope">产物范围：当前 Studio 项目。远程地址状态与本地文件校验分别显示。</p>
+        <ArtifactCenterModal open={assetView === 'outputs'} embedded onClose={(): void => setAssetView('outputs')} />
+        {assetView === 'downloads' && <DownloadQueueModal embedded open jobs={downloadJobs} loading={downloadJobsLoading} onClose={(): void => setAssetView('outputs')} onRefresh={(): void => { void loadDownloadJobs(); }} onRetry={handleRetryDownload} />}
+      </section>}
+      {page === 'settings' && <div className="settings-groups">
+        <section className="workspace-card"><div className="section-heading"><div><h2><SettingOutlined /> 偏好</h2><p>下载目录、素材授权与初始化并发</p></div></div><Space wrap>{toolButton('settings')}{toolButton('updates')}</Space></section>
+        <section className="workspace-card"><div className="section-heading"><div><h2><DatabaseOutlined /> 数据与维护</h2><p>Studio 数据备份不自动包含外部萌宠项目目录和全部媒体</p></div></div><Space wrap>{['integrity', 'backup', 'restore'].map(toolButton)}</Space></section>
+        <section className="workspace-card"><div className="section-heading"><div><h2><ToolOutlined /> 诊断</h2><p>当前账号页面自检、运行日志与页面适配规则</p></div></div><Space wrap>{['logs', 'diagnostics', 'adapter-check', 'adapter-import', 'adapter-rollback'].map(toolButton)}<Button icon={<BarChartOutlined />} onClick={(): void => { void loadDownloadJobs(); setMetricsOpen(true); }}>全局运行统计</Button></Space></section>
+      </div>}
 
     {/* 设置 Modal */}
     <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
@@ -448,11 +331,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
       onRefresh={() => void loadDownloadJobs()}
       onRetry={handleRetryDownload}
     />
-    <ArtifactCenterModal open={artifactCenterOpen} onClose={() => setArtifactCenterOpen(false)} />
     <BatchManagerModal open={batchManagerOpen} onClose={() => setBatchManagerOpen(false)} onDownloadBatch={handleDownloadBatch} />
     <LogCenterModal open={logsOpen} onClose={() => setLogsOpen(false)} />
     <ProjectOverviewModal open={projectOverviewOpen} onClose={() => setProjectOverviewOpen(false)} />
-    <Modal title="运行统计" open={metricsOpen} onCancel={() => setMetricsOpen(false)} footer={null} width={560}>
+    <Modal title="全局运行统计" open={metricsOpen} onCancel={() => setMetricsOpen(false)} footer={null} width={560}>
       <Progress percent={successRate} status={successRate >= 80 ? 'success' : 'normal'} />
       <div style={{ marginTop: 8, fontSize: 12, color: '#888' }}>
         平台成功率只统计平台生成结果；依赖阻断（dependency_failed / dependency_missing / dependency_cycle）不计入分子或分母。
@@ -466,8 +348,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
         </Descriptions.Item>
         <Descriptions.Item label="失败任务">{platformStats.platformFailed}</Descriptions.Item>
         <Descriptions.Item label="依赖阻断">{platformStats.dependencyBlocked}</Descriptions.Item>
-        <Descriptions.Item label="下载失败">{downloadJobs.filter((job) => job.status === 'failed').length}</Descriptions.Item>
-        <Descriptions.Item label="可用账号">
+        <Descriptions.Item label="下载失败">{downloadJobsLoading ? '读取中' : downloadJobs.filter((job) => job.status === 'failed').length}</Descriptions.Item>
+        <Descriptions.Item label="未标记登录/额度异常">
           {accounts.filter((account) => !account.seedanceQuota?.exhausted && !account.health?.verificationRequired && account.health?.loginState !== 'expired').length}
         </Descriptions.Item>
         <Descriptions.Item label="额度耗尽账号">{accounts.filter((account) => account.seedanceQuota?.exhausted).length}</Descriptions.Item>
@@ -488,7 +370,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
             <Descriptions.Item label="页面地址">{adapterReport.pageUrl}</Descriptions.Item>
             {adapterReport.items.map((item) => (
               <Descriptions.Item key={item.key} label={item.label}>
-                <span style={{ color: item.ok ? '#34d399' : '#fb7185' }}>{item.ok ? '正常' : '异常'}</span>
+                <span style={{ color: item.ok ? '#238563' : '#c44352' }}>{item.ok ? '正常' : '异常'}</span>
                 <span style={{ marginLeft: 8, color: '#888' }}>{item.detail}</span>
               </Descriptions.Item>
             ))}

@@ -10,28 +10,30 @@ import zhCN from 'antd/locale/zh_CN';
 import App from './App';
 import './styles/global.css';
 
-// ==================== Ant Design 深色主题配置 ====================
+// ==================== Ant Design 工作台主题配置 ====================
 
-const darkTheme = {
-  algorithm: theme.darkAlgorithm,
+const studioTheme = {
+  algorithm: theme.defaultAlgorithm,
   token: {
     // 品牌色 - 紫色系
     colorPrimary: '#6c5ce7',
     colorInfo: '#6c5ce7',
-    colorSuccess: '#34d399',
-    colorWarning: '#fbbf24',
-    colorError: '#f87171',
+    colorSuccess: '#238563',
+    colorWarning: '#b97515',
+    colorError: '#ce4453',
+    fontSize: 14,
+    controlHeight: 34,
     // 基础色
-    colorBgBase: '#0f0f14',
-    colorBgContainer: '#1e1e2e',
-    colorBgElevated: '#24243a',
-    colorBorder: '#2a2a3e',
-    colorTextBase: '#e8e8f0',
-    colorTextSecondary: '#9898b8',
+    colorBgBase: '#f5f5f7',
+    colorBgContainer: '#ffffff',
+    colorBgElevated: '#ffffff',
+    colorBorder: '#e2e3e8',
+    colorTextBase: '#252631',
+    colorTextSecondary: '#6b6d7c',
     // 圆角
     borderRadius: 8,
     // 字体
-    fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif",
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif",
   },
   components: {
     Button: {
@@ -39,13 +41,13 @@ const darkTheme = {
       algorithm: true,
     },
     Modal: {
-      colorBgElevated: '#1e1e2e',
+      colorBgElevated: '#ffffff',
     },
     Dropdown: {
-      colorBgElevated: '#1e1e2e',
+      colorBgElevated: '#ffffff',
     },
     Input: {
-      colorBgContainer: '#1a1a24',
+      colorBgContainer: '#ffffff',
     },
     Tag: {
       borderRadiusSM: 9999,
@@ -57,7 +59,7 @@ const darkTheme = {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <ConfigProvider theme={darkTheme} locale={zhCN}>
+    <ConfigProvider theme={studioTheme} locale={zhCN}>
       <App />
     </ConfigProvider>
   </React.StrictMode>

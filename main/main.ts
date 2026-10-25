@@ -189,7 +189,7 @@ function createMainWindow(): BrowserWindow {
     minWidth: 1024,
     minHeight: 680,
     title: '豆包工作室 Doubao Studio',
-    backgroundColor: '#0f0f14',
+    backgroundColor: '#f5f5f7',
     show: false, // 等待 ready-to-show 后再显示，避免白屏闪烁
     // macOS 使用原生标题栏，为系统窗口按钮保留空间，避免遮挡工具栏。
     frame: process.platform === 'darwin',

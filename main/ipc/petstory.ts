@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { BrowserWindow, dialog, ipcMain, nativeImage } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 import type { PetStoryChatJob, PetStoryPlan, PetStoryPromptKind, PetStoryResult } from '@doubao-studio/contracts';
@@ -53,14 +54,14 @@ export function registerPetStoryIPC(): () => void {
     if (!listAccountsForLocalControl().some((a): boolean => a.id === accountId && a.platform !== 'dola')) throw new Error('请选择已有豆包账号');
     const selected = await dialog.showOpenDialog(dialogOwner(event), { title: '选择存放 PetStory project.json 的目录', properties: ['openDirectory', 'createDirectory'] });
     if (selected.canceled) return { success: false, error: '已取消' };
-    return { success: true, project: await projects.create(selected.filePaths[0], studioProjectId, accountId) };
+    return { success: true, displayName: path.basename(selected.filePaths[0]), project: await projects.create(selected.filePaths[0], studioProjectId, accountId) };
   }));
   ipcMain.handle('petstory:open', hostGuard(async (event: IpcMainInvokeEvent): Promise<PetStoryResult> => {
     const selected = await dialog.showOpenDialog(dialogOwner(event), { title: '选择包含 project.json 的 PetStory 目录', properties: ['openDirectory'] });
     if (selected.canceled) return { success: false, error: '已取消' };
     const project = await projects.open(selected.filePaths[0]);
     production.suspend(project.id);
-    return { success: true, project };
+    return { success: true, displayName: path.basename(selected.filePaths[0]), project };
   }));
   ipcMain.handle('petstory:saveSource', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), async (): Promise<PetStoryResult> => ({
     success: true, project: await projects.saveSource(String(p.id), Number(p.revision), String(p.text || '')),

@@ -176,6 +176,8 @@ export interface PetStoryProject {
 }
 export interface PetStoryResult {
   success: boolean;
+  /** 仅展示用户选中目录的末级名称，不保存路径或新增项目索引。 */
+  displayName?: string;
   project?: PetStoryProject;
   error?: string;
   taskId?: string;

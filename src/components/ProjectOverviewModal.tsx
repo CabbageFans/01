@@ -1,5 +1,5 @@
 import React from 'react';
-import { Button, Descriptions, Modal, Progress, Space, message } from 'antd';
+import { Button, Descriptions, Modal, Progress, message } from 'antd';
 import { ExportOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../store/useProjectStore';
 import { useTaskStore } from '../store/useTaskStore';
@@ -13,11 +13,11 @@ export const ProjectOverviewModal: React.FC<{ open: boolean; onClose: () => void
   const batches = new Set(tasks.map((task) => task.batchId).filter(Boolean)).size;
   const exportProject = async () => {
     const result = await window.electronAPI.system.exportProject(activeProjectId);
-    if (result.success) message.success(`项目包已导出：${result.filePath}`);
+    if (result.success) message.success(`Studio 项目元数据已导出：${result.filePath}`);
     else if (result.error) message.error(result.error);
   };
   return (
-    <Modal title={project?.name || '项目概览'} open={open} onCancel={onClose} footer={<Button icon={<ExportOutlined />} onClick={() => void exportProject()}>导出项目包</Button>} width={620}>
+    <Modal title={project?.name || '项目概览'} open={open} onCancel={onClose} footer={<Button icon={<ExportOutlined />} onClick={() => void exportProject()}>导出 Studio 项目元数据（JSON）</Button>} width={620}>
       <Progress percent={tasks.length ? Math.round(done / tasks.length * 100) : 0} />
       <Descriptions column={2} style={{ marginTop: 18 }}>
         <Descriptions.Item label="项目说明" span={2}>{project?.description || '暂无说明'}</Descriptions.Item>

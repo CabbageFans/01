@@ -5,6 +5,7 @@ import type { DownloadJob } from '../types';
 
 interface DownloadQueueModalProps {
   open: boolean;
+  embedded?: boolean;
   jobs: DownloadJob[];
   loading: boolean;
   onClose: () => void;
@@ -21,13 +22,15 @@ const STATUS_LABELS: Record<DownloadJob['status'], { label: string; color: strin
 
 export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
   open,
+  embedded = false,
   jobs,
   loading,
   onClose,
   onRefresh,
   onRetry,
 }) => (
-  <Modal
+  <DownloadSurface
+    embedded={embedded}
     title="下载记录"
     open={open}
     onCancel={onClose}
@@ -35,7 +38,7 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
     footer={(
       <Space>
         <Button icon={<ReloadOutlined />} loading={loading} onClick={onRefresh}>刷新</Button>
-        <Button onClick={onClose}>关闭</Button>
+        {!embedded && <Button onClick={onClose}>关闭</Button>}
       </Space>
     )}
     styles={{ body: { maxHeight: '62vh', overflowY: 'auto' } }}
@@ -49,7 +52,7 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
             <List.Item
               actions={job.status === 'failed' ? [
                 <Button key="retry" size="small" icon={<ReloadOutlined />} onClick={() => onRetry(job)}>
-                  重试
+                  重新下载
                 </Button>,
               ] : undefined}
             >
@@ -68,7 +71,7 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
                         {job.filePath || job.url}
                       </div>
                     </Tooltip>
-                    <div style={{ color: job.error ? '#fb7185' : '#888', marginTop: 4 }}>
+                    <div style={{ color: job.error ? '#c44352' : '#888', marginTop: 4 }}>
                       {job.error || (job.bytes ? `${(job.bytes / 1024 / 1024).toFixed(1)} MB` : `尝试 ${job.attempts} 次`)}
                     </div>
                   </div>
@@ -79,5 +82,7 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
         }}
       />
     )}
-  </Modal>
+  </DownloadSurface>
 );
+
+const DownloadSurface: React.FC<React.ComponentProps<typeof Modal> & { embedded: boolean }> = ({ embedded, children, footer, ...props }): React.ReactElement => embedded ? <div className="embedded-downloads"><div className="download-tools">{typeof footer === 'function' ? null : footer}<span className="muted-text">全局下载记录 · 已下载不代表通过文件解码校验</span></div>{children}</div> : <Modal {...props} footer={footer}>{children}</Modal>;

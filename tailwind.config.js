@@ -8,35 +8,35 @@ module.exports = {
       colors: {
         // 豆包工作室品牌色系 - 深色创作者工具风格
         'db-bg': {
-          DEFAULT: '#0f0f14',
-          secondary: '#1a1a24',
-          tertiary: '#24243a',
+          DEFAULT: '#f5f5f7',
+          secondary: '#ffffff',
+          tertiary: '#ffffff',
         },
         'db-surface': {
-          DEFAULT: '#1e1e2e',
-          hover: '#2a2a3e',
-          active: '#32324a',
+          DEFAULT: '#ffffff',
+          hover: '#e2e3e8',
+          active: '#e9e9f0',
         },
         'db-border': {
-          DEFAULT: '#2a2a3e',
-          light: '#38385a',
+          DEFAULT: '#e2e3e8',
+          light: '#d6d7df',
         },
         'db-accent': {
           DEFAULT: '#6c5ce7', // 主紫色
-          light: '#a29bfe',
+          light: '#6855c9',
           dark: '#5a4bd1',
         },
         'db-text': {
-          primary: '#e8e8f0',
-          secondary: '#9898b8',
-          muted: '#686888',
+          primary: '#252631',
+          secondary: '#6b6d7c',
+          muted: '#737584',
         },
         'db-status': {
           idle: '#4ade80',    // 空闲 - 绿色
-          busy: '#fbbf24',    // 忙碌 - 琥珀色
-          error: '#f87171',   // 异常 - 红色
+          busy: '#b97515',    // 忙碌 - 琥珀色
+          error: '#ce4453',   // 异常 - 红色
           queued: '#60a5fa',  // 排队中 - 蓝色
-          done: '#34d399',    // 已完成 - 翠绿
+          done: '#238563',    // 已完成 - 翠绿
           fail: '#fb7185',    // 失败 - 玫红
         },
       },
@@ -45,7 +45,7 @@ module.exports = {
         mono: ['"JetBrains Mono"', '"Fira Code"', 'monospace'],
       },
       fontSize: {
-        '2xs': ['0.65rem', { lineHeight: '0.9rem' }],
+        '2xs': ['12px', { lineHeight: '18px' }],
       },
       borderRadius: {
         'db': '8px',

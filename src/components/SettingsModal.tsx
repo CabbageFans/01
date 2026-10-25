@@ -98,7 +98,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
           </div>
         )}
       </div>
-      <div style={{ marginBottom: 16, padding: 12, border: '1px solid #34344a', borderRadius: 8 }}>
+      <div style={{ marginBottom: 16, padding: 12, border: '1px solid #e2e3e8', borderRadius: 8 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
           <div>
             <div style={{ fontWeight: 500 }}>已授权素材自动确认</div>

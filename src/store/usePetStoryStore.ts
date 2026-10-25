@@ -7,6 +7,7 @@ import { analysisPrompt, optimizationPrompt, repairPrompt } from '../utils/petst
 
 interface PetStoryState {
   project: PetStoryProject | null;
+  projectName: string;
   capability: PetStoryCapability | null;
   productionCounts: PetStoryProductionCounts | null;
   productionResolutions: Record<string, PetStoryModeResolution>;
@@ -96,7 +97,7 @@ async function refreshTasks(): Promise<void> {
 }
 export const usePetStoryStore = create<PetStoryState>((set, get) => {
   const accept = (result: PetStoryResult): void => {
-    if (result.project) set({ project: result.project });
+    if (result.project) set({ project: result.project, projectName: result.displayName ?? (get().project?.id === result.project.id ? get().projectName : '') });
     if (!result.success) set({ error: result.error || '操作未完成' });
   };
   const run = async (work: () => Promise<void>): Promise<void> => {
@@ -137,7 +138,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     if (job) await startBound(job.id);
   };
   return {
-    project: null, capability: null, productionCounts: null, productionResolutions: {}, fallbacks: {},
+    project: null, projectName: '', capability: null, productionCounts: null, productionResolutions: {}, fallbacks: {},
     selectProductionImage: async (stepId: string, artifactId: string): Promise<void> => run(async (): Promise<void> => {
       const p = get().project;
       if (p) accept(await window.electronAPI.petstory.selectProductionImage(p.id, stepId, artifactId));
