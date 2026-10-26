@@ -27,6 +27,9 @@ export default tseslint.config(
       'release/**',
       'node_modules/**',
       'data/**',
+      // 本机真实任务证据及一次性核验脚本不是产品源码；源代码仍沿用原门禁。
+      'artifacts/drama-runtime/**',
+      'artifacts/chat-internalization/**',
       // contracts 构建产物（.d.ts）由 tsc 生成，不参与 lint
       'packages/contracts/dist/**',
       // 根级 doubaoBridge.ts 是历史游离文件，不在任何 tsconfig include 中

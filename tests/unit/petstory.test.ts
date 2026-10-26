@@ -17,6 +17,7 @@ function testPrompt(label: string): PetStoryPrompt {
 }
 function testPlan(count = 4): PetStoryPlan {
   return { sourceSummary: '离线测试：店员帮助找到礼物', adaptedStory: '离线测试：噜噜与噜妹在商店找礼物，店员帮助，找回礼物后道谢。',
+    props: [], scenes: [{ id: 'test-store', name: '测试商店', location: '测试商店', time: '白天', lighting: '自然光', layout: '入口相对柜台', view: '正面', designOrigin: 'script' }],
     characters: [
       { id: 'lulu', name: '噜噜', role: 'main', purpose: '找礼物', description: '测试蓝衣', referenceAssetId: 'asset-lulu' },
       { id: 'lumei', name: '噜妹', role: 'main', purpose: '收到礼物', description: '测试红衣', referenceAssetId: 'asset-lumei' },
@@ -24,7 +25,7 @@ function testPlan(count = 4): PetStoryPlan {
     ],
     shots: Array.from({ length: count }, (_, index): PetStoryPlan['shots'][number] => ({
       id: `s${index + 1}`, order: index + 1, characterIds: index === 0 ? ['clerk', 'lulu'] : ['lumei'],
-      scene: '测试商店', action: '测试展示礼物', startState: '测试手边有盒子', endState: '测试拿起盒子',
+      sceneId: 'test-store', propIds: [], propStates: [], scene: '测试商店', action: '测试展示礼物', startState: '测试手边有盒子', endState: '测试拿起盒子',
       durationSeconds: index % 2 ? 10 : 5, transition: 'cut', requestedMode: 'auto',
       prompts: { firstFrame: testPrompt('单帧构图'), video: testPrompt('动作过程') },
     })),
@@ -106,11 +107,11 @@ describe('PetStory dynamic data and rules — offline tests only', (): void => {
     p.shots[0].scene = 'test'; p.shots[0].transition = 'continue';
     expect((): PetStoryPlan => validatePetStoryPlan(p)).toThrow('连续引用');
   });
-  it('rejects invalid modes and missing fixed lead identities', (): void => {
+  it('rejects invalid modes and allows editing default lead names', (): void => {
     const p = testPlan();
     expect((): PetStoryPlan => validatePetStoryPlan({ ...p, shots: [{ ...p.shots[0], requestedMode: 'fake' }] })).toThrow('模式');
     p.characters[0].name = '其他';
-    expect((): PetStoryPlan => validatePetStoryPlan(p)).toThrow('固定主演');
+    expect(validatePetStoryPlan(p).characters[0].name).toBe('其他');
   });
   it('parses fenced JSON while preserving whitespace inside prompt strings, and rejects malformed JSON', (): void => {
     const value = { optimized: '第一行\n  保留缩进\n```代码```' };
@@ -131,13 +132,13 @@ describe('PetStory dynamic data and rules — offline tests only', (): void => {
     ] };
     const analysis = analysisPrompt(p);
     expect(analysis).toContain(project.source.url);
-    expect(analysis).toContain('第 1 张参考图：clerk');
-    expect(analysis).toContain('单帧状态');
+    expect(analysis.indexOf('身份参考图：lulu')).toBeLessThan(analysis.indexOf('身份参考图：clerk'));
+    expect(analysis).toContain('明确开始时刻');
     expect(analysis).toContain('中间过程');
-    expect(analysis).toContain('不默认三镜头');
+    expect(analysis).toContain('不以固定镜数');
     const image = optimizationPrompt(p, 's1', 'firstFrame');
     const video = optimizationPrompt(p, 's1', 'video');
-    expect(image).toContain('单帧状态');
+    expect(image).toContain('明确静态时刻');
     expect(video).toContain('中间过程');
     expect(image).not.toBe(video);
   });
@@ -240,7 +241,7 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     expect(result.project!.plan).toBeUndefined();
     expect(tasks()).toHaveLength(1);
   });
-  it.each(['video_assets_not_ready', 'chat_assets_not_ready', 'page_unrecognized', 'cancelled'] as const)('retries the same never-submitted %s failure as hold and binds a new run without creating another task', async (code): Promise<void> => {
+  it.each(['video_prompt_not_ready', 'video_assets_not_ready', 'chat_assets_not_ready', 'page_unrecognized', 'cancelled'] as const)('retries the same never-submitted %s failure as hold and binds a new run without creating another task', async (code): Promise<void> => {
     const { port, core, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
     const prepared = await chat.prepare(project.id, 'TEST analysis', 'analysis');
@@ -429,43 +430,13 @@ describe('PetStory project and real service wiring — offline tests only', (): 
 });
 
 describe('PetStory final draft integration — offline tests only', (): void => {
-  it('creates one held image draft from final text and only the required ordered references, and reuses it on repeated clicks', async (): Promise<void> => {
-    const { port, core, tasks } = taskPort();
-    const chat = new PetStoryChatService(projects, port);
-    await chat.prepare(project.id, 'TEST draft analysis', 'analysis');
+  it('requires approved base images and the explicit shot production entry before a new draft', async (): Promise<void> => {
+    const { port, core, tasks } = taskPort(); const chat = new PetStoryChatService(projects, port);
+    await chat.prepare(project.id, 'TEST analysis', 'analysis');
     await complete(core, tasks()[0], testAnswer());
-    await chat.collect(project.id, (await projects.read(project.id)).jobs[0].id);
-    const fixture = path.join(directory, 'TEST-reference.png');
-    await fs.writeFile(fixture, 'TEST fixture bytes; not a real image');
-    await projects.addReference(project.id, 'lulu', fixture);
-    await projects.addReference(project.id, 'clerk', fixture);
-    await projects.addReference(project.id, 'lumei', fixture);
-    let current = await projects.read(project.id);
-    const edited = structuredClone(current.plan) as PetStoryPlan;
-    edited.shots[0].prompts.firstFrame.final = 'TEST final draft %%%%%%%%%% single task';
-    current = await projects.savePlan(current.id, current.revision, edited);
-    const first = await chat.draft(project.id, 's1', 'firstFrame');
-    const repeated = await chat.draft(project.id, 's1', 'firstFrame');
-    expect(repeated.taskId).toBe(first.taskId);
-    expect(tasks()).toHaveLength(2);
-    const actual = tasks()[1];
-    expect(actual).toMatchObject({ executionIntent: 'hold', status: 'queued', mode: 'image', prompt: 'TEST final draft %%%%%%%%%% single task' });
-    const refs = current.plan?.shots[0].characterIds.map((id: string): string => {
-      const a = current.assets.find((a): boolean => a.characterId === id);
-      return path.join(directory, a?.relativePath || 'missing');
-    });
-    expect(actual.attachments).toEqual(refs);
-    expect(actual.attachments).toHaveLength(2);
-    const knownAsset = current.assets[0];
-    expect(await projects.referenceFile(project.id, knownAsset.id)).toBe(path.join(directory, knownAsset.relativePath));
-    await expect(projects.referenceFile(project.id, '../TEST-other-file')).rejects.toThrow('未登记');
-    await expect(chat.draft(project.id, 's1', 'video')).rejects.toThrow('P4');
-    // 同一最终文本更换参考图时，旧任务保留，新草稿必须使用新资产。
-    await projects.addReference(project.id, 'lulu', fixture);
-    const replacement = await chat.draft(project.id, 's1', 'firstFrame');
-    expect(replacement.taskId).not.toBe(first.taskId);
-    expect(tasks()).toHaveLength(3);
-    expect(tasks()[1].attachments).toEqual(refs);
+    const p = await projects.read(project.id); await chat.collect(p.id, p.jobs[0].id);
+    await expect(chat.draft(p.id, 's1', 'firstFrame')).rejects.toThrow('确认实际基础图片');
+    expect(tasks().filter((t): boolean => t.mode !== 'chat')).toHaveLength(0);
   });
   it('retains the current plan when saving the same source link again, and does not clamp invalid manual edits', async (): Promise<void> => {
     const { port, core, tasks } = taskPort();

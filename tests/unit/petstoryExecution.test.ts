@@ -84,7 +84,7 @@ describe('PetStory final prompt and body persistence through actual execution bo
     expect(stored[0].executionIntent).toBe('hold');
     expect(stored[0].runtime).toBeUndefined();
     expect(await useTaskStore.getState().startAutomation('TEST-task')).toBe(true);
-    expect(stored[0].runtime?.input).toMatchObject({ prompt: 'TEST user final %%%%%%%%%% kept', mode: 'image', attachments: ['TEST-only-reference.png'] });
+    expect(stored[0].runtime?.input).toMatchObject({ prompt: 'TEST user final %%%%%%%%%% kept', mode: 'image', promptReadback: 'exact', attachments: ['TEST-only-reference.png'] });
     expect(stored[0].runtime?.input.petstory).toEqual(input.petstory);
     expect(stored).toHaveLength(1);
   });

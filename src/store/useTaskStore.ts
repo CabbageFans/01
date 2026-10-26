@@ -651,6 +651,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           attachments: [...(task.attachments || [])],
           audioAttachment: task.audioAttachment,
           petstory: task.petstory,
+          promptReadback: task.promptReadback,
         },
       },
       updatedAt: now,

@@ -277,7 +277,7 @@ export class TaskService {
   }
 
   create(params: TaskAddParams): TaskServiceResult<Task[]> {
-    const prompts = (params.prompts || []).map((prompt) => prompt.trim()).filter(Boolean);
+    const prompts = (params.prompts || []).map((prompt: string): string => params.promptReadback === 'exact' ? prompt.replace(/\r\n?/g, '\n') : prompt.trim()).filter((prompt: string): boolean => !!prompt.trim());
     if (prompts.length === 0) return { success: false, error: '请输入至少一条提示词' };
     const tasks = this.readTasks();
     if (!tasks) return { success: false, error: WRITE_ERROR };
@@ -287,7 +287,7 @@ export class TaskService {
       return {
         id: this.id(), prompt, assignedAccountId: null, status: 'queued', mode,
         executionIntent: params.executionIntent || 'hold',
-        petstory: params.petstory, videoConfig: params.videoConfig, attachments: params.attachments,
+        petstory: params.petstory, promptReadback: params.promptReadback, videoConfig: params.videoConfig, attachments: params.attachments,
         audioAttachment: params.audioAttachment, result: null, outputs: [], artifacts: [],
         runHistory: [], source: 'manual', dependsOnTaskIds: [],
         projectId: params.projectId || this.deps.defaultProjectId(),
@@ -299,13 +299,38 @@ export class TaskService {
     return { success: true, data: created };
   }
 
-  /** 采用 P3 已有未运行 hold 草稿时，仅补业务归属，不重建任务。 */
-  bindPetStory(taskId: string, binding: NonNullable<Task['petstory']>): TaskServiceResult<Task> {
+  /** 采用 P3 未运行 hold 草稿时绑定业务归属，可同步已批准的最终编译全文；不重建任务。 */
+  bindPetStory(taskId: string, binding: NonNullable<Task['petstory']>, compiledPrompt?: string): TaskServiceResult<Task> {
     const tasks = this.readTasks();
     const task = tasks?.find((item: Task): boolean => item.id === taskId);
     if (!tasks || !task || task.status !== 'queued' || task.executionIntent !== 'hold' || task.runtime || task.outputs.length
       || (task.petstory && JSON.stringify(task.petstory) !== JSON.stringify(binding))) return { success: false, error: '仅允许绑定尚未运行的原 hold 草稿' };
+    if (compiledPrompt !== undefined) {
+      if (!compiledPrompt.trim()) return { success: false, error: '最终编译文本不能为空' };
+      task.prompt = compiledPrompt.replace(/\r\n?/g, '\n');
+      task.promptReadback = 'exact';
+    }
     task.petstory = binding;
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: true, data: task };
+  }
+
+  /** 网页素材绑定后仅允许原短剧运行在提交前固定实际引用文本，final 和附件不改。 */
+  bindPetStoryPageInput(taskId: string, runId: string, prompt: string): TaskServiceResult<Task> {
+    const tasks = this.readTasks(); const task = tasks?.find((t: Task): boolean => t.id === taskId);
+    if (!tasks || !task?.petstory || !task.runtime || task.runtime.runId !== runId || task.runtime.submittedAt || task.runtime.acceptanceObservation || task.outputs.length
+      || (task.status !== 'executing' && !(task.status === 'queued' && task.executionIntent === 'hold' && task.runtime.stage === 'queued'))
+      || !prompt.trim()) return { success: false, error: '仅允许本次未提交的短剧运行或显式恢复的 hold 保存实际引用' };
+    task.prompt = prompt; task.runtime.input.prompt = prompt; task.promptReadback = 'exact'; task.updatedAt = this.now();
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: true, data: task };
+  }
+  /** 仅显式保存业务草稿时更新未运行 hold 的全文；不改变原任务身份及附件。 */
+  reviseHeldPrompt(taskId: string, prompt: string): TaskServiceResult<Task> {
+    const tasks = this.readTasks();
+    const task = tasks?.find((t: Task): boolean => t.id === taskId);
+    if (!tasks || !task || task.status !== 'queued' || task.executionIntent !== 'hold' || task.runtime || task.petstory || task.outputs.length || !prompt.trim()) return { success: false, error: '仅允许更新未运行的原 hold 草稿' };
+    task.prompt = prompt.replace(/\r\n?/g, '\n'); task.promptReadback = 'exact'; task.updatedAt = this.now();
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true, data: task };
   }

@@ -304,14 +304,18 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
   });
   it('每个 run 只有一个点击提交调用点，禁止 Enter 与循环自动重提', () => {
     const panelSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'BrowserPanel.tsx'), 'utf8');
-    const clickCalls = panelSource.match(/submitPromptWithNativeClick\(webview\)/g) || [];
+    const clickCalls = panelSource.match(/submitPromptWithNativeClick\(/g) || [];
     expect(clickCalls.length, '原生点击提交必须只有一个调用点').toBe(1);
     expect(panelSource).not.toContain('submitPromptWithNativeEnter');
     expect(panelSource).not.toContain('submissionAttempt < 3');
     expect(panelSource).not.toContain('验证已完成，正在新对话中重新上传并提交');
     expect(panelSource).toContain('系统不会自动重新提交');
+    const readinessIndex = panelSource.indexOf('if (!authorizationTriggeredSubmission && !(await prepareNativeSubmission(webview)).ok)');
+    const submittingIndex = panelSource.indexOf("markSubmissionIntent('submitting'");
+    expect(readinessIndex, '发送前必须先确认窗口、输入区和控件稳定').toBeGreaterThan(0);
+    expect(submittingIndex).toBeGreaterThan(readinessIndex);
     expect(panelSource.indexOf('submittedAt: submissionMarkedAt')).toBeLessThan(
-      panelSource.indexOf('submitPromptWithNativeClick(webview)'),
+      panelSource.indexOf("submitPromptWithNativeClick(webview, mode === 'chat' ? 'guest' : 'native')"),
     );
     expect(panelSource).toContain('发送动作结果不确定，请人工核对豆包会话；系统未自动重发');
   });
@@ -333,7 +337,7 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     );
     expect(panelSource).toContain('authorizationTriggeredSubmission');
     expect(panelSource).toContain('if (!authorizationTriggeredSubmission)');
-    expect((panelSource.match(/submitPromptWithNativeClick\(webview\)/g) || []).length).toBe(1);
+    expect((panelSource.match(/submitPromptWithNativeClick\(/g) || []).length).toBe(1);
   });
 
   it('原生点击失败不得回退到兼容提交', () => {
@@ -344,7 +348,8 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     );
     expect(nativeClickBody).not.toContain('return submitPrompt(webview)');
     expect(nativeClickBody).toContain('禁止自动回退');
-    expect(nativeClickBody).toContain('findSendButtonTarget(webview)');
+    expect(nativeClickBody).toContain('prepareNativeSubmission(webview)');
+    expect(bridgeSource).toContain('const target = await findSendButtonTarget(webview)');
   });
 
   it('只读核对路径不包含提交调用，普通 retry/edit-rerun 对不确定任务隐藏', () => {

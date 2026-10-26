@@ -8,7 +8,7 @@
  * - per-account 执行状态监听，自动路由任务到对应 webview
  */
 
-import { readAcceptedImageOutputs, checkPetStoryPageGuard, inspectPetStoryCapability, readPetStoryComposer, uploadPetStoryImages, verifyPetStoryUploads, PetStoryControlError } from '../utils/doubaoBridge';
+import { readAcceptedImageOutputs, bindPetStoryReferences, verifyPetStoryReferenceBindings, checkPetStoryPageGuard, inspectPetStoryCapability, readPetStoryComposer, uploadPetStoryImages, verifyPetStoryUploads, PetStoryControlError } from '../utils/doubaoBridge';
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { Button, Input, message, Modal, notification, Popover, Switch, Tooltip } from 'antd';
 import type { Account, AccountAvailability, AccountAvailabilitySource, Task, TaskUpdateInput } from '../types';
@@ -23,6 +23,7 @@ import { runAdapterSelfCheck } from '../automation/doubaoAdapter';
 import {
   injectPrompt,
   verifyPromptReadyForSubmission,
+  prepareNativeSubmission,
   submitPromptWithNativeClick,
   inspectMaterialAuthorization,
   confirmMaterialAuthorizationIfAllowed,
@@ -46,6 +47,7 @@ import {
   getSubmissionMessageCount,
   getSubmissionEvidence,
   startNewConversation,
+  ensurePlainChatComposer,
   detectRobotVerification,
   resolveVideoArtifact,
   manualResolveVideoArtifact,
@@ -62,7 +64,7 @@ import {
   updateStableStreak,
   type SubmissionReadback,
 } from '../utils/realSendStateMachine';
-import { inspectChatReadback, inspectCreationReadback } from '../utils/chatReadback';
+import { diagnoseChatReadback, inspectChatReadback, inspectCreationReadback } from '../utils/chatReadback';
 import { createWebviewResourceScope } from '../utils/webviewLifecycle';
 import type { WebviewResourceScope } from '../utils/webviewLifecycle';
 import { getVideoQuotaUsageUnits } from '../utils/videoQuota';
@@ -445,7 +447,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const accountId = task?.assignedAccountId;
       const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
       let conversationTarget = resolveTaskConversationTarget(task);
-      const confirmCurrentSubmission = (task?.mode === 'chat' || (!!task?.petstory && (task.mode === 'image' || task.mode === 'video')))
+      const confirmCurrentSubmission = (task?.mode === 'chat' || (!!task?.petstory && (task.mode === 'image' || task.mode === 'video'))
+        || (task?.mode === 'image' && task.promptReadback === 'exact'))
         && !!task.runtime?.submittedAt && detail.useCurrentPage === true
         && !conversationTarget.ok && conversationTarget.reason === 'CONVERSATION_URL_MISSING';
       if (!task || !accountId || !account || !supportsDoubaoConversationLocator(account.platform) || (!conversationTarget.ok && !confirmCurrentSubmission)) {
@@ -478,6 +481,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           const latest = useTaskStore.getState().tasks.find((item) => item.id === taskId);
           if (!currentUrl || !evidence.promptPublished || latest?.runtime?.runId !== task.runtime?.runId
             || latest?.runtime?.submittedAt !== task.runtime?.submittedAt) {
+            if (!evidence.promptPublished && task.mode === 'chat') console.warn('[ChatReadbackMismatch]', JSON.stringify(diagnoseChatReadback(snapshot, task.prompt)));
             submissionReconcileRef.current.delete(taskId);
             message.error('当前 Chat 不唯一匹配原任务或运行已变化；未绑定、未重发');
             return;
@@ -539,7 +543,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         let conversationMatched = false;
         for (let attempt = 0; attempt < 40; attempt++) {
           if (isSameDoubaoConversation(webview.getURL(), conversationUrl)) {
-            const matched = task.petstory && (task.mode === 'image' || task.mode === 'video')
+            const matched = (task.petstory || task.promptReadback === 'exact') && (task.mode === 'image' || task.mode === 'video')
               ? inspectCreationReadback(await getChatPageSnapshot(webview), task.prompt, task.mode, 0, task.videoConfig, !!task.runtime?.generationConfirmation).promptPublished
               : matchesSubmissionConversation(task.prompt, await getConversationText(webview));
             if (matched) {
@@ -1278,7 +1282,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       useTaskStore.getState();
     const expectedRunId = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.runId;
     const petstoryTask = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.petstory;
+    const strictPrompt = !!petstoryTask || useTaskStore.getState().tasks.find((item) => item.id === taskId)?.promptReadback === 'exact';
     let petstoryGuard: import('@doubao-studio/contracts').PetStoryExecutionGuard | undefined;
+    let petstoryUploads: import('../utils/doubaoBridge').PetStoryUploadReceipt[] = [];
+    let petstoryBindings: import('@doubao-studio/contracts').PetStoryPageBinding[] = [];
     const refreshPetStoryGuard = async (): Promise<void> => {
       if (!petstoryTask) return;
       const result = await window.electronAPI.petstory.guardProductionTask(taskId);
@@ -1417,9 +1424,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       taskConversationUrl = webview.getURL();
       await persistVideoReadiness('new_conversation');
       const uploadTaskImages = async (): Promise<void> => {
+      if (mode === 'chat' && !(await ensurePlainChatComposer(webview)).ok) throw new SubmissionSafetyPauseError('普通 Chat 输入区模式未确认，未上传或发送');
       // 有参考图片时上传
       if (attachments && attachments.length > 0) {
         setAccountAutomationState(accountId, 'injecting', '上传参考图片...', 'uploading_assets');
+        if (strictPrompt && mode === 'image') {
+          if (!await window.electronAPI.system.prepareNativeInput()) throw new PetStoryControlError('图片上传窗口尚未就绪，未提交');
+          webview.focus();
+        }
         // 读取文件为 base64
         const fileDataList: Array<{ name: string; base64: string; mime: string }> = [];
         for (const filePath of attachments) {
@@ -1442,8 +1454,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             ...createVideoReadinessCheckpoint('assets'), ready: false, failureStage: 'assets', missingControl: 'asset_upload',
           });
         }
-        if (petstoryGuard) {
-          await uploadPetStoryImages(webview, fileDataList, mode === 'video' && petstoryGuard.mode ? petstoryGuard.mode : 'image', controller.signal);
+        if (petstoryGuard || (strictPrompt && mode === 'image')) {
+          petstoryUploads = await uploadPetStoryImages(webview, fileDataList, mode === 'video' && petstoryGuard?.mode ? petstoryGuard.mode : 'image', controller.signal, petstoryGuard?.fileSha256s);
           return;
         }
         let lastUploadPersistAt = -Infinity;
@@ -1574,11 +1586,22 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       setAccountAutomationState(accountId, 'injecting', '正在注入提示词...', 'injecting_prompt');
       let injected = false;
       try {
-        injected = await Promise.race([
-          injectPrompt(webview, prompt),
+        if (petstoryTask && petstoryGuard?.references) {
+          const source = petstoryGuard.compiledPrompt;
+          if (!source || source.text !== prompt || !source.segments) throw new PetStoryControlError('结构化引用编译快照缺失或与任务不符，零提交');
+          const bound = await bindPetStoryReferences(webview, source, petstoryUploads, controller.signal, !!petstoryGuard.capability.allowPlainReferences);
+          if (!expectedRunId) throw new PetStoryControlError('本次运行缺失');
+          const saved = await window.electronAPI.petstory.recordPageBindings(petstoryTask.projectId, taskId, expectedRunId, bound.bindings);
+          if (!saved.success || !saved.compiledPrompt || saved.compiledPrompt.text !== bound.compiled.text) throw new PetStoryControlError(saved.error || '实际网页绑定保存不一致');
+          prompt = saved.compiledPrompt.text; petstoryBindings = bound.bindings;
+          await useTaskStore.getState().loadTasks();
+          injected = true;
+        } else injected = await Promise.race([
+          injectPrompt(webview, prompt, 3, strictPrompt),
           new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('注入超时')), 60000)),
         ]);
-      } catch {
+      } catch (error: unknown) {
+        if (error instanceof PetStoryControlError) throw error;
         throw new VideoControlReadinessError('prompt', {
           ...createVideoReadinessCheckpoint('prompt'), ready: false, failureStage: 'prompt', missingControl: 'prompt_editor', elapsedMs: 60_000,
         });
@@ -1587,7 +1610,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         ...createVideoReadinessCheckpoint('prompt'), ready: false, failureStage: 'prompt', missingControl: 'prompt_editor',
       });
       await pause(800);
-      if (!await verifyPromptReadyForSubmission(webview, prompt)) {
+      if (!await verifyPromptReadyForSubmission(webview, prompt, strictPrompt)) {
         throw new VideoControlReadinessError('prompt', {
           ...createVideoReadinessCheckpoint('prompt'), ready: false, failureStage: 'prompt', missingControl: 'prompt_editor',
         });
@@ -1597,7 +1620,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       // 素材确认可能在用户点击后直接继续发送。先取只读基线，确认后只回读，
       // 绝不能再点一次发送。
       const generationStartTimeBeforeSubmit = await getGenerationStartTime(webview);
-      if (mode === 'chat' || petstoryGuard) {
+      if (mode === 'chat' || petstoryGuard || (strictPrompt && mode === 'image')) {
         const beforeSubmit = await getChatPageSnapshot(webview);
         if (!beforeSubmit.editorPresent || beforeSubmit.messages.length !== 0) {
           throw new SubmissionSafetyPauseError('普通 Chat 新会话消息基线不为空或输入框缺失；未发送');
@@ -1608,15 +1631,25 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       const readSubmissionEvidence = async (): Promise<SubmissionReadback> => mode === 'chat'
         ? inspectChatReadback(await getChatPageSnapshot(webview), prompt, initialMsgCount)
-        : petstoryGuard && (mode === 'image' || mode === 'video')
+        : (petstoryGuard || strictPrompt) && (mode === 'image' || mode === 'video')
           ? inspectCreationReadback(await getChatPageSnapshot(webview), prompt, mode, initialMsgCount, videoConfig)
         : getSubmissionEvidence(webview, prompt, generationStartTimeBeforeSubmit, initialMsgCount);
       let authorizationTriggeredSubmission = false;
       let submissionMarkedAt: string | undefined;
 
       const markSubmissionIntent = async (stage: 'submitting' | 'waiting_verification', messageText: string): Promise<string> => {
+        if (mode === 'chat' && !(await ensurePlainChatComposer(webview)).ok) throw new SubmissionSafetyPauseError('普通 Chat 输入区已切换或无法确认，未持久化提交意图，未发送');
         await refreshPetStoryGuard();
-        if (petstoryGuard) await verifyPetStoryUploads(webview, petstoryGuard, mode === 'video');
+        if (petstoryGuard) {
+          await verifyPetStoryUploads(webview, petstoryGuard, mode === 'video');
+          if (petstoryGuard.references && petstoryBindings.length !== petstoryGuard.references.length) throw new PetStoryControlError('网页逐文件绑定未完成，零提交');
+          await verifyPetStoryReferenceBindings(webview, petstoryBindings);
+        } else if (strictPrompt && mode === 'image') {
+          const snapshot = await readPetStoryComposer(webview);
+          if (!snapshot.present || !snapshot.generic || snapshot.pending || snapshot.count !== (attachments?.length || 0)
+            || snapshot.free === 'paid' || snapshot.free === 'exhausted') throw new PetStoryControlError('图片输入区、参考图或额度回读不符，未提交');
+        }
+        if (strictPrompt && !await verifyPromptReadyForSubmission(webview, prompt, true)) throw new SubmissionSafetyPauseError('最终全文或段落回读不一致，未提交');
         const currentRuntime = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime;
         if (!canAttemptSubmission(expectedRunId, currentRuntime?.runId, currentRuntime?.submittedAt)) {
           throw new SubmissionSafetyPauseError('本次运行已存在发送记录或运行身份已变化；系统已停止，未再次发送');
@@ -1755,6 +1788,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       await persistVideoReadiness('submission_controls');
 
+      // 只读焦点／命中检查先于提交意图；明确未就绪不会留下“可能已发送”的记录。
+      if (!authorizationTriggeredSubmission && !(await prepareNativeSubmission(webview)).ok) {
+        throw new AccountAvailabilityPauseError('当前窗口焦点、输入区或发送控件命中尚未就绪；未记录提交意图、未发送，请处理窗口后继续原任务', 'page_unrecognized');
+      }
+
       // P0：真实发送是不可重复副作用。先从当前任务快照核对 runId/submittedAt，
       // 再把本次提交意图持久化；写入失败或运行已变化时绝不点击页面。
       if (!submissionMarkedAt) {
@@ -1779,7 +1817,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (!authorizationTriggeredSubmission) {
         try {
           submitted = await Promise.race([
-            submitPromptWithNativeClick(webview),
+            submitPromptWithNativeClick(webview, mode === 'chat' ? 'guest' : 'native'),
             new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('提交超时')), 10000)),
           ]);
         } catch {
@@ -1792,7 +1830,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
       let submissionConfirmed = false;
       let confirmedEvidence: SubmissionReadback | undefined;
-      for (let attempt = 0; attempt < 4; attempt++) {
+      for (let attempt = 0; attempt < (mode === 'chat' ? 30 : 4); attempt++) {
         await pause(500);
         const evidence = await readSubmissionEvidence();
         if (classifySubmissionReadback(evidence) === 'confirmed') {
@@ -1803,6 +1841,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       if (!submissionConfirmed) {
         throw new SubmissionSafetyPauseError('发送状态不确定，请人工核对豆包会话；系统未自动重发');
+      }
+      // 原用户消息已全文匹配即保存具体会话，避免之后验证码／窗口退出丢失恢复定位。
+      if (mode === 'chat') {
+        const originalUrl = await waitForConcreteConversationUrl(webview, { timeoutMs: 15_000 });
+        if (!originalUrl || !await updateTaskRuntime(taskId, { runtime: { conversationUrl: originalUrl } })) throw new SubmissionSafetyPauseError('原 Chat 会话定位保存失败；保留提交记录且不重发');
+        taskConversationUrl = originalUrl;
       }
       // 普通 Chat 使用发送前的消息基线和独立助手节点，保留快速回复。
       // 图片/视频的既有回读路径保持不变。
@@ -1897,7 +1941,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       let lastConversationText = conversationTextAfterSubmit;
       let chatResponseText = '';
 
-      if (petstoryGuard && mode === 'image') {
+      if ((petstoryGuard || strictPrompt) && mode === 'image') {
         imageUrls = await readAcceptedImageOutputs(webview, conversationUrl, controller.signal);
         generating = false;
       }

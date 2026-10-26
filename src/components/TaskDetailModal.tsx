@@ -225,11 +225,11 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
               type="primary"
               icon={<SyncOutlined />}
               onClick={() => {
-                window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id } }));
+                window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id, useCurrentPage: task.mode === 'chat' && !task.runtime?.conversationUrl } }));
                 onClose();
               }}
             >
-              {task.status === 'waiting_generation_confirmation' ? '人工确认后，只读回读原会话' : '核对平台结果（不重新发送）'}
+              {task.mode === 'chat' && !task.runtime?.conversationUrl ? '核对当前 Chat 原回复（不重新发送）' : task.status === 'waiting_generation_confirmation' ? '人工确认后，只读回读原会话' : '核对平台结果（不重新发送）'}
             </Button>
           )}
           {canObserveManualSubmission && (

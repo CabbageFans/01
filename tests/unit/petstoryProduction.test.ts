@@ -37,9 +37,9 @@ function plan(): PetStoryPlan {
     { id: 'lumei', name: '噜妹', role: 'main', purpose: '测试', description: '红衣' },
     { id: 'friend', name: '朋友', role: 'supporting', purpose: '交接盒子', description: '绿衣' },
     { id: 'unused', name: '背景角色', role: 'supporting', purpose: '未被镜头使用', description: '黄衣' },
-  ], shots: Array.from({ length: 4 }, (_, i): PetStoryPlan['shots'][number] => ({ id: `TEST-shot-${i + 1}`, order: i + 1,
+  ], props: [], scenes: [{ id: 'test-room', name: '测试房间', location: '测试房间', time: '白天', lighting: '自然光', layout: '门相对窗', view: '正面', designOrigin: 'script' }], shots: Array.from({ length: 4 }, (_, i): PetStoryPlan['shots'][number] => ({ id: `TEST-shot-${i + 1}`, order: i + 1,
     characterIds: i === 0 ? ['friend', 'lulu'] : i === 1 ? ['lumei'] : i === 2 ? ['friend'] : ['lulu'],
-    scene: '测试房间', action: '交接盒子', startState: '拿盒子', endState: '放下盒子', durationSeconds: i % 2 ? 10 : 5,
+    sceneId: 'test-room', propIds: [], propStates: [], scene: '测试房间', action: '交接盒子', startState: '拿盒子', endState: '放下盒子', durationSeconds: i % 2 ? 10 : 5,
     transition: i === 1 ? 'continue' : 'cut', previousShotId: i === 1 ? 'TEST-shot-1' : undefined,
     requestedMode: i === 2 ? 'first_last_frame' : i === 0 ? 'first_frame' : 'reference',
     prompts: { firstFrame: prompt(`首帧${i}`), lastFrame: i === 2 ? prompt(`基于首帧编辑终态${i}`) : undefined, video: prompt(`视频${i}`) } })) };
@@ -55,7 +55,8 @@ function create(params: TaskAddParams, accountId: string): Task {
 }
 function makeService(storage: PetStoryProjects = projects): PetStoryProductionService {
   return new PetStoryProductionService(storage, { list, create,
-    adopt: (id, binding): Task => { const result = core.bindPetStory(id, binding); if (!result.success) throw new Error(result.error); return result.data; },
+    bindPageInput: (id, runId, body): Task => { const result = core.bindPetStoryPageInput(id, runId, body); if (!result.success) throw new Error(result.error); return result.data; },
+    adopt: (id, binding, compiledPrompt): Task => { const result = core.bindPetStory(id, binding, compiledPrompt); if (!result.success) throw new Error(result.error); return result.data; },
     retryUnsubmitted: (id): Task => { const result = core.retry(id, 'hold'); if (!result.success) throw new Error(result.error); return result.data; },
     downloads: (): DownloadJob[] => structuredClone(jobs), download });
 }
@@ -64,7 +65,7 @@ async function start(taskId: string): Promise<Task> {
   if (!task) throw new Error('TEST missing task');
   const now = new Date().toISOString();
   const runtime = { runId: `TEST-run-${taskId}`, attempt: 1, stage: 'injecting_prompt' as const, message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
-    input: { prompt: task.prompt, mode: task.mode, attachments: task.attachments || [], videoConfig: task.videoConfig, petstory: task.petstory } };
+    input: { prompt: task.prompt, mode: task.mode, attachments: task.attachments || [], videoConfig: task.videoConfig, petstory: task.petstory, promptReadback: task.promptReadback } };
   expect(core.updateRuntime({ taskId, status: 'executing', runtime }).success).toBe(true);
   const bound = await service.bindRun(p.id, taskId, runtime.runId);
   expect(bound.success).toBe(true);
@@ -108,6 +109,10 @@ beforeEach(async (): Promise<void> => {
   p = await projects.saveMobileStory(p.id, p.revision, 'TEST 离线故事，无平台请求');
   p.plan = plan(); p.source.status = 'review_required'; p = await projects.write(p);
   p = await projects.addReference(p.id, 'lulu', picture); p = await projects.addReference(p.id, 'lumei', picture);
+  p = await projects.addReference(p.id, 'friend', picture);
+  p = await projects.confirmStory(p.id, p.revision);
+  p = await projects.addMaterialImage(p.id, p.revision, 'scene:test-room', picture);
+  p = await projects.approveMaterials(p.id, p.revision, p.materials!.map((m): { materialId: string; assetId: string } => ({ materialId: m.id, assetId: m.selectedAssetId! })));
   tasks = []; jobs = []; sequence = 0; createdInputs.length = 0; downloadFailure = false; download.mockReset();
   core = new TaskService({ store: { read: list, replace: (value: Task[]): boolean => { tasks = normalizeTasks(structuredClone(value), 'TEST-studio').data; return true; } }, defaultProjectId: (): string => 'TEST-studio', id: (): string => `TEST-task-${++sequence}` });
   download.mockImplementation(async (params: { outputs: { taskId: string; accountId: string; mode: Task['mode']; outputs: string[] }[] }): Promise<object> => {
@@ -120,6 +125,15 @@ beforeEach(async (): Promise<void> => {
 });
 
 describe('P4 实际入口和请求模式', (): void => {
+  it('存在未收取Chat时，独立文字继续不会放行任何媒体入口', async (): Promise<void> => {
+    p.jobs.push({ id: 'TEST-unresolved-chat', taskId: 'TEST-uncertain-chat', kind: 'optimize', status: 'bound', inputHash: 'a'.repeat(64), sourceUrl: p.source.url, sourceStoryId: p.mobileStory!.id, shotId: p.plan!.shots[0].id, promptKind: 'video' });
+    p = await projects.write(p); const c = capability();
+    await expect(service.preview(p.id, c, {})).rejects.toThrow('未收取');
+    await expect(service.approve(p.id, p.revision, c, {})).rejects.toThrow('未收取');
+    await expect(service.generateShotMedia(p.id, p.revision, p.plan!.shots[0].id, 'firstFrame', c, {})).rejects.toThrow('未收取');
+    await expect(service.generateMaterials(p.id, p.revision, [p.materials![0].id], c)).rejects.toThrow('未收取');
+    expect(tasks).toEqual([]); expect(createdInputs).toEqual([]); expect((await projects.read(p.id)).production).toBeUndefined();
+  });
   it('strict native mode never uses two generic images as first/last; explicit fallback retains requested mode', (): void => {
     const c = capability(); const shot = plan().shots[2];
     c.modes.first_last_frame = { state: 'unsupported', free: 'free', reason: 'TEST 平台无槽' };
@@ -144,8 +158,29 @@ describe('P4 实际入口和请求模式', (): void => {
 });
 
 describe('P4 顺序素材接力与持久化', (): void => {
+  it('正文没有显式引用的真实附件只保存零节点证据，不补写素材句或接受伪造节点', async (): Promise<void> => {
+    await approve();
+    const next = await service.advance(p.id);
+    expect(next.taskId).toBeTruthy();
+    const task = await start(next.taskId!);
+    p = await projects.read(p.id);
+    const step = p.production!.steps.find((item): boolean => item.taskId === task.id)!;
+    expect(step.compiledPrompt!.text).toBe(step.compiledPrompt!.final);
+    const bindings = step.compiledPrompt!.references.map((reference, index): import('@doubao-studio/contracts').PetStoryPageBinding => ({
+      assetId: reference.assetId, order: index + 1, slot: 'reference', label: `@图片${index + 1}`,
+      previewHash: String(index + 1).padStart(64, '0'), reference: 'mention', targetId: `TEST-target-${index}`,
+      fileSha256: p.assets.find((asset): boolean => asset.id === reference.assetId)!.validation!.sha256,
+      nodeIds: [], occurrenceCount: 0,
+    }));
+    const forged = structuredClone(bindings); forged[0].occurrenceCount = 1;
+    await expect(service.recordPageBindings(p.id, task.id, task.runtime!.runId, forged)).rejects.toThrow('引用节点');
+    const saved = await service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings);
+    expect(saved.success).toBe(true);
+    expect(saved.compiledPrompt!.text).toBe(step.compiledPrompt!.final);
+    expect(tasks.find((item): boolean => item.id === task.id)!.runtime!.input.prompt).toBe(step.compiledPrompt!.final);
+  });
   it('executes four dynamic shots, one necessary supporting reference, native tail editing and real-video continuation', async (): Promise<void> => {
-    expect(productionCounts(p, capability(), {})).toEqual({ shots: 4, supporting: 1, newCharacters: 1, firstFrames: 3, lastFrames: 1, videos: 4 });
+    expect(productionCounts(p, capability(), {})).toEqual({ shots: 4, supporting: 1, newCharacters: 0, firstFrames: 4, lastFrames: 1, videos: 4 });
     await approve();
     for (let i = 0; i < 50; i++) {
       const result = await service.advance(p.id);
@@ -160,10 +195,10 @@ describe('P4 顺序素材接力与持久化', (): void => {
     const saved = await projects.read(p.id);
     expect(saved.production?.state).toBe('complete');
     expect(tasks).toHaveLength(9);
-    expect(saved.production?.steps.filter((s): boolean => s.kind === 'character')).toHaveLength(1);
+    expect(saved.production?.steps.filter((s): boolean => s.kind === 'character')).toHaveLength(0);
     expect(saved.assets.some((a): boolean => a.characterId === 'unused')).toBe(false);
     const firstStep = saved.production?.steps.find((s): boolean => s.shotId === 'TEST-shot-1' && s.kind === 'firstFrame');
-    expect(firstStep?.attachmentAssetIds.map((id): string | undefined => saved.assets.find((a): boolean => a.id === id)?.characterId)).toEqual(['friend', 'lulu']);
+    expect(firstStep?.attachmentAssetIds.map((id): string | undefined => saved.assets.find((a): boolean => a.id === id)?.characterId)).toEqual(['friend', 'lulu', undefined]);
     const tail = saved.production?.steps.find((s): boolean => s.kind === 'lastFrame');
     expect(tail?.attachmentAssetIds).toEqual([saved.production?.shots['TEST-shot-3'].firstFrameId]);
     expect(saved.production?.steps.filter((s): boolean => s.kind === 'lastFrame')).toHaveLength(1);
@@ -172,7 +207,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
     expect(nativeVideo?.runtime?.input.videoConfig?.duration).toBe('5s');
     for (const task of tasks.filter((t): boolean => t.mode === 'video')) expect(task.runtime?.input.videoConfig?.duration).toBe(task.videoConfig?.duration);
     const continued = saved.production?.shots['TEST-shot-2'];
-    const frame = saved.assets.find((a): boolean => a.id === continued?.firstFrameId);
+    const frame = saved.assets.find((a): boolean => a.id === continued?.actualEndFrameId);
     expect(frame?.kind).toBe('actualEndFrame');
     expect(frame?.sourceVideo?.assetId).toBe(saved.production?.shots['TEST-shot-1'].videoId);
     expect(frame?.sourceVideo?.atSeconds).toBeCloseTo(4.9, 2);
@@ -180,6 +215,14 @@ describe('P4 顺序素材接力与持久化', (): void => {
     expect(saved.production?.shots['TEST-shot-3'].startFromPreviousEnd).toBeUndefined();
     const reopened = await new PetStoryProjects().open(projects.directory(p.id));
     expect(reopened.production).toEqual(saved.production);
+    for (const step of reopened.production?.steps || []) {
+      if (!['firstFrame', 'lastFrame', 'video'].includes(step.kind)) continue;
+      const task = tasks.find((t): boolean => t.id === step.taskId);
+      expect(step.compiledPrompt?.text).toBe(task?.runtime?.input.prompt);
+      expect(step.compiledPrompt?.references.map((r): string => r.assetId)).toEqual(step.attachmentAssetIds);
+      expect(task?.runtime?.input.promptReadback).toBe('exact');
+      expect(step.compiledPrompt?.final).toBe(reopened.plan?.shots.find((s): boolean => s.id === step.shotId)?.prompts[step.kind as 'firstFrame' | 'lastFrame' | 'video']?.final);
+    }
     expect(reopened.assets.filter((a): boolean => a.kind === 'video').every((a): boolean => a.validation?.decoded === true && a.validation.durationSeconds === 6 && a.validation.width === 64)).toBe(true);
     expect(createdInputs.filter((i): boolean => i.mode === 'video').every((i): boolean => i.prompts.length === 1 && i.prompts[0].includes('TEST final'))).toBe(true);
   });
@@ -187,7 +230,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
     const reduced = p.plan as PetStoryPlan; reduced.shots = [reduced.shots[3]]; reduced.shots[0].order = 1;
     p.plan = reduced; p = await projects.write(p);
     const asset = p.assets.find((a): boolean => a.characterId === 'lulu');
-    const task = create({ prompts: [reduced.shots[0].prompts.firstFrame.final], mode: 'image', executionIntent: 'hold', projectId: p.studioProjectId, attachments: [await projects.referenceFile(p.id, asset?.id || '')] }, p.accountId);
+    const task = create({ prompts: [reduced.shots[0].prompts.firstFrame.final], mode: 'image', executionIntent: 'hold', projectId: p.studioProjectId, attachments: [await projects.referenceFile(p.id, asset?.id || ''), await projects.referenceFile(p.id, p.materials!.find((m): boolean => m.id === 'scene:test-room')!.selectedAssetId!)] }, p.accountId);
     p.drafts = [{ taskId: task.id, shotId: reduced.shots[0].id, kind: 'firstFrame', final: task.prompt }]; p = await projects.write(p);
     await approve();
     const next = await service.advance(p.id);
@@ -203,8 +246,8 @@ describe('P4 顺序素材接力与持久化', (): void => {
     expect(first.success, first.error).toBe(true);
     const saved = first.project as PetStoryProject;
     const step = saved.production?.steps.find((item): boolean => item.shotId === 'TEST-shot-1');
-    const assets = step?.attachmentAssetIds.map((id): unknown => { const a = saved.assets.find((item): boolean => item.id === id); return a?.kind === 'scene' ? a.shotId : a?.characterId; });
-    expect(assets).toEqual(['friend', 'lulu', 'TEST-shot-1']);
+    const assets = step?.attachmentAssetIds.map((id): unknown => { const a = saved.assets.find((item): boolean => item.id === id); return a?.kind === 'scene' ? a.materialId : a?.characterId; });
+    expect(assets).toEqual(['friend', 'lulu', 'scene:test-room']);
   });
   it('concurrent starts serialize to one hold task; repeated resume retains that identity', async (): Promise<void> => {
     await approve();

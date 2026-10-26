@@ -1,0 +1,252 @@
+{
+  "schemaVersion": 1,
+  "id": "TEST-drama-input",
+  "studioProjectId": "TEST-studio",
+  "accountId": "TEST-account",
+  "revision": 162,
+  "source": {
+    "kind": "douyin",
+    "url": "",
+    "status": "review_required",
+    "reason": "制作方案基于用户粘贴的手机豆包故事；内容与原视频是否一致待本人核对，A1 尚未验收"
+  },
+  "mobileStory": {
+    "id": "80cf27f2-c5f7-4168-b65d-0d793d3b2efe",
+    "text": "人物及关系\nA：穿紫色 T 恤、骑粉色电动车的男子，字幕中被称作“乐”。这是否为完整姓名，视频未交代。\nB：穿黑色长袖、短发、手拿细树枝的男子。\nC：结尾出现的黑衣长发人物，正在路边弯腰处理鞋底。\nB 叫 A 试尝树枝上的东西，随后拿 A 的反应向 C 证明“踩到屎了”。三人的亲属、婚恋等具体身份关系没有在视频中交代。\n\n1. 开头：地点、意图和问题\n场景在民居前的村道上，地面潮湿、有积水。A 骑着粉色电动车经过。B 从画面右侧招呼他：“乐，你尝尝……”A 因而停下、转头看他。\n开头只表现为 B 请 A 尝一样东西，尚未说明是什么，也未交代 A 原本要去哪里。B 的真正目的直到结尾才揭示。\n\n2. 经过：关键事件、动作、对白与因果\n约 0—1.5 秒：A 骑车靠近，B 招呼他试尝。A 停下并转头。\n约 1.5—4 秒：B 站在车旁，把手中的细树枝一端递到 A 嘴边。A 探头，用嘴接触树枝的一端，做出试尝的动作；随后缩回头，表情发生变化。\n约 4—6.5 秒：A 弯身、偏头，表现出嫌恶，问：“这啥呀，咋恁臭啊？”意思是询问这是什么、为什么这么臭。画面可见试尝和退缩，但是否吞咽、是否明确吐出东西，看不清。\n约 6.5—9 秒：B 转身朝路边的 C 走去，说：“看，我说你踩住屎了吧，你还不信。”这句话把前面的试尝与 C 的鞋底联系起来：B 是用 A 的反应来证明自己对鞋底脏东西的判断。\n约 9—11.56 秒：镜头跟着 B 转向路边，C 出现在画面中，弯腰抬脚，手里有一根较长的细棍，正在处理鞋底。B 走到 C 身旁，视频结束。\n\n3. 转折或冲突如何变化\n前半段制造“让人尝一样不明物”的疑问，A 发现味道很臭。随后 B 没有继续向 A 解释，而是转头对 C 宣告“我说你踩住屎了吧”，揭示 A 被用来帮忙验证鞋底东西的性质。\n笑点和冲突由“不知道尝了什么”，变成“试尝者在不知情的情况下成了验证工具”。B 与 C 先前存在“到底是不是踩到屎”的分歧，是由结尾对白反推得出的；视频没有展示此前争论的经过。\n\n4. 结局：实际结果及人物、道具最终状态\nB 走到 C 身边，按自己的说法确认了 C 踩到屎；C 仍弯腰处理鞋底，是否已经弄干净没有展示。\nA 最后可见时仍在粉色电动车上，随后因镜头转向而出画。视频没有交代他之后是否离开或采取其他行动。电动车没有发生可见损坏。\nB 拿着递给 A 试尝的细树枝走向 C，未见明确丢弃；C 另持一根较长的细棍处理鞋底。",
+    "importedAt": "2026-10-24T07:42:53.658Z"
+  },
+  "plan": {
+    "sourceSummary": "潮湿村道上，B骗路过的A尝树枝，利用A闻到臭味的反应，向C证实C踩到屎了，C正在清理鞋底",
+    "adaptedStory": "乡间潮湿小路上，噜噜骑着粉色小电车经过，噜妹在路边叫住噜噜，递出一根细树枝让噜噜尝尝。噜噜凑过去闻了一下，瞬间皱起脸，嫌弃地问怎么这么臭。噜妹笑着转身走向旁边正在弯腰的另一个小伙伴，告诉对方：你看，我说你踩到屎了吧。镜头转过去，小伙伴正拿长棍子清理鞋底。",
+    "characters": [
+      {
+        "id": "lulu",
+        "name": "噜噜",
+        "role": "main",
+        "purpose": "被骗尝树枝、产生嫌弃反应的角色，是验证味道的工具人",
+        "description": "黄色小河马，头顶橘子，橙色背带裤，绿色背包肩带，黏土毛绒质感",
+        "referenceAssetId": "2d2c95ee-973f-4ba1-b760-c832dc50930d"
+      },
+      {
+        "id": "lumei",
+        "name": "噜妹",
+        "role": "main",
+        "purpose": "发起恶作剧，利用噜噜的反应验证鞋底脏东西，推动剧情反转",
+        "description": "黄色小河马，头顶橘子，白色荷叶边帽饰，粉色草莓连衣裙，黏土毛绒质感",
+        "referenceAssetId": "91d1d330-94b3-427d-84ab-2b33c52879d4"
+      },
+      {
+        "id": "friend",
+        "name": "小伙伴",
+        "role": "supporting",
+        "purpose": "踩到脏东西的当事人，在路边清理鞋底，是噜妹想要证明判断的对象",
+        "description": "同风格黄色小刺猬，黏土毛绒质感",
+        "referenceAssetId": "99d5bff5-328c-43e1-82e3-6dc65f352b83"
+      }
+    ],
+    "shots": [
+      {
+        "id": "shot_1",
+        "order": 1,
+        "characterIds": [
+          "lulu",
+          "lumei"
+        ],
+        "scene": "乡间民居前潮湿积水的泥土村道，柔和暖自然光，浅米色干净背景",
+        "action": "噜噜骑着粉色小电车慢慢靠近，噜妹站在路边抬手招呼噜噜停下",
+        "startState": "噜噜骑电车从画面远处驶来，噜妹静止站在路边",
+        "endState": "噜噜停下电车，转头看向噜妹",
+        "durationSeconds": 7,
+        "transition": "cut",
+        "requestedMode": "reference",
+        "prompts": {
+          "firstFrame": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          },
+          "video": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          }
+        }
+      },
+      {
+        "id": "shot_2",
+        "order": 2,
+        "characterIds": [
+          "lulu",
+          "lumei"
+        ],
+        "scene": "同一条潮湿村道，暖柔和自然光",
+        "action": "噜妹把细树枝递到噜噜嘴边，噜噜探头凑近去闻、试探品尝",
+        "startState": "噜噜停好电车，面向噜妹；噜妹握着细树枝，手臂抬起",
+        "endState": "噜噜凑近树枝，鼻子靠近树枝端头",
+        "durationSeconds": 6,
+        "transition": "continue",
+        "previousShotId": "shot_1",
+        "requestedMode": "first_last_frame",
+        "prompts": {
+          "firstFrame": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          },
+          "lastFrame": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          },
+          "video": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          }
+        }
+      },
+      {
+        "id": "shot_3",
+        "order": 3,
+        "characterIds": [
+          "lulu",
+          "lumei"
+        ],
+        "scene": "同潮湿村道，暖柔和自然光",
+        "action": "噜噜闻到臭味，猛地缩回脑袋，皱起脸，露出嫌弃难受的表情",
+        "startState": "噜噜鼻子挨着细树枝，正在闻",
+        "endState": "噜噜向后缩，眉头皱起，嘴巴微张，满脸嫌弃",
+        "durationSeconds": 6,
+        "transition": "continue",
+        "previousShotId": "shot_2",
+        "requestedMode": "first_last_frame",
+        "prompts": {
+          "firstFrame": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          },
+          "lastFrame": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          },
+          "video": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          }
+        }
+      },
+      {
+        "id": "shot_4",
+        "order": 4,
+        "characterIds": [
+          "lumei",
+          "friend"
+        ],
+        "scene": "村道路边，暖柔和自然光",
+        "action": "噜妹拿着细树枝转身走向小伙伴，对着小伙伴说话，告知验证结果",
+        "startState": "噜妹站在噜噜电车旁，转向小伙伴方向",
+        "endState": "噜妹走到弯腰的小伙伴身旁",
+        "durationSeconds": 7,
+        "transition": "cut",
+        "requestedMode": "first_last_frame",
+        "prompts": {
+          "firstFrame": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          },
+          "lastFrame": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          },
+          "video": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          }
+        }
+      },
+      {
+        "id": "shot_5",
+        "order": 5,
+        "characterIds": [
+          "lumei",
+          "friend"
+        ],
+        "scene": "村道路边，暖柔和自然光",
+        "action": "小伙伴弯腰，拿着长细棍持续清理鞋底脏东西",
+        "startState": "小伙伴抬脚，鞋底朝向外侧，拿着长棍",
+        "endState": "小伙伴继续用棍子刮擦鞋底",
+        "durationSeconds": 8,
+        "transition": "continue",
+        "previousShotId": "shot_4",
+        "requestedMode": "reference",
+        "prompts": {
+          "firstFrame": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          },
+          "video": {
+            "original": "TEST-old-body-not-fact",
+            "optimized": "TEST-old-body-not-fact",
+            "final": "TEST-old-body-not-fact",
+            "edited": false,
+            "rulesVersion": "TEST-old"
+          }
+        }
+      }
+    ]
+  },
+  "updatedAt": "2026-10-25T13:48:22.011Z",
+  "jobs": [],
+  "fixtureNote": "离线机制夹具，源自原五镜头已保存输入；不包含模型新输出或真实媒体文件。",
+  "assets": [
+    {
+      "id": "91d1d330-94b3-427d-84ab-2b33c52879d4",
+      "kind": "character",
+      "characterId": "lumei",
+      "relativePath": "characters/4cc62b37-8acb-4f45-b447-70b42268b455.jpg"
+    },
+    {
+      "id": "99d5bff5-328c-43e1-82e3-6dc65f352b83",
+      "kind": "character",
+      "characterId": "friend",
+      "relativePath": "characters/b70e05dd-1bd5-43ea-85e6-537c282cb9ce.jpg"
+    },
+    {
+      "id": "2d2c95ee-973f-4ba1-b760-c832dc50930d",
+      "kind": "character",
+      "characterId": "lulu",
+      "relativePath": "characters/4638907c-f2d1-45ae-b3a9-803b20cb81ea.jpg"
+    }
+  ]
+}

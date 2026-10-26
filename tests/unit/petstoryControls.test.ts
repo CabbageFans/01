@@ -1,15 +1,17 @@
 /** 当前输入区的序列化 DOM 回归。只有 TEST 字节；不打开真实网页或提交生成。 */
 import { runInNewContext } from 'node:vm';
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { PetStoryCapability, PetStoryExecutionGuard } from '@doubao-studio/contracts';
-import { checkPetStoryPageGuard, getResultUrl, readAcceptedImageOutputs, readPetStoryComposer, uploadPetStoryImages, verifyPetStoryUploads } from '../../src/utils/doubaoBridge';
+import { checkPetStoryPageGuard, getResultUrl, readAcceptedImageOutputs, readPetStoryComposer, uploadPetStoryImages, verifyPetStoryUploads, verifyPetStoryReferenceBindings } from '../../src/utils/doubaoBridge';
 
 class Node {
   parentElement: Node | null = null;
   children: Node[] = [];
   accept = 'image/*'; files: File[] = []; disabled = false; display = 'block'; text = ''; width = 200; height = 100;
-  complete = true; naturalWidth = 64; src = ''; pending = false;
+  complete = true; naturalWidth = 64; src = ''; pending = false; loading = 'lazy';
   received: string[] = [];
+  clicks = 0;
   constructor(readonly tag: string, readonly attributes: Record<string, string> = {}) {}
   add(node: Node): Node { this.children.push(node); node.parentElement = this; return node; }
   get textContent(): string { return [this.text, ...this.children.map((n): string => n.textContent)].join(' '); }
@@ -24,13 +26,15 @@ class Node {
   querySelectorAll(selector: string): Node[] {
     const nodes = this.children.flatMap((c): Node[] => [c, ...c.querySelectorAll('*')]);
     if (selector === '*') return nodes;
-    if (selector.startsWith('textarea')) return nodes.filter((n): boolean => n.tag === 'textarea');
+    if (selector.startsWith('textarea')) return nodes.filter((n): boolean => n.tag === 'textarea' || n.attributes.contenteditable === 'true');
     if (selector === 'input[type="file"]') return nodes.filter((n): boolean => n.tag === 'input');
     if (selector === 'img') return nodes.filter((n): boolean => n.tag === 'img');
     if (selector.includes('aria-busy')) return nodes.filter((n): boolean => n.pending);
     if (selector.includes('data-creation-params-panel-id')) return nodes.filter((n): boolean => 'data-creation-params-panel-id' in n.attributes);
     if (selector.includes('video-model')) return nodes.filter((n): boolean => n.attributes['data-input-engine-actionbar-control-key'] === 'video-model');
     if (selector.includes('role="dialog"')) return nodes.filter((n): boolean => n.attributes.role === 'dialog' || n.attributes.role === 'alert');
+    if (selector.includes('data-type="mention"')) return nodes.filter((n): boolean => n.attributes['data-type'] === 'mention');
+    if (selector.includes('data-reference-option')) return nodes.filter((n): boolean => n.attributes.role === 'option' || 'data-reference-option' in n.attributes);
     if (selector.includes('button')) return nodes.filter((n): boolean => ['button', 'span', 'label'].includes(n.tag));
     return [];
   }
@@ -42,7 +46,7 @@ class Node {
     }
     return true;
   }
-  click(): void {}
+  click(): void { this.clicks++; }
 }
 function fixture(native: boolean): { view: { executeJavaScript: ReturnType<typeof vi.fn>; loadURL: ReturnType<typeof vi.fn>; getURL: () => string }; surface: Node; first: Node; last?: Node; portal: Node } {
   const body = new Node('body'); const surface = body.add(new Node('div', { class: 'guidance-input-surface' }));
@@ -100,6 +104,7 @@ describe('P4 current composer and actual slot readback', (): void => {
     try {
       const test = fixture(true); const control = new AbortController();
       const upload = uploadPetStoryImages(test.view, materials, 'first_last_frame', control.signal);
+      await vi.waitFor((): void => expect(test.first.received).toHaveLength(1));
       await vi.advanceTimersByTimeAsync(4000); await upload;
       expect(test.first.received).toEqual(['TEST-first.png']); expect(test.last?.received).toEqual(['TEST-last.png']); expect(test.portal.received).toEqual([]);
       await expect(verifyPetStoryUploads(test.view, guard('first_last_frame', 2), true)).resolves.toBeUndefined();
@@ -117,6 +122,7 @@ describe('P4 current composer and actual slot readback', (): void => {
       expect(snapshot).toMatchObject({ first: true, last: false, generic: false });
       checkPetStoryPageGuard(snapshot, guard('first_frame'), true);
       const upload = uploadPetStoryImages(test.view, [materials[0]], 'first_frame', new AbortController().signal);
+      await vi.waitFor((): void => expect(test.first.received).toHaveLength(1));
       await vi.advanceTimersByTimeAsync(2000); await upload;
       await verifyPetStoryUploads(test.view, guard('first_frame'), true);
       expect(test.first.received).toEqual([materials[0].name]); expect(test.last?.received).toEqual([]);
@@ -127,10 +133,27 @@ describe('P4 current composer and actual slot readback', (): void => {
     try {
       const test = fixture(false);
       const upload = uploadPetStoryImages(test.view, materials, 'reference', new AbortController().signal);
+      await vi.waitFor((): void => expect(test.first.received).toHaveLength(1));
       await vi.advanceTimersByTimeAsync(4000); await upload;
       expect(test.first.received).toEqual(materials.map((m): string => m.name));
       expect((await readPetStoryComposer(test.view, { slot: 'reference' })).count).toBe(2);
       await verifyPetStoryUploads(test.view, guard('reference', 2), true);
+    } finally { vi.useRealTimers(); }
+  });
+  it('rejects wrong file bytes before any upload and detects actual first/last preview swaps', async (): Promise<void> => {
+    const test = fixture(true);
+    await expect(uploadPetStoryImages(test.view, materials, 'first_last_frame', new AbortController().signal, ['0'.repeat(64), '0'.repeat(64)])).rejects.toThrow('摘要不符');
+    expect(test.first.received).toEqual([]); expect(test.last?.received).toEqual([]);
+    vi.useFakeTimers();
+    try {
+      const upload = uploadPetStoryImages(test.view, materials, 'first_last_frame', new AbortController().signal, materials.map((m): string => createHash('sha256').update(Buffer.from(m.base64, 'base64')).digest('hex')));
+      await vi.waitFor((): void => expect(test.first.received).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(5000); const receipts = await upload;
+      const bindings = receipts.map((r, i): import('@doubao-studio/contracts').PetStoryPageBinding => ({ assetId: `TEST-frame-${i}`, order: i + 1, slot: r.slot, reference: 'slot', label: r.label, fileSha256: r.fileSha256, previewHash: createHash('sha256').update(r.key).digest('hex') }));
+      await verifyPetStoryReferenceBindings(test.view, bindings);
+      const first = test.first.parentElement!.querySelector('img')!; const last = test.last!.parentElement!.querySelector('img')!;
+      [first.src, last.src] = [last.src, first.src];
+      await expect(verifyPetStoryReferenceBindings(test.view, bindings)).rejects.toThrow('素材丢失');
     } finally { vi.useRealTimers(); }
   });
   it.each(['duration', 'model', 'paid', 'unknown'] as const)('blocks %s before any submission', async (failure): Promise<void> => {
@@ -156,6 +179,35 @@ describe('P4 current composer and actual slot readback', (): void => {
     const card = test.surface.add(new Node('div', { 'data-testid': 'mdbox_image' }));
     const image = card.add(new Node('img')); image.src = 'blob:TEST-real'; image.width = 64; image.height = 96;
     const placeholder = card.add(new Node('img')); placeholder.src = 'blob:TEST-placeholder'; placeholder.width = 64; placeholder.height = 96;
+    expect((await readPetStoryComposer(test.view, { slot: 'reference' })).count).toBe(1);
+  });
+  it('serialized guest reads distinct node instance and target IDs and selects the matching real menu item', async (): Promise<void> => {
+    const test = fixture(false); const textarea = test.surface.querySelector('textarea')!; const parent = textarea.parentElement!;
+    parent.children = parent.children.filter((n): boolean => n !== textarea);
+    const editor = parent.add(new Node('div', { contenteditable: 'true' }));
+    const node = editor.add(new Node('span', { 'data-type': 'mention', 'data-mention-id': 'instance-9', 'data-asset-id': 'target-A' })); node.text = '@图片1';
+    const preview = test.surface.add(new Node('div', { 'data-testid': 'mdbox_image', 'data-asset-id': 'target-A', 'data-reference-label': '@图片1' })); preview.add(new Node('img')).src = 'blob:TEST-upload';
+    const menu = test.surface.parentElement!.add(new Node('div'));
+    const correct = menu.add(new Node('div', { role: 'option', 'data-asset-id': 'target-A' })); correct.text = '图片1';
+    const other = menu.add(new Node('div', { role: 'option', 'data-asset-id': 'target-B' })); other.text = '图片1';
+    const snapshot = await readPetStoryComposer(test.view);
+    expect(snapshot.referenceNodes).toEqual([{ label: '@图片1', nodeId: 'instance-9', targetId: 'target-A' }]);
+    expect(snapshot.previews![0].nodeId).toBe('target-A');
+    const selected = await readPetStoryComposer(test.view, { selectReference: '@图片1', selectReferenceKey: snapshot.referenceOptions!.find((o): boolean => o.nodeId === 'target-A')!.key });
+    expect(selected.selectedReference).toBe(true); expect(correct.clicks).toBe(1); expect(other.clicks).toBe(0);
+  });
+  it('wakes only current composer previews and still requires actual decoding before counting', async (): Promise<void> => {
+    const test = fixture(false);
+    const current = test.surface.add(new Node('img')); current.src = 'blob:TEST-current';
+    current.complete = false; current.naturalWidth = 0;
+    const history = test.surface.parentElement?.add(new Node('img'));
+    if (!history) throw new Error('TEST history missing');
+    history.src = 'https://TEST.invalid/history.png';
+    const pending = await readPetStoryComposer(test.view, { slot: 'reference', wakePreviews: true });
+    expect(pending).toMatchObject({ count: 0, uploaded: false });
+    expect(current.loading).toBe('eager'); expect(current.src).toBe('blob:TEST-current');
+    expect(history.loading).toBe('lazy'); expect(test.first.received).toEqual([]);
+    current.complete = true; current.naturalWidth = 64;
     expect((await readPetStoryComposer(test.view, { slot: 'reference' })).count).toBe(1);
   });
   it('recovers accepted image results only by observing the original session and existing extractors', async (): Promise<void> => {

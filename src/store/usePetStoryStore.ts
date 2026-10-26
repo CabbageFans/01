@@ -1,19 +1,45 @@
 import { create } from 'zustand';
-import type { Task, PetStoryPlan, PetStoryProject, PetStoryPromptKind, PetStoryResult, PetStoryChatJob, PetStoryCapability, PetStoryProductionCounts, PetStoryModeResolution } from '@doubao-studio/contracts';
+import type { Task, PetStoryPlan, PetStoryProject, PetStoryPromptKind, PetStoryResult, PetStoryChatJob, PetStoryCapability, PetStoryMaterialEditIntent, PetStoryProductionCounts, PetStoryModeResolution, PetStoryPromptProfile, PetStoryRuntimeTarget } from '@doubao-studio/contracts';
 import { useTaskStore } from './useTaskStore';
 import { useAccountStore } from './useAccountStore';
 import { useProjectStore } from './useProjectStore';
-import { analysisPrompt, optimizationPrompt, repairPrompt } from '../utils/petstoryPrompts';
+import { repairPrompt } from '../utils/petstoryPrompts';
 
 interface PetStoryState {
+  saveOriginalStory: (text: string) => Promise<void>;
+  linkExistingMedia: (shotId: string, kind: PetStoryPromptKind, taskId: string, artifactId?: string) => Promise<void>;
+  promptBatch: { total: number; completed: number; status: 'idle' | 'running' | 'complete' | 'paused' };
+  regenerateAllPrompts: () => Promise<void>;
+  regenerateAllMaterialPrompts: () => Promise<void>;
+  extractAssets: () => Promise<void>;
+  adoptPlanCandidate: (jobId: string) => Promise<void>;
+  adoptAssetsCandidate: (jobId: string) => Promise<void>;
+  adoptPromptCandidate: (jobId: string) => Promise<void>;
+  reviewContent: (target?: PetStoryRuntimeTarget) => Promise<void>;
+  reviseContent: (reviewJobId: string, target: PetStoryRuntimeTarget) => Promise<void>;
+  stopPromptBatch: () => void;
+  regenerateMaterialPrompt: (materialId: string, editIntent?: PetStoryMaterialEditIntent) => Promise<void>;
+  saveShotPrompt: (shotId: string, kind: PetStoryPromptKind, final: string) => Promise<void>;
+  generateShotMedia: (shotId: string, kind: PetStoryPromptKind) => Promise<void>;
+  exportStatus: string;
+  exportPrompts: () => Promise<void>;
   project: PetStoryProject | null;
   projectName: string;
   capability: PetStoryCapability | null;
+  /** 项目中恢复的能力只供文字方言；媒体须在当前会话重新核对。 */
+  capabilityCheckedInSession: boolean;
   productionCounts: PetStoryProductionCounts | null;
   productionResolutions: Record<string, PetStoryModeResolution>;
   fallbacks: Record<string, 'first_frame' | 'reference'>;
+  confirmStory: () => Promise<void>;
+  saveMaterialPrompt: (materialId: string, final: string) => Promise<void>;
+  addMaterialImage: (materialId: string) => Promise<void>;
+  selectMaterialImage: (materialId: string, assetId: string) => Promise<void>;
+  approveMaterials: (selections: { materialId: string; assetId: string }[]) => Promise<void>;
+  generateMaterials: (materialIds: string[]) => Promise<void>;
   selectProductionImage: (stepId: string, artifactId: string) => Promise<void>;
   inspectCapability: (freeConfirmed: boolean) => Promise<void>;
+  setPlainReferences: (value: boolean) => void;
   setFallback: (shotId: string, mode?: 'first_frame' | 'reference') => void;
   previewProduction: () => Promise<void>;
   startProduction: () => Promise<void>;
@@ -32,6 +58,8 @@ interface PetStoryState {
   saveMobileStory: (text: string) => Promise<void>;
   addSceneReference: (shotId: string) => Promise<void>;
   addReference: (characterId: string) => Promise<void>;
+  bindSharedReference: (characterId: string, assetId: string) => Promise<void>;
+  savePromptProfile: (profile: PetStoryPromptProfile) => Promise<void>;
   savePlan: (plan: PetStoryPlan) => Promise<void>;
   analyze: () => Promise<void>;
   optimize: (shotId: string, kind: PetStoryPromptKind) => Promise<void>;
@@ -42,6 +70,8 @@ interface PetStoryState {
   draftFinal: (shotId: string) => Promise<void>;
 }
 const liveJobs = new Set<string>();
+type PromptBatchTarget = { shotId: string; kind: PetStoryPromptKind; materialId?: never } | { materialId: string; shotId?: never; kind?: never };
+let promptBatchQueue: { projectId: string; targets: PromptBatchTarget[]; jobId?: string } | null = null;
 let activeProductionId: string | null = null;
 let productionTickRunning = false;
 const observingProductionTasks = new Set<string>();
@@ -104,7 +134,10 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     if (get().busy) return;
     set({ busy: true, error: '' });
     try { await work(); }
-    catch (error: unknown) { set({ error: error instanceof Error ? error.message : '操作失败' }); }
+    catch (error: unknown) {
+      if (promptBatchQueue) { promptBatchQueue = null; set({ promptBatch: { ...get().promptBatch, status: 'paused' } }); }
+      set({ error: error instanceof Error ? error.message : '操作失败' });
+    }
     finally { set({ busy: false }); }
   };
   const startBound = async (jobId: string): Promise<void> => {
@@ -123,22 +156,117 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     });
     if (!started) throw new Error(useTaskStore.getState().error || '原任务保持已绑定；请处理原因后启动原任务，不要重复分析');
   };
-  const prepare = async (prompt: string, kind: PetStoryChatJob['kind'], parentJobId?: string, shotId?: string, promptKind?: PetStoryPromptKind): Promise<void> => {
+  const prepare = async (prompt: string, kind: PetStoryChatJob['kind'], parentJobId?: string, shotId?: string, promptKind?: PetStoryPromptKind, materialId?: string): Promise<string | undefined> => {
     const project = get().project;
     if (!project) throw new Error('请先打开或创建项目');
     if (!get().freeChatConfirmed) throw new Error('请先由本人确认当前普通Chat免费可用，未知时暂停');
     if (!useProjectStore.getState().projects.some((p): boolean => p.id === project.studioProjectId && !p.archived)) throw new Error('原 Studio 项目缺失或已归档');
     const account = useAccountStore.getState().accounts.find((a): boolean => a.id === project.accountId);
     if (!account || account.platform === 'dola') throw new Error('项目原豆包账号缺失，不能自动更换账号');
-    const result = await window.electronAPI.petstory.prepareChat(project.id, prompt, kind, parentJobId, shotId, promptKind);
+    const result = await window.electronAPI.petstory.prepareChat(project.id, prompt, kind, parentJobId, shotId, promptKind, materialId);
     accept(result);
     if (!result.success || !result.taskId || !result.project) return;
     await refreshTasks();
     const job = result.project.jobs.find((j): boolean => j.taskId === result.taskId);
-    if (job) await startBound(job.id);
+    if (job) { await startBound(job.id); return job.id; }
+  };
+  const prepareRuntime = async (kind: PetStoryChatJob['kind'], target?: PetStoryRuntimeTarget): Promise<string | undefined> => {
+    const project = get().project;
+    if (!project) throw new Error('请先打开或创建项目');
+    if (!get().freeChatConfirmed) throw new Error('请先确认当前普通 Chat 免费可用');
+    if (!useProjectStore.getState().projects.some((p): boolean => p.id === project.studioProjectId && !p.archived)) throw new Error('原 Studio 项目缺失或已归档');
+    const account = useAccountStore.getState().accounts.find((a): boolean => a.id === project.accountId);
+    if (!account || account.platform === 'dola') throw new Error('项目原豆包账号缺失，不能自动更换账号');
+    // 规则、当前事实和实际附件由主进程同一快照组装；页面不自行撰写运行时正文。
+    const capability = target?.capability || get().capability || project.promptCapability;
+    const requestTarget = capability ? { ...target, capability } : target;
+    const result = await window.electronAPI.petstory.prepareRuntime(project.id, project.revision, kind, requestTarget);
+    accept(result);
+    if (!result.success || !result.taskId || !result.project) return;
+    await refreshTasks();
+    const job = result.project.jobs.find((j): boolean => j.taskId === result.taskId);
+    if (job) { await startBound(job.id); return job.id; }
+  };
+  const nextPrompt = async (): Promise<void> => {
+    const batch = promptBatchQueue; const p = get().project;
+    if (!batch || !p || batch.projectId !== p.id) return;
+    const target = batch.targets.shift();
+    if (!target) { promptBatchQueue = null; set({ promptBatch: { ...get().promptBatch, status: 'complete' } }); return; }
+    const jobId = target.materialId ? await prepareRuntime('materialPrompt', { materialId: target.materialId }) : await prepareRuntime('optimize', { shotId: target.shotId, promptKind: target.kind });
+    if (!jobId) throw new Error(get().error || '本项文字任务未启动，批次已暂停');
+    batch.jobId = jobId;
   };
   return {
-    project: null, projectName: '', capability: null, productionCounts: null, productionResolutions: {}, fallbacks: {},
+    saveOriginalStory: async (text: string): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project; if (p) accept(await window.electronAPI.petstory.saveOriginalStory(p.id, p.revision, text));
+    }),
+    linkExistingMedia: async (shotId: string, kind: PetStoryPromptKind, taskId: string, artifactId?: string): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project; if (p) accept(await window.electronAPI.petstory.linkExistingMedia(p.id, p.revision, shotId, kind, taskId, artifactId));
+    }),
+    promptBatch: { total: 0, completed: 0, status: 'idle' },
+    regenerateAllPrompts: async (): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project;
+      if (!p?.plan) throw new Error('请先打开已有制作方案');
+      if (promptBatchQueue) throw new Error('当前文字批次尚未结束，请先收取原任务');
+      const targets = p.plan.shots.flatMap((s): { shotId: string; kind: PetStoryPromptKind }[] => (['firstFrame', 'lastFrame', 'video'] as const).filter((kind): boolean => !!s.prompts[kind]).map((kind) => ({ shotId: s.id, kind })));
+      promptBatchQueue = { projectId: p.id, targets };
+      set({ promptBatch: { total: targets.length, completed: 0, status: 'running' } });
+      await nextPrompt();
+    }),
+    regenerateAllMaterialPrompts: async (): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project;
+      if (!p?.materials?.length) throw new Error('请先补齐并采用当前资产清单');
+      if (promptBatchQueue) throw new Error('当前文字批次尚未结束，请先收取原任务');
+      const targets = p.materials.map((material): PromptBatchTarget => ({ materialId: material.id }));
+      promptBatchQueue = { projectId: p.id, targets };
+      set({ promptBatch: { total: targets.length, completed: 0, status: 'running' } });
+      await nextPrompt();
+    }),
+    extractAssets: async (): Promise<void> => run(async (): Promise<void> => { await prepareRuntime('assets'); }),
+    adoptPlanCandidate: async (jobId: string): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.adoptPlanCandidate(p.id, p.revision, jobId)); }),
+    adoptAssetsCandidate: async (jobId: string): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.adoptAssetsCandidate(p.id, p.revision, jobId)); }),
+    adoptPromptCandidate: async (jobId: string): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.adoptPromptCandidate(p.id, p.revision, jobId)); }),
+    reviewContent: async (target?: PetStoryRuntimeTarget): Promise<void> => run(async (): Promise<void> => { await prepareRuntime('review', target); }),
+    reviseContent: async (reviewJobId: string, target: PetStoryRuntimeTarget): Promise<void> => run(async (): Promise<void> => { await prepareRuntime('revise', { ...target, parentJobId: reviewJobId }); }),
+    stopPromptBatch: (): void => { promptBatchQueue = null; set({ promptBatch: { ...get().promptBatch, status: 'paused' } }); },
+    regenerateMaterialPrompt: async (materialId: string, editIntent?: PetStoryMaterialEditIntent): Promise<void> => run(async (): Promise<void> => {
+      await prepareRuntime('materialPrompt', { materialId, ...(editIntent ? { editIntent } : {}) });
+    }),
+    saveShotPrompt: async (shotId: string, kind: PetStoryPromptKind, final: string): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project; if (p) accept(await window.electronAPI.petstory.saveShotPrompt(p.id, p.revision, shotId, kind, final));
+    }),
+    generateShotMedia: async (shotId: string, kind: PetStoryPromptKind): Promise<void> => {
+      await run(async (): Promise<void> => {
+        const p = get().project; const capability = get().capability;
+        if (!p || !capability || !get().capabilityCheckedInSession) throw new Error('请先在当前会话核对原账号的免费创作入口；已保存选择仅供文字创作');
+        const result = await window.electronAPI.petstory.generateShotMedia(p.id, p.revision, shotId, kind, capability, get().fallbacks);
+        accept(result); if (result.success) { activeProductionId = p.id; observingProductionTasks.clear(); set({ productionCounts: null }); }
+      });
+      await tickPetStoryProduction();
+    },
+    exportStatus: '',
+    exportPrompts: async (): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project; if (!p) return;
+      set({ exportStatus: '' });
+      const result = await window.electronAPI.petstory.exportPrompts(p.id, p.revision);
+      if (!result.success) throw new Error(result.error || '导出失败');
+      set({ exportStatus: `已导出 ${result.exportName || ''}：模型正文、引用计划与实际记录分别保存，目录已打开。` });
+    }),
+    project: null, projectName: '', capability: null, capabilityCheckedInSession: false, productionCounts: null, productionResolutions: {}, fallbacks: {},
+    confirmStory: async (): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.confirmStory(p.id, p.revision)); }),
+    saveMaterialPrompt: async (materialId: string, final: string): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.saveMaterialPrompt(p.id, p.revision, materialId, final)); }),
+    addMaterialImage: async (materialId: string): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.addMaterialImage(p.id, p.revision, materialId)); set({ productionCounts: null }); }),
+    selectMaterialImage: async (materialId: string, assetId: string): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.selectMaterialImage(p.id, p.revision, materialId, assetId)); set({ productionCounts: null }); }),
+    approveMaterials: async (selections: { materialId: string; assetId: string }[]): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.approveMaterials(p.id, p.revision, selections)); set({ productionCounts: null }); }),
+    generateMaterials: async (materialIds: string[]): Promise<void> => {
+      await run(async (): Promise<void> => {
+        const p = get().project; const capability = get().capability;
+        if (!p || !capability || !get().capabilityCheckedInSession) throw new Error('请先在当前会话核对原账号的免费图片入口；已保存选择仅供文字创作');
+        const result = await window.electronAPI.petstory.generateMaterials(p.id, p.revision, materialIds, capability);
+        accept(result); if (result.success) { activeProductionId = p.id; observingProductionTasks.clear(); set({ productionCounts: null }); }
+      });
+      await tickPetStoryProduction();
+    },
     selectProductionImage: async (stepId: string, artifactId: string): Promise<void> => run(async (): Promise<void> => {
       const p = get().project;
       if (p) accept(await window.electronAPI.petstory.selectProductionImage(p.id, stepId, artifactId));
@@ -152,8 +280,10 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
           resolve: (value: PetStoryCapability): void => { clearTimeout(timeout); resolve(value); },
           reject: (error: Error): void => { clearTimeout(timeout); reject(error); } } }));
       });
-      set({ capability, productionCounts: null, productionResolutions: {} });
+      if (capability.accountId !== p.accountId) throw new Error('入口检查结果不属于项目原账号');
+      set({ capability, capabilityCheckedInSession: true, productionCounts: null, productionResolutions: {} });
     }),
+    setPlainReferences: (value: boolean): void => { const capability = get().capability; if (capability) set({ capability: { ...capability, allowPlainReferences: value }, productionCounts: null }); },
     setFallback: (shotId: string, mode?: 'first_frame' | 'reference'): void => {
       const fallbacks = { ...get().fallbacks };
       if (mode) fallbacks[shotId] = mode; else delete fallbacks[shotId];
@@ -161,7 +291,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     },
     previewProduction: async (): Promise<void> => run(async (): Promise<void> => {
       const p = get().project; const capability = get().capability;
-      if (!p || !capability) throw new Error('请先核对当前原账号的免费创作入口');
+      if (!p || !capability || !get().capabilityCheckedInSession) throw new Error('请先在当前会话核对原账号的免费创作入口');
       const result = await window.electronAPI.petstory.previewProduction(p.id, capability, get().fallbacks);
       accept(result);
       set({ productionCounts: result.counts || null, productionResolutions: result.resolutions || {} });
@@ -169,7 +299,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     startProduction: async (): Promise<void> => {
       await run(async (): Promise<void> => {
         const p = get().project; const capability = get().capability;
-        if (!p || !capability || !get().productionCounts) throw new Error('请先查看并确认制作数量');
+        if (!p || !capability || !get().capabilityCheckedInSession || !get().productionCounts) throw new Error('请先在当前会话核对入口，再查看并确认制作数量');
         const result = await window.electronAPI.petstory.approveProduction(p.id, p.revision, capability, get().fallbacks);
         accept(result);
         if (result.success) { activeProductionId = p.id; observingProductionTasks.clear(); }
@@ -187,7 +317,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     resumeProduction: async (): Promise<void> => {
       await run(async (): Promise<void> => {
         const p = get().project; const capability = get().capability;
-        if (!p || !capability) throw new Error('重新打开后请本人核对当前入口，再显式继续原制作');
+        if (!p || !capability || !get().capabilityCheckedInSession) throw new Error('重新打开后请本人核对当前入口，再显式继续原制作');
         const result = await window.electronAPI.petstory.resumeProduction(p.id, capability);
         accept(result);
         if (result.success) { activeProductionId = p.id; observingProductionTasks.clear(); }
@@ -199,8 +329,8 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     setFreeChatConfirmed: (value: boolean): void => set({ freeChatConfirmed: value }),
     setAutoRepair: (value: boolean): void => set({ autoRepair: value }),
     createProject: async (): Promise<void> => run(async (): Promise<void> => {
-      activeProductionId = null;
-      set({ capability: null, productionCounts: null, fallbacks: {} });
+      activeProductionId = null; promptBatchQueue = null;
+      set({ capability: null, capabilityCheckedInSession: false, productionCounts: null, fallbacks: {} });
       const accountId = useAccountStore.getState().selectedAccountId;
       if (!accountId) throw new Error('请先选择已登录的豆包账号');
       const result = await window.electronAPI.petstory.create(useProjectStore.getState().activeProjectId, accountId);
@@ -208,13 +338,14 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (result.success) { liveJobs.clear(); set({ freeChatConfirmed: false }); }
     }),
     openProject: async (): Promise<void> => run(async (): Promise<void> => {
-      activeProductionId = null;
+      activeProductionId = null; promptBatchQueue = null;
       liveJobs.clear();
-      set({ freeChatConfirmed: false, capability: null, productionCounts: null, fallbacks: {} });
+      set({ freeChatConfirmed: false, capability: null, capabilityCheckedInSession: false, productionCounts: null, fallbacks: {} });
       const result = await window.electronAPI.petstory.open();
       accept(result);
       if (result.project) {
         const project = result.project;
+        set({ capability: project.promptCapability || null, capabilityCheckedInSession: false });
         const studio = useProjectStore.getState();
         if (studio.projects.some((p): boolean => p.id === project.studioProjectId && !p.archived)) studio.selectProject(project.studioProjectId);
         else set({ error: '原 Studio 项目缺失或已归档，保留当前文件，不能开始新的对话' });
@@ -232,30 +363,41 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     addSceneReference: async (shotId: string): Promise<void> => run(async (): Promise<void> => {
       const p = get().project;
       if (p) accept(await window.electronAPI.petstory.addSceneReference(p.id, shotId));
-      set({ productionCounts: null });
+      set({ productionCounts: null, productionResolutions: {} });
     }),
     addReference: async (characterId: string): Promise<void> => run(async (): Promise<void> => {
       const p = get().project;
       if (p) accept(await window.electronAPI.petstory.addReference(p.id, characterId));
-      set({ productionCounts: null });
+      set({ productionCounts: null, productionResolutions: {} });
+    }),
+    bindSharedReference: async (characterId: string, assetId: string): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project;
+      if (p) accept(await window.electronAPI.petstory.bindSharedReference(p.id, p.revision, characterId, assetId));
+      set({ productionCounts: null, productionResolutions: {} });
+    }),
+    savePromptProfile: async (profile: PetStoryPromptProfile): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project;
+      if (p) accept(await window.electronAPI.petstory.savePromptProfile(p.id, p.revision, profile));
+      set({ productionCounts: null, productionResolutions: {} });
     }),
     savePlan: async (plan: PetStoryPlan): Promise<void> => run(async (): Promise<void> => {
       const p = get().project;
-      set({ productionCounts: null });
+      set({ productionCounts: null, productionResolutions: {} });
       if (p) accept(await window.electronAPI.petstory.savePlan(p.id, p.revision, plan));
     }),
     analyze: async (): Promise<void> => run(async (): Promise<void> => {
-      const p = get().project;
-      if (p) await prepare(analysisPrompt(p), 'analysis');
+      await prepareRuntime('analysis');
     }),
     optimize: async (shotId: string, kind: PetStoryPromptKind): Promise<void> => run(async (): Promise<void> => {
-      const p = get().project;
-      if (p) await prepare(optimizationPrompt(p, shotId, kind), 'optimize', undefined, shotId, kind);
+      await prepareRuntime('optimize', { shotId, promptKind: kind });
     }),
     correctOnce: async (jobId: string): Promise<void> => run(async (): Promise<void> => {
       const p = get().project;
       const job = p?.jobs.find((j): boolean => j.id === jobId);
-      if (p && job) await prepare(repairPrompt(p, job), 'repair', job.id);
+      if (p && job) {
+        if (job.requestId) await prepareRuntime('repair', { parentJobId: job.id });
+        else await prepare(repairPrompt(p, job), 'repair', job.id);
+      }
     }),
     startBoundChat: async (jobId: string): Promise<void> => run((): Promise<void> => startBound(jobId)),
     retryUnsubmitted: async (jobId: string): Promise<void> => run(async (): Promise<void> => {
@@ -271,11 +413,19 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (!p) return;
       const result = await window.electronAPI.petstory.collectChat(p.id, jobId);
       accept(result);
+      let repairJobId: string | undefined;
       if (allowRepair && get().autoRepair && get().freeChatConfirmed && liveJobs.has(jobId) && result.needsRepair && result.project) {
         const job = result.project.jobs.find((j): boolean => j.id === jobId);
-        if (job) await prepare(repairPrompt(result.project, job), 'repair', job.id);
+        if (job?.requestId) repairJobId = await prepareRuntime('repair', { parentJobId: job.id });
+        else if (job) repairJobId = await prepare(repairPrompt(result.project, job), 'repair', job.id);
       }
       liveJobs.delete(jobId);
+      if (promptBatchQueue?.jobId === jobId) {
+        // 一次修订仍属于同一条文字目标，只有完整修订收取成功后才计数并继续。
+        if (repairJobId) { promptBatchQueue.jobId = repairJobId; return; }
+        if (!result.success) { promptBatchQueue = null; set({ promptBatch: { ...get().promptBatch, status: 'paused' } }); }
+        else { set({ promptBatch: { ...get().promptBatch, completed: get().promptBatch.completed + 1 } }); await nextPrompt(); }
+      }
     }),
     draftFinal: async (shotId: string): Promise<void> => run(async (): Promise<void> => {
       const p = get().project;
@@ -293,6 +443,10 @@ export function observePetStoryTasks(): () => void {
     void tickPetStoryProduction();
     const p = usePetStoryStore.getState();
     if (p.busy || !p.project) return;
+    const batchJob = p.project.jobs.find((j): boolean => j.id === promptBatchQueue?.jobId);
+    if (batchJob && state.tasks.some((t): boolean => t.id === batchJob.taskId && ['fail', 'paused', 'cancelled', 'waiting_verification'].includes(t.status))) {
+      promptBatchQueue = null; usePetStoryStore.setState({ promptBatch: { ...p.promptBatch, status: 'paused' } });
+    }
     const job = p.project.jobs.find((j): boolean => liveJobs.has(j.id) && !attempted.has(j.id) && j.status === 'bound' && state.tasks.some((t): boolean => t.id === j.taskId && t.status === 'done' && !!t.runtime?.chatResponse));
     if (!job) return;
     attempted.add(job.id);

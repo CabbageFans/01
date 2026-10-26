@@ -102,3 +102,13 @@ data/
 
 # UI 改版本机截图、验收快照（含个人数据，不进入版本库）
 /artifacts/ui-refactor/
+
+# 提示词与画布专项的真实项目、聊天和本机验收快照（不进入版本库）
+/artifacts/prompt-quality/
+/artifacts/storyboard-canvas/
+
+# drama-skills 原项目真实请求、回复及图片验收快照（不进入版本库）
+/artifacts/drama-runtime/
+
+# 普通 Chat 内化：原任务全文、原回复与本机核验记录不进入版本库
+/artifacts/chat-internalization/

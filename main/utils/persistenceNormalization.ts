@@ -542,6 +542,7 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): 
       ? { text: r.chatResponse.text, capturedAt: r.chatResponse.capturedAt } : undefined,
     input: {
       petstory: isObject(input) ? input.petstory as Task['petstory'] : undefined,
+      promptReadback: isObject(input) && input.promptReadback === 'exact' ? 'exact' : undefined,
       prompt: asString(isObject(input) ? input.prompt : '', ''),
       mode: oneOf(isObject(input) ? input.mode : taskMode, VALID_GENERATION_MODES, taskMode),
       videoConfig: isObject(videoConfig) ? normalizeVideoConfig(videoConfig) : undefined,

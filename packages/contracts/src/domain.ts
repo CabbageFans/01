@@ -226,6 +226,7 @@ export interface TaskRunSnapshot {
     attachments: string[];
     audioAttachment?: string;
     petstory?: import('./dto/petstory').PetStoryTaskBinding;
+    promptReadback?: 'exact';
   };
 }
 
@@ -302,6 +303,8 @@ export interface Task {
   mode: GenerationMode;
   /** PetStory 步骤归属，重开后也必须经过项目绑定门禁。 */
   petstory?: import('./dto/petstory').PetStoryTaskBinding;
+  /** 精确保留段落的提交回读，仅业务显式启用。 */
+  promptReadback?: 'exact';
   /** 视频生成配置 */
   videoConfig?: {
     model: VideoModel;

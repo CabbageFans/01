@@ -1,0 +1,517 @@
+[
+  {
+    "label": "噜妹在家得意",
+    "source": "离线人工示例，来自任务包关键帧和分析；TEST资产仅为逻辑夹具，没有实际上传或生成",
+    "kind": "firstFrame",
+    "resolvedMode": null,
+    "before": "噜妹在客厅很得意，3D可爱风，高清。",
+    "project": {
+      "schemaVersion": 1,
+      "id": "TEST-offline",
+      "studioProjectId": "TEST",
+      "accountId": "TEST",
+      "revision": 0,
+      "source": {
+        "kind": "douyin",
+        "url": "https://v.douyin.com/TEST/",
+        "status": "review_required"
+      },
+      "jobs": [],
+      "assets": [
+        {
+          "id": "TEST-lulu",
+          "kind": "character",
+          "characterId": "lulu",
+          "relativePath": "characters/TEST-lulu.png"
+        },
+        {
+          "id": "TEST-lumei",
+          "kind": "character",
+          "characterId": "lumei",
+          "relativePath": "characters/TEST-lumei.png"
+        },
+        {
+          "id": "TEST-first",
+          "kind": "firstFrame",
+          "shotId": "TEST-shot",
+          "relativePath": "shots/TEST-shot/first.png"
+        },
+        {
+          "id": "TEST-last",
+          "kind": "plannedEndImage",
+          "shotId": "TEST-shot",
+          "relativePath": "shots/TEST-shot/last.png"
+        }
+      ],
+      "promptProfile": {
+        "style": "圆润细腻的拟人化3D卡通角色与生活化场景结合；眼睛有高光，布料有自然褶皱，柔和光线，背景保留必要生活细节与适当虚化。以项目明确风格和实际参考为准，不默认改成长毛写实水豚。",
+        "characters": {
+          "lulu": {
+            "identity": "噜噜：浅黄／金黄的大头圆胖水豚，短四肢、小圆耳，宽圆突出的橙色吻部、大眼睛。",
+            "appearance": "未指定且无参考时的默认造型：头顶完整小橘子及短柄，白底红草莓图案短裤。不得与噜妹的帽饰互换；用户换装与实际参考优先。"
+          },
+          "lumei": {
+            "identity": "噜妹：浅黄／金黄的大头圆胖水豚，短四肢、小圆耳，宽圆突出的橙色吻部、高光眼睛。",
+            "appearance": "未指定且无参考时的默认造型：粉色荷叶边软帽及带褶边衣装，帽顶浅橙色扁平盘／环状装饰及双叶绿色嫩芽，不是噜噜的完整小橘子。斗篷仅由当前场景明确指定，不作为默认衣装；用户换装与实际参考优先。"
+          }
+        }
+      },
+      "updatedAt": "2026-10-25T00:00:00.000Z",
+      "plan": {
+        "sourceSummary": "离线样片方法示例",
+        "adaptedStory": "在家得意与面馆求助的反差；文档示例，不是新生成剧情",
+        "characters": [
+          {
+            "id": "lulu",
+            "name": "噜噜",
+            "role": "main",
+            "purpose": "关注同伴",
+            "description": "以批准的当前角色图为准，完整橘子和草莓短裤；无换装要求",
+            "referenceAssetId": "TEST-lulu"
+          },
+          {
+            "id": "lumei",
+            "name": "噜妹",
+            "role": "main",
+            "purpose": "表达感受并求助",
+            "description": "以批准的当前角色图为准，粉色荷叶帽与衣装、盘环状双叶芽饰",
+            "referenceAssetId": "TEST-lumei"
+          }
+        ],
+        "shots": [
+          {
+            "id": "TEST-shot",
+            "order": 1,
+            "characterIds": [
+              "lumei"
+            ],
+            "scene": "客厅米色沙发前",
+            "appearanceOverrides": {
+              "lumei": "本场披浅黄色柑橘图案斗篷"
+            },
+            "action": "本镜主要事件按最终正文",
+            "startState": "单人得意站姿",
+            "endState": "保持本镜得意表情",
+            "durationSeconds": 5,
+            "transition": "cut",
+            "requestedMode": "reference",
+            "prompts": {
+              "firstFrame": {
+                "original": "离线示例原始表达",
+                "optimized": "以噜妹当前身份参考为准，保留浅黄圆胖身形、宽橙吻部、粉色荷叶边软帽和衣装、帽顶浅橙盘环状双叶芽饰。本场披浅黄色柑橘图案斗篷，站在米色沙发前，身体微侧向画外，下巴略抬，双眼半眯，嘴角得意上扬，短臂自然靠近腰侧。单张中近景、眼睛高度的平视机位，头饰完整入画；温暖侧光，布料褶皱清楚，生活化背景轻度虚化。保留圆润3D材质，不复刻参考上的字幕或标题。",
+                "final": "以噜妹当前身份参考为准，保留浅黄圆胖身形、宽橙吻部、粉色荷叶边软帽和衣装、帽顶浅橙盘环状双叶芽饰。本场披浅黄色柑橘图案斗篷，站在米色沙发前，身体微侧向画外，下巴略抬，双眼半眯，嘴角得意上扬，短臂自然靠近腰侧。单张中近景、眼睛高度的平视机位，头饰完整入画；温暖侧光，布料褶皱清楚，生活化背景轻度虚化。保留圆润3D材质，不复刻参考上的字幕或标题。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              },
+              "lastFrame": {
+                "original": "离线示例原始表达",
+                "optimized": "只将左侧噜妹的表情和头部姿态调整到求助终态：目光转向右侧噜噜，头部略偏向他，肩膀微收，嘴角轻压；筷子仍握在原来那只前爪，停在面碗上方。噜噜小幅侧头看她。保持两人的脸型、颜色、当前衣装、头饰，保留两碗面和香菜的位置、桌椅、机位、画幅与光线；允许随姿态合理改变衣褶和遮挡，不增加动作阶段。",
+                "final": "只将左侧噜妹的表情和头部姿态调整到求助终态：目光转向右侧噜噜，头部略偏向他，肩膀微收，嘴角轻压；筷子仍握在原来那只前爪，停在面碗上方。噜噜小幅侧头看她。保持两人的脸型、颜色、当前衣装、头饰，保留两碗面和香菜的位置、桌椅、机位、画幅与光线；允许随姿态合理改变衣褶和遮挡，不增加动作阶段。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              },
+              "video": {
+                "original": "离线示例原始表达",
+                "optimized": "延续画面中左侧噜妹、右侧噜噜的当前衣装、头饰与桌面。噜妹先看自己碗上的香菜，握筷动作停住，眼睑稍低、嘴角下压；短暂停顿后缓慢抬眼看向噜噜，头部微偏向他，肩膀稍内收，表情转为犹豫求助。噜噜注意到她的目光，小幅侧头回应。筷子始终由噜妹握持，两碗面留在原位置。固定双人中近景，连续完成这次反应，结尾停在噜妹求助、噜噜关注她的状态。",
+                "final": "延续画面中左侧噜妹、右侧噜噜的当前衣装、头饰与桌面。噜妹先看自己碗上的香菜，握筷动作停住，眼睑稍低、嘴角下压；短暂停顿后缓慢抬眼看向噜噜，头部微偏向他，肩膀稍内收，表情转为犹豫求助。噜噜注意到她的目光，小幅侧头回应。筷子始终由噜妹握持，两碗面留在原位置。固定双人中近景，连续完成这次反应，结尾停在噜妹求助、噜噜关注她的状态。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "label": "面馆双人反应",
+    "source": "离线人工示例，来自任务包关键帧和分析；TEST资产仅为逻辑夹具，没有实际上传或生成",
+    "kind": "firstFrame",
+    "resolvedMode": null,
+    "before": "噜噜和噜妹在面馆吃面，噜妹委屈，可爱3D。",
+    "project": {
+      "schemaVersion": 1,
+      "id": "TEST-offline",
+      "studioProjectId": "TEST",
+      "accountId": "TEST",
+      "revision": 0,
+      "source": {
+        "kind": "douyin",
+        "url": "https://v.douyin.com/TEST/",
+        "status": "review_required"
+      },
+      "jobs": [],
+      "assets": [
+        {
+          "id": "TEST-lulu",
+          "kind": "character",
+          "characterId": "lulu",
+          "relativePath": "characters/TEST-lulu.png"
+        },
+        {
+          "id": "TEST-lumei",
+          "kind": "character",
+          "characterId": "lumei",
+          "relativePath": "characters/TEST-lumei.png"
+        },
+        {
+          "id": "TEST-first",
+          "kind": "firstFrame",
+          "shotId": "TEST-shot",
+          "relativePath": "shots/TEST-shot/first.png"
+        },
+        {
+          "id": "TEST-last",
+          "kind": "plannedEndImage",
+          "shotId": "TEST-shot",
+          "relativePath": "shots/TEST-shot/last.png"
+        }
+      ],
+      "promptProfile": {
+        "style": "圆润细腻的拟人化3D卡通角色与生活化场景结合；眼睛有高光，布料有自然褶皱，柔和光线，背景保留必要生活细节与适当虚化。以项目明确风格和实际参考为准，不默认改成长毛写实水豚。",
+        "characters": {
+          "lulu": {
+            "identity": "噜噜：浅黄／金黄的大头圆胖水豚，短四肢、小圆耳，宽圆突出的橙色吻部、大眼睛。",
+            "appearance": "未指定且无参考时的默认造型：头顶完整小橘子及短柄，白底红草莓图案短裤。不得与噜妹的帽饰互换；用户换装与实际参考优先。"
+          },
+          "lumei": {
+            "identity": "噜妹：浅黄／金黄的大头圆胖水豚，短四肢、小圆耳，宽圆突出的橙色吻部、高光眼睛。",
+            "appearance": "未指定且无参考时的默认造型：粉色荷叶边软帽及带褶边衣装，帽顶浅橙色扁平盘／环状装饰及双叶绿色嫩芽，不是噜噜的完整小橘子。斗篷仅由当前场景明确指定，不作为默认衣装；用户换装与实际参考优先。"
+          }
+        }
+      },
+      "updatedAt": "2026-10-25T00:00:00.000Z",
+      "plan": {
+        "sourceSummary": "离线样片方法示例",
+        "adaptedStory": "在家得意与面馆求助的反差；文档示例，不是新生成剧情",
+        "characters": [
+          {
+            "id": "lulu",
+            "name": "噜噜",
+            "role": "main",
+            "purpose": "关注同伴",
+            "description": "以批准的当前角色图为准，完整橘子和草莓短裤；无换装要求",
+            "referenceAssetId": "TEST-lulu"
+          },
+          {
+            "id": "lumei",
+            "name": "噜妹",
+            "role": "main",
+            "purpose": "表达感受并求助",
+            "description": "以批准的当前角色图为准，粉色荷叶帽与衣装、盘环状双叶芽饰",
+            "referenceAssetId": "TEST-lumei"
+          }
+        ],
+        "shots": [
+          {
+            "id": "TEST-shot",
+            "order": 1,
+            "characterIds": [
+              "lulu",
+              "lumei"
+            ],
+            "scene": "木质面馆",
+            "appearanceOverrides": {
+              "lumei": "本场不披斗篷"
+            },
+            "action": "本镜主要事件按最终正文",
+            "startState": "噜妹低头看香菜，握筷停在碗边；噜噜在右侧",
+            "endState": "噜妹看向噜噜求助，噜噜侧头关注她，筷子仍在噜妹爪中",
+            "durationSeconds": 5,
+            "transition": "cut",
+            "requestedMode": "reference",
+            "prompts": {
+              "firstFrame": {
+                "original": "离线示例原始表达",
+                "optimized": "噜噜采用自己的完整小橘子头饰、白底草莓短裤；噜妹保留粉色荷叶帽及衣装、盘环状双叶芽饰，本场不披斗篷。在木质面馆同桌而坐，噜妹在画面左侧，噜噜在右侧，面前各有一碗面，噜妹那碗表面香菜清楚可见。噜妹握筷停在碗边、低眼看香菜，嘴角微垂；噜噜侧头看她。固定双人中近景，面碗与双爪可见，暖光、圆润3D材质、背景轻虚化，头饰与衣服不互换，不复刻参考文字覆盖。",
+                "final": "噜噜采用自己的完整小橘子头饰、白底草莓短裤；噜妹保留粉色荷叶帽及衣装、盘环状双叶芽饰，本场不披斗篷。在木质面馆同桌而坐，噜妹在画面左侧，噜噜在右侧，面前各有一碗面，噜妹那碗表面香菜清楚可见。噜妹握筷停在碗边、低眼看香菜，嘴角微垂；噜噜侧头看她。固定双人中近景，面碗与双爪可见，暖光、圆润3D材质、背景轻虚化，头饰与衣服不互换，不复刻参考文字覆盖。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              },
+              "lastFrame": {
+                "original": "离线示例原始表达",
+                "optimized": "只将左侧噜妹的表情和头部姿态调整到求助终态：目光转向右侧噜噜，头部略偏向他，肩膀微收，嘴角轻压；筷子仍握在原来那只前爪，停在面碗上方。噜噜小幅侧头看她。保持两人的脸型、颜色、当前衣装、头饰，保留两碗面和香菜的位置、桌椅、机位、画幅与光线；允许随姿态合理改变衣褶和遮挡，不增加动作阶段。",
+                "final": "只将左侧噜妹的表情和头部姿态调整到求助终态：目光转向右侧噜噜，头部略偏向他，肩膀微收，嘴角轻压；筷子仍握在原来那只前爪，停在面碗上方。噜噜小幅侧头看她。保持两人的脸型、颜色、当前衣装、头饰，保留两碗面和香菜的位置、桌椅、机位、画幅与光线；允许随姿态合理改变衣褶和遮挡，不增加动作阶段。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              },
+              "video": {
+                "original": "离线示例原始表达",
+                "optimized": "延续画面中左侧噜妹、右侧噜噜的当前衣装、头饰与桌面。噜妹先看自己碗上的香菜，握筷动作停住，眼睑稍低、嘴角下压；短暂停顿后缓慢抬眼看向噜噜，头部微偏向他，肩膀稍内收，表情转为犹豫求助。噜噜注意到她的目光，小幅侧头回应。筷子始终由噜妹握持，两碗面留在原位置。固定双人中近景，连续完成这次反应，结尾停在噜妹求助、噜噜关注她的状态。",
+                "final": "延续画面中左侧噜妹、右侧噜噜的当前衣装、头饰与桌面。噜妹先看自己碗上的香菜，握筷动作停住，眼睑稍低、嘴角下压；短暂停顿后缓慢抬眼看向噜噜，头部微偏向他，肩膀稍内收，表情转为犹豫求助。噜噜注意到她的目光，小幅侧头回应。筷子始终由噜妹握持，两碗面留在原位置。固定双人中近景，连续完成这次反应，结尾停在噜妹求助、噜噜关注她的状态。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "label": "面馆首帧视频",
+    "source": "离线人工示例，来自任务包关键帧和分析；TEST资产仅为逻辑夹具，没有实际上传或生成",
+    "kind": "video",
+    "resolvedMode": "first_frame",
+    "before": "噜妹看向噜噜，委屈，动作自然，保持一致。",
+    "project": {
+      "schemaVersion": 1,
+      "id": "TEST-offline",
+      "studioProjectId": "TEST",
+      "accountId": "TEST",
+      "revision": 0,
+      "source": {
+        "kind": "douyin",
+        "url": "https://v.douyin.com/TEST/",
+        "status": "review_required"
+      },
+      "jobs": [],
+      "assets": [
+        {
+          "id": "TEST-lulu",
+          "kind": "character",
+          "characterId": "lulu",
+          "relativePath": "characters/TEST-lulu.png"
+        },
+        {
+          "id": "TEST-lumei",
+          "kind": "character",
+          "characterId": "lumei",
+          "relativePath": "characters/TEST-lumei.png"
+        },
+        {
+          "id": "TEST-first",
+          "kind": "firstFrame",
+          "shotId": "TEST-shot",
+          "relativePath": "shots/TEST-shot/first.png"
+        },
+        {
+          "id": "TEST-last",
+          "kind": "plannedEndImage",
+          "shotId": "TEST-shot",
+          "relativePath": "shots/TEST-shot/last.png"
+        }
+      ],
+      "promptProfile": {
+        "style": "圆润细腻的拟人化3D卡通角色与生活化场景结合；眼睛有高光，布料有自然褶皱，柔和光线，背景保留必要生活细节与适当虚化。以项目明确风格和实际参考为准，不默认改成长毛写实水豚。",
+        "characters": {
+          "lulu": {
+            "identity": "噜噜：浅黄／金黄的大头圆胖水豚，短四肢、小圆耳，宽圆突出的橙色吻部、大眼睛。",
+            "appearance": "未指定且无参考时的默认造型：头顶完整小橘子及短柄，白底红草莓图案短裤。不得与噜妹的帽饰互换；用户换装与实际参考优先。"
+          },
+          "lumei": {
+            "identity": "噜妹：浅黄／金黄的大头圆胖水豚，短四肢、小圆耳，宽圆突出的橙色吻部、高光眼睛。",
+            "appearance": "未指定且无参考时的默认造型：粉色荷叶边软帽及带褶边衣装，帽顶浅橙色扁平盘／环状装饰及双叶绿色嫩芽，不是噜噜的完整小橘子。斗篷仅由当前场景明确指定，不作为默认衣装；用户换装与实际参考优先。"
+          }
+        }
+      },
+      "updatedAt": "2026-10-25T00:00:00.000Z",
+      "plan": {
+        "sourceSummary": "离线样片方法示例",
+        "adaptedStory": "在家得意与面馆求助的反差；文档示例，不是新生成剧情",
+        "characters": [
+          {
+            "id": "lulu",
+            "name": "噜噜",
+            "role": "main",
+            "purpose": "关注同伴",
+            "description": "以批准的当前角色图为准，完整橘子和草莓短裤；无换装要求",
+            "referenceAssetId": "TEST-lulu"
+          },
+          {
+            "id": "lumei",
+            "name": "噜妹",
+            "role": "main",
+            "purpose": "表达感受并求助",
+            "description": "以批准的当前角色图为准，粉色荷叶帽与衣装、盘环状双叶芽饰",
+            "referenceAssetId": "TEST-lumei"
+          }
+        ],
+        "shots": [
+          {
+            "id": "TEST-shot",
+            "order": 1,
+            "characterIds": [
+              "lulu",
+              "lumei"
+            ],
+            "scene": "木质面馆",
+            "appearanceOverrides": {
+              "lumei": "本场不披斗篷"
+            },
+            "action": "本镜主要事件按最终正文",
+            "startState": "噜妹低头看香菜，握筷停在碗边；噜噜在右侧",
+            "endState": "噜妹看向噜噜求助，噜噜侧头关注她，筷子仍在噜妹爪中",
+            "durationSeconds": 5,
+            "transition": "cut",
+            "requestedMode": "first_frame",
+            "prompts": {
+              "firstFrame": {
+                "original": "离线示例原始表达",
+                "optimized": "噜噜采用自己的完整小橘子头饰、白底草莓短裤；噜妹保留粉色荷叶帽及衣装、盘环状双叶芽饰，本场不披斗篷。在木质面馆同桌而坐，噜妹在画面左侧，噜噜在右侧，面前各有一碗面，噜妹那碗表面香菜清楚可见。噜妹握筷停在碗边、低眼看香菜，嘴角微垂；噜噜侧头看她。固定双人中近景，面碗与双爪可见，暖光、圆润3D材质、背景轻虚化，头饰与衣服不互换，不复刻参考文字覆盖。",
+                "final": "噜噜采用自己的完整小橘子头饰、白底草莓短裤；噜妹保留粉色荷叶帽及衣装、盘环状双叶芽饰，本场不披斗篷。在木质面馆同桌而坐，噜妹在画面左侧，噜噜在右侧，面前各有一碗面，噜妹那碗表面香菜清楚可见。噜妹握筷停在碗边、低眼看香菜，嘴角微垂；噜噜侧头看她。固定双人中近景，面碗与双爪可见，暖光、圆润3D材质、背景轻虚化，头饰与衣服不互换，不复刻参考文字覆盖。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              },
+              "lastFrame": {
+                "original": "离线示例原始表达",
+                "optimized": "只将左侧噜妹的表情和头部姿态调整到求助终态：目光转向右侧噜噜，头部略偏向他，肩膀微收，嘴角轻压；筷子仍握在原来那只前爪，停在面碗上方。噜噜小幅侧头看她。保持两人的脸型、颜色、当前衣装、头饰，保留两碗面和香菜的位置、桌椅、机位、画幅与光线；允许随姿态合理改变衣褶和遮挡，不增加动作阶段。",
+                "final": "只将左侧噜妹的表情和头部姿态调整到求助终态：目光转向右侧噜噜，头部略偏向他，肩膀微收，嘴角轻压；筷子仍握在原来那只前爪，停在面碗上方。噜噜小幅侧头看她。保持两人的脸型、颜色、当前衣装、头饰，保留两碗面和香菜的位置、桌椅、机位、画幅与光线；允许随姿态合理改变衣褶和遮挡，不增加动作阶段。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              },
+              "video": {
+                "original": "离线示例原始表达",
+                "optimized": "延续画面中左侧噜妹、右侧噜噜的当前衣装、头饰与桌面。噜妹先看自己碗上的香菜，握筷动作停住，眼睑稍低、嘴角下压；短暂停顿后缓慢抬眼看向噜噜，头部微偏向他，肩膀稍内收，表情转为犹豫求助。噜噜注意到她的目光，小幅侧头回应。筷子始终由噜妹握持，两碗面留在原位置。固定双人中近景，连续完成这次反应，结尾停在噜妹求助、噜噜关注她的状态。",
+                "final": "延续画面中左侧噜妹、右侧噜噜的当前衣装、头饰与桌面。噜妹先看自己碗上的香菜，握筷动作停住，眼睑稍低、嘴角下压；短暂停顿后缓慢抬眼看向噜噜，头部微偏向他，肩膀稍内收，表情转为犹豫求助。噜噜注意到她的目光，小幅侧头回应。筷子始终由噜妹握持，两碗面留在原位置。固定双人中近景，连续完成这次反应，结尾停在噜妹求助、噜噜关注她的状态。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              }
+            }
+          }
+        ]
+      },
+      "production": {
+        "shots": {
+          "TEST-shot": {
+            "firstFrameId": "TEST-first",
+            "plannedEndImageId": "TEST-last"
+          }
+        }
+      }
+    }
+  },
+  {
+    "label": "面馆首尾视频及尾帧编辑",
+    "source": "离线人工示例，来自任务包关键帧和分析；TEST资产仅为逻辑夹具，没有实际上传或生成",
+    "kind": "video",
+    "resolvedMode": "first_last_frame",
+    "before": "噜妹转向噜噜，首尾自然过渡，保持一致。",
+    "project": {
+      "schemaVersion": 1,
+      "id": "TEST-offline",
+      "studioProjectId": "TEST",
+      "accountId": "TEST",
+      "revision": 0,
+      "source": {
+        "kind": "douyin",
+        "url": "https://v.douyin.com/TEST/",
+        "status": "review_required"
+      },
+      "jobs": [],
+      "assets": [
+        {
+          "id": "TEST-lulu",
+          "kind": "character",
+          "characterId": "lulu",
+          "relativePath": "characters/TEST-lulu.png"
+        },
+        {
+          "id": "TEST-lumei",
+          "kind": "character",
+          "characterId": "lumei",
+          "relativePath": "characters/TEST-lumei.png"
+        },
+        {
+          "id": "TEST-first",
+          "kind": "firstFrame",
+          "shotId": "TEST-shot",
+          "relativePath": "shots/TEST-shot/first.png"
+        },
+        {
+          "id": "TEST-last",
+          "kind": "plannedEndImage",
+          "shotId": "TEST-shot",
+          "relativePath": "shots/TEST-shot/last.png"
+        }
+      ],
+      "promptProfile": {
+        "style": "圆润细腻的拟人化3D卡通角色与生活化场景结合；眼睛有高光，布料有自然褶皱，柔和光线，背景保留必要生活细节与适当虚化。以项目明确风格和实际参考为准，不默认改成长毛写实水豚。",
+        "characters": {
+          "lulu": {
+            "identity": "噜噜：浅黄／金黄的大头圆胖水豚，短四肢、小圆耳，宽圆突出的橙色吻部、大眼睛。",
+            "appearance": "未指定且无参考时的默认造型：头顶完整小橘子及短柄，白底红草莓图案短裤。不得与噜妹的帽饰互换；用户换装与实际参考优先。"
+          },
+          "lumei": {
+            "identity": "噜妹：浅黄／金黄的大头圆胖水豚，短四肢、小圆耳，宽圆突出的橙色吻部、高光眼睛。",
+            "appearance": "未指定且无参考时的默认造型：粉色荷叶边软帽及带褶边衣装，帽顶浅橙色扁平盘／环状装饰及双叶绿色嫩芽，不是噜噜的完整小橘子。斗篷仅由当前场景明确指定，不作为默认衣装；用户换装与实际参考优先。"
+          }
+        }
+      },
+      "updatedAt": "2026-10-25T00:00:00.000Z",
+      "plan": {
+        "sourceSummary": "离线样片方法示例",
+        "adaptedStory": "在家得意与面馆求助的反差；文档示例，不是新生成剧情",
+        "characters": [
+          {
+            "id": "lulu",
+            "name": "噜噜",
+            "role": "main",
+            "purpose": "关注同伴",
+            "description": "以批准的当前角色图为准，完整橘子和草莓短裤；无换装要求",
+            "referenceAssetId": "TEST-lulu"
+          },
+          {
+            "id": "lumei",
+            "name": "噜妹",
+            "role": "main",
+            "purpose": "表达感受并求助",
+            "description": "以批准的当前角色图为准，粉色荷叶帽与衣装、盘环状双叶芽饰",
+            "referenceAssetId": "TEST-lumei"
+          }
+        ],
+        "shots": [
+          {
+            "id": "TEST-shot",
+            "order": 1,
+            "characterIds": [
+              "lulu",
+              "lumei"
+            ],
+            "scene": "木质面馆",
+            "appearanceOverrides": {
+              "lumei": "本场不披斗篷"
+            },
+            "action": "本镜主要事件按最终正文",
+            "startState": "噜妹低头看香菜，握筷停在碗边；噜噜在右侧",
+            "endState": "噜妹看向噜噜求助，噜噜侧头关注她，筷子仍在噜妹爪中",
+            "durationSeconds": 5,
+            "transition": "cut",
+            "requestedMode": "first_last_frame",
+            "prompts": {
+              "firstFrame": {
+                "original": "离线示例原始表达",
+                "optimized": "噜噜采用自己的完整小橘子头饰、白底草莓短裤；噜妹保留粉色荷叶帽及衣装、盘环状双叶芽饰，本场不披斗篷。在木质面馆同桌而坐，噜妹在画面左侧，噜噜在右侧，面前各有一碗面，噜妹那碗表面香菜清楚可见。噜妹握筷停在碗边、低眼看香菜，嘴角微垂；噜噜侧头看她。固定双人中近景，面碗与双爪可见，暖光、圆润3D材质、背景轻虚化，头饰与衣服不互换，不复刻参考文字覆盖。",
+                "final": "噜噜采用自己的完整小橘子头饰、白底草莓短裤；噜妹保留粉色荷叶帽及衣装、盘环状双叶芽饰，本场不披斗篷。在木质面馆同桌而坐，噜妹在画面左侧，噜噜在右侧，面前各有一碗面，噜妹那碗表面香菜清楚可见。噜妹握筷停在碗边、低眼看香菜，嘴角微垂；噜噜侧头看她。固定双人中近景，面碗与双爪可见，暖光、圆润3D材质、背景轻虚化，头饰与衣服不互换，不复刻参考文字覆盖。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              },
+              "lastFrame": {
+                "original": "离线示例原始表达",
+                "optimized": "只将左侧噜妹的表情和头部姿态调整到求助终态：目光转向右侧噜噜，头部略偏向他，肩膀微收，嘴角轻压；筷子仍握在原来那只前爪，停在面碗上方。噜噜小幅侧头看她。保持两人的脸型、颜色、当前衣装、头饰，保留两碗面和香菜的位置、桌椅、机位、画幅与光线；允许随姿态合理改变衣褶和遮挡，不增加动作阶段。",
+                "final": "只将左侧噜妹的表情和头部姿态调整到求助终态：目光转向右侧噜噜，头部略偏向他，肩膀微收，嘴角轻压；筷子仍握在原来那只前爪，停在面碗上方。噜噜小幅侧头看她。保持两人的脸型、颜色、当前衣装、头饰，保留两碗面和香菜的位置、桌椅、机位、画幅与光线；允许随姿态合理改变衣褶和遮挡，不增加动作阶段。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              },
+              "video": {
+                "original": "离线示例原始表达",
+                "optimized": "从噜妹低头看香菜、握筷停在碗边的起点开始，连续表现她转向噜噜求助。先让握筷动作轻轻停顿，眼睑和嘴角显出委屈；随后缓慢转动头部和目光朝向噜噜，肩膀微收。噜噜感受到她的目光后小幅侧头，视线落在她脸上。结尾收敛到噜妹看向噜噜、筷子仍在原爪中以及噜噜关注她的目标姿态，稍作停留。保持身份、当前衣装、头饰、面碗和桌椅一致，固定双人中近景，不额外切镜、换爪或移动面碗。",
+                "final": "从噜妹低头看香菜、握筷停在碗边的起点开始，连续表现她转向噜噜求助。先让握筷动作轻轻停顿，眼睑和嘴角显出委屈；随后缓慢转动头部和目光朝向噜噜，肩膀微收。噜噜感受到她的目光后小幅侧头，视线落在她脸上。结尾收敛到噜妹看向噜噜、筷子仍在原爪中以及噜噜关注她的目标姿态，稍作停留。保持身份、当前衣装、头饰、面碗和桌椅一致，固定双人中近景，不额外切镜、换爪或移动面碗。",
+                "edited": true,
+                "rulesVersion": "petstory-prompt-quality-v2"
+              }
+            }
+          }
+        ]
+      },
+      "production": {
+        "shots": {
+          "TEST-shot": {
+            "firstFrameId": "TEST-first",
+            "plannedEndImageId": "TEST-last"
+          }
+        }
+      }
+    }
+  }
+]

@@ -11,6 +11,28 @@ import type { ElectronAPI, Account, AccountAvailability, AccountPlatform, Task, 
 
 const electronAPI = {
   petstory: {
+    prepareRuntime: (id: string, revision: number, kind: import('@doubao-studio/contracts').PetStoryChatJob['kind'], target?: import('@doubao-studio/contracts').PetStoryRuntimeTarget): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:prepareRuntime', { id, revision, kind, target }),
+    adoptPlanCandidate: (id: string, revision: number, jobId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:adoptPlanCandidate', { id, revision, jobId }),
+    adoptAssetsCandidate: (id: string, revision: number, jobId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:adoptAssetsCandidate', { id, revision, jobId }),
+    adoptPromptCandidate: (id: string, revision: number, jobId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:adoptPromptCandidate', { id, revision, jobId }),
+    saveOriginalStory: (id: string, revision: number, text: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:saveOriginalStory', { id, revision, text }),
+    linkExistingMedia: (id: string, revision: number, shotId: string, kind: import('@doubao-studio/contracts').PetStoryPromptKind, taskId: string, artifactId?: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:linkExistingMedia', { id, revision, shotId, kind, taskId, artifactId }),
+    listExistingMediaCandidates: (id: string, shotId: string, kind: import('@doubao-studio/contracts').PetStoryPromptKind): Promise<{ success: boolean; candidates?: import('@doubao-studio/contracts').PetStoryMediaCandidate[]; error?: string }> => ipcRenderer.invoke('petstory:listExistingMediaCandidates', { id, shotId, kind }),
+    saveShotPrompt: (id: string, revision: number, shotId: string, kind: import('@doubao-studio/contracts').PetStoryPromptKind, final: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:saveShotPrompt', { id, revision, shotId, kind, final }),
+    generateShotMedia: (id: string, revision: number, shotId: string, kind: import('@doubao-studio/contracts').PetStoryPromptKind, capability: import('@doubao-studio/contracts').PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:generateShotMedia', { id, revision, shotId, kind, capability, fallbacks }),
+    readMedia: (id: string, assetId: string): Promise<{ success: boolean; data?: string; mimeType?: string; error?: string }> => ipcRenderer.invoke('petstory:readMedia', { id, assetId }),
+    exportPrompts: (id: string, revision: number): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:exportPrompts', { id, revision }),
+    confirmStory: (id: string, revision: number): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:confirmStory', { id, revision }),
+    saveMaterialPrompt: (id: string, revision: number, materialId: string, final: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:saveMaterialPrompt', { id, revision, materialId, final }),
+    addMaterialImage: (id: string, revision: number, materialId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:addMaterialImage', { id, revision, materialId }),
+    selectMaterialImage: (id: string, revision: number, materialId: string, assetId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:selectMaterialImage', { id, revision, materialId, assetId }),
+    approveMaterials: (id: string, revision: number, selections: { materialId: string; assetId: string }[]): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:approveMaterials', { id, revision, selections }),
+    generateMaterials: (id: string, revision: number, materialIds: string[], capability: import('@doubao-studio/contracts').PetStoryCapability): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:generateMaterials', { id, revision, materialIds, capability }),
+    recordPageBindings: (id: string, taskId: string, runId: string, bindings: import('@doubao-studio/contracts').PetStoryPageBinding[]): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:recordPageBindings', { id, taskId, runId, bindings }),
+    bindSharedReference: (id: string, revision: number, characterId: string, assetId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:bindSharedReference', { id, revision, characterId, assetId }),
+    previewPrompt: (id: string, shotId: string, kind: import('@doubao-studio/contracts').PetStoryPromptKind, resolvedMode?: import('@doubao-studio/contracts').PetStoryResolvedMode): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:previewPrompt', { id, shotId, kind, resolvedMode }),
+    savePromptProfile: (id: string, revision: number, profile: import('@doubao-studio/contracts').PetStoryPromptProfile): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:savePromptProfile', { id, revision, profile }),
+
     selectProductionImage: (id: string, stepId: string, artifactId: string): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:selectProductionImage', { id, stepId, artifactId }),
     previewProduction: (id: string, capability: import('@doubao-studio/contracts').PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:previewProduction', { id, capability, fallbacks }),
     approveProduction: (id: string, revision: number, capability: import('@doubao-studio/contracts').PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:approveProduction', { id, revision, capability, fallbacks }),
@@ -27,7 +49,7 @@ const electronAPI = {
     addSceneReference: (id: string, shotId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:addSceneReference', { id, shotId }),
     addReference: (id: string, characterId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:addReference', { id, characterId }),
     savePlan: (id: string, revision: number, plan: import('@doubao-studio/contracts').PetStoryPlan): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:savePlan', { id, revision, plan }),
-    prepareChat: (id: string, prompt: string, kind: import('@doubao-studio/contracts').PetStoryChatJob['kind'], parentJobId?: string, shotId?: string, promptKind?: import('@doubao-studio/contracts').PetStoryPromptKind): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:prepareChat', { id, prompt, kind, parentJobId, shotId, promptKind }),
+    prepareChat: (id: string, prompt: string, kind: import('@doubao-studio/contracts').PetStoryChatJob['kind'], parentJobId?: string, shotId?: string, promptKind?: import('@doubao-studio/contracts').PetStoryPromptKind, materialId?: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:prepareChat', { id, prompt, kind, parentJobId, shotId, promptKind, materialId }),
     bindRun: (id: string, jobId: string, runId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:bindRun', { id, jobId, runId }),
     retryUnsubmitted: (id: string, jobId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:retryUnsubmitted', { id, jobId }),
     collectChat: (id: string, jobId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:collectChat', { id, jobId }),
@@ -86,8 +108,8 @@ const electronAPI = {
   // ---- 任务调度 ----
   tasks: {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
-    add: (prompts: string[], mode?: GenerationMode, videoConfig?: any, attachments?: string[], audioAttachment?: string, projectId?: string): Promise<{ success: boolean; tasks?: Task[]; error?: string }> =>
-      ipcRenderer.invoke('tasks:add', { prompts, mode, videoConfig, attachments, audioAttachment, projectId }),
+    add: (prompts: string[], mode?: GenerationMode, videoConfig?: any, attachments?: string[], audioAttachment?: string, projectId?: string, promptReadback?: Task['promptReadback']): Promise<{ success: boolean; tasks?: Task[]; error?: string }> =>
+      ipcRenderer.invoke('tasks:add', { prompts, mode, videoConfig, attachments, audioAttachment, projectId, promptReadback }),
     assign: (taskId: string, accountId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>
       ipcRenderer.invoke('tasks:assign', { taskId, accountId }),
     updateStatus: (

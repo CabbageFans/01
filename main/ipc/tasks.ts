@@ -512,8 +512,18 @@ export async function downloadTaskOutputs(params: TaskDownloadOutputsParams): Pr
       }
 }
 export function listTaskDownloads(): DownloadJob[] { return loadDownloadJobs(); }
-export function bindPetStoryTask(taskId: string, binding: NonNullable<Task['petstory']>): Task {
-  const result = taskService.bindPetStory(taskId, binding);
+export function revisePetStoryHeldPrompt(taskId: string, prompt: string): Task {
+  const result = taskService.reviseHeldPrompt(taskId, prompt);
+  if (!result.success) throw new Error(result.error);
+  return result.data;
+}
+export function bindPetStoryPageInput(taskId: string, runId: string, prompt: string): Task {
+  const result = taskService.bindPetStoryPageInput(taskId, runId, prompt);
+  if (!result.success) throw new Error(result.error);
+  return result.data;
+}
+export function bindPetStoryTask(taskId: string, binding: NonNullable<Task['petstory']>, compiledPrompt?: string): Task {
+  const result = taskService.bindPetStory(taskId, binding, compiledPrompt);
   if (!result.success) throw new Error(result.error);
   return result.data;
 }

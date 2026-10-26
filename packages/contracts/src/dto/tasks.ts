@@ -45,6 +45,7 @@ export interface TaskAddResult {
 
 export interface TaskAddParams {
   petstory?: Task['petstory'];
+  promptReadback?: Task['promptReadback'];
   prompts: string[];
   mode?: GenerationMode;
   videoConfig?: Task['videoConfig'];

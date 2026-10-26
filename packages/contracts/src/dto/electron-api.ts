@@ -134,7 +134,8 @@ export interface ElectronAPI {
       videoConfig?: Task['videoConfig'],
       attachments?: string[],
       audioAttachment?: string,
-      projectId?: string
+      projectId?: string,
+      promptReadback?: Task['promptReadback']
     ) => Promise<TaskAddResult>;
     assign: (taskId: string, accountId: string) => Promise<TaskResult>;
     updateStatus: (

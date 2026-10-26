@@ -26,6 +26,7 @@ import type { VideoControlReadinessResult } from './videoControlReadiness';
 import { inspectChatReadback, readChatPage } from './chatReadback';
 import { isSameDoubaoConversation } from './taskConversationLocator';
 import { uploadChatImages } from './chatAttachments';
+import { appendExactComposerText, insertExactComposerText, readExactComposerText } from './exactComposer';
 import { petStoryComposerProbe } from './petstoryControls';
 import type { ChatPageSnapshot } from './chatReadback';
 
@@ -38,6 +39,9 @@ export interface WebviewHandle {
   getURL(): string;
   sendInputEvent?(event: ElectronInputEvent): void | Promise<void>;
   focus?(): void;
+  getBoundingClientRect?(): { left: number; top: number; right: number; bottom: number; width: number; height: number };
+  contains?(node: Node | null): boolean;
+  readonly isConnected?: boolean;
 }
 
 /** Electron webview sendInputEvent 的键盘事件类型 */
@@ -165,9 +169,19 @@ export function canUseNativePerCharacterInput(prompt: string): boolean {
 export async function injectPrompt(
   webview: WebviewHandle,
   prompt: string,
-  maxRetries: number = 3
+  maxRetries: number = 3,
+  strictParagraphs: boolean = false,
 ): Promise<boolean> {
   console.log(`[doubaoBridge] injectPrompt 提示词长度=${prompt.length}`);
+
+  if (strictParagraphs) {
+    // 精确多段落走编辑器原生插入；textContent + Fiber 路径会把换行折成空格。
+    // 不允许该兼容路径以“空白等值”冒充全文相同，也不模拟 Enter。
+    const inserted = await safeExecuteJS<boolean>(webview, `(${insertExactComposerText.toString()})(${JSON.stringify(prompt)})`, 5000, 'insertExactComposerText');
+    if (!inserted) return false;
+    await sleep(100);
+    return verifyPromptReadyForSubmission(webview, prompt, true);
+  }
 
   // 注入前先检查按钮初始状态
   const initialBtnReady = await checkSendButtonReady(webview);
@@ -281,13 +295,16 @@ export async function injectPrompt(
 export async function verifyPromptReadyForSubmission(
   webview: WebviewHandle,
   prompt: string,
+  strictParagraphs: boolean = false,
 ): Promise<boolean> {
-  const expectedNormalized = JSON.stringify(normalizePromptForComposer(prompt));
+  const expectedNormalized = JSON.stringify(strictParagraphs ? prompt.replace(/\r\n?/g, '\n') : normalizePromptForComposer(prompt));
   const code = `
     (function() {
       try {
         var expected = ${expectedNormalized};
+        var readExactText = ${readExactComposerText.toString()};
         var normalize = function(value) {
+          if (${strictParagraphs}) return String(value || '').replace(/\\r\\n?/g, '\\n');
           return String(value || '')
             .replace(/\u00a0/g, ' ')
             .replace(/[\u200b-\u200d\ufeff]/g, '')
@@ -295,18 +312,26 @@ export async function verifyPromptReadyForSubmission(
             .trim();
         };
         var editors = document.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]');
+        var eligibleCount = 0;
+        var exactCount = 0;
         for (var i = 0; i < editors.length; i++) {
           var editor = editors[i];
           if (editor.offsetParent === null) continue;
           if (editor.disabled || editor.getAttribute('aria-disabled') === 'true') continue;
+          var style = typeof window.getComputedStyle === 'function' ? window.getComputedStyle(editor) : null;
+          if (style && (style.visibility === 'hidden' || style.display === 'none')) continue;
+          if (editor.closest && editor.closest('[aria-hidden="true"]')) continue;
           var rect = editor.getBoundingClientRect();
           if (rect.width < 50 || rect.height < 20 || rect.top < 0 || rect.top > window.innerHeight) continue;
-          var actual = editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT'
-            ? editor.value
-            : (editor.innerText || editor.textContent || '');
-          if (normalize(actual) === expected) return true;
+          eligibleCount++;
+          var actual = ${strictParagraphs} ? readExactText(editor) : editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT'
+            ? editor.value : (editor.innerText || editor.textContent || '');
+          if (normalize(actual) === expected) {
+            if (!${strictParagraphs}) return true;
+            exactCount++;
+          }
         }
-        return false;
+        return ${strictParagraphs} && eligibleCount === 1 && exactCount === 1;
       } catch(e) {
         return false;
       }
@@ -935,6 +960,8 @@ export interface SendButtonTarget {
   ok: boolean;
   position?: string;
   method?: string;
+  geometry?: string;
+  focused?: boolean;
 }
 
 /**
@@ -961,12 +988,17 @@ export async function findSendButtonTarget(webview: WebviewHandle): Promise<Send
         var finish = function(button, method) {
           if (!enabled(button)) return { ok: false };
           var rect = button.getBoundingClientRect();
-          return { ok: true, method: method,
-            position: Math.round(rect.left + rect.width / 2) + ',' + Math.round(rect.top + rect.height / 2) };
+          var x = Math.round(rect.left + rect.width / 2);
+          var y = Math.round(rect.top + rect.height / 2);
+          if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return { ok: false };
+          var hit = document.elementFromPoint(x, y);
+          if (!hit || !(hit === button || button.contains(hit))) return { ok: false };
+          return { ok: true, method: method, position: x + ',' + y,
+            geometry: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height), window.innerWidth, window.innerHeight].join(','),
+            focused: document.hasFocus() && (document.activeElement === editor || editor.contains(document.activeElement)) };
         };
 
         var exact = document.querySelector('#flow-end-msg-send');
-        if (enabled(exact)) return finish(exact, 'exact-id');
 
         var editors = document.querySelectorAll('textarea, [contenteditable="true"]');
         var editor = null;
@@ -977,6 +1009,8 @@ export async function findSendButtonTarget(webview: WebviewHandle): Promise<Send
         var editorRect = editor.getBoundingClientRect();
         var root = editor.parentElement;
         for (var depth = 0; depth < 12 && root; depth++, root = root.parentElement) {
+          if (root === document.body || root === document.documentElement) break;
+          if (enabled(exact) && root.contains(exact)) return finish(exact, 'exact-id');
           var controls = root.querySelectorAll('button, [role="button"], [data-testid], [aria-label], [title]');
           var matches = [];
           for (var j = 0; j < controls.length; j++) {
@@ -992,7 +1026,7 @@ export async function findSendButtonTarget(webview: WebviewHandle): Promise<Send
             var nearVertical = rect.top <= editorRect.bottom + 80 && rect.bottom >= editorRect.top - 40;
             var square = rect.width >= 24 && rect.width <= 64 && rect.height >= 24 && rect.height <= 64;
             var semantic = /发送|提交|生成|send|submit|generate/.test(descriptor);
-            var rgb = (window.getComputedStyle(control).backgroundColor || '').match(/\d+/g);
+            var rgb = (window.getComputedStyle(control).backgroundColor || '').match(/\\d+/g);
             var accent = !!(rgb && rgb.length >= 3 && Number(rgb[2]) > Number(rgb[0]) && Number(rgb[2]) > Number(rgb[1]) && Number(rgb[2]) > 120);
             if (nearRight && nearVertical && square && (semantic || accent)) {
               matches.push({ el: control, semantic: semantic, accent: accent });
@@ -2102,28 +2136,105 @@ export async function injectGenerationMonitor(webview: WebviewHandle): Promise<b
   }
 }
 
-/**
- * 以 Electron 原生鼠标事件点击当前豆包页的发送按钮。
- * 豆包的 React 控件在部分账号页会忽略脚本 click()，因此任务自动化优先使用
- * 与人工点击等价的 webview 输入事件；找不到权威按钮时才回退到旧兼容路径。
- */
-export async function submitPromptWithNativeClick(webview: WebviewHandle): Promise<boolean> {
-  if (typeof webview.sendInputEvent !== 'function') return false;
+function nativeInputHostVisible(webview: WebviewHandle): boolean {
+  if (!webview.getBoundingClientRect || webview.isConnected === false || typeof document === 'undefined') return false;
+  const rect = webview.getBoundingClientRect();
+  const x = rect.left + rect.width / 2; const y = rect.top + rect.height / 2;
+  if (rect.width <= 0 || rect.height <= 0 || x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return false;
+  const hit = document.elementFromPoint(x, y);
+  return hit === (webview as unknown as Element) || !!webview.contains?.(hit);
+}
+
+/** 只准备焦点并回读两帧稳定命中，不派发任何提交事件；调用方须在提交意图前执行。 */
+export async function prepareNativeSubmission(webview: WebviewHandle): Promise<SendButtonTarget> {
   try {
     const prepare = typeof window !== 'undefined' ? window.electronAPI?.system?.prepareNativeInput : undefined;
-    // Electron 要求 BrowserWindow 先获得 OS 焦点；不能依赖第一次发送点击来激活它。
-    if (!prepare || !await prepare()) return false;
+    if (!prepare || !await prepare() || !nativeInputHostVisible(webview)) return { ok: false };
     webview.focus?.();
-    const target = await findSendButtonTarget(webview);
-    // 只认当前页面的权威发送按钮。找不到时 fail-closed，不猜测其它控件。
+    const focused = await safeExecuteJS<boolean>(webview, `
+      (async function() {
+        var editors = document.querySelectorAll('textarea, [contenteditable="true"]');
+        var editor = Array.from(editors).find(function(el) {
+          var rect = el.getBoundingClientRect(); var style = window.getComputedStyle(el);
+          return el.offsetParent !== null && !el.disabled && style.display !== 'none' && style.visibility !== 'hidden' &&
+            style.pointerEvents !== 'none' && rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 &&
+            rect.left < window.innerWidth && rect.top < window.innerHeight;
+        });
+        if (!editor) return false;
+        editor.focus();
+        await new Promise(function(resolve) { requestAnimationFrame(resolve); });
+        return document.hasFocus() && (document.activeElement === editor || editor.contains(document.activeElement));
+      })()
+    `, 3000, 'focusNativeSubmissionEditor');
+    if (!focused) return { ok: false };
+    let previous: SendButtonTarget | undefined;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await safeExecuteJS<boolean>(webview, 'new Promise(function(resolve) { requestAnimationFrame(function() { resolve(true); }); })', 3000, 'nativeSubmissionFrame');
+      if (!nativeInputHostVisible(webview)) return { ok: false };
+      const target = await findSendButtonTarget(webview);
+      if (target.ok && target.focused && target.geometry && target.position && previous?.geometry === target.geometry && previous.position === target.position && previous.method === target.method) return target;
+      previous = target.ok && target.focused ? target : undefined;
+    }
+  } catch { /* 焦点或只读探针不确定时不记录发送成功。 */ }
+  return { ok: false };
+}
+
+/** 普通 Chat 使用页内命中后的单次完整事件序列，避免嵌套 guest 的原生坐标偏移。 */
+async function dispatchVerifiedGuestClick(webview: WebviewHandle, target: SendButtonTarget): Promise<boolean> {
+  return safeExecuteJS<boolean>(webview, `
+    (function() {
+      var x = ${Number(target.position?.split(',')[0])}; var y = ${Number(target.position?.split(',')[1])};
+      if (!document.hasFocus()) return false;
+      var hit = document.elementFromPoint(x, y);
+      var expectedGeometry = ${JSON.stringify(target.geometry)};
+      var geometryOf = function(el) {
+        var r = el.getBoundingClientRect();
+        return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), window.innerWidth, window.innerHeight].join(',');
+      };
+      var button = ${JSON.stringify(target.method)} === 'exact-id' ? document.querySelector('#flow-end-msg-send') : hit;
+      if (${JSON.stringify(target.method)} !== 'exact-id') {
+        while (button && button !== document.body && button !== document.documentElement) {
+          if (button.matches('button, [role="button"], [data-testid], [aria-label], [title]') && geometryOf(button) === expectedGeometry) break;
+          button = button.parentElement;
+        }
+      }
+      if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true' || button.getAttribute('data-disabled') === 'true') return false;
+      if (geometryOf(button) !== expectedGeometry || !(hit === button || button.contains(hit))) return false;
+      var editor = Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).find(function(el) { return el === document.activeElement || el.contains(document.activeElement); });
+      var composer = editor && editor.parentElement; var sameComposer = false;
+      for (var depth = 0; depth < 12 && composer && composer !== document.body && composer !== document.documentElement; depth++, composer = composer.parentElement) {
+        if (composer.contains(button)) { sameComposer = true; break; }
+      }
+      if (!sameComposer) return false;
+      var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+      try { button.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
+      button.dispatchEvent(new MouseEvent('mousedown', opts));
+      try { button.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
+      button.dispatchEvent(new MouseEvent('mouseup', opts));
+      button.dispatchEvent(new MouseEvent('click', opts));
+      return true;
+    })()
+  `, 5000, 'dispatchVerifiedGuestSubmission');
+}
+
+/** 一次运行只选择一种首次点击策略；返回值只表示事件派发，成功以原消息全文回执为准。 */
+export async function submitPromptWithNativeClick(webview: WebviewHandle, strategy: 'native' | 'guest' = 'native'): Promise<boolean> {
+  if (typeof webview.sendInputEvent !== 'function') return false;
+  try {
+    const target = await prepareNativeSubmission(webview);
     if (!target.ok || !target.position) return false;
+    if (strategy === 'guest') {
+      const dispatched = await dispatchVerifiedGuestClick(webview, target);
+      if (dispatched) console.log('[doubaoBridge] 已派发一次可见发送控件 pointer/mouse 事件，等待原消息回执');
+      return dispatched;
+    }
     const [x, y] = target.position.split(',').map(Number);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
     await webview.sendInputEvent({ type: 'mouseMove', x, y });
     await webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
     await sleep(35);
     await webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
-    console.log('[doubaoBridge] submitPrompt 成功, 方法: native-click');
+    console.log('[doubaoBridge] 已派发一次原生发送鼠标事件，等待原消息回执');
     return true;
   } catch (error: unknown) {
     // 原生事件可能已经部分送达；此处回退会形成第二次外部副作用。
@@ -4973,6 +5084,71 @@ export interface NewConversationResult {
   reason?: string;
 }
 
+/** 仅使用当前输入区的已知技能退出控件；普通 Chat 不得继承上次媒体创作模式。 */
+async function plainChatComposerProbe(allowExit: boolean, timeoutMs: number): Promise<NewConversationResult> {
+  const visible = (element: Element | null): boolean => {
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    for (let node: Element | null = element; node; node = node.parentElement) {
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || node.getAttribute('aria-hidden') === 'true') return false;
+    }
+    return true;
+  };
+  const read = (): { ready: boolean; reason: string; skill?: HTMLElement } => {
+    const root = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface') || document.querySelector('[data-testid="guidance-input-surface"]');
+    if (!root || !visible(root)) return { ready: false, reason: 'CHAT_COMPOSER_UNRECOGNIZED' };
+    const editor = Array.from(root.querySelectorAll('textarea,[contenteditable="true"],[contenteditable=""]')).find((element): boolean => visible(element) && !element.hasAttribute('disabled'));
+    if (!editor) return { ready: false, reason: 'EDITOR_NOT_FOUND' };
+    if (allowExit) {
+      const draft = editor.tagName === 'TEXTAREA' ? (editor as HTMLTextAreaElement).value : editor.textContent;
+      const attachments = Array.from(root.querySelectorAll('[data-testid="mdbox_image"],[data-testid="image-upload-item"],[data-testid="reference-image"]')).some(visible);
+      const selectedFiles = Array.from(root.querySelectorAll<HTMLInputElement>('input[type="file"]')).some((input): boolean => !!input.files?.length);
+      const pending = Array.from(root.querySelectorAll('[aria-busy="true"],[data-status="uploading"],[class*="uploading"],[class*="progress"]')).some(visible);
+      if (draft?.trim() || attachments || selectedFiles || pending) return { ready: false, reason: 'SESSION_NOT_EMPTY' };
+    }
+    const skills = Array.from(root.querySelectorAll<HTMLElement>('[data-testid="skill_input_exit_button"]')).filter((element): boolean => visible(element) && !element.parentElement?.closest('[data-testid="skill_input_exit_button"]'));
+    if (skills.length > 1) return { ready: false, reason: 'CHAT_MODE_UNVERIFIED' };
+    if (skills.length) {
+      const label = (skills[0].innerText || '').trim();
+      return /^(图像生成|视频生成)$/.test(label) ? { ready: false, reason: 'CHAT_MEDIA_SKILL_ACTIVE', skill: skills[0] } : { ready: false, reason: 'CHAT_MODE_UNVERIFIED' };
+    }
+    const media = Array.from(root.querySelectorAll('[data-input-engine-actionbar-control-key="video-model"],[data-input-engine-actionbar-control-key="image-model"],[data-creation-params-panel-id]')).some(visible);
+    const mediaMode = Array.from(root.querySelectorAll('[data-valid-btn="mode-select-action-btn"]')).some((element): boolean => visible(element) && /图像生成|图片生成|视频生成|音乐生成/.test(element.textContent || ''));
+    return media || mediaMode ? { ready: false, reason: 'CHAT_MEDIA_CONTROLS_ACTIVE' } : { ready: true, reason: 'PLAIN_CHAT_READY' };
+  };
+  const activate = (element: HTMLElement): void => {
+    const rect = element.getBoundingClientRect();
+    const options: MouseEventInit = { bubbles: true, cancelable: true, view: window, clientX: Math.round(rect.left + rect.width / 2), clientY: Math.round(rect.top + rect.height / 2), button: 0 };
+    try { element.dispatchEvent(new PointerEvent('pointerdown', { ...options, pointerId: 1, pointerType: 'mouse', isPrimary: true })); } catch { /* 旧页面无 PointerEvent 时仍保留鼠标事件序列。 */ }
+    element.dispatchEvent(new MouseEvent('mousedown', options));
+    try { element.dispatchEvent(new PointerEvent('pointerup', { ...options, pointerId: 1, pointerType: 'mouse', isPrimary: true })); } catch { /* 同上。 */ }
+    element.dispatchEvent(new MouseEvent('mouseup', options));
+    element.dispatchEvent(new MouseEvent('click', options));
+  };
+  let state = read();
+  if (state.skill && allowExit) { activate(state.skill); state = read(); }
+  else if (!state.ready) return { ok: false, reason: state.reason };
+  const deadline = Date.now() + timeoutMs;
+  let stable = 0;
+  while (Date.now() < deadline) {
+    state = read();
+    stable = state.ready ? stable + 1 : 0;
+    if (stable >= 2) return { ok: true };
+    await new Promise<void>((resolve): void => { setTimeout(resolve, 100); });
+  }
+  return { ok: false, reason: state.reason };
+}
+
+/** 开始前可退出一次已知媒体技能；上传和提交前只读回验，绝不在有正文时切换模式。 */
+export async function ensurePlainChatComposer(webview: WebviewHandle, allowExit: boolean = false, timeoutMs: number = 3000): Promise<NewConversationResult> {
+  try {
+    const result = await safeExecuteJS<NewConversationResult>(webview, `(${plainChatComposerProbe.toString()})(${allowExit},${timeoutMs})`, timeoutMs + 2000, 'ensurePlainChatComposer');
+    return result?.ok === true ? { ok: true } : { ok: false, reason: result?.reason || 'CHAT_MODE_UNVERIFIED' };
+  } catch { return { ok: false, reason: 'CHAT_MODE_UNVERIFIED' }; }
+}
+
 /**
  * 创建新对话（P0-1 状态机）。
  *
@@ -5050,6 +5226,10 @@ export async function startNewConversation(
       // 导航后页面恢复了旧会话：不点击任何按钮，按失败处理并提示。
       console.warn('[doubaoBridge] 新对话页面包含已有用户内容，拒绝继续');
       return { ok: false, reason: 'SESSION_NOT_EMPTY' };
+    }
+    if (reuseEmptyChatRoot) {
+      const plainChat = await ensurePlainChatComposer(webview, true);
+      if (!plainChat.ok) return plainChat;
     }
     await new Promise((resolve) => setTimeout(resolve, 800));
     console.log('[doubaoBridge] 新对话已就绪（页面状态机验证通过）');
@@ -6257,25 +6437,143 @@ export function checkPetStoryPageGuard(snapshot: import('./petstoryControls').Pe
   const config = guard.capability.videoConfig;
   if (snapshot.duration !== guard.durationSeconds || !config || snapshot.aspectRatio !== config.aspectRatio || snapshot.model !== getVideoModelUiLabel(config.model)) throw new PetStoryControlError('当前模型／时长／比例回读与计划不一致，零提交');
 }
-export async function uploadPetStoryImages(webview: WebviewHandle, files: Array<{ name: string; base64: string; mime: string }>, mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image', signal: AbortSignal): Promise<void> {
+export interface PetStoryUploadReceipt {
+  fileIndex: number;
+  key: string;
+  label: string;
+  slot: 'reference' | 'first_frame' | 'last_frame';
+  reference: 'plain' | 'mention' | 'slot';
+  fileSha256?: string;
+  targetId?: string;
+}
+function petStoryUploadSlot(mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image', index: number): PetStoryUploadReceipt['slot'] {
+  return mode === 'first_last_frame' ? index === 0 ? 'first_frame' : 'last_frame' : mode === 'first_frame' ? 'first_frame' : 'reference';
+}
+async function checkedUploadFiles(files: Array<{ name: string; base64: string; mime: string }>, mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image', expectedSha256s?: string[]): Promise<{ fileBytes: Uint8Array<ArrayBuffer>[]; fileDigests: string[] }> {
+  if ((mode === 'first_last_frame' && files.length !== 2) || (mode === 'first_frame' && files.length !== 1)) throw new PetStoryControlError('专用首尾模式附件数量冲突');
+  if (expectedSha256s && expectedSha256s.length !== files.length) throw new PetStoryControlError('文件摘要清单与实际附件数量不符');
+  const fileBytes = files.map((file): Uint8Array<ArrayBuffer> => Uint8Array.from(atob(file.base64), (c: string): number => c.charCodeAt(0)));
+  const fileDigests = await Promise.all(fileBytes.map(async (bytes): Promise<string> => {
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest)).map((b): string => b.toString(16).padStart(2, '0')).join('');
+  }));
+  if (expectedSha256s && fileDigests.some((sha, i): boolean => sha !== expectedSha256s[i])) throw new PetStoryControlError('将要上传的文件字节与确认素材摘要不符，零上传');
+  return { fileBytes, fileDigests };
+}
+export async function uploadPetStoryImages(webview: WebviewHandle, files: Array<{ name: string; base64: string; mime: string }>, mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image', signal: AbortSignal, expectedSha256s?: string[]): Promise<PetStoryUploadReceipt[]> {
+  const { fileBytes, fileDigests } = await checkedUploadFiles(files, mode, expectedSha256s);
+  const receipts: PetStoryUploadReceipt[] = [];
   for (let index = 0; index < files.length; index++) {
-    const slot = mode === 'first_last_frame' ? index === 0 ? 'first_frame' : 'last_frame' : mode === 'first_frame' ? 'first_frame' : 'reference';
+    const slot = petStoryUploadSlot(mode, index);
+    const bytes = fileBytes[index]; const fileSha256 = fileDigests[index];
     const before = await readPetStoryComposer(webview, { slot });
     const expected = slot === 'reference' ? index : 0;
     if (signal.aborted || before.count !== expected || before.pending) throw new PetStoryControlError('输入区已有不明素材或上传未就绪，停止且不追加');
-    if (!(await readPetStoryComposer(webview, { slot, file: files[index] })).uploaded) throw new PetStoryControlError('对应素材槽位无法明确绑定，代码尚未适配');
-    let stable = 0;
+    const uploaded = await readPetStoryComposer(webview, { slot, file: files[index] });
+    if (!uploaded.uploaded || !uploaded.uploadedFile || uploaded.uploadedFile.name !== files[index].name || uploaded.uploadedFile.bytes !== bytes.length || uploaded.uploadedFile.mime !== files[index].mime) throw new PetStoryControlError('对应槽位实际文件回读不符，未提交');
+    let stable = 0; let stableKey = ''; let completed: import('./petstoryControls').PetStoryComposerSnapshot | undefined;
     const start = Date.now();
     while (Date.now() - start < 180_000 && stable < 3) {
       if (signal.aborted) throw new DOMException('任务已暂停', 'AbortError');
       await sleep(500);
-      const current = await readPetStoryComposer(webview, { slot });
-      stable = current.count === expected + 1 && !current.pending ? stable + 1 : 0;
+      const current = await readPetStoryComposer(webview, { slot, wakePreviews: true });
+      const key = JSON.stringify(current.previews || []);
+      stable = current.count === expected + 1 && !current.pending && key === stableKey ? stable + 1 : 0;
+      stableKey = key; completed = current;
     }
     if (stable < 3) throw new PetStoryControlError('实际上传图片未连续稳定回读，停止且不发送');
+    const beforeKeys = before.previews?.map((p): string => p.key) || [];
+    const after = completed?.previews || [];
+    const added = after.filter((p): boolean => !!p.key && !beforeKeys.includes(p.key));
+    if (beforeKeys.some((key): boolean => !after.some((p): boolean => p.key === key)) || added.length !== 1 || after.some((p, i): boolean => after.findIndex((other): boolean => other.key === p.key) !== i)) throw new PetStoryControlError('无法逐文件核对实际素材，可能超过附件限制；请调整或使用确认组合图，未漏图提交');
+    receipts.push({ fileIndex: index, key: added[0].key, label: added[0].label, targetId: added[0].nodeId, fileSha256, slot, reference: slot === 'reference' ? completed?.referenceSyntax || 'plain' : 'slot' });
   }
+  return receipts;
 }
 
+async function resolvePetStoryReferenceMenu(webview: WebviewHandle, receipts: PetStoryUploadReceipt[]): Promise<Map<number, string>> {
+  const menuKeys = new Map<number, string>();
+  if (receipts.some((r): boolean => r.slot === 'reference')) {
+    if (!await safeExecuteJS<boolean>(webview, `(${appendExactComposerText.toString()})('@',true)`, 5000, 'probe_reference_menu')) throw new PetStoryControlError('无法核对当前入口的素材引用菜单');
+    await sleep(300);
+    const menu = await readPetStoryComposer(webview);
+    if (menu.referenceSyntax === 'mention') {
+      for (const receipt of receipts.filter((r): boolean => r.slot === 'reference')) {
+        const preview = menu.previews?.find((p): boolean => p.key === receipt.key);
+        const candidates = menu.referenceOptions?.filter((o): boolean => preview?.nodeId && o.nodeId ? preview.nodeId === o.nodeId : !!o.key && o.key === receipt.key) || [];
+        if (candidates.length !== 1 || !candidates[0].key) throw new PetStoryControlError('入口支持 @，但菜单与实际文件不能唯一对应，未降级或创建假引用');
+        receipt.label = candidates[0].label; receipt.reference = 'mention'; receipt.targetId = candidates[0].nodeId || preview?.nodeId;
+        menuKeys.set(receipt.fileIndex, candidates[0].key);
+      }
+    }
+  }
+  return menuKeys;
+}
+
+function validatePetStoryUploadReceipts(compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt, receipts: PetStoryUploadReceipt[]): void {
+  if (receipts.length !== compiled.references.length || receipts.some((r, i): boolean => r.fileIndex !== i || r.slot !== (compiled.references[i].slot === 'first' ? 'first_frame' : compiled.references[i].slot === 'last' ? 'last_frame' : 'reference'))
+    || new Set(receipts.map((r): string => `${r.slot}:${r.key}`)).size !== receipts.length) throw new PetStoryControlError('上传回执的文件次序／槽位与逻辑引用不符');
+}
+
+/** 依据逐文件上传回执绑定；每一个 @ 都必须由当前菜单创建真实节点。 */
+export async function bindPetStoryReferences(webview: WebviewHandle, compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt, receipts: PetStoryUploadReceipt[], signal: AbortSignal, allowPlain = false): Promise<{ compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt; bindings: import('@doubao-studio/contracts').PetStoryPageBinding[] }> {
+  validatePetStoryUploadReceipts(compiled, receipts);
+  const menuKeys = await resolvePetStoryReferenceMenu(webview, receipts);
+  if (!allowPlain && receipts.some((r): boolean => r.reference === 'plain')) throw new PetStoryControlError('当前素材引用方式尚未核对；确实不支持 @ 时请本人批准中文用途映射');
+  const bindings: import('@doubao-studio/contracts').PetStoryPageBinding[] = [];
+  for (const receipt of receipts) {
+    const snapshot = await readPetStoryComposer(webview, { slot: receipt.slot });
+    const preview = snapshot.previews?.filter((p): boolean => p.key === receipt.key);
+    if (signal.aborted || snapshot.pending || preview?.length !== 1) throw new PetStoryControlError('本次实际文件对应的页面素材已变化');
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(receipt.key));
+    bindings.push({ assetId: compiled.references[receipt.fileIndex].assetId, order: receipt.fileIndex + 1, slot: receipt.slot, label: receipt.reference === 'mention' ? receipt.label : preview[0].label,
+      previewHash: Array.from(new Uint8Array(bytes)).map((b): string => b.toString(16).padStart(2, '0')).join(''), reference: receipt.reference, fileSha256: receipt.fileSha256, targetId: receipt.targetId || preview[0].nodeId });
+  }
+  const replacement = (order: number): string => { const b = bindings[order - 1]; if (!b) throw new PetStoryControlError('引用缺少实际素材'); return b.reference === 'slot' ? b.slot === 'first_frame' ? '首帧画面' : '尾帧画面' : b.label; };
+  const resolved = { ...compiled, text: compiled.segments ? compiled.segments.map((s): string => 'text' in s ? s.text : replacement(s.referenceOrder)).join('') : compiled.text.replace(/第\s*(\d+)\s*张(?:参考)?图?/g, (_all: string, order: string): string => replacement(Number(order))) };
+  if (bindings.some((b): boolean => b.reference === 'mention')) {
+    const append = async (value: string, reset = false): Promise<void> => {
+      if (signal.aborted || !await safeExecuteJS<boolean>(webview, `(${appendExactComposerText.toString()})(${JSON.stringify(value)},${reset})`, 5000, 'appendExactComposerText')) throw new PetStoryControlError('原生引用编辑器写入失败，未提交');
+    };
+    await append('', true);
+    for (const token of resolved.text.split(/(@图片\d+)/g)) {
+      if (!token) continue;
+      const binding = bindings.find((b): boolean => b.reference === 'mention' && b.label === token);
+      if (!binding) { await append(token); continue; }
+      await append('@'); await sleep(200);
+      const menu = await readPetStoryComposer(webview);
+      const optionKey = menuKeys.get(binding.order - 1);
+      const candidates = menu.referenceOptions?.filter((o): boolean => o.label === binding.label && o.key === optionKey && (!binding.targetId || o.nodeId === binding.targetId)) || [];
+      if (candidates.length !== 1 || !(await readPetStoryComposer(webview, { selectReference: binding.label, selectReferenceKey: optionKey })).selectedReference) throw new PetStoryControlError('无法在当前 @ 菜单唯一选中实际素材，未创建文字假引用');
+      await sleep(100);
+    }
+    const actual = await readPetStoryComposer(webview);
+    for (const b of bindings.filter((b): boolean => b.reference === 'mention')) {
+      const nodes = actual.referenceNodes?.filter((n): boolean => n.label === b.label) || [];
+      const expectedCount = compiled.segments ? compiled.segments.filter((s): boolean => 'referenceOrder' in s && s.referenceOrder === b.order).length : resolved.text.split(b.label).length - 1;
+      if (!b.targetId || nodes.length !== expectedCount || nodes.some((n): boolean => (n.targetId || n.nodeId) !== b.targetId)) throw new PetStoryControlError('引用节点与本次文件不符或出现次数不全，零提交');
+      b.nodeId = nodes[0]?.nodeId; b.nodeIds = nodes.map((n): string => n.nodeId); b.occurrenceCount = expectedCount;
+    }
+  } else if (!await injectPrompt(webview, resolved.text, 1, true)) throw new PetStoryControlError('最终文本写入失败');
+  if (!await verifyPromptReadyForSubmission(webview, resolved.text, true)) throw new PetStoryControlError('真实引用节点或最终全文回读不一致');
+  await verifyPetStoryReferenceBindings(webview, bindings);
+  return { compiled: resolved, bindings };
+}
+export async function verifyPetStoryReferenceBindings(webview: WebviewHandle, bindings: import('@doubao-studio/contracts').PetStoryPageBinding[]): Promise<void> {
+  for (const binding of bindings) {
+    const snapshot = await readPetStoryComposer(webview, { slot: binding.slot });
+    const candidates = await Promise.all((snapshot.previews || []).map(async (p): Promise<{ key: string; label: string; hash: string; nodeId?: string }> => { const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(p.key)); return { ...p, hash: Array.from(new Uint8Array(bytes)).map((b): string => b.toString(16).padStart(2, '0')).join('') }; }));
+    const preview = candidates.find((p): boolean => p.hash === binding.previewHash);
+    if (!preview || snapshot.pending) throw new PetStoryControlError('提交前页面素材丢失或编号变化');
+    if (binding.reference === 'slot' && (snapshot.count !== 1 || (binding.slot === 'first_frame' ? !snapshot.first : !snapshot.last))) throw new PetStoryControlError('专用首尾槽的实际素材不符');
+    if (binding.reference === 'plain' && preview.label !== binding.label) throw new PetStoryControlError('提交前实际素材或引用节点已变化，零提交');
+    if (binding.reference === 'mention') {
+      const nodes = snapshot.referenceNodes?.filter((n): boolean => n.label === binding.label) || [];
+      if (!binding.targetId || (preview.nodeId && preview.nodeId !== binding.targetId) || nodes.length !== binding.occurrenceCount
+        || nodes.some((n): boolean => (n.targetId || n.nodeId) !== binding.targetId) || JSON.stringify(nodes.map((n): string => n.nodeId)) !== JSON.stringify(binding.nodeIds)) throw new PetStoryControlError('提交前实际素材或引用节点已变化，零提交');
+    }
+  }
+}
 export class PetStoryControlError extends Error {}
 
 export async function verifyPetStoryUploads(webview: WebviewHandle, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, video: boolean): Promise<void> {
