@@ -26,7 +26,8 @@ export interface ConversationNavigationResult {
 export function normalizeDoubaoConversationUrl(raw: string | undefined): string | null {
   if (!raw) return null;
   const match = raw.trim().match(CONVERSATION_URL);
-  if (!match) return null;
+  // local_ 是平台发送中的临时路由，刷新／重开会回到首页，不能持久化为原会话。
+  if (!match || /^local_/i.test(match[1])) return null;
   try {
     const parsed = new URL(raw.trim());
     if (parsed.origin !== DOUBAO_ORIGIN || parsed.username || parsed.password || parsed.port) return null;
@@ -84,6 +85,12 @@ export function resolveTaskConversationTarget(
   return conversationId
     ? { ok: true, url: urls[0], conversationId, source: 'artifact' }
     : { ok: false, reason: 'CONVERSATION_URL_MISSING' };
+}
+
+/** 根页及空值都属于缺少具体定位；冲突／多候选不能借当前页面兜底。 */
+export function isTaskConversationMissing(task: Pick<Task, 'runtime' | 'artifacts'> | null | undefined): boolean {
+  const target = resolveTaskConversationTarget(task);
+  return !target.ok && target.reason === 'CONVERSATION_URL_MISSING';
 }
 
 /** 切换账号后有界等待该账号的常驻 WebView 完成注册和就绪。 */

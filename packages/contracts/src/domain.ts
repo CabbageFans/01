@@ -212,6 +212,26 @@ export interface TaskRunSnapshot {
   };
   /** 本次普通 Chat 最终正文；独立于媒体产物，不进入日志。 */
   chatResponse?: { text: string; capturedAt: string };
+  /** 普通 Chat 已发布轮次的只读恢复凭据；与原任务／运行一起持久化。 */
+  chatReadback?: {
+    runId: string;
+    baselineMessageCount: number;
+    requestId?: string;
+    targetIds?: string[];
+    userTurnId?: string;
+    userMessageId?: string;
+    assistantTurnId?: string;
+    assistantMessageId?: string;
+    association: 'full_prompt' | 'recorded_turn' | 'request_envelope';
+    observedAt: string;
+  };
+  /** 未能唯一关联的可见事实，不能代替 chatResponse 或代表采用。仅保存在本机。 */
+  chatReadbackReview?: {
+    runId: string;
+    checkedAt: string;
+    reason: string;
+    candidates: { messageIndex: number; rawText: string; turnId?: string; messageId?: string }[];
+  };
   manualObservation?: {
     startedAt: string;
     expiresAt: string;

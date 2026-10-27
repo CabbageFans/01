@@ -8,7 +8,7 @@
 - 审查基线：标签 `v0.9.2`，提交 `fdb7b7c58017e3eae64eca382c2a85ede368dab0`；`git rev-parse HEAD`、`git tag --points-at HEAD` 与 `VERSION`（`0.9.2`）已核对。
 - 获取/适配日期：2026-10-25（Asia/Shanghai）。参考源在临时缓存中审读，运行时不依赖缓存、Codex 技能目录、网络仓库或固定 CWD。
 - 上游许可为 MIT，版权 `Copyright (c) 2026 drama-skills contributors`。原文保存在 `main/resources/drama/LICENSE`，并完整嵌入 `runtime.json.licenseText`，随 JSON 进入构建。许可允许改编，须保留版权和许可，不提供质量/适销保证。
-- 产品规则版本：`drama-skills-0.9.2-studio.1`。这是 Studio 的适配资源版本，不冒充上游新版本或应用已发布版本。
+- 产品规则版本：`drama-skills-0.9.2-studio.3`。这是 Studio 的适配资源版本，不冒充上游新版本或应用已发布版本。本轮仅统一分析／专用正文职责、有限等价字幕约束与每原请求一次自动修订；上游提交与许可保持原固定基线。
 
 ## 资源形式与加载
 

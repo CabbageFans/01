@@ -38,6 +38,7 @@ import {
 import { useTaskStore, describeDependencyBlock, isDependencyBlockedTask } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
 import { requiresSubmissionReconciliation } from '../utils/realSendStateMachine';
+import { isTaskConversationMissing } from '../utils/taskConversationLocator';
 
 // ==================== 组件 ====================
 
@@ -225,11 +226,11 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
               type="primary"
               icon={<SyncOutlined />}
               onClick={() => {
-                window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id, useCurrentPage: task.mode === 'chat' && !task.runtime?.conversationUrl } }));
+                window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id, useCurrentPage: task.mode === 'chat' && isTaskConversationMissing(task) } }));
                 onClose();
               }}
             >
-              {task.mode === 'chat' && !task.runtime?.conversationUrl ? '核对当前 Chat 原回复（不重新发送）' : task.status === 'waiting_generation_confirmation' ? '人工确认后，只读回读原会话' : '核对平台结果（不重新发送）'}
+              {task.mode === 'chat' && isTaskConversationMissing(task) ? '核对当前 Chat 原回复（不重新发送）' : task.status === 'waiting_generation_confirmation' ? '人工确认后，只读回读原会话' : '核对平台结果（不重新发送）'}
             </Button>
           )}
           {canObserveManualSubmission && (

@@ -2,9 +2,10 @@ import type { PetStoryAsset, PetStoryCompiledPrompt, PetStoryProject, PetStoryPr
 import presets from './petstoryPresets.json';
 import { materialAsset, requireApprovedMaterials, requireMaterialPromptSource, shotMaterialReferences } from './petstoryMaterials';
 import { renderReferenceSegments } from './petstoryReferenceText';
+import { requirePromptEligibility } from './petstoryEligibility';
 
 export const PROMPT_RULES_VERSION = presets.version;
-export function defaultPromptProfile(): PetStoryPromptProfile { return structuredClone(presets.profile); }
+export function defaultPromptProfile(): PetStoryPromptProfile { return structuredClone(presets.profile) as PetStoryPromptProfile; }
 export function assetCharacterIds(asset: PetStoryAsset): string[] { return asset.characterIds || (asset.characterId ? [asset.characterId] : []); }
 export function identityAsset(p: PetStoryProject, characterId: string): PetStoryAsset | undefined {
   const char = p.plan?.characters.find((c): boolean => c.id === characterId);
@@ -40,6 +41,8 @@ export function promptReferences(p: PetStoryProject, shot: PetStoryShot, kind: P
     refs.push(...shotMaterialReferences(p, shot, planned));
     const actual = p.assets.find((a): boolean => a.id === p.production?.shots[shot.id]?.actualEndFrameId && a.kind === 'actualEndFrame' && !!a.sourceVideo);
     if (actual) refs.push({ assetId: actual.id, characterIds: shot.characterIds, order: refs.length + 1, purpose: 'actualEndFrame' });
+    // 连续镜的实际末帧在制作后才落地；提前保留同用途计划引用，落地仅映射编号。
+    else if (planned && shot.transition === 'continue') refs.push({ assetId: 'pending:previous-end', characterIds: shot.characterIds, order: refs.length + 1, purpose: 'actualEndFrame' });
   } else if (kind === 'firstFrame') {
     for (const id of shot.characterIds) {
       const a = identityAsset(p, id);
@@ -104,7 +107,7 @@ export function checkPromptReferences(final: string, p: PetStoryProject, refs: P
   }
 }
 /** 新请求的编号属于当次媒体输入计划；不能把它误当作 Chat 附件或当前数组下标。 */
-function plannedReferenceMap(source: PetStoryPromptReference[], current: PetStoryPromptReference[]): Map<number, PetStoryPromptReference> {
+export function plannedReferenceMap(source: PetStoryPromptReference[], current: PetStoryPromptReference[]): Map<number, PetStoryPromptReference> {
   const result = new Map<number, PetStoryPromptReference>();
   for (const ref of source) {
     if (!Number.isSafeInteger(ref.order) || ref.order < 1 || ref.order > source.length || result.has(ref.order)) throw new Error('正文来源的素材标签表编号无效，请重新生成');
@@ -143,21 +146,22 @@ export function compileReferencedText(p: PetStoryProject, final: string, refs: P
 function validateVideoPromptTarget(p: PetStoryProject, prompt: PetStoryPrompt, mode: PetStoryResolvedMode | undefined): void {
   if (!mode) throw new Error('视频实际模式尚未解析，不能编译提交');
   if (mode !== 'first_last_frame' && /(?:原生首尾帧|首尾帧专用槽|尾帧作为目标结尾|以首帧作为开头、尾帧)/.test(prompt.final)) throw new Error('最终文本仍声明原生首尾帧，与实际模式不符，请重新优化或修正 final');
-  if (!prompt.promptTask) return;
+  if (!prompt.promptTask) throw new Error('正文缺少专用目标合同，请按当前模型／模式通过豆包重新生成或修订');
   if (prompt.promptTask.mode !== mode) throw new Error('正文生成时的目标视频模式与实际模式不同，请通过 Chat 重新生成或修订');
   const model = p.production?.capability?.videoConfig?.model || p.promptCapability?.videoConfig?.model || '';
   const dialect = /seedance[\s_-]*2[._]5/i.test(model) ? 'seedance25' : /seedance[\s_-]*2[._]0/i.test(model) ? 'seedance20' : undefined;
-  if (dialect && ['seedance20', 'seedance25'].includes(prompt.promptTask.dialect) && prompt.promptTask.dialect !== dialect) throw new Error('正文生成时的 Seedance 方言与本次目标模型不同，请通过 Chat 重新生成或修订');
+  if (dialect && prompt.promptTask.dialect !== dialect) throw new Error('正文生成时的 Seedance 方言与本次目标模型不同，请通过 Chat 重新生成或修订');
 }
 export function compilePrompt(p: PetStoryProject, shotId: string, kind: PetStoryPromptKind, mode?: PetStoryResolvedMode, planned = false): PetStoryCompiledPrompt {
   const shot = must(p.plan?.shots.find((s): boolean => s.id === shotId), '镜头不存在');
   const prompt = must(shot.prompts[kind], '提示词不存在');
   const final = prompt.final;
+  if (!planned) requirePromptEligibility(p, prompt, { shotId, promptKind: kind, mode });
   if (!planned && prompt.needsReview) throw new Error('本项正文的来源或设计已变化，请重新生成或显式复核采用后制作');
   if (!planned && kind === 'video' && shot.dialogue?.some((line): boolean => !final.includes(line.text))) throw new Error('当前最终视频正文遗漏已确认的原台词，请查看本次候选或保存修正后再制作');
-  if (!planned && p.materials) requireApprovedMaterials(p);
+  if (!planned && p.materials) requireApprovedMaterials(p, [shotId]);
   const refs = promptReferences(p, shot, kind, mode, planned);
-  if (kind === 'video') validateVideoPromptTarget(p, prompt, mode);
+  if (kind === 'video' && !planned) validateVideoPromptTarget(p, prompt, mode);
   // 正文由 Chat 或用户撰写。编译仅解析已存在的引用，绝不补写目的、保持项或素材说明。
   const compiled = compileReferencedText(p, final, refs, prompt.promptTask?.references);
   return { ...compiled, final, kind, requestedMode: shot.requestedMode, resolvedMode: kind === 'video' ? mode : undefined,
@@ -165,11 +169,10 @@ export function compilePrompt(p: PetStoryProject, shotId: string, kind: PetStory
 }
 
 /** 基础图预览、导出与正式生产共用，元数据不混入正文。 */
-export function compileMaterialPrompt(p: PetStoryProject, materialId: string, planned = false): PetStoryCompiledPrompt {
-  const material = requireMaterialPromptSource(p, materialId);
-  if (!planned && material.prompt.needsReview) throw new Error('基础素材设计已变化，请重新生成或显式复核采用正文后制作');
+export function materialPromptReferences(p: PetStoryProject, materialId: string, planned = false, promptOverride?: PetStoryPrompt): PetStoryPromptReference[] {
+  const material = must(p.materials?.find((item): boolean => item.id === materialId), '基础素材不存在');
   const references: PetStoryPromptReference[] = [];
-  const edit = material.prompt.editIntent;
+  const edit = (promptOverride || material.prompt).editIntent;
   if (edit) {
     const source = p.assets.find((asset): boolean => asset.id === edit.baseAssetId && asset.kind === material.kind);
     if (!source || (source.materialId !== material.id && !(material.kind === 'character' && assetCharacterIds(source).includes(material.entityId)))) throw new Error('已采用编辑正文缺少对应实际基图，请重新选择本资产图片后生成编辑计划');
@@ -184,5 +187,12 @@ export function compileMaterialPrompt(p: PetStoryProject, materialId: string, pl
     try { asset = materialAsset(p, `scene:${parentId}`); } catch (error: unknown) { if (!planned) throw error; }
     references.push({ assetId: asset?.id || `pending:scene:${parentId}`, materialId: `scene:${parentId}`, entityId: parentId, purpose: 'scene', characterIds: [], order: 1 });
   }
+  return references;
+}
+/** 基础图预览、导出与正式生产共用，元数据不混入正文。 */
+export function compileMaterialPrompt(p: PetStoryProject, materialId: string, planned = false): PetStoryCompiledPrompt {
+  const material = planned ? must(p.materials?.find((item): boolean => item.id === materialId), '基础素材不存在') : requireMaterialPromptSource(p, materialId);
+  if (!planned && material.prompt.needsReview) throw new Error('基础素材设计已变化，请重新生成或显式复核采用正文后制作');
+  const references = materialPromptReferences(p, materialId, planned);
   return { ...compileReferencedText(p, material.prompt.final, references, material.prompt.promptTask?.references), final: material.prompt.final, kind: material.kind, requestedMode: 'auto', rulesVersion: material.prompt.rulesVersion, references };
 }

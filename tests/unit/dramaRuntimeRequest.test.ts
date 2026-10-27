@@ -3,10 +3,12 @@ import { describe, expect, it } from 'vitest';
 import type { PetStoryCapability, PetStoryChatJob, PetStoryMaterial, PetStoryProject, PetStoryProduction, PetStoryShot } from '@doubao-studio/contracts';
 import fixture from '../fixtures/drama-runtime-input.json';
 import resources from '../../main/resources/drama/runtime.json';
+import presets from '../../main/utils/petstoryPresets.json';
 import { buildDramaRequest, dramaChatAssets } from '../../main/utils/petstoryRuntimeRequest';
-import { syncMaterials } from '../../main/utils/petstoryMaterials';
+import { storyHash, syncMaterials } from '../../main/utils/petstoryMaterials';
 import { compileMaterialPrompt, compilePrompt } from '../../main/utils/petstoryPromptQuality';
 import { validatePetStoryPlan } from '../../main/utils/petstoryValidation';
+import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 
 function project(): PetStoryProject { return structuredClone(fixture) as PetStoryProject; }
 function facts(prompt: string): Record<string, unknown> {
@@ -40,11 +42,114 @@ function production(model: NonNullable<PetStoryCapability['videoConfig']>['model
 }
 
 describe('drama-skills 真实请求构造的离线边界', (): void => {
+  it.each([false, true])('分析有旧plan=%s时都独立发送当前动态制作配置，来源原文和未确认旧设计不覆盖它', (hasPlan: boolean): void => {
+    const p = project(); const identities = p.plan!.characters.map((item): string => item.description);
+    p.promptProfile = { style: '', characters: { lulu: { identity: identities[0], appearance: '', aliases: ['A', '乐'], role: 'main' }, guest_role: { identity: identities[2], appearance: 'TEST用户配置的补充', aliases: ['C'], role: 'supporting' } } };
+    if (!hasPlan) p.plan = undefined;
+    else p.plan!.characters[0].description = 'TEST上次未确认的角色设计';
+    p.assets = []; const before = structuredClone(p);
+    const request = buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-cast-current' }); const data = facts(request.prompt);
+    expect(data.productionCast).toMatchObject({ source: 'current_project_configuration', characters: p.promptProfile.characters, confirmedIdentities: [], actualIdentityImages: [] });
+    expect(request.analysisCastBindings).toEqual({ lulu: { aliases: ['A', '乐'], role: 'main' }, guest_role: { aliases: ['C'], role: 'supporting' } });
+    expect(data).not.toHaveProperty('characters'); expect(data.source).toMatchObject({ originalText: p.mobileStory!.text, originalPreserved: true });
+    if (hasPlan) expect(data.currentPlanStatus).toMatchObject({ storyApproved: false, promptBodiesUsedAsIdentity: false });
+    expect(request.prompt).toContain('由你在understanding及characters.aliases中明确落实来源人物');
+    expect(request.prompt).toContain('来源人物的称谓与外观用于来源落实，不自动成为本项目制作演员的外观要求');
+    expect(request.prompt).toContain('已保存的aliases是来源称谓到该演员的已知对应'); expect(request.prompt).toContain('未展示的前置动作只能标为推断，不写成已发生事实');
+    expect(request.prompt).not.toContain('这是用户可编辑的默认主演配置；实际图片和明确文字优先'); expect(p).toEqual(before);
+  });
+  it('旧项目缺profile时投影当前plan全部角色原文，不注入默认物种或固定双主演', (): void => {
+    const p = project(); delete p.promptProfile; p.assets = [];
+    p.plan!.characters[0].description = 'TEST当前项目已保存的角色身份原文';
+    const data = facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-old-cast' }).prompt);
+    expect(data.productionCast).toMatchObject({ source: 'saved_plan_characters', characters: p.plan!.characters });
+    expect((data.productionCast as { characters: unknown[] }).characters).toHaveLength(p.plan!.characters.length);
+  });
+  it('无profile亦无plan才使用默认配置；显式空配置不暗中补默认角色', (): void => {
+    const p = project(); delete p.promptProfile; p.plan = undefined; p.assets = [];
+    expect(facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-default-cast' }).prompt).productionCast).toMatchObject({ source: 'default_configuration', characters: presets.profile.characters });
+    p.promptProfile = { style: '', characters: {} };
+    expect(facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-empty-config' }).prompt).productionCast).toMatchObject({ source: 'current_project_configuration', characters: {} });
+  });
+  it('analysis格式纠正仍携带当前制作配置与来源映射职责，不退回旧plan身份', (): void => {
+    const p = project(); p.promptProfile = { style: '', characters: { custom_actor: { identity: p.plan!.characters[0].description, appearance: '' } } };
+    const parent: PetStoryChatJob = { id: 'TEST-analysis-parent', taskId: 'TEST-original-task', kind: 'analysis', status: 'invalid', inputHash: 'a'.repeat(64), sourceUrl: p.source.url,
+      requestId: 'TEST-original-request', requestText: 'TEST原分析请求', rawText: 'TEST结构错误原回复', validationIssues: ['TEST结构缺项'], analysisCastBindings: { custom_actor: { aliases: ['TEST父请求来源别名'], role: 'supporting' } } };
+    const request = buildDramaRequest(p, { kind: 'repair', requestId: 'TEST-cast-repair', parentJob: parent });
+    expect(request.stage).toBe('analysis+assets+storyboard'); expect(facts(request.prompt).productionCast).toMatchObject({ source: 'current_project_configuration', characters: p.promptProfile.characters });
+    expect(request.prompt).toContain('【本次分析的来源人物与制作演员】'); expect(facts(request.prompt).parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: parent.rawText });
+    expect(request.analysisCastBindings).toEqual(parent.analysisCastBindings);
+    delete parent.analysisCastBindings;
+    expect(buildDramaRequest(p, { kind: 'repair', requestId: 'TEST-legacy-cast-repair', parentJob: parent }).analysisCastBindings).toBeUndefined();
+  });
+  it.each(['missing', 'stale', 'approved'] as const)('完整分析及其纠正对%s剧本确认只保留获批故事，不携带旧推导答案', (approval): void => {
+    const p = enriched(); p.assets = []; p.promptProfile = { style: '', characters: { current_actor: { identity: 'TEST当前选定演员资料', appearance: '' } } };
+    Object.assign(p.plan!, { adaptedStory: 'TEST旧改编稿', sourceSummary: 'TEST旧方案摘要', understanding: 'TEST旧理解', sceneDesign: 'TEST旧空间设计' });
+    p.plan!.characters[0].description = 'TEST旧未确认人物设计'; p.plan!.shots[0].action = 'TEST旧整组镜头答案';
+    if (approval !== 'missing') p.storyApproval = { hash: approval === 'approved' ? storyHash(p) : 'a'.repeat(64), at: '2026-10-27T00:00:00.000Z' };
+    const parent: PetStoryChatJob = { id: 'TEST-analysis-parent', taskId: 'TEST-analysis-original-task', kind: 'analysis', status: 'invalid', inputHash: 'a'.repeat(64), sourceUrl: p.source.url,
+      requestText: 'TEST原请求保留\n{"old":"未确认旧内容"}', rawText: 'TEST原回复保留\n{"wrong":"待纠正内容"}', validationIssues: ['TEST缺少道具结构字段'] };
+    const before = structuredClone(p);
+    for (const kind of ['analysis', 'repair'] as const) {
+      const request = buildDramaRequest(p, { kind, requestId: 'TEST-analysis-omits-' + kind, ...(kind === 'repair' ? { parentJob: parent } : {}) }); const data = facts(request.prompt);
+      expect(data.source).toEqual({ originalText: p.mobileStory!.text, originalPreserved: true, ...(approval === 'approved' ? { adoptedStory: p.plan!.adaptedStory, storyApproved: true } : {}) });
+      expect(data).not.toHaveProperty('currentPlan'); expect(data.currentPlanStatus).toMatchObject({ storyApproved: approval === 'approved', role: expect.stringContaining('已省略既有镜头与未确认设计') });
+      expect(data.productionCast).toMatchObject({ characters: p.promptProfile.characters });
+      for (const omitted of ['TEST旧方案摘要', 'TEST旧理解', 'TEST旧空间设计', 'TEST旧未确认人物设计', 'TEST旧整组镜头答案']) expect(request.prompt).not.toContain(omitted);
+      if (approval !== 'approved') expect(request.prompt).not.toContain('TEST旧改编稿');
+      if (kind === 'repair') {
+        expect(data.parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: parent.rawText, rawForFormatRepairOnly: parent.rawText });
+        expect(request.prompt).toContain('其原请求与原回复是待纠正材料，不是当前演员权威');
+      }
+    }
+    expect(p).toEqual(before);
+  });
+  it.each(['assets', 'review', 'optimize', 'materialPrompt', 'revise'] as const)('%s及其纠正保留原有当前设计来源投影，完整分析精简不外溢', (kind): void => {
+    const p = enriched(); const target = kind === 'materialPrompt' ? { materialId: 'prop:branch' }
+      : kind === 'optimize' || kind === 'revise' ? { shotId: p.plan!.shots[0].id, promptKind: 'firstFrame' as const } : {};
+    const expected = { originalText: p.mobileStory!.text, originalPreserved: true, adoptedStory: p.plan!.adaptedStory, sourceSummary: p.plan!.sourceSummary, understanding: p.plan!.understanding, sceneDesign: p.plan!.sceneDesign };
+    const parent: PetStoryChatJob = { id: 'TEST-other-parent', taskId: 'TEST-other-task', kind, ...target, status: 'invalid', inputHash: 'a'.repeat(64), sourceUrl: p.source.url, rawText: 'TEST原回复' };
+    for (const options of [{ kind, ...target }, { kind: 'repair' as const, ...target, parentJob: parent }]) {
+      const data = facts(buildDramaRequest(p, { ...options, requestId: 'TEST-unchanged-' + kind }).prompt);
+      expect(data.source).toEqual(JSON.parse(JSON.stringify(expected))); expect(data).not.toHaveProperty('productionCast');
+      if (kind === 'assets' || kind === 'review') expect(data.currentPlan).toMatchObject({ characters: p.plan!.characters, props: p.plan!.props, scenes: p.plan!.scenes, shots: p.plan!.shots.map((shot): object => ({ id: shot.id, action: shot.action })) });
+    }
+  });
+  it.each(['analysis', 'assets'] as const)('%s输出合同明确每个道具对应一条非空状态，静置道具不强塞持有人', (kind): void => {
+    const request = buildDramaRequest(enriched(), { kind, requestId: 'TEST-prop-state-contract' });
+    expect(request.prompt).toContain('propStates必须逐项且仅一次覆盖该镜propIds'); expect(request.prompt).toContain('state为非空的具体状态说明');
+    expect(request.prompt).toContain('静置或无持有人时说明位置与状态并省略holderId'); expect(request.prompt).toContain('只有propIds为空时propStates才可为[]');
+    expect(request.prompt).toContain('continuity不能替代此结构字段');
+  });
+  it('剧本确认不升级人物身份，当前配置以外的真实确认配角和实际看图仍独立约束', (): void => {
+    const p = enriched(); p.promptProfile = { style: '', characters: { lulu: { identity: 'TEST当前可编辑演员配置', appearance: '' } } }; p.storyApproval = { hash: storyHash(p), at: '2026-10-27T00:00:00.000Z' };
+    const material = p.materials!.find((item): boolean => item.id === 'character:friend')!; const asset = p.assets.find((item): boolean => item.id === material.selectedAssetId)!;
+    asset.validation = { decoded: true, sha256: 'a'.repeat(64), bytes: 1, width: 64, height: 64, checkedAt: '2026-10-27T00:00:00.000Z' };
+    material.approved = { assetId: asset.id, sha256: asset.validation.sha256, at: '2026-10-27T00:00:00.000Z', identity: { assetId: asset.id, description: 'TEST配角已确认身份原文' } };
+    const data = facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-confirmed-cast' }).prompt);
+    expect(data.productionCast).toMatchObject({ characters: p.promptProfile.characters, confirmedIdentities: [{ id: 'friend', description: material.approved.identity!.description, assetId: asset.id, chatImage: expect.any(Number) }] });
+    expect((data.productionCast as { actualIdentityImages: unknown[] }).actualIdentityImages).toHaveLength(3);
+    expect(data.currentPlanStatus).toMatchObject({ storyApproved: true, identityApproval: expect.stringContaining('剧本确认不代表逐项人物身份') });
+    delete material.approved;
+    expect(facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-story-not-identity' }).prompt).productionCast).toMatchObject({ confirmedIdentities: [] });
+  });
+  it.each(['selected', 'digest', 'identity-image', 'date'] as const)('失效%s确认不伪称当前身份批准，配置与实际附件仍可见', (change): void => {
+    const p = enriched(); const material = p.materials!.find((item): boolean => item.id === 'character:lulu')!; const asset = p.assets.find((item): boolean => item.id === material.selectedAssetId)!;
+    asset.validation = { decoded: true, sha256: 'a'.repeat(64), bytes: 1, width: 64, height: 64, checkedAt: '2026-10-27T00:00:00.000Z' };
+    material.approved = { assetId: asset.id, sha256: asset.validation.sha256, at: '2026-10-27T00:00:00.000Z', identity: { assetId: asset.id, description: p.plan!.characters[0].description } };
+    if (change === 'selected') material.selectedAssetId = 'TEST-different-selected';
+    if (change === 'digest') asset.validation.sha256 = 'b'.repeat(64);
+    if (change === 'identity-image') material.approved.identity!.assetId = 'TEST-other-image';
+    if (change === 'date') material.approved.at = 'TEST-invalid-date';
+    const data = facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-expired-cast' }).prompt);
+    expect(data.productionCast).toMatchObject({ confirmedIdentities: [] });
+    expect((data.productionCast as { actualIdentityImages: unknown[] }).actualIdentityImages.length).toBeGreaterThan(0);
+  });
   it('分析实际包含固定规则、原文和精确目标，而不是旧正文或路径', (): void => {
     const p = project(); const built = buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-analysis' });
     expect(built.expectedIds).toEqual(['plan']); expect(built.stage).toBe('analysis+assets+storyboard');
     expect(built.ruleFiles).toEqual([...new Set(['analysis', 'assets', 'storyboard'].flatMap((stage: string): string[] => resources.stages[stage as keyof typeof resources.stages].sources))]);
-    const data = facts(built.prompt); expect(data.source).toMatchObject({ originalText: p.mobileStory!.text, adoptedStory: p.plan!.adaptedStory, originalPreserved: true });
+    const data = facts(built.prompt); expect(data.source).toEqual({ originalText: p.mobileStory!.text, originalPreserved: true });
     expect(built.prompt).not.toContain('TEST-old-body-not-fact'); expect(built.prompt).not.toMatch(/\/Users\//); expect(built.prompt.length).toBeLessThan(100_000);
     expect(built.assets.map((asset): string => asset.id)).toEqual(p.plan!.characters.map((character): string => character.referenceAssetId!));
   });
@@ -186,8 +291,10 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     expect(compilePrompt(p, shot.id, 'firstFrame', undefined, true).rulesVersion).toBe(resources.version);
     const material = p.materials![0]; material.prompt.rulesVersion = resources.version; material.prompt.needsReview = true;
     adoptedMaterialReply(p, material, 'TEST已采用材料正文');
-    expect((): unknown => compileMaterialPrompt(p, material.id)).toThrow('设计已变化'); expect(compileMaterialPrompt(p, material.id, true).rulesVersion).toBe(resources.version);
+    seedOfflinePromptContracts(p, { materialId: material.id });
+    expect((): unknown => compileMaterialPrompt(p, material.id)).toThrow('待复核'); expect(compileMaterialPrompt(p, material.id, true).rulesVersion).toBe(resources.version);
     shot.dialogue = [{ speakerId: 'lulu', text: 'TEST逐字原台词', tone: '', pace: '' }];
+    p.promptModel = 'seedance-2.0'; seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' });
     expect((): unknown => compilePrompt(p, shot.id, 'video', 'reference')).toThrow('遗漏已确认的原台词');
   });
   it('OS／VO保存真实说话者但不强迫入画、上传或冒充画内发声', (): void => {

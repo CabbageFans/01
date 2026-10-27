@@ -78,7 +78,21 @@ describe('分类与阶段投影', (): void => {
 });
 
 describe('正式 Chat 与产品导出', (): void => {
-  it('原Chat绑定未收取或已捕获未处理时导出全局暂停警示，保留不确定原任务且不改正文', async (): Promise<void> => {
+  it('用户手改采用正文与离线来源候选在普通HTML和TXT中分别完整展示', (): void => {
+    const p = setPlan('library'); const shot = p.plan!.shots[0]; const current = shot.prompts.firstFrame;
+    const manual = current.final; const candidate = `${manual}\nTEST 离线新候选，引用@图片1。`;
+    current.edited = true; current.optimized = candidate; current.candidateJobId = 'TEST-new-candidate';
+    p.jobs.push({ id: 'TEST-new-candidate', taskId: 'TEST-new-task', kind: 'optimize', status: 'applied', resultStatus: 'candidate', inputHash: 'a'.repeat(64), sourceUrl: '', sourceStoryId: p.mobileStory!.id,
+      shotId: shot.id, promptKind: 'firstFrame', requestId: 'TEST-new-request', stage: 'firstFrame', rulesVersion: 'TEST-rules', expectedIds: [`${shot.id}:firstFrame`], ruleFiles: ['TEST-rule'],
+      rawText: JSON.stringify({ optimized: candidate }), parsedResult: { optimized: candidate }, promptTask: { dialect: 'seedream', references: [{ assetId: 'pending:lulu', order: 1, purpose: 'identity', characterIds: ['lulu'] }] } });
+    const before = structuredClone(p); const data = buildPetStoryPromptExport(p, []); const entry = data.prompts.find((item): boolean => item.id === `${shot.id}:firstFrame`)!;
+    expect(entry.final).toBe(manual); expect(entry.modelPrompt).toBe(manual);
+    expect(entry.candidate).toMatchObject({ body: candidate, jobId: 'TEST-new-candidate', requestId: 'TEST-new-request', stage: 'firstFrame', referencePlan: [{ assetId: 'pending:lulu', order: 1 }] });
+    const rendered = renderPetStoryPromptExport(data);
+    for (const output of [rendered.html, rendered.text]) { expect(output).toContain('豆包新候选 · 未采用'); expect(output).toContain(manual); expect(output).toContain(candidate); expect(output).toContain('TEST-new-candidate'); expect(output).toContain('TEST-new-request'); }
+    expect(p).toEqual(before);
+  });
+  it('原Chat绑定未收取或已捕获未处理时导出依赖范围警示，保留不确定原任务且不改正文', async (): Promise<void> => {
     const p = setPlan('greenhouse'); const exportedAt = '2026-10-26T00:00:00.000Z';
     const before = buildPetStoryPromptExport(p, [], exportedAt);
     p.jobs.push({ id: 'TEST-bound-repair', taskId: 'TEST-paused-task', runId: 'TEST-original-run', kind: 'repair', parentJobId: 'TEST-original-job', shotId: 'beat-0', promptKind: 'video', status: 'bound', inputHash: 'a'.repeat(64), sourceUrl: '', requestText: 'TEST已发送完整文字请求' },
@@ -89,13 +103,13 @@ describe('正式 Chat 与产品导出', (): void => {
     const savedProject = structuredClone(p); const savedTask = structuredClone(task);
     const exported = buildPetStoryPromptExport(p, [task], exportedAt);
     expect(exported.review.pendingChat).toEqual({ total: 2, bound: 1, captured: 1 });
-    expect(exported.review.warnings.join('\n')).toContain('原Chat未收取，媒体暂停，不得重发。');
+    expect(exported.review.warnings.join('\n')).toContain('原Chat未收取，不得重发。');
     expect(exported.review.warnings.join('\n')).toContain('绑定待收取 1，已捕获待处理 1');
     expect(exported.prompts).toEqual(before.prompts); expect(exported.actualRuns).toEqual(before.actualRuns);
     const output = await writePetStoryPromptExport(directory, exported);
     const text = await fs.readFile(path.join(output, 'model-prompts.txt'), 'utf8'); const html = await fs.readFile(path.join(output, 'review.html'), 'utf8');
-    expect(text.startsWith('[原Chat未收取，媒体暂停，不得重发。')).toBe(true);
-    expect(html).toContain('<p role="alert"><strong>原Chat未收取，媒体暂停，不得重发。</strong></p>');
+    expect(text.startsWith('[原Chat未收取，不得重发；相关目标及其依赖仍待处理。')).toBe(true);
+    expect(html).toContain('<p role="alert"><strong>原Chat未收取，不得重发；相关目标及其依赖仍待处理。</strong></p>');
     expect(text).not.toContain('TEST尚未解析的原回复'); expect(p).toEqual(savedProject); expect(task).toEqual(savedTask);
   });
   it('无bound/captured原Chat时不增加导出字段或横幅，已处理任务不改变输出', (): void => {
@@ -127,18 +141,23 @@ describe('正式 Chat 与产品导出', (): void => {
     expect(entry.review.warnings.join('\n')).toContain('TEST当前正文存在未包裹声音指令');
     const output = await writePetStoryPromptExport(directory, exported);
     const text = await fs.readFile(path.join(output, 'model-prompts.txt'), 'utf8'); const html = await fs.readFile(path.join(output, 'review.html'), 'utf8');
-    expect(text).toContain('待复核 · 不可直接提交'); expect(text).toContain(original); expect(text).not.toContain('TEST失败完整候选'); expect(html).toContain('role="alert"');
+    expect(text).toContain('待修订 · 不可直接提交'); expect(text).toContain(original); expect(text).not.toContain('TEST失败完整候选'); expect(html).toContain('role="alert"');
     if (kind === 'shot') expect((): unknown => compilePrompt(p, shot.id, 'video', 'reference')).toThrow('复核');
     else expect((): unknown => compileMaterialPrompt(p, material.id)).toThrow('复核');
     expect(current.final).toBe(original); expect(p.jobs[0].parsedResult?.optimized).toBe('TEST失败完整候选');
   });
-  it('原回复经稳定回读、TaskService 保存和项目收取；保护规范身份与手改 final，不产生媒体任务', async (): Promise<void> => {
-    project = setPlan('library'); const savedFinal='用户亲自编辑的静态首帧。'; project.plan!.shots[0].prompts.firstFrame=prompt(savedFinal,true); project=await projects.write(project);
+  it('原回复经稳定回读、TaskService 保存和项目收取；保护已确认图片身份与手改 final，不产生媒体任务', async (): Promise<void> => {
+    project = setPlan('library'); const savedFinal='用户亲自编辑的静态首帧。'; project.plan!.shots[0].prompts.firstFrame=prompt(savedFinal,true);
+    project.assets.push({ id: 'TEST-confirmed-person', kind: 'character', characterId: 'lulu', relativePath: 'characters/confirmed.png', validation: { decoded: true, sha256: 'a'.repeat(64), bytes: 1, width: 64, height: 64, checkedAt: '2026-10-27T00:00:00.000Z' } });
+    await fs.mkdir(path.join(directory, 'characters'), { recursive: true }); await fs.writeFile(path.join(directory, 'characters/confirmed.png'), 'TEST离线素材文件');
+    project.plan!.characters[0].referenceAssetId = 'TEST-confirmed-person'; project.materials = syncMaterials(project);
+    project.materials.find((item): boolean => item.id === 'character:lulu')!.approved = { assetId: 'TEST-confirmed-person', sha256: 'a'.repeat(64), at: '2026-10-27T00:00:00.000Z', identity: { assetId: 'TEST-confirmed-person', description: project.plan!.characters[0].description } };
+    project=await projects.write(project);
     let stored:Task[]=[]; let sequence=0; const list=():Task[]=>structuredClone(stored);
     const core=new TaskService({store:{read:list,replace:(items:Task[]):boolean=>{stored=structuredClone(items);return true;}},defaultProjectId:():string=>'TEST-studio',id:():string=>`TEST-chat-${++sequence}`});
     const create=(input:TaskAddParams,accountId:string):Task=>{const result=core.create(input);if(!result.success)throw new Error(result.error);const assigned=core.assign({taskId:result.data[0].id,accountId});if(!assigned.success)throw new Error(assigned.error);return assigned.data;};
     const chat=new PetStoryChatService(projects,{list,create}); const input='请按提供的剧本返回完整 JSON，不生成媒体。'; const prepared=await chat.prepare(project.id,input,'analysis'); const job=prepared.project!.jobs[0]; const task=list()[0]; const now=new Date().toISOString(); const runId='TEST-run';
-    core.updateRuntime({taskId:task.id,status:'executing',runtime:{runId,attempt:1,stage:'submitting',message:'TEST',startedAt:now,stageStartedAt:now,lastHeartbeatAt:now,submittedAt:now,conversationUrl:'https://www.doubao.com/chat/TEST-only',input:{prompt:input,mode:'chat',attachments:[]}}});
+    core.updateRuntime({taskId:task.id,status:'executing',runtime:{runId,attempt:1,stage:'submitting',message:'TEST',startedAt:now,stageStartedAt:now,lastHeartbeatAt:now,submittedAt:now,conversationUrl:'https://www.doubao.com/chat/TEST-only',input:{prompt:input,mode:'chat',attachments:task.attachments || []}}});
     await chat.bindRun(project.id,job.id,runId);
     const answer=plan('library'); answer.characters[0].description='不应覆盖规范身份的模型猜测';
     const raw='```json\n'+JSON.stringify({...answer,storyUsable:true,contentBasis:{beginning:'桌上放册子',middle:'完成交接',ending:'送到借阅台'}})+'\n```';

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Task } from '../../src/types';
 import {
   isSameDoubaoConversation,
+  isTaskConversationMissing,
   normalizeDoubaoConversationUrl,
   openTaskConversation,
   resolveTaskConversationTarget,
@@ -29,6 +30,8 @@ describe('任务原会话定位', () => {
     undefined,
     'https://www.doubao.com/chat/',
     'https://www.doubao.com/chat',
+    'https://www.doubao.com/chat/local_OFFLINE-temporary',
+    'https://www.doubao.com/chat/LOCAL_OFFLINE-temporary?source=send',
     'https://evil.example/chat/123',
     'http://www.doubao.com/chat/123',
     'https://www.doubao.com:443/chat/123',
@@ -55,6 +58,12 @@ describe('任务原会话定位', () => {
   it('优先使用 runtime 的具体会话', () => {
     expect(resolveTaskConversationTarget(task('https://www.doubao.com/chat/runtime-1')))
       .toMatchObject({ ok: true, source: 'runtime', conversationId: 'runtime-1' });
+  });
+  it('根页属于缺失定位，仅具体会话可直接恢复，冲突不被降级成缺失', (): void => {
+    expect(isTaskConversationMissing(task('https://www.doubao.com/chat/'))).toBe(true);
+    expect(isTaskConversationMissing(task('https://www.doubao.com/chat/local_OFFLINE-temporary'))).toBe(true);
+    expect(isTaskConversationMissing(task('https://www.doubao.com/chat/REAL-original'))).toBe(false);
+    expect(isTaskConversationMissing(task('https://www.doubao.com/chat/REAL-original', [], 'https://www.doubao.com/chat/OTHER'))).toBe(false);
   });
 
   it('acceptance binding 与 runtime 同 run 同会话时可恢复', () => {
@@ -107,6 +116,18 @@ describe('任务原会话定位', () => {
       { getURL: () => urls[Math.min(index++, urls.length - 1)] },
       { timeoutMs: 1000, intervalMs: 100, now: () => now, wait: async (ms) => { now += ms; } },
     )).resolves.toBe('https://www.doubao.com/chat/target');
+  });
+  it('平台 local_ 临时路由必须等待真实具体会话，不能提前保存或导航', async (): Promise<void> => {
+    let now = 0; let index = 0;
+    const urls = ['https://www.doubao.com/chat/local_OFFLINE-temporary', 'https://www.doubao.com/chat/local_OFFLINE-temporary', 'https://www.doubao.com/chat/123456789'];
+    expect(await waitForConcreteConversationUrl({ getURL: (): string => urls[Math.min(index++, urls.length - 1)] }, { timeoutMs: 1000, intervalMs: 100, now: (): number => now, wait: async (ms: number): Promise<void> => { now += ms; } })).toBe('https://www.doubao.com/chat/123456789');
+    expect(now).toBe(200);
+    now = 0;
+    expect(await waitForConcreteConversationUrl({ getURL: (): string => urls[0] }, { timeoutMs: 200, intervalMs: 100, now: (): number => now, wait: async (ms: number): Promise<void> => { now += ms; } })).toBeNull();
+    const loadURL = vi.fn(); const reload = vi.fn();
+    expect(await openTaskConversation({ getURL: (): string => urls[0], loadURL, reload }, urls[0])).toEqual({ ok: false, reason: 'INVALID_TARGET' });
+    expect(loadURL).not.toHaveBeenCalled(); expect(reload).not.toHaveBeenCalled();
+    expect(normalizeDoubaoConversationUrl('https://www.doubao.com/chat/alpha_future-identifier')).toBe('https://www.doubao.com/chat/alpha_future-identifier');
   });
 
   it('切换账号后等待对应 WebView 注册并就绪', async () => {

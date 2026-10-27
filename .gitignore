@@ -112,3 +112,4 @@ data/
 
 # 普通 Chat 内化：原任务全文、原回复与本机核验记录不进入版本库
 /artifacts/chat-internalization/
+/artifacts/prompt-pipeline-completion/

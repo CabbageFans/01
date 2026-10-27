@@ -13,6 +13,7 @@ import { requiredMaterialKeys } from '../../main/utils/petstoryMaterials';
 import { validatePetStoryPlan } from '../../main/utils/petstoryValidation';
 import { mediaCommand } from '../../main/utils/petstoryMedia';
 import { bindReferenceText } from '../../main/utils/petstoryReferenceText';
+import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 import { analysisPrompt } from '../../src/utils/petstoryPrompts';
 
 let root: string; let red: string; let blue: string;
@@ -71,7 +72,8 @@ async function harness(which: 'music' | 'repair' = 'repair'): Promise<{
 async function accepted(h: Awaited<ReturnType<typeof harness>>): Promise<PetStoryProject> {
   let p = await h.projects.read(h.project.id); p = await h.projects.confirmStory(p.id, p.revision);
   for (const m of p.materials!) p = await h.projects.addMaterialImage(p.id, p.revision, m.id, m.kind === 'scene' ? blue : red);
-  return h.projects.approveMaterials(p.id, p.revision, p.materials!.map((m): { materialId: string; assetId: string } => ({ materialId: m.id, assetId: m.selectedAssetId! })));
+  p = await h.projects.approveMaterials(p.id, p.revision, p.materials!.map((m): { materialId: string; assetId: string } => ({ materialId: m.id, assetId: m.selectedAssetId! })));
+  p.promptCapability = capability(); seedOfflinePromptContracts(p); return h.projects.write(p);
 }
 beforeAll(async (): Promise<void> => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'TEST-asset-first-')); red = path.join(root, 'red.png'); blue = path.join(root, 'blue.png');
@@ -127,6 +129,7 @@ describe('通用剧本资产与确认', (): void => {
   it('基础图成功只保存待确认候选，失败只重试下载并保留原任务身份', async (): Promise<void> => {
     const h = await harness('music'); let p = await h.projects.confirmStory(h.project.id, h.project.revision); const id = p.materials![0].id;
     p = await h.projects.saveMaterialPrompt(p.id, p.revision, id, 'TEST用户明确保存的基础图正文');
+    p.promptCapability = capability(); seedOfflinePromptContracts(p); p = await h.projects.write(p);
     await h.service.generateMaterials(p.id, p.revision, [id], capability()); const next = await h.service.advance(p.id); await h.finish(next.taskId!);
     h.setDownloadFailure(true); expect((await h.service.advance(p.id)).success).toBe(false); expect(h.list()).toHaveLength(1);
     h.setDownloadFailure(false); const c = capability(); c.freeEvidence = 'unknown'; c.image.free = 'unknown'; await h.service.resume(p.id, c);
@@ -142,6 +145,7 @@ describe('通用剧本资产与确认', (): void => {
   it('重新生成已接受角色时真实上传原身份图，完成后新图重新待确认', async (): Promise<void> => {
     const h = await harness('music'); let p = await accepted(h); const material = p.materials!.find((m): boolean => m.kind === 'character')!; const old = material.selectedAssetId!;
     p = await h.projects.saveMaterialPrompt(p.id, p.revision, material.id, '沿用身份，只把外套改成用户确认的绿色。');
+    p.promptCapability = capability(); seedOfflinePromptContracts(p); p = await h.projects.write(p);
     await h.service.generateMaterials(p.id, p.revision, [material.id], capability()); const next = await h.service.advance(p.id);
     expect(next.success, next.error).toBe(true); expect(h.list()[0].attachments).toEqual([await h.projects.referenceFile(p.id, old)]);
     expect(h.list()[0].prompt).toContain('只把外套改成用户确认的绿色'); await h.finish(next.taskId!); await h.service.advance(p.id); await h.service.advance(p.id);
@@ -153,6 +157,7 @@ describe('通用剧本资产与确认', (): void => {
     plan.scenes!.push({ ...main, id: 'view-b', parentSceneId: main.id, view: '从入口反向看工作区' }); plan.shots[1].sceneId = 'view-b';
     p = await h.projects.write(p); p = await h.projects.confirmStory(p.id, p.revision);
     p = await h.projects.saveMaterialPrompt(p.id, p.revision, 'scene:view-b', `TEST用户派生视角正文，基于{{ref:scene:${main.id}}}的空间。`);
+    p.promptCapability = capability(); seedOfflinePromptContracts(p); p = await h.projects.write(p);
     await h.service.generateMaterials(p.id, p.revision, ['scene:view-b'], capability()); expect((await h.service.advance(p.id)).success).toBe(false); expect(h.list()).toHaveLength(0);
     p = await h.projects.read(p.id); p = await h.projects.addMaterialImage(p.id, p.revision, `scene:${main.id}`, blue); const selected = p.materials!.find((m): boolean => m.entityId === main.id)!;
     p = await h.projects.approveMaterials(p.id, p.revision, [{ materialId: selected.id, assetId: selected.selectedAssetId! }]); await h.service.resume(p.id, capability()); const next = await h.service.advance(p.id);
@@ -164,14 +169,14 @@ describe('通用剧本资产与确认', (): void => {
 describe('镜头输入与实际引用', (): void => {
   it('同组确认素材跨镜复用，人物顺序变化仍按逻辑ID映射，手改final重开后用于原任务', async (): Promise<void> => {
     const h = await harness(); let p = await accepted(h); const plan = structuredClone(p.plan!); const final = '用户手改全文\n保留“校准值是三，请接稳。”\n{{ref:prop:object-a}}是校准器。';
-    plan.shots[0].prompts.firstFrame.final = final; plan.shots[0].characterIds.reverse(); p = await h.projects.savePlan(p.id, p.revision, plan);
+    plan.shots[0].prompts.firstFrame.final = final; plan.shots[0].characterIds.reverse(); p = await h.projects.savePlan(p.id, p.revision, plan); seedOfflinePromptContracts(p); p = await h.projects.write(p);
     const reopened = await new PetStoryProjects().open(h.projects.directory(p.id)); expect(reopened.plan!.shots[0].prompts.firstFrame.final).toBe(final);
     const first = compilePrompt(reopened, 'moment-0', 'firstFrame'); const second = compilePrompt(reopened, 'moment-1', 'firstFrame');
     expect(first.references.map((r): string | undefined => r.materialId)).toEqual(['character:actor-1', 'character:actor-0', 'prop:object-a', 'scene:place-a']);
     expect(first.references.find((r): boolean => r.purpose === 'prop')?.assetId).toBe(second.references.find((r): boolean => r.purpose === 'prop')?.assetId);
     expect(first.references.find((r): boolean => r.purpose === 'scene')?.assetId).toBe(second.references.find((r): boolean => r.purpose === 'scene')?.assetId);
     const incorrect = structuredClone(reopened); incorrect.plan!.shots[0].prompts.firstFrame.final = '@图片99是人物';
-    expect((): unknown => compilePrompt(incorrect, 'moment-0', 'firstFrame')).toThrow('没有对应实际上传');
+    expect((): unknown => compilePrompt(incorrect, 'moment-0', 'firstFrame', undefined, true)).toThrow('没有对应实际上传');
     await h.service.approve(p.id, p.revision, capability(), {}); const next = await h.service.advance(p.id); const task = h.list()[0];
     expect(next.success, next.error).toBe(true); expect(next.action).toBe('start'); expect(task.prompt).toBe(first.text); expect(task.prompt.endsWith(first.final.replace('{{ref:prop:object-a}}', '第 3 张图'))).toBe(true);
     expect(task.attachments).toEqual(await Promise.all(first.references.map((r): Promise<string> => h.projects.referenceFile(p.id, r.assetId))));
@@ -179,7 +184,7 @@ describe('镜头输入与实际引用', (): void => {
   });
   it.each(['first_frame', 'first_last_frame', 'reference'] as const)('%s 严格组装互斥输入，不以文本冒充首尾槽', async (mode: PetStoryResolvedMode): Promise<void> => {
     const h = await harness('music'); let p = await accepted(h); p.plan!.shots = [p.plan!.shots[0]]; p.plan!.shots[0].requestedMode = mode;
-    p = await h.projects.write(p); await h.service.approve(p.id, p.revision, capability(), {});
+    seedOfflinePromptContracts(p); p = await h.projects.write(p); await h.service.approve(p.id, p.revision, capability(), {});
     for (let i = 0; i < 8; i++) { const next = await h.service.advance(p.id); expect(next.success, next.error).toBe(true); if (next.taskId && next.action === 'start') { if (h.list().find((t): boolean => t.id === next.taskId)?.mode === 'video') break; await h.finish(next.taskId); } }
     const video = h.list().find((t): boolean => t.mode === 'video')!; const saved = await h.projects.read(p.id); const step = saved.production!.steps.find((s): boolean => s.kind === 'video')!;
     expect(video.attachments).toHaveLength(mode === 'first_last_frame' ? 2 : mode === 'reference' ? 4 : 1); expect(step.compiledPrompt?.references.map((r): string | undefined => r.slot)).toEqual(mode === 'first_last_frame' ? ['first', 'last'] : mode === 'first_frame' ? ['first'] : [undefined, undefined, undefined, undefined]);

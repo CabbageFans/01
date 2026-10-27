@@ -28,5 +28,7 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
+    // 本地验收／导出 HTML 不是渲染入口，避免写证据时刷新正在执行的账号页面。
+    watch: { ignored: ['**/artifacts/**'] },
   },
 });

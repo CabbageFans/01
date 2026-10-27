@@ -42,6 +42,8 @@ function fixture(initial: 'plain' | 'video' | 'image' | 'unknown' | 'orphan-cont
   const document = { querySelector: (selector: string): Element | null => selector === '#input-engine-container' ? root : null };
   class InputEvent { constructor(readonly type: string) {} }
   const view: WebviewHandle = { getURL: (): string => 'https://www.doubao.com/chat/', loadURL: vi.fn(), executeJavaScript: async (code: string): Promise<unknown> => {
+    if (code.includes('timeOrigin: performance.timeOrigin')) return { href: view.getURL(), timeOrigin: 1, readyState: 'complete' };
+    if (code.includes('var newConversationDocument')) return { ok: true, reason: 'READY', stabilityKey: 'OFFLINE-stable' };
     if (code.includes('plainChatComposerProbe')) return runInNewContext(code, { document, window: { getComputedStyle: (element: Element): object => ({ display: 'block', visibility: element === hiddenSkill ? 'hidden' : 'visible' }) }, Date, setTimeout, PointerEvent: InputEvent, MouseEvent: InputEvent });
     if (code.includes('messages.push')) return { messages: [], editorPresent: true, editorText: '', generating: false };
     if (code.includes('var editor = null')) return { ok: true, reason: 'READY' };

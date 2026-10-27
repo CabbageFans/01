@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   GenerationMode,
   TaskExecutionIntent,
@@ -25,6 +26,11 @@ import type {
 } from '@doubao-studio/contracts';
 import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
 import { parseCsv } from '../utils/csv';
+
+/** JSON 落盘省略 undefined 并重排白名单字段；仅比较实际数据，原回复字符串仍逐字比较。 */
+function samePersistedChatEvidence(stored: unknown, requested: unknown): boolean {
+  return isDeepStrictEqual(JSON.parse(JSON.stringify(stored ?? null)), JSON.parse(JSON.stringify(requested ?? null)));
+}
 
 export interface TaskStore {
   read(): Task[];
@@ -600,6 +606,10 @@ export class TaskService {
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
 
+    const chatEvidenceRunIds = [params.runtime?.chatReadback?.runId, params.runtime?.chatReadbackReview?.runId].filter((runId): runId is string => runId !== undefined);
+    if (chatEvidenceRunIds.some((runId): boolean => !runId || runId !== (params.runtime?.runId || task.runtime?.runId)
+      || task.mode !== 'chat' || !task.runtime?.submittedAt)) return { success: false, error: 'Chat 只读证据与原已提交运行不符，未绑定' };
+
     const timestamp = this.now();
 
     if (params.executionIntent) task.executionIntent = params.executionIntent;
@@ -649,6 +659,14 @@ export class TaskService {
       const authoritative = this.readPersistedTask(params.taskId);
       if (!authoritative) return { success: false, error: '任务状态写入后回读失败，无法确认落盘结果' };
       return { success: false, error: '任务状态已被并发修改，已返回权威回读状态', task: authoritative };
+    }
+    if (params.runtime?.chatReadback || params.runtime?.chatReadbackReview) {
+      const saved = this.readPersistedTask(params.taskId);
+      if (!saved || saved.runtime?.runId !== task.runtime?.runId
+        || params.runtime.chatReadback && !samePersistedChatEvidence(saved.runtime?.chatReadback, params.runtime.chatReadback)
+        || params.runtime.chatReadbackReview && !samePersistedChatEvidence(saved.runtime?.chatReadbackReview, params.runtime.chatReadbackReview)) {
+        return { success: false, error: 'Chat 只读证据写入后回读不一致，禁止重新发送', task: saved || undefined };
+      }
     }
     if (params.runtime?.chatResponse) {
       const saved = this.readPersistedTask(params.taskId);
@@ -1012,6 +1030,7 @@ export class TaskService {
     return {
       ...runtime,
       chatResponse: undefined,
+      chatReadbackReview: undefined,
       conversationUrl: runtime.conversationUrl ? '[已脱敏]' : undefined,
       acceptanceObservation: runtime.acceptanceObservation ? { ...runtime.acceptanceObservation, conversationUrl: '[已脱敏]' } : undefined,
       input: {

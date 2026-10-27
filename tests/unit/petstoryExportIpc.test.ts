@@ -64,7 +64,7 @@ it('exports through the registered product handler and native directory selectio
   expect(await fs.readFile(path.join(source, 'project.json'), 'utf8')).toBe(before);
   expect(desktop.createTask).not.toHaveBeenCalled();
 });
-it('exports adopted provenance and unadopted candidates only as review metadata, keeping every model input on saved final', async (): Promise<void> => {
+it('exports adopted provenance and readable unadopted candidate sections, keeping each current model input on saved final', async (): Promise<void> => {
   const shot = p.plan!.shots[0];
   shot.prompts.firstFrame = { ...shot.prompts.firstFrame, optimized: 'TEST未采用镜头候选\n完整第二段', candidateJobId: 'TEST-new-shot-candidate', sourceJobId: undefined };
   shot.prompts.video = { ...shot.prompts.video, final: 'TEST已采用视频正文', optimized: 'TEST已采用视频正文', edited: false, sourceJobId: 'TEST-adopted-video', candidateJobId: 'TEST-adopted-video' };
@@ -79,7 +79,10 @@ it('exports adopted provenance and unadopted candidates only as review metadata,
   const material = data.prompts.find((entry): boolean => entry.id === 'scene:hall')!;
   expect(material.review.metadata).toMatchObject({ edited: true, sourceJobId: null, candidateJobId: 'TEST-new-material-candidate', unadoptedCandidate: 'TEST未采用素材候选' });
   expect(data.prompts.find((entry): boolean => entry.id === 'door:video')!.review.metadata).toMatchObject({ edited: false, sourceJobId: 'TEST-adopted-video', candidateJobId: 'TEST-adopted-video', unadoptedCandidate: null });
-  const modelInputs = await fs.readFile(path.join(output, 'model-prompts.txt'), 'utf8'); expect(modelInputs).not.toContain('TEST未采用'); expect(modelInputs).toContain('TEST已采用视频正文');
+  const modelInputs = await fs.readFile(path.join(output, 'model-prompts.txt'), 'utf8');
+  expect(modelInputs).toContain('TEST已采用视频正文'); expect(modelInputs).toContain('豆包新候选 · 未采用');
+  expect(modelInputs).toContain('TEST未采用镜头候选\n完整第二段'); expect(modelInputs).toContain('TEST未采用素材候选');
+  expect(modelInputs).toContain('用户手改保留'); expect(modelInputs).toContain('待修订 · 不可直接提交');
   expect(await fs.readFile(path.join(source, 'project.json'), 'utf8')).toBe(before); expect(desktop.createTask).not.toHaveBeenCalled();
 });
 it('rejects stale revisions before opening a directory picker', async (): Promise<void> => {
@@ -104,5 +107,42 @@ it('keeps cancel and non-host frame calls free of writes or media tasks', async 
   expect(await invoke('exportPrompts', { id: p.id, revision: p.revision }, foreign)).toMatchObject({ success: false, error: '仅宿主窗口可访问项目' });
   expect(desktop.picker).toHaveBeenCalledTimes(2);
   expect(await fs.readdir(destination)).toEqual([]);
+  expect(desktop.createTask).not.toHaveBeenCalled();
+});
+
+it('opens the selected project.json through the same project reader without writes or task dispatch', async (): Promise<void> => {
+  const before = await fs.readFile(path.join(source, 'project.json'), 'utf8');
+  desktop.picker.mockResolvedValueOnce({ canceled: false, filePaths: [path.join(source, 'project.json')] });
+  const result = await invoke('open');
+  expect(result).toMatchObject({ success: true, displayName: 'project', project: { id: p.id } });
+  expect(await fs.readFile(path.join(source, 'project.json'), 'utf8')).toBe(before);
+  expect(desktop.createTask).not.toHaveBeenCalled();
+});
+
+it.each(['directory', 'file'] as const)('opens an explicitly entered absolute project %s through the normal host handler without native dialog or task dispatch', async (kind: 'directory' | 'file'): Promise<void> => {
+  const before = await fs.readFile(path.join(source, 'project.json'), 'utf8');
+  const entered = kind === 'directory' ? source : path.join(source, 'project.json');
+  const result = await invoke('open', { path: entered });
+  expect(result).toMatchObject({ success: true, project: { id: p.id, revision: p.revision }, displayName: path.basename(source) });
+  expect(desktop.picker).toHaveBeenCalledTimes(1);
+  expect(await fs.readFile(path.join(source, 'project.json'), 'utf8')).toBe(before);
+  expect(desktop.createTask).not.toHaveBeenCalled();
+});
+
+it('rejects relative, malformed, other JSON and non-host path opens without a picker or writes', async (): Promise<void> => {
+  const before = await fs.readFile(path.join(source, 'project.json'), 'utf8');
+  await fs.writeFile(path.join(source, 'other.json'), before);
+  for (const supplied of ['', 'project.json', null, 123, path.join(source, 'project.json') + '\0']) {
+    expect(await invoke('open', { path: supplied })).toMatchObject({ success: false, error: expect.stringContaining('绝对路径') });
+  }
+  expect(await invoke('open', { path: path.join(source, 'other.json') })).toMatchObject({ success: false, error: expect.stringContaining('不读取其他 JSON') });
+  expect(await invoke('open', { path: source }, { sender: event.sender, senderFrame: {} } as IpcMainInvokeEvent)).toMatchObject({ success: false, error: '仅宿主窗口可访问项目' });
+  expect(desktop.picker).toHaveBeenCalledTimes(1);
+  expect(await fs.readFile(path.join(source, 'project.json'), 'utf8')).toBe(before); expect(desktop.createTask).not.toHaveBeenCalled();
+});
+it('rejects a selected JSON file other than the canonical project manifest', async (): Promise<void> => {
+  const file = path.join(source, 'tasks.json'); await fs.writeFile(file, '{}');
+  desktop.picker.mockResolvedValueOnce({ canceled: false, filePaths: [file] });
+  expect(await invoke('open')).toMatchObject({ success: false, error: expect.stringContaining('不读取其他 JSON') });
   expect(desktop.createTask).not.toHaveBeenCalled();
 });

@@ -1,6 +1,8 @@
+import { isSameDoubaoConversation } from './taskConversationLocator';
+
 /** 普通 Chat 只读取消息区；不把侧栏、编辑器或页面脚本当成回复。 */
 export interface ChatPageSnapshot {
-  messages: { role: 'user' | 'assistant'; text: string; rawText?: string; renderedSource?: string; codeSpans?: number; fencedCode?: { language: string; text: string }[]; headingCount?: number; attachmentOnly?: boolean; turnId?: string }[];
+  messages: { role: 'user' | 'assistant'; text: string; rawText?: string; renderedSource?: string; codeSpans?: number; fencedCode?: { language: string; text: string }[]; headingCount?: number; attachmentOnly?: boolean; turnId?: string; messageId?: string }[];
   editorPresent: boolean;
   editorText: string;
   generating: boolean;
@@ -45,41 +47,50 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
     return ['P', 'DIV', 'OL', 'UL', 'BLOCKQUOTE'].includes(tag) ? body + '\n' : body;
   };
   const messageNodes = Array.from(doc.querySelectorAll('[data-testid="send_message"], [data-testid="receive_message"]'));
-  for (const node of messageNodes) {
-    const content = node.querySelector('[data-testid="message_text_content"]');
-    const turnId = node.closest?.('[data-testid="union_message"]')?.getAttribute('data-target-id') || undefined;
-    const attachmentOnly = !content && node.getAttribute('data-testid') === 'send_message' && !!node.querySelector('img');
-    // 普通 Chat 的同一 union_message 会把附件和正文分别渲染成 send_message。
-    // 只合并有明确共同 turn、图片及唯一正文的附件块；未知／跨 turn 空消息仍保留并阻断。
-    if (!content && node.getAttribute('data-testid') === 'send_message' && node.querySelector('img')) {
-      const turn = node.closest?.('[data-testid="union_message"]');
-      // 同一 turn 也可能拆成多个 union_message wrapper，以非空 data-target-id 关联。
-      const turnId = turn?.getAttribute('data-target-id');
-      const textPeers = turn ? messageNodes.filter((peer: Element): boolean => {
-        const peerTurn = peer.closest?.('[data-testid="union_message"]');
-        return peer.getAttribute('data-testid') === 'send_message' && !!peer.querySelector('[data-testid="message_text_content"]')
-          && (turnId ? peerTurn?.getAttribute('data-target-id') === turnId : peerTurn === turn);
-      }) : [];
-      if (textPeers.length === 1) continue;
-    }
+  const attachmentIsGrouped = (node: Element): boolean => {
+    if (node.querySelector('[data-testid="message_text_content"]') || node.getAttribute('data-testid') !== 'send_message' || !node.querySelector('img')) return false;
+    const turn = node.closest?.('[data-testid="union_message"]');
+    if (!turn) return false;
+    const turnId = turn.getAttribute('data-target-id');
+    const textPeers = messageNodes.filter((peer: Element): boolean => {
+      const peerTurn = peer.closest?.('[data-testid="union_message"]');
+      return peer.getAttribute('data-testid') === 'send_message' && !!peer.querySelector('[data-testid="message_text_content"]')
+        && (turnId ? peerTurn?.getAttribute('data-target-id') === turnId : peerTurn === turn);
+    });
+    return textPeers.length === 1;
+  };
+  const codeEvidence = (content: Element | null): Partial<ChatPageSnapshot['messages'][number]> => {
     const codeSpans = content?.querySelectorAll?.('code')?.length || 0;
     const fencedCode = Array.from(content?.querySelectorAll?.('pre') || []).flatMap((pre: Element): { language: string; text: string }[] => {
       const code = pre.querySelector('code');
       return code ? [{ language: code.className?.match(/language-([\w-]+)/)?.[1] || '', text: code.textContent || '' }] : [];
     });
     const headingCount = content?.querySelectorAll?.('h1,h2,h3,h4,h5,h6')?.length || 0;
+    return { ...(codeSpans ? { codeSpans } : {}), ...(fencedCode.length ? { fencedCode } : {}), ...(headingCount ? { headingCount } : {}) };
+  };
+  const readMessage = (node: Element): ChatPageSnapshot['messages'][number] | undefined => {
+    const content = node.querySelector('[data-testid="message_text_content"]');
+    const turnId = node.closest?.('[data-testid="union_message"]')?.getAttribute('data-target-id') || undefined;
+    const messageId = node.getAttribute('data-message-id') || node.getAttribute('data-msg-id') || undefined;
+    const attachmentOnly = !content && node.getAttribute('data-testid') === 'send_message' && !!node.querySelector('img');
+    // 普通 Chat 的同一 union_message 会把附件和正文分别渲染成 send_message。
+    // 只合并有明确共同 turn、图片及唯一正文的附件块；未知／跨 turn 空消息仍保留并阻断。
+    if (attachmentIsGrouped(node)) return undefined;
     const formatted = !!content?.querySelectorAll?.('ol,ul,strong,em,pre,code,h1,h2,h3,h4,h5,h6')?.length;
-    messages.push({
+    return {
       role: node.getAttribute('data-testid') === 'send_message' ? 'user' : 'assistant',
       rawText: content ? rawContent(content).trim() : '',
       ...(formatted && content ? { renderedSource: renderedSource(content).trim() } : {}),
       text: (content?.textContent || '').normalize('NFKC').replace(/\s+/g, ' ').trim(),
-      ...(codeSpans ? { codeSpans } : {}),
-      ...(fencedCode.length ? { fencedCode } : {}),
-      ...(headingCount ? { headingCount } : {}),
+      ...codeEvidence(content),
       ...(attachmentOnly ? { attachmentOnly: true } : {}),
       ...(turnId ? { turnId } : {}),
-    });
+      ...(messageId ? { messageId } : {}),
+    };
+  };
+  for (const node of messageNodes) {
+    const message = readMessage(node);
+    if (message) messages.push(message);
   }
   const editor = Array.from(doc.querySelectorAll<HTMLElement>('textarea, [contenteditable="true"], [contenteditable=""]'))
     .find((element: HTMLElement): boolean => element.offsetParent !== null);
@@ -178,27 +189,222 @@ export function diagnoseChatReadback(snapshot: ChatPageSnapshot, prompt: string)
   return { users: users.length, messages: snapshot.messages.length, expectedLength: expected.length, observedLength: actual.length, samePrefixLength: at, expected: character(expected[at] || ''), observed: character(actual[at] || ''), renderedStructure: !!users[0]?.renderedSource, variants };
 }
 
+/** 由正式任务提供身份；页面回显本身不能创建任务、运行或账号归属。 */
+export interface ChatReadbackContext {
+  taskId: string;
+  runId: string;
+  currentRunId: string;
+  accountId: string;
+  currentAccountId: string;
+  conversationUrl: string;
+  currentConversationUrl: string;
+  userTurnId?: string;
+  userMessageId?: string;
+}
+
+export interface ChatReadbackCandidate {
+  messageIndex: number;
+  rawText: string;
+  turnId?: string;
+  messageId?: string;
+}
+
+export interface ChatReadbackResult {
+  generationStarted: boolean;
+  inputCleared: boolean;
+  messageCount: number;
+  promptPublished: boolean;
+  replyText: string;
+  replyRawText: string;
+  generating: boolean;
+  association?: 'full_prompt' | 'recorded_turn' | 'request_envelope';
+  userTurnId?: string;
+  userMessageId?: string;
+  assistantTurnId?: string;
+  assistantMessageId?: string;
+  reason?: 'context_changed' | 'user_ambiguous' | 'reply_ambiguous' | 'reply_identity_mismatch' | 'prompt_unmatched';
+  /** 归属不明的可见回复单独保留，不冒充已收取／已采用。 */
+  candidates: ChatReadbackCandidate[];
+}
+
+/** 仅解析当前 Studio 的明确任务声明；不从助手回显反推本次任务。 */
+export function chatRequestIdentity(prompt: string): { requestId: string; targetIds: string[] } | undefined {
+  const taskSection = prompt.split('【当前事实与本次附件】')[0];
+  const matches = [...taskSection.matchAll(/【本次任务】\s*本次请求\s+([^\s；]+)\s*；\s*目标\s*ID\s*集合\s*(\[[^\n]*?\])\s*。/g)];
+  if (matches.length !== 1) return undefined;
+  try {
+    const ids: unknown = JSON.parse(matches[0][2]);
+    if (!Array.isArray(ids) || !ids.length || ids.some((id: unknown): boolean => typeof id !== 'string' || !id) || new Set(ids).size !== ids.length) return undefined;
+    return { requestId: matches[0][1], targetIds: ids as string[] };
+  } catch { return undefined; }
+}
+
+function sameTargetIds(left: unknown, right: string[]): boolean {
+  return Array.isArray(left) && left.every((id: unknown): boolean => typeof id === 'string') && new Set(left).size === left.length
+    && [...left].sort().join('\n') === [...right].sort().join('\n');
+}
+
+function codeJson(text: string): unknown {
+  const unwrapped = text.match(/^(`{3,})json\s*\n([\s\S]*?)\n\1\s*$/);
+  try { return JSON.parse(unwrapped ? unwrapped[2] : text); } catch { return undefined; }
+}
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (typeof left !== 'object' || left === null || typeof right !== 'object' || right === null || Array.isArray(left) !== Array.isArray(right)) return false;
+  if (Array.isArray(left) && Array.isArray(right)) return left.length === right.length && left.every((value: unknown, index: number): boolean => sameJsonValue(value, right[index]));
+  const a = left as Record<string, unknown>; const b = right as Record<string, unknown>;
+  return Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((key: string): boolean => Object.hasOwn(b, key) && sameJsonValue(a[key], b[key]));
+}
+
+/** 旧任务缺少已记录消息 ID 时，至少证明完整事实 JSON、任务声明及确定的首轮顺序。 */
+function requestEnvelopeMatches(message: ChatPageSnapshot['messages'][number], prompt: string): boolean {
+  if (!message.turnId && !message.messageId || !message.fencedCode?.length) return false;
+  const expected = chatRequestIdentity(prompt);
+  const identities = [message.rawText, message.renderedSource].filter((text): text is string => text !== undefined).map(chatRequestIdentity);
+  if (!expected || !identities.some((identity): boolean => !!identity && identity.requestId === expected.requestId && sameTargetIds(identity.targetIds, expected.targetIds))) return false;
+  const facts = prompt.match(/【当前事实与本次附件】\s*\n(`{3,})json\n([\s\S]*?)\n\1(?=\n|$)/);
+  if (!facts) return false;
+  const expectedFacts = codeJson(facts[2]);
+  if (typeof expectedFacts !== 'object' || expectedFacts === null) return false;
+  const observed = message.fencedCode.filter((block): boolean => block.language === 'json' || block.language === '')
+    .map((block): unknown => codeJson(block.text));
+  return observed.filter((value: unknown): boolean => value !== undefined && sameJsonValue(value, expectedFacts)).length === 1;
+}
+
+function trustedReadbackContext(context: ChatReadbackContext): boolean {
+  return !!context.taskId && !!context.runId && context.runId === context.currentRunId && !!context.accountId && context.accountId === context.currentAccountId
+    && isSameDoubaoConversation(context.conversationUrl, context.currentConversationUrl);
+}
+
+interface JsonDisplayMask { boundaries: Set<number>; whitespace: Set<number> }
+
+/** 只定位正式结构数据，不能把普通台词或正文中的空格当成可删版式。 */
+function structuredJsonSpan(source: string): { start: number; end: number } | undefined {
+  const marker = '【当前事实与本次附件】'; const at = source.indexOf(marker);
+  let start = at < 0 ? 0 : at + marker.length;
+  let end = at < 0 ? source.length : source.lastIndexOf('\n\n【结果约定】');
+  if (end < start) return undefined;
+  while (/\s/.test(source[start] || '') && start < end) start++;
+  while (/\s/.test(source[end - 1] || '') && end > start) end--;
+  const fence = source.slice(start, end).match(/^(`{3,})json\s*\n([\s\S]*?)\n\1\s*$/);
+  if (fence) { start += fence[0].indexOf('\n') + 1; end = start + fence[2].length; }
+  try {
+    const parsed: unknown = JSON.parse(source.slice(start, end));
+    return typeof parsed === 'object' && parsed !== null ? { start, end } : undefined;
+  } catch { return undefined; }
+}
+
+/** 在合法 JSON 的语法边界标记可变空白；字符串内逐字保留。 */
+function jsonDisplayMask(source: string, depth: number = 0): JsonDisplayMask {
+  const mask: JsonDisplayMask = { boundaries: new Set(), whitespace: new Set() };
+  const span = structuredJsonSpan(source); if (!span || depth > 3) return mask;
+  mask.boundaries.add(span.start); mask.boundaries.add(span.end);
+  let latestKey = '';
+  for (let index = span.start; index < span.end;) {
+    const character = source[index];
+    if (/\s/.test(character)) { mask.boundaries.add(index); mask.whitespace.add(index++); continue; }
+    if (character !== '"') {
+      if ('{}[],:'.includes(character)) { mask.boundaries.add(index); mask.boundaries.add(index + 1); }
+      index++; continue;
+    }
+    const start = index++; const positions: { start: number; end: number }[] = [];
+    while (index < span.end && source[index] !== '"') {
+      const from = index; index += source[index] === '\\' ? source[index + 1] === 'u' ? 6 : 2 : 1;
+      positions.push({ start: from, end: index });
+    }
+    const end = ++index; mask.boundaries.add(start); mask.boundaries.add(end);
+    const value = JSON.parse(source.slice(start, end)) as string;
+    let next = end; while (/\s/.test(source[next] || '') && next < span.end) next++;
+    if (source[next] === ':') { latestKey = value; continue; }
+    // 只递归宿主已经明确作为原请求／回复传入的 JSON 文本，不解释一般创作字符串。
+    if (!['originalRequest', 'originalReply', 'rawForFormatRepairOnly'].includes(latestKey)) continue;
+    const nested = jsonDisplayMask(value, depth + 1);
+    for (const boundary of nested.boundaries) mask.boundaries.add(boundary < positions.length ? positions[boundary].start : end - 1);
+    for (const whitespace of nested.whitespace) {
+      const position = positions[whitespace]; if (!position) continue;
+      // 转义的 \\n／\\t 仍逐字比较；仅允许其后的排版间距变化。
+      for (let offset = position.start; offset < position.end; offset++) if (/\s/.test(source[offset])) mask.whitespace.add(offset);
+      mask.boundaries.add(position.end);
+    }
+  }
+  return mask;
+}
+
+/** 旧版未围栏事实：按可信原请求词法证明 JSON 语法空白，而非删除全部空白。 */
+function legacyRenderedRequestMatches(message: ChatPageSnapshot['messages'][number], prompt: string): boolean {
+  if (!message.renderedSource || message.codeSpans || !message.turnId && !message.messageId) return false;
+  const identity = chatRequestIdentity(prompt); const observedIdentity = chatRequestIdentity(message.renderedSource);
+  if (!identity || observedIdentity?.requestId !== identity.requestId || !sameTargetIds(observedIdentity.targetIds, identity.targetIds)) return false;
+  const mask = jsonDisplayMask(prompt); if (!mask.boundaries.size || prompt.includes('\uE000')) return false;
+  let expected = '';
+  for (let index = 0; index <= prompt.length; index++) {
+    if (mask.boundaries.has(index)) expected += '\uE000';
+    if (index < prompt.length && !mask.whitespace.has(index)) expected += prompt[index];
+  }
+  // 一次标准 Markdown ASCII 标点转义消费；不处理 \\n、\\t 或任意正文内容。
+  expected = expected.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\]\\^_`{|}~])/g, '$1');
+  const normalizeDisplay = (value: string): string => normalizePublishedChatPrompt(value)
+    .replace(/(?<=[+−×÷=])\s+(?=\d)|(?<=\d)\s+(?=[+−×÷=])/gu, '')
+    .replace(/(?<=[\p{Script=Han}\p{Script=Latin}_])\s*\/\s*(?=[\p{Script=Han}\p{Script=Latin}_])/gu, '/')
+    .replace(/(:\s*(?:string|number|boolean|unknown|never|object))\s+(?=\[\])/g, '$1');
+  const pattern = normalizeDisplay(expected).split(/\uE000+/).map((part: string): string => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*');
+  return new RegExp('^' + pattern + '$', 'u').test(normalizeDisplay(message.renderedSource));
+}
+
+function findOriginalChatUser(fresh: ChatPageSnapshot['messages'], prompt: string, baselineMessageCount: number, context?: ChatReadbackContext): {
+  user?: ChatPageSnapshot['messages'][number]; association?: ChatReadbackResult['association']; reason?: ChatReadbackResult['reason'];
+} {
+  const users = fresh.filter((item): boolean => item.role === 'user');
+  if (context && (context.userTurnId || context.userMessageId)) {
+    const matches = users.filter((item): boolean => (!context.userTurnId || item.turnId === context.userTurnId)
+      && (!context.userMessageId || item.messageId === context.userMessageId));
+    return matches.length === 1 ? { user: matches[0], association: 'recorded_turn' } : { reason: 'user_ambiguous' };
+  }
+  if (users.length === 1 && publishedPromptMatches(users[0], prompt)) return { user: users[0], association: 'full_prompt' };
+  if (context && baselineMessageCount === 0 && users.length === 1 && fresh[0] === users[0] && legacyRenderedRequestMatches(users[0], prompt)) return { user: users[0], association: 'full_prompt' };
+  if (context && baselineMessageCount === 0 && users.length === 1 && fresh[0] === users[0] && requestEnvelopeMatches(users[0], prompt)) {
+    // 旧版每次都创建空白普通 Chat；事实 JSON 来自真实 CODE，不能仅凭 requestId 放行。
+    return { user: users[0], association: 'request_envelope' };
+  }
+  return { reason: users.length > 1 ? 'user_ambiguous' : 'prompt_unmatched' };
+}
+
 /** 基线在发送前取得；即使回复在首次回读前完成，也不会被吞进基线。 */
 export function inspectChatReadback(
   snapshot: ChatPageSnapshot,
   prompt: string,
   baselineMessageCount: number,
-): { generationStarted: boolean; inputCleared: boolean; messageCount: number; promptPublished: boolean; replyText: string; replyRawText: string; generating: boolean } {
+  context?: ChatReadbackContext,
+): ChatReadbackResult {
   const normalize = normalizePublishedChatPrompt;
   const fresh = snapshot.messages.slice(baselineMessageCount);
-  const users = fresh.filter((item): boolean => item.role === 'user');
-  // 多个用户消息、不同提示词或缺少消息结构时保守等待，不绑定别人的回复。
-  const promptPublished = users.length === 1 && publishedPromptMatches(users[0], prompt);
-  const userIndex = fresh.findIndex((item): boolean => item.role === 'user');
-  const replies = promptPublished ? fresh.slice(userIndex + 1).filter((item): boolean => item.role === 'assistant') : [];
+  const result: ChatReadbackResult = { generationStarted: false, inputCleared: snapshot.editorPresent && normalize(snapshot.editorText) === '', messageCount: snapshot.messages.length,
+    promptPublished: false, replyRawText: '', replyText: '', generating: snapshot.generating,
+    candidates: fresh.flatMap((item, index): ChatReadbackCandidate[] => item.role === 'assistant'
+      ? [{ messageIndex: index + baselineMessageCount, rawText: item.rawText ?? item.text, ...(item.turnId ? { turnId: item.turnId } : {}), ...(item.messageId ? { messageId: item.messageId } : {}) }] : []) };
+  if (context && !trustedReadbackContext(context)) return { ...result, reason: 'context_changed' };
+  const { user, association, reason } = findOriginalChatUser(fresh, prompt, baselineMessageCount, context);
+  if (!user) return { ...result, reason };
+  const userIndex = fresh.indexOf(user);
+  const nextUserIndex = fresh.findIndex((item, index): boolean => index > userIndex && item.role === 'user');
+  const replies = fresh.slice(userIndex + 1, nextUserIndex === -1 ? undefined : nextUserIndex).filter((item): boolean => item.role === 'assistant');
+  const candidates = replies.map((reply): ChatReadbackCandidate => ({ messageIndex: snapshot.messages.indexOf(reply), rawText: reply.rawText ?? reply.text,
+    ...(reply.turnId ? { turnId: reply.turnId } : {}), ...(reply.messageId ? { messageId: reply.messageId } : {}) }));
+  const identity = chatRequestIdentity(prompt);
+  const reply = replies.length === 1 ? replies[0] : undefined;
+  const raw = reply?.rawText ?? reply?.text ?? '';
+  const parsed = codeJson(raw.trim());
+  const replyEnvelope = typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : undefined;
+  const replyMismatch = !!identity && !!replyEnvelope && (Object.hasOwn(replyEnvelope, 'requestId') || Object.hasOwn(replyEnvelope, 'targetIds'))
+    && (replyEnvelope.requestId !== identity.requestId || !sameTargetIds(replyEnvelope.targetIds, identity.targetIds));
+  // 已确定的原轮次回复即使不是合法 JSON 也保留；内容校验及采用由项目服务独立完成。
   return {
-    generationStarted: promptPublished,
-    inputCleared: snapshot.editorPresent && normalize(snapshot.editorText) === '',
-    messageCount: snapshot.messages.length,
-    promptPublished,
-    replyRawText: replies.length === 1 ? (replies[0].rawText ?? replies[0].text) : '',
-    replyText: replies.length === 1 ? replies[0].text : '',
-    generating: snapshot.generating,
+    ...result, generationStarted: true, promptPublished: true, association,
+    userTurnId: user.turnId, userMessageId: user.messageId, candidates,
+    ...(reply ? { assistantTurnId: reply.turnId, assistantMessageId: reply.messageId } : {}),
+    ...(replies.length > 1 ? { reason: 'reply_ambiguous' as const } : replyMismatch ? { reason: 'reply_identity_mismatch' as const } : {}),
+    replyRawText: reply && !replyMismatch ? raw : '', replyText: reply && !replyMismatch ? reply.text : '',
   };
 }
 

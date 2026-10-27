@@ -461,6 +461,46 @@ function normalizeAcceptanceObservation(raw: unknown): TaskRunSnapshot['acceptan
   };
 }
 
+/** 消息／请求身份只保留实际读到的有界 ID；不裁切后冒充另一个身份。 */
+function chatEvidenceId(raw: unknown): string | undefined {
+  return typeof raw === 'string' && /^[a-zA-Z0-9_:.=-]{1,256}$/.test(raw) ? raw : undefined;
+}
+function validOptionalChatIds(raw: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((key: string): boolean => raw[key] === undefined || chatEvidenceId(raw[key]) !== undefined);
+}
+function chatEvidenceRuntime(raw: Record<string, unknown>, runtime: Record<string, unknown>, mode: GenerationMode): boolean {
+  return mode === 'chat' && isValidISODate(runtime.submittedAt) && !!chatEvidenceId(raw.runId) && raw.runId === runtime.runId;
+}
+function normalizeChatReadback(raw: unknown, runtime: Record<string, unknown>, mode: GenerationMode): TaskRunSnapshot['chatReadback'] {
+  if (!isObject(raw) || !chatEvidenceRuntime(raw, runtime, mode) || !isValidISODate(raw.observedAt)
+    || !Number.isSafeInteger(raw.baselineMessageCount) || (raw.baselineMessageCount as number) < 0) return undefined;
+  const association = optionalOneOf(raw.association, ['full_prompt', 'recorded_turn', 'request_envelope'] as const);
+  const idKeys = ['requestId', 'userTurnId', 'userMessageId', 'assistantTurnId', 'assistantMessageId'] as const;
+  if (!association || !validOptionalChatIds(raw, idKeys)) return undefined;
+  const targetIds = raw.targetIds;
+  if (targetIds !== undefined && (!Array.isArray(targetIds) || !targetIds.length || targetIds.some((id: unknown): boolean => !chatEvidenceId(id)) || new Set(targetIds).size !== targetIds.length)) return undefined;
+  if ((raw.requestId === undefined) !== (targetIds === undefined)) return undefined;
+  if (association === 'recorded_turn' && !raw.userTurnId && !raw.userMessageId) return undefined;
+  if (association === 'request_envelope' && (!raw.requestId || !raw.userTurnId && !raw.userMessageId)) return undefined;
+  return { runId: raw.runId as string, baselineMessageCount: raw.baselineMessageCount as number, association, observedAt: raw.observedAt,
+    requestId: chatEvidenceId(raw.requestId), targetIds: targetIds === undefined ? undefined : [...targetIds as string[]],
+    userTurnId: chatEvidenceId(raw.userTurnId), userMessageId: chatEvidenceId(raw.userMessageId),
+    assistantTurnId: chatEvidenceId(raw.assistantTurnId), assistantMessageId: chatEvidenceId(raw.assistantMessageId) };
+}
+function normalizeChatReadbackReview(raw: unknown, runtime: Record<string, unknown>, mode: GenerationMode): TaskRunSnapshot['chatReadbackReview'] {
+  if (!isObject(raw) || !chatEvidenceRuntime(raw, runtime, mode) || !isValidISODate(raw.checkedAt) || !Array.isArray(raw.candidates)) return undefined;
+  const reason = optionalOneOf(raw.reason, ['context_changed', 'user_ambiguous', 'reply_ambiguous', 'reply_identity_mismatch', 'prompt_unmatched', 'reply_not_stable', 'submission_not_confirmed'] as const);
+  if (!reason) return undefined;
+  const candidates: NonNullable<TaskRunSnapshot['chatReadbackReview']>['candidates'] = [];
+  for (const candidate of raw.candidates) {
+    if (!isObject(candidate) || !Number.isSafeInteger(candidate.messageIndex) || (candidate.messageIndex as number) < 0
+      || typeof candidate.rawText !== 'string' || !validOptionalChatIds(candidate, ['turnId', 'messageId'])) return undefined;
+    candidates.push({ messageIndex: candidate.messageIndex as number, rawText: candidate.rawText,
+      turnId: chatEvidenceId(candidate.turnId), messageId: chatEvidenceId(candidate.messageId) });
+  }
+  return { runId: raw.runId as string, checkedAt: raw.checkedAt, reason, candidates };
+}
+
 /**
  * 归一化 TaskRunSnapshot（运行快照）。
  */
@@ -540,6 +580,8 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): 
       } : undefined,
     chatResponse: isObject(r.chatResponse) && typeof r.chatResponse.text === 'string' && isValidISODate(r.chatResponse.capturedAt)
       ? { text: r.chatResponse.text, capturedAt: r.chatResponse.capturedAt } : undefined,
+    chatReadback: normalizeChatReadback(r.chatReadback, r, taskMode),
+    chatReadbackReview: normalizeChatReadbackReview(r.chatReadbackReview, r, taskMode),
     input: {
       petstory: isObject(input) ? input.petstory as Task['petstory'] : undefined,
       promptReadback: isObject(input) && input.promptReadback === 'exact' ? 'exact' : undefined,

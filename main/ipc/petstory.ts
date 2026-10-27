@@ -22,7 +22,7 @@ const production = new PetStoryProductionService(projects, { list: listTasksForL
 const existingMedia = new PetStoryExistingMediaService(projects, { list: listTasksForLocalControl, downloads: listTaskDownloads });
 const CHANNELS = ['petstory:saveOriginalStory', 'petstory:linkExistingMedia', 'petstory:listExistingMediaCandidates', 'petstory:saveShotPrompt', 'petstory:generateShotMedia', 'petstory:readMedia', 'petstory:exportPrompts', 'petstory:confirmStory', 'petstory:saveMaterialPrompt', 'petstory:addMaterialImage', 'petstory:selectMaterialImage', 'petstory:approveMaterials', 'petstory:generateMaterials', 'petstory:recordPageBindings', 'petstory:bindSharedReference', 'petstory:previewPrompt', 'petstory:savePromptProfile', 'petstory:selectProductionImage', 'petstory:addSceneReference', 'petstory:previewProduction', 'petstory:approveProduction', 'petstory:advanceProduction', 'petstory:pauseProduction', 'petstory:resumeProduction', 'petstory:bindProductionRun', 'petstory:guardProductionTask', 'petstory:create', 'petstory:open', 'petstory:saveSource', 'petstory:saveMobileStory', 'petstory:addReference', 'petstory:savePlan', 'petstory:prepareChat', 'petstory:collectChat', 'petstory:bindRun', 'petstory:retryUnsubmitted', 'petstory:readReference', 'petstory:draftFinal'] as const;
 type Handler = (event: IpcMainInvokeEvent, params: Record<string, unknown>) => Promise<PetStoryResult & { data?: string }>;
-const RUNTIME_CHANNELS = ['petstory:prepareRuntime', 'petstory:adoptPlanCandidate', 'petstory:adoptAssetsCandidate', 'petstory:adoptPromptCandidate'] as const;
+const RUNTIME_CHANNELS = ['petstory:promptStageTargets', 'petstory:savePromptModel', 'petstory:savePromptBatch', 'petstory:endChatWaiting', 'petstory:prepareRuntime', 'petstory:adoptPlanCandidate', 'petstory:adoptAssetsCandidate', 'petstory:adoptPromptCandidate'] as const;
 
 /** 仅宿主顶层 frame 可调用；不接受任意目录、文件路径或 shell 参数。 */
 function hostGuard(work: Handler): Handler {
@@ -115,12 +115,21 @@ export function registerPetStoryIPC(): () => void {
     if (selected.canceled) return { success: false, error: '已取消' };
     return { success: true, displayName: path.basename(selected.filePaths[0]), project: await projects.create(selected.filePaths[0], studioProjectId, accountId) };
   }));
-  ipcMain.handle('petstory:open', hostGuard(async (event: IpcMainInvokeEvent): Promise<PetStoryResult> => {
-    const selected = await dialog.showOpenDialog(dialogOwner(event), { title: '选择包含 project.json 的 PetStory 目录', properties: ['openDirectory'] });
-    if (selected.canceled) return { success: false, error: '已取消' };
-    const project = await projects.open(selected.filePaths[0]);
+  ipcMain.handle('petstory:open', hostGuard(async (event: IpcMainInvokeEvent, args: Record<string, unknown>): Promise<PetStoryResult> => {
+    const owner = dialogOwner(event);
+    let chosen = args.path;
+    if (chosen === undefined) {
+      const selected = await dialog.showOpenDialog(owner, { title: '选择 PetStory 目录或其中的 project.json', properties: ['openDirectory', 'openFile'], filters: [{ name: 'PetStory 项目', extensions: ['json'] }] });
+      if (selected.canceled) return { success: false, error: '已取消' };
+      chosen = selected.filePaths[0];
+    }
+    if (typeof chosen !== 'string' || !path.isAbsolute(chosen) || chosen.includes('\0') || chosen.length > 4096) throw new Error('请输入已有项目目录或 project.json 的完整绝对路径');
+    const info = await fs.stat(chosen);
+    if (!info.isDirectory() && (!info.isFile() || path.basename(chosen) !== 'project.json')) throw new Error('请选择项目目录或其 project.json，不读取其他 JSON 文件');
+    const directory = info.isDirectory() ? chosen : path.dirname(chosen);
+    const project = await projects.open(directory);
     production.suspend(project.id);
-    return { success: true, displayName: path.basename(selected.filePaths[0]), project };
+    return { success: true, displayName: path.basename(directory), project };
   }));
   ipcMain.handle('petstory:saveSource', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), async (): Promise<PetStoryResult> => ({
     success: true, project: await projects.saveSource(String(p.id), Number(p.revision), String(p.text || '')),
@@ -146,6 +155,10 @@ export function registerPetStoryIPC(): () => void {
   ipcMain.handle('petstory:prepareChat', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => chats.prepare(
     String(p.id), String(p.prompt || ''), p.kind as PetStoryChatJob['kind'], p.parentJobId as string | undefined, p.shotId as string | undefined, p.promptKind as PetStoryPromptKind | undefined, p.materialId as string | undefined,
   ))));
+  ipcMain.handle('petstory:savePromptModel', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), async (): Promise<PetStoryResult> => ({ success: true, project: await projects.savePromptModel(String(p.id), Number(p.revision), p.model as import('@doubao-studio/contracts').PetStoryProject['promptModel']) }))));
+  ipcMain.handle('petstory:savePromptBatch', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), async (): Promise<PetStoryResult> => ({ success: true, project: await projects.savePromptBatch(String(p.id), Number(p.revision), p.batch as import('@doubao-studio/contracts').PetStoryPromptBatch) }))));
+  ipcMain.handle('petstory:endChatWaiting', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => chats.endWaiting(String(p.id), Number(p.revision), String(p.jobId)))));
+  ipcMain.handle('petstory:promptStageTargets', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => chats.promptStageTargets(String(p.id), Number(p.revision))));
   ipcMain.handle('petstory:bindRun', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => chats.bindRun(String(p.id), String(p.jobId), String(p.runId)))));
   ipcMain.handle('petstory:retryUnsubmitted', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => chats.retryUnsubmitted(String(p.id), String(p.jobId)))));
   ipcMain.handle('petstory:collectChat', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => chats.collect(String(p.id), String(p.jobId)))));

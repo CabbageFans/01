@@ -247,7 +247,7 @@ describe('ordinary Chat message-scoped readback', (): void => {
 
   it('executes the actual serialized guest probe and excludes unrelated body content', async (): Promise<void> => {
     const messageNode = (role: string, text: string): object => ({
-      getAttribute: (): string => role,
+      getAttribute: (name: string): string | null => name === 'data-testid' ? role : null,
       querySelector: (): object => ({ textContent: text }),
     });
     const doc = {
@@ -329,8 +329,9 @@ describe('ordinary Chat message-scoped readback', (): void => {
     const loadURL = vi.fn();
     const result = await startNewConversation({
       loadURL, getURL: (): string => 'https://www.doubao.com/chat/',
-      executeJavaScript: async (code: string): Promise<unknown> => code.includes('messages.push')
-        ? page([]) : code.includes('plainChatComposerProbe') ? { ok: true } : code.includes('var editor = null') ? { ok: true, reason: 'READY' } : true,
+      executeJavaScript: async (code: string): Promise<unknown> => code.includes('timeOrigin: performance.timeOrigin') ? { href: 'https://www.doubao.com/chat/', timeOrigin: 1, readyState: 'complete' }
+        : code.includes('var newConversationDocument') ? { ok: true, reason: 'READY', stabilityKey: 'OFFLINE-stable' } : code.includes('messages.push')
+          ? page([]) : code.includes('plainChatComposerProbe') ? { ok: true } : code.includes('var editor = null') ? { ok: true, reason: 'READY' } : true,
     }, 1000, true);
     expect(result.ok).toBe(true);
     expect(loadURL).not.toHaveBeenCalled();
@@ -340,17 +341,19 @@ describe('ordinary Chat message-scoped readback', (): void => {
     const loadURL = vi.fn();
     const result = await startNewConversation({
       loadURL, getURL: (): string => 'https://www.doubao.com/chat/',
-      executeJavaScript: async (): Promise<ChatPageSnapshot> => snapshot,
+      executeJavaScript: async (code: string): Promise<unknown> => code.includes('timeOrigin: performance.timeOrigin') ? { href: 'https://www.doubao.com/chat/', timeOrigin: 1, readyState: 'complete' } : snapshot,
     }, 1000, true);
     expect(result).toEqual({ ok: false, reason: 'SESSION_NOT_EMPTY' });
     expect(loadURL).not.toHaveBeenCalled();
   });
 
   it('still navigates out of a concrete old conversation before any new input', async (): Promise<void> => {
-    const loadURL = vi.fn();
+    let url = 'https://www.doubao.com/chat/old-conversation'; let timeOrigin = 1;
+    const loadURL = vi.fn((next: string): void => { url = next; timeOrigin++; });
     await startNewConversation({
-      loadURL, getURL: (): string => 'https://www.doubao.com/chat/old-conversation',
-      executeJavaScript: async (code: string): Promise<unknown> => code.includes('var editor = null') ? { ok: false, reason: 'EDITOR_NOT_FOUND' } : true,
+      loadURL, getURL: (): string => url,
+      executeJavaScript: async (code: string): Promise<unknown> => code.includes('timeOrigin: performance.timeOrigin') ? { href: url, timeOrigin, readyState: 'complete' }
+        : code.includes('var editor = null') ? { ok: false, reason: 'EDITOR_NOT_FOUND' } : true,
     }, 1000, true);
     expect(loadURL).toHaveBeenCalledOnce();
     expect(loadURL).toHaveBeenCalledWith('https://www.doubao.com/chat/');

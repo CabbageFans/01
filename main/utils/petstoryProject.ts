@@ -1,11 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryChatJob } from '@doubao-studio/contracts';
+import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryChatJob, PetStoryPromptBatch } from '@doubao-studio/contracts';
 import { assetCharacterIds, defaultPromptProfile } from './petstoryPromptQuality';
 import { extractDouyinLink, record, validatePetStoryPlan, validatePromptTask } from './petstoryValidation';
 import { invalidateMaterialDependents, materialAsset, syncMaterials, storyHash, requireMaterialInventory } from './petstoryMaterials';
 import { mediaDigest, validatePetStoryMedia } from './petstoryMedia';
+import { archiveCompletedPetStoryProduction } from './petstoryProductionLifecycle';
+import { validateCastBindings } from './petstoryCast';
 
 export async function projectPath(directory: string, relative: string): Promise<string> {
   if (!relative || path.isAbsolute(relative) || relative.includes('\\') || relative.split('/').some((p: string): boolean => p === '..' || p === '.' || !p)) {
@@ -40,6 +42,8 @@ export function validateProject(value: unknown): PetStoryProject {
   if (!['pending', 'blocked', 'review_required'].includes(String(source.status))) throw new Error('来源状态无效');
   validateMobileStory(p.mobileStory);
   if (p.promptProfile !== undefined) validatePromptProfile(p.promptProfile);
+  if (p.promptModel !== undefined && !['generic', 'seedance-2.5', 'seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'].includes(String(p.promptModel))) throw new Error('文字目标模型无效');
+  if (p.promptBatch !== undefined) validatePromptBatch(p.promptBatch);
   if (!Array.isArray(p.assets) || !Array.isArray(p.jobs)) throw new Error('项目资产或任务清单无效');
   const result = structuredClone(value) as PetStoryProject;
   if (p.plan) result.plan = validatePetStoryPlan(p.plan);
@@ -63,10 +67,17 @@ function validateChatJobs(result: PetStoryProject): void {
     if (job.requestId && (!job.expectedIds?.length || !job.rulesVersion || !job.ruleFiles?.length)) throw new Error('运行时规则或目标记录不完整');
     if (job.selectedIssueIds !== undefined && (!Array.isArray(job.selectedIssueIds) || !job.selectedIssueIds.length || job.selectedIssueIds.some((id: unknown): boolean => typeof id !== 'string' || !id.trim()) || new Set(job.selectedIssueIds).size !== job.selectedIssueIds.length)) throw new Error('保存的局部修订问题选择无效');
     if (job.reviewFocus !== undefined && (typeof job.reviewFocus !== 'string' || !job.reviewFocus.trim() || job.reviewFocus.length > 2000 || !['review', 'repair'].includes(job.kind))) throw new Error('保存的内容审查核对疑点无效');
+    if (job.endedWaitingAt !== undefined && !Number.isFinite(Date.parse(job.endedWaitingAt))) throw new Error('结束等待记录无效');
     validateChatRequestFacts(job);
   }
 }
 function validateChatRequestFacts(job: PetStoryChatJob): void {
+  if (job.analysisCastBindings !== undefined) {
+    if (!['analysis', 'repair'].includes(job.kind)) throw new Error('演员绑定快照仅用于分析任务');
+    validateCastBindings(job.analysisCastBindings);
+  }
+  if (job.reviewInputFinals !== undefined && (!['review', 'repair'].includes(job.kind) || !job.reviewInputFinals || typeof job.reviewInputFinals !== 'object' || Object.prototype.toString.call(job.reviewInputFinals) !== '[object Object]'
+    || Object.entries(job.reviewInputFinals).some(([key, value]): boolean => !/^(?:(?:character|prop|scene):[a-zA-Z0-9_-]{1,80}|[a-zA-Z0-9_-]{1,80}:(?:firstFrame|lastFrame|video))$/.test(key) || typeof value !== 'string'))) throw new Error('保存的审查逐项正文快照无效');
   if (job.requestText !== undefined && (typeof job.requestText !== 'string' || !job.requestText.trim())) throw new Error('保存的 Chat 原请求无效');
   if (job.validationIssues !== undefined && (!Array.isArray(job.validationIssues) || job.validationIssues.some((issue: unknown): boolean => typeof issue !== 'string' || !issue.trim()))) throw new Error('保存的 Chat 具体缺项无效');
   if (job.frameContextHash !== undefined && !/^[a-f0-9]{64}$/.test(job.frameContextHash)) throw new Error('保存的共同帧正文快照无效');
@@ -196,12 +207,28 @@ export class PetStoryProjects {
       return written;
     } finally { await fs.rm(temporary, { force: true }); }
   }
+  async savePromptModel(id: string, revision: number, model?: PetStoryProject['promptModel']): Promise<PetStoryProject> {
+    const p = await this.read(id);
+    if (p.revision !== revision) throw new Error('项目已变化或原制作仍在使用中');
+    archiveCompletedPetStoryProduction(p);
+    if (p.production) throw new Error('项目已变化或原制作仍在使用中');
+    p.promptModel = model;
+    return this.write(p);
+  }
+  async savePromptBatch(id: string, revision: number, batch: PetStoryPromptBatch): Promise<PetStoryProject> {
+    const p = await this.read(id);
+    if (p.revision !== revision) throw new Error('项目版本已变化，请刷新文字批次');
+    validatePromptBatch(batch);
+    p.promptBatch = structuredClone(batch);
+    return this.write(p);
+  }
   async savePromptProfile(id: string, revision: number, profile: PetStoryPromptProfile): Promise<PetStoryProject> {
     const p = await this.read(id);
-    if (p.revision !== revision || (p.production && (p.production.phase !== 'materials' || p.production.state !== 'complete'))) throw new Error('项目已变化或制作已锁定');
+    if (p.revision !== revision) throw new Error('项目已变化或制作已锁定');
+    archiveCompletedPetStoryProduction(p);
+    if (p.production) throw new Error('项目已变化或制作已锁定');
     p.promptProfile = validatePromptProfile(profile);
     if (p.materials) p.materials = syncMaterials(p);
-    if (p.production) { p.productionHistory = [...(p.productionHistory || []), p.production]; p.production = undefined; }
     return this.write(p);
   }
   async saveSource(id: string, revision: number, value: string): Promise<PetStoryProject> {
@@ -255,17 +282,16 @@ export class PetStoryProjects {
     const p = await this.read(id);
     if (p.revision !== revision) throw new Error('项目版本已变化，请重新读取');
     if (!p.plan) throw new Error('请先取得本次 Chat 分析结果');
-    if (p.production && (!(p.production.phase === 'materials' || p.production.target) || p.production.state !== 'complete' || p.production.steps.some((s): boolean => s.status !== 'complete'))) throw new Error('原制作尚未结束或镜头方案已锁定，保留已有素材和任务');
+    if (p.production && !archiveCompletedPetStoryProduction(p)) throw new Error('原制作尚未结束或镜头方案已锁定，保留已有素材和任务');
     const checked = validatePetStoryPlan(value);
     for (const shot of checked.shots) {
       const previous = p.plan.shots.find((s): boolean => s.id === shot.id);
       for (const kind of ['firstFrame', 'lastFrame', 'video'] as const) {
         const incoming = shot.prompts[kind];
         const old = previous?.prompts[kind];
-        if (incoming && old) shot.prompts[kind] = { ...old, final: incoming.final, edited: old.edited || incoming.final !== old.final, sourceJobId: incoming.final === old.final ? old.sourceJobId : undefined };
+        if (incoming && old) shot.prompts[kind] = { ...old, final: incoming.final, edited: old.edited || incoming.final !== old.final, basisJobId: incoming.final === old.final ? old.basisJobId : old.sourceJobId || old.basisJobId, sourceJobId: incoming.final === old.final ? old.sourceJobId : undefined };
       }
     }
-    if (p.production?.state === 'complete' && (p.production.phase === 'materials' || p.production.target)) { p.productionHistory = [...(p.productionHistory || []), p.production]; p.production = undefined; }
     p.plan = checked;
     if (p.materials) p.materials = syncMaterials(p);
     return this.write(p);
@@ -277,11 +303,8 @@ export class PetStoryProjects {
     if (!['firstFrame', 'lastFrame', 'video'].includes(kind) || !final.trim() || final.length > 100_000) throw new Error('提示词用途或正文无效');
     const target = p.plan?.shots.find((s): boolean => s.id === shotId)?.prompts[kind];
     if (!target) throw new Error('镜头或提示词不存在');
-    if (p.production) {
-      if (p.production.state !== 'complete' || !(p.production.phase === 'materials' || p.production.target)) throw new Error('原制作尚未结束，请先处理原任务，保留已有输入与素材');
-      p.productionHistory = [...(p.productionHistory || []), p.production]; p.production = undefined;
-    }
-    target.final = final; target.edited = true; target.sourceJobId = undefined;
+    if (p.production && !archiveCompletedPetStoryProduction(p)) throw new Error('原制作尚未结束，请先处理原任务，保留已有输入与素材');
+    target.basisJobId = target.sourceJobId || target.basisJobId; target.final = final; target.edited = true; target.sourceJobId = undefined;
     return this.write(p);
   }
   async bindSharedReference(id: string, revision: number, characterId: string, assetId: string): Promise<PetStoryProject> {
@@ -334,6 +357,7 @@ export class PetStoryProjects {
   }
   private editableMaterials(p: PetStoryProject, revision: number): void {
     if (p.revision !== revision) throw new Error('项目版本变化，请刷新后操作');
+    archiveCompletedPetStoryProduction(p);
     if (p.production?.state === 'running' || p.production?.steps.some((s): boolean => s.status !== 'complete')) throw new Error('原制作尚有未结束步骤，请先处理原任务，不能替换其输入');
   }
   async confirmStory(id: string, revision: number): Promise<PetStoryProject> {
@@ -347,7 +371,7 @@ export class PetStoryProjects {
     const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
     const m = p.materials?.find((m): boolean => m.id === materialId);
     if (!m || !final.trim() || final.length > 50000) throw new Error('基础图提示词为空或无效');
-    m.prompt = { ...m.prompt, final, edited: true, sourceJobId: undefined, needsReview: undefined };
+    m.prompt = { ...m.prompt, final, edited: true, basisJobId: m.prompt.sourceJobId || m.prompt.basisJobId, sourceJobId: undefined, needsReview: undefined };
     return this.write(p);
   }
   async selectMaterialImage(id: string, revision: number, materialId: string, assetId: string): Promise<PetStoryProject> {
@@ -424,5 +448,19 @@ export function validatePromptProfile(value: unknown): PetStoryPromptProfile {
     if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || typeof c.identity !== 'string' || typeof c.appearance !== 'string'
       || c.identity.length > 10000 || c.appearance.length > 10000) throw new Error('角色预设无效');
   }
+  validateCastBindings(characters);
   return structuredClone(value) as PetStoryPromptProfile;
+}
+
+/** 批次只保存文字目标和进度，不保存自动重启授权。 */
+function validatePromptBatch(value: unknown): void {
+  const batch = record(value);
+  if (!['running', 'paused', 'complete'].includes(String(batch.status)) || !Array.isArray(batch.targets)
+    || !Number.isInteger(batch.total) || !Number.isInteger(batch.completed) || Number(batch.completed) < 0 || Number(batch.total) < Number(batch.completed)
+    || batch.targets.length + Number(batch.completed) !== batch.total) throw new Error('文字批次进度无效');
+  for (const item of batch.targets) {
+    const t = record(item);
+    if (!(typeof t.materialId === 'string' && !t.shotId && !t.kind || typeof t.shotId === 'string' && !t.materialId && ['firstFrame', 'lastFrame', 'video'].includes(String(t.kind)))) throw new Error('文字批次目标无效');
+  }
+  if (batch.jobId !== undefined && typeof batch.jobId !== 'string') throw new Error('文字批次运行无效');
 }

@@ -28,7 +28,7 @@ import { isSameDoubaoConversation } from './taskConversationLocator';
 import { uploadChatImages } from './chatAttachments';
 import { appendExactComposerText, insertExactComposerText, readExactComposerText } from './exactComposer';
 import { petStoryComposerProbe } from './petstoryControls';
-import type { ChatPageSnapshot } from './chatReadback';
+import type { ChatPageSnapshot, ChatReadbackContext, ChatReadbackResult } from './chatReadback';
 
 // ==================== 类型 ====================
 
@@ -42,6 +42,7 @@ export interface WebviewHandle {
   getBoundingClientRect?(): { left: number; top: number; right: number; bottom: number; width: number; height: number };
   contains?(node: Node | null): boolean;
   readonly isConnected?: boolean;
+  isLoadingMainFrame?(): boolean;
 }
 
 /** Electron webview sendInputEvent 的键盘事件类型 */
@@ -962,6 +963,7 @@ export interface SendButtonTarget {
   method?: string;
   geometry?: string;
   focused?: boolean;
+  hostGeometry?: string;
 }
 
 /**
@@ -2136,20 +2138,51 @@ export async function injectGenerationMonitor(webview: WebviewHandle): Promise<b
   }
 }
 
-function nativeInputHostVisible(webview: WebviewHandle): boolean {
-  if (!webview.getBoundingClientRect || webview.isConnected === false || typeof document === 'undefined') return false;
+function nativeInputHostGeometry(webview: WebviewHandle, target?: SendButtonTarget): string | undefined {
+  if (!webview.getBoundingClientRect || webview.isConnected === false || typeof document === 'undefined') return undefined;
   const rect = webview.getBoundingClientRect();
-  const x = rect.left + rect.width / 2; const y = rect.top + rect.height / 2;
-  if (rect.width <= 0 || rect.height <= 0 || x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return false;
-  const hit = document.elementFromPoint(x, y);
-  return hit === (webview as unknown as Element) || !!webview.contains?.(hit);
+  if (rect.width <= 0 || rect.height <= 0) return undefined;
+  const points = [[rect.left + rect.width / 2, rect.top + rect.height / 2]];
+  if (target) {
+    const geometry = target.geometry?.split(',').map(Number); const position = target.position?.split(',').map(Number);
+    if (!geometry || geometry.length !== 6 || !geometry.every(Number.isFinite) || geometry[4] <= 0 || geometry[5] <= 0
+      || !position || position.length !== 2 || !position.every(Number.isFinite) || position[0] < 0 || position[1] < 0 || position[0] >= geometry[4] || position[1] >= geometry[5]) return undefined;
+    // guest DOM 看不到宿主遮挡；只映射可见命中检查，原生事件仍使用原 guest 坐标。
+    points.push([rect.left + position[0] * rect.width / geometry[4], rect.top + position[1] * rect.height / geometry[5]]);
+  }
+  if (!points.every(([x, y]): boolean => {
+    if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return false;
+    const hit = document.elementFromPoint(x, y);
+    return hit === (webview as unknown as Element) || !!webview.contains?.(hit);
+  })) return undefined;
+  return [rect.left, rect.top, rect.width, rect.height, window.innerWidth, window.innerHeight].join(',');
 }
 
-/** 只准备焦点并回读两帧稳定命中，不派发任何提交事件；调用方须在提交意图前执行。 */
-export async function prepareNativeSubmission(webview: WebviewHandle): Promise<SendButtonTarget> {
+export interface SubmissionDispatchSafety {
+  signal: AbortSignal;
+  deadlineAt: number;
+  isCurrent: () => boolean;
+  verifyLease: () => Promise<boolean>;
+}
+
+function submissionDispatchAllowed(safety?: SubmissionDispatchSafety): boolean {
+  if (!safety) return true;
   try {
+    return !safety.signal.aborted && Number.isFinite(safety.deadlineAt)
+      && Date.now() < safety.deadlineAt && safety.isCurrent();
+  } catch { return false; }
+}
+function sameNativeSubmissionTarget(current: SendButtonTarget, previous: SendButtonTarget): boolean {
+  return current.ok && previous.ok && current.focused === true && previous.focused === true && !!current.geometry && !!current.position && !!current.hostGeometry
+    && current.geometry === previous.geometry && current.position === previous.position && current.method === previous.method && current.hostGeometry === previous.hostGeometry;
+}
+
+/** 只准备焦点并回读两帧稳定命中；最终提交准备还必须受原运行及截止时间约束。 */
+export async function prepareNativeSubmission(webview: WebviewHandle, safety?: SubmissionDispatchSafety): Promise<SendButtonTarget> {
+  try {
+    if (!submissionDispatchAllowed(safety)) return { ok: false };
     const prepare = typeof window !== 'undefined' ? window.electronAPI?.system?.prepareNativeInput : undefined;
-    if (!prepare || !await prepare() || !nativeInputHostVisible(webview)) return { ok: false };
+    if (!prepare || !await prepare() || !submissionDispatchAllowed(safety) || !nativeInputHostGeometry(webview)) return { ok: false };
     webview.focus?.();
     const focused = await safeExecuteJS<boolean>(webview, `
       (async function() {
@@ -2166,23 +2199,28 @@ export async function prepareNativeSubmission(webview: WebviewHandle): Promise<S
         return document.hasFocus() && (document.activeElement === editor || editor.contains(document.activeElement));
       })()
     `, 3000, 'focusNativeSubmissionEditor');
-    if (!focused) return { ok: false };
+    if (!focused || !submissionDispatchAllowed(safety)) return { ok: false };
     let previous: SendButtonTarget | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
       await safeExecuteJS<boolean>(webview, 'new Promise(function(resolve) { requestAnimationFrame(function() { resolve(true); }); })', 3000, 'nativeSubmissionFrame');
-      if (!nativeInputHostVisible(webview)) return { ok: false };
+      if (!submissionDispatchAllowed(safety) || !nativeInputHostGeometry(webview)) return { ok: false };
       const target = await findSendButtonTarget(webview);
-      if (target.ok && target.focused && target.geometry && target.position && previous?.geometry === target.geometry && previous.position === target.position && previous.method === target.method) return target;
-      previous = target.ok && target.focused ? target : undefined;
+      if (!submissionDispatchAllowed(safety)) return { ok: false };
+      const current = { ...target, hostGeometry: target.ok ? nativeInputHostGeometry(webview, target) : undefined };
+      if (previous && sameNativeSubmissionTarget(current, previous)) return current;
+      previous = current;
     }
   } catch { /* 焦点或只读探针不确定时不记录发送成功。 */ }
   return { ok: false };
 }
 
-/** 普通 Chat 使用页内命中后的单次完整事件序列，避免嵌套 guest 的原生坐标偏移。 */
-async function dispatchVerifiedGuestClick(webview: WebviewHandle, target: SendButtonTarget): Promise<boolean> {
+/** 页内单次事件序列；策略须预先选定，不能在另一种提交失败后调用。 */
+async function dispatchVerifiedGuestClick(webview: WebviewHandle, target: SendButtonTarget, safety?: SubmissionDispatchSafety): Promise<boolean> {
+  if (!submissionDispatchAllowed(safety)) return false;
   return safeExecuteJS<boolean>(webview, `
     (function() {
+      var deadline = ${JSON.stringify(safety?.deadlineAt ?? null)};
+      if (deadline !== null && Date.now() >= deadline) return false;
       var x = ${Number(target.position?.split(',')[0])}; var y = ${Number(target.position?.split(',')[1])};
       if (!document.hasFocus()) return false;
       var hit = document.elementFromPoint(x, y);
@@ -2206,9 +2244,11 @@ async function dispatchVerifiedGuestClick(webview: WebviewHandle, target: SendBu
         if (composer.contains(button)) { sameComposer = true; break; }
       }
       if (!sameComposer) return false;
-      var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
-      try { button.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
-      button.dispatchEvent(new MouseEvent('mousedown', opts));
+      if (deadline !== null && Date.now() >= deadline) return false;
+      var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0, buttons: 0 };
+      var downOpts = Object.assign({}, opts, { buttons: 1 });
+      try { button.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, downOpts))); } catch (_) {}
+      button.dispatchEvent(new MouseEvent('mousedown', downOpts));
       try { button.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
       button.dispatchEvent(new MouseEvent('mouseup', opts));
       button.dispatchEvent(new MouseEvent('click', opts));
@@ -2218,21 +2258,30 @@ async function dispatchVerifiedGuestClick(webview: WebviewHandle, target: SendBu
 }
 
 /** 一次运行只选择一种首次点击策略；返回值只表示事件派发，成功以原消息全文回执为准。 */
-export async function submitPromptWithNativeClick(webview: WebviewHandle, strategy: 'native' | 'guest' = 'native'): Promise<boolean> {
+export async function submitPromptWithNativeClick(webview: WebviewHandle, strategy: 'native' | 'guest' = 'native', safety?: SubmissionDispatchSafety): Promise<boolean> {
   if (typeof webview.sendInputEvent !== 'function') return false;
   try {
-    const target = await prepareNativeSubmission(webview);
-    if (!target.ok || !target.position) return false;
+    const target = await prepareNativeSubmission(webview, safety);
+    if (!target.ok || !target.position || !submissionDispatchAllowed(safety)) return false;
+    if (safety && !await safety.verifyLease()) return false;
+    if (!submissionDispatchAllowed(safety)) return false;
     if (strategy === 'guest') {
-      const dispatched = await dispatchVerifiedGuestClick(webview, target);
+      const dispatched = await dispatchVerifiedGuestClick(webview, target, safety);
       if (dispatched) console.log('[doubaoBridge] 已派发一次可见发送控件 pointer/mouse 事件，等待原消息回执');
       return dispatched;
     }
+    // 租约 IPC 期间焦点、页面或宿主布局可能变化；不沿用此前缓存坐标直接发送。
+    const current = await findSendButtonTarget(webview);
+    if (!submissionDispatchAllowed(safety)) return false;
+    if (!sameNativeSubmissionTarget({ ...current, hostGeometry: nativeInputHostGeometry(webview, current) }, target)) return false;
     const [x, y] = target.position.split(',').map(Number);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
     await webview.sendInputEvent({ type: 'mouseMove', x, y });
+    if (!submissionDispatchAllowed(safety)) return false;
     await webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+    if (!submissionDispatchAllowed(safety)) return false;
     await sleep(35);
+    if (!submissionDispatchAllowed(safety)) return false;
     await webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
     console.log('[doubaoBridge] 已派发一次原生发送鼠标事件，等待原消息回执');
     return true;
@@ -2281,24 +2330,33 @@ export interface SubmissionEvidence {
   promptPublished: boolean;
 }
 
+export class ChatReadbackRecoveryError extends Error {
+  constructor(message: string, public readonly evidence?: ChatReadbackResult) { super(message); this.name = 'ChatReadbackRecoveryError'; }
+}
+
 /** 用户显式恢复时只读原会话；不注入提示词、不上传、不调用发送器。 */
-export async function readStableChatAnswer(webview: WebviewHandle, prompt: string, conversationUrl: string, timeoutMs: number = 15_000): Promise<string> {
+export async function readStableChatAnswer(webview: WebviewHandle, prompt: string, conversationUrl: string, timeoutMs: number = 15_000,
+  options?: { context: ChatReadbackContext; currentRunId?: () => string | undefined; signal?: AbortSignal; onCaptured?: (evidence: ChatReadbackResult) => Promise<void> }): Promise<string> {
   const startedAt = Date.now();
   let previous = '';
   let stable = 0;
+  let latest: ChatReadbackResult | undefined;
   while (Date.now() - startedAt < timeoutMs) {
+    if (options?.signal?.aborted) throw new ChatReadbackRecoveryError('只读补取已停止；原提交记录保留', latest);
     if (!isSameDoubaoConversation(webview.getURL(), conversationUrl)) throw new Error('已离开原会话，停止只读补取');
-    const sample = inspectChatReadback(await getChatPageSnapshot(webview), prompt, 0);
+    const context = options ? { ...options.context, currentConversationUrl: webview.getURL(), currentRunId: options.currentRunId ? options.currentRunId() || '' : options.context.currentRunId } : undefined;
+    const sample = inspectChatReadback(await getChatPageSnapshot(webview), prompt, 0, context);
+    latest = sample;
     const raw = sample.replyRawText;
     // 只读补取不触碰用户的新草稿；原会话、唯一已发布全文和稳定回复已提供归属证据。
     if (sample.promptPublished && !sample.generating && raw.trim()) {
       stable = raw === previous ? stable + 1 : 0;
-      if (stable >= 3) return raw;
+      if (stable >= 3) { await options?.onCaptured?.(sample); return raw; }
     } else stable = 0;
     previous = raw;
     await sleep(750);
   }
-  throw new Error('原会话尚无唯一匹配且稳定的完整正文；未重新发送');
+  throw new ChatReadbackRecoveryError('原会话尚无唯一匹配且稳定的完整正文；可查看本次可见候选后核对，未重新发送', latest);
 }
 
 /** 普通 Chat 的消息区快照，失败时不降级到整页文本或猜测发送结果。 */
@@ -2844,13 +2902,14 @@ export async function waitForChatReady(
     `;
 
     try {
-      const ready = await safeExecuteJS<boolean>(webview, code, 5000, 'waitForChatReady');
+      const ready = await safeExecuteJS<boolean>(webview, code, Math.max(1, Math.min(5000, timeoutMs - (Date.now() - startTime))), 'waitForChatReady');
       if (ready) return true;
     } catch {
       // 页面可能还在加载，继续等待
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const remaining = timeoutMs - (Date.now() - startTime);
+    if (remaining > 0) await sleep(Math.min(1000, remaining));
   }
 
   return false;
@@ -3878,6 +3937,55 @@ export function getVideoCompositeLabel(aspectRatio: string, duration: string): s
 
 export type KnownPopupDismissResult = 'none' | 'dismissed' | 'failed';
 
+export interface DesktopDownloadPromotionSnapshot { present: boolean; position?: string; method?: string }
+
+/** 自包含 DOM 白名单：正文、侧栏或整页中出现宣传文字均不能冒充推广弹窗。 */
+export function inspectDesktopDownloadPromotion(doc: Document, win: Window): DesktopDownloadPromotionSnapshot {
+  const normalize = (value: string | null | undefined): string => String(value || '').replace(/\s+/g, ' ').trim();
+  const visible = (element: Element): boolean => {
+    const style = win.getComputedStyle(element); const rect = element.getBoundingClientRect();
+    return (element as HTMLElement).offsetParent !== null && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  };
+  const outsideMessage = (element: Element): boolean => !element.closest('[data-testid="send_message"],[data-testid="receive_message"],textarea,[contenteditable="true"],[contenteditable=""]');
+  const isOverlay = (element: Element): boolean => {
+    let current: Element | null = element;
+    for (let depth = 0; current && depth < 4; depth++, current = current.parentElement) {
+      if (['BODY', 'HTML'].includes(current.tagName)) return false;
+      if (current.getAttribute('role') === 'dialog' || current.getAttribute('aria-modal') === 'true') return true;
+      if (['fixed', 'absolute'].includes(win.getComputedStyle(current).position)) return true;
+    }
+    return false;
+  };
+  const rootFor = (title: Element): Element | undefined => {
+    let root: Element | null = title;
+    for (let depth = 0; root && depth < 8; depth++, root = root.parentElement) {
+      if (['BODY', 'HTML'].includes(root.tagName)) return undefined;
+      const text = normalize((root as HTMLElement).innerText || root.textContent);
+      const rect = root.getBoundingClientRect();
+      if (text.length <= 1200 && text.includes('使用完整功能') && rect.width >= 200 && rect.height >= 100
+        && rect.width < win.innerWidth * 0.96 && rect.height < win.innerHeight * 0.96 && isOverlay(root)) return root;
+    }
+    return undefined;
+  };
+  const titles = Array.from(doc.querySelectorAll('h1,h2,h3,div,span')).filter((element: Element): boolean => visible(element) && outsideMessage(element)
+    && normalize((element as HTMLElement).innerText || element.textContent) === '下载电脑版');
+  const roots = [...new Set(titles.map(rootFor).filter((root): root is Element => !!root))];
+  if (!roots.length) return { present: false };
+  if (roots.length !== 1) return { present: true };
+  const root = roots[0];
+  const controls = Array.from(root.querySelectorAll('button,[role="button"],a,[aria-label],[title]')).filter(visible);
+  const snooze = controls.filter((element: Element): boolean => normalize((element as HTMLElement).innerText || element.textContent) === '下次提醒我');
+  const close = controls.filter((element: Element): boolean => ['关闭', '关闭弹窗'].includes(normalize([element.getAttribute('aria-label'), element.getAttribute('title')].filter(Boolean).join(' '))));
+  const candidates = snooze.length ? snooze : close;
+  // 没有唯一明确关闭控件时保留暂停；不把角落方块或授权按钮猜作 X。
+  if (candidates.length !== 1) return { present: true };
+  const target = candidates[0]; const rect = target.getBoundingClientRect();
+  const x = Math.round(rect.left + rect.width / 2); const y = Math.round(rect.top + rect.height / 2);
+  const hit = doc.elementFromPoint(x, y);
+  if (!hit || hit !== target && !target.contains(hit)) return { present: true };
+  return { present: true, method: snooze.length ? 'snooze' : 'close', position: `${x},${y}` };
+}
+
 /**
  * 白名单清理豆包“下载电脑版”推广弹窗。
  * 只有同一容器同时包含固定标题和副标题时才允许点击，绝不关闭素材授权、验证或额度弹窗。
@@ -3885,55 +3993,9 @@ export type KnownPopupDismissResult = 'none' | 'dismissed' | 'failed';
 export async function dismissKnownDesktopDownloadPromotion(
   webview: WebviewHandle,
 ): Promise<KnownPopupDismissResult> {
-  const inspect = async (): Promise<{ present: boolean; position?: string; method?: string }> => safeExecuteJS(
+  const inspect = async (): Promise<DesktopDownloadPromotionSnapshot> => safeExecuteJS(
     webview,
-    `
-      (function() {
-        var normalize = function(value) { return String(value || '').replace(/\\s+/g, ' ').trim(); };
-        var visible = function(el) {
-          if (!el || el.offsetParent === null) return false;
-          var style = window.getComputedStyle(el);
-          var rect = el.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-        };
-        var title = Array.from(document.querySelectorAll('h1,h2,h3,div,span')).find(function(el) {
-          return visible(el) && normalize(el.innerText || el.textContent) === '下载电脑版';
-        });
-        if (!title) return { present: false };
-        var root = title;
-        for (var depth = 0; depth < 10 && root; depth += 1) {
-          var text = normalize(root.innerText || root.textContent);
-          if (text.indexOf('下载电脑版') >= 0 && text.indexOf('使用完整功能') >= 0) break;
-          root = root.parentElement;
-        }
-        if (!root) return { present: false };
-        var rootText = normalize(root.innerText || root.textContent);
-        if (rootText.indexOf('下载电脑版') < 0 || rootText.indexOf('使用完整功能') < 0) return { present: false };
-        var controls = Array.from(root.querySelectorAll('button,[role="button"],a,[aria-label],[title],div,span')).filter(visible);
-        var target = controls.find(function(el) { return normalize(el.innerText || el.textContent) === '下次提醒我'; });
-        var method = 'snooze';
-        if (!target) {
-          target = controls.find(function(el) {
-            var label = normalize([el.getAttribute('aria-label'), el.getAttribute('title')].filter(Boolean).join(' '));
-            return label === '关闭' || label === '关闭弹窗';
-          });
-          method = 'close';
-        }
-        if (!target) {
-          var rootRect = root.getBoundingClientRect();
-          target = controls.find(function(el) {
-            var rect = el.getBoundingClientRect();
-            var square = rect.width >= 24 && rect.width <= 56 && rect.height >= 24 && rect.height <= 56;
-            return square && rect.right >= rootRect.right - 70 && rect.top <= rootRect.top + 70;
-          });
-          method = 'close-corner';
-        }
-        if (!target) return { present: true };
-        var rect = target.getBoundingClientRect();
-        return { present: true, method: method,
-          position: Math.round(rect.left + rect.width / 2) + ',' + Math.round(rect.top + rect.height / 2) };
-      })()
-    `,
+    `(${inspectDesktopDownloadPromotion.toString()})(document,window)`,
     5000,
     'inspectDesktopDownloadPromotion',
   );
@@ -5149,6 +5211,50 @@ export async function ensurePlainChatComposer(webview: WebviewHandle, allowExit:
   } catch { return { ok: false, reason: 'CHAT_MODE_UNVERIFIED' }; }
 }
 
+interface ChatDocumentState {
+  href: string;
+  timeOrigin: number;
+  readyState: string;
+}
+
+/** 仅忽略根路径末尾斜杠；具体会话、参数、片段或不同来源都不是空根页。 */
+function matchesChatRoot(raw: string, chatRoot: string): boolean {
+  try {
+    const current = new URL(raw); const expected = new URL(chatRoot);
+    return current.origin === expected.origin && !current.username && !current.password
+      && current.pathname.replace(/\/$/, '') === expected.pathname.replace(/\/$/, '')
+      && !current.search && !current.hash;
+  } catch { return false; }
+}
+
+async function readChatDocumentState(webview: WebviewHandle, deadline: number): Promise<ChatDocumentState | null> {
+  if (Date.now() >= deadline) return null;
+  try {
+    const state = await safeExecuteJS<ChatDocumentState>(webview, `(function() {
+      return { href: location.href, timeOrigin: performance.timeOrigin, readyState: document.readyState };
+    })()`, Math.max(1, Math.min(3000, deadline - Date.now())), 'readChatDocumentState');
+    return state && typeof state.href === 'string' && Number.isFinite(state.timeOrigin) && state.timeOrigin > 0
+      && ['loading', 'interactive', 'complete'].includes(state.readyState) ? state : null;
+  } catch { return null; }
+}
+
+function readyChatDocument(webview: WebviewHandle, chatRoot: string, state: ChatDocumentState | null, previousTimeOrigin?: number): state is ChatDocumentState {
+  return !!state && (previousTimeOrigin === undefined || state.timeOrigin !== previousTimeOrigin) && state.readyState !== 'loading'
+    && matchesChatRoot(state.href, chatRoot) && matchesChatRoot(webview.getURL(), chatRoot)
+    && !webview.isLoadingMainFrame?.();
+}
+
+/** loadURL 不会同步替换旧 DOM；有导航时必须先看到另一个真正加载到根页的文档。 */
+async function waitForFreshChatDocument(webview: WebviewHandle, chatRoot: string, previousTimeOrigin: number | undefined, deadline: number): Promise<ChatDocumentState | null> {
+  while (Date.now() < deadline) {
+    const state = await readChatDocumentState(webview, deadline);
+    if (readyChatDocument(webview, chatRoot, state, previousTimeOrigin)) return state;
+    const remaining = deadline - Date.now();
+    if (remaining > 0) await sleep(Math.min(100, remaining));
+  }
+  return null;
+}
+
 /**
  * 创建新对话（P0-1 状态机）。
  *
@@ -5166,12 +5272,17 @@ export async function startNewConversation(
   reuseEmptyChatRoot: boolean = false,
 ): Promise<NewConversationResult> {
   try {
+    const deadline = Date.now() + Math.max(0, readinessTimeoutMs);
     const chatRoot = getPlatformChatRoot(webview);
     if (!chatRoot) return { ok: false, reason: 'PLATFORM_UNRECOGNIZED' };
+    const before = await readChatDocumentState(webview, deadline);
+    if (!before) return { ok: false, reason: 'PAGE_NOT_READY' };
     // 普通 Chat 已在官方空根页时，重复导航会重新等待慢子资源，反而失去已就绪状态。
     // 只在精确根地址、可见编辑器、零消息且零草稿全部回读通过时复用。
-    const sameRoot = webview.getURL() === chatRoot;
+    const sameRoot = matchesChatRoot(webview.getURL(), chatRoot) && matchesChatRoot(before.href, chatRoot);
+    let documentState = before;
     if (reuseEmptyChatRoot && sameRoot) {
+      if (before.readyState === 'loading' || webview.isLoadingMainFrame?.()) return { ok: false, reason: 'PAGE_NOT_READY' };
       const snapshot = await getChatPageSnapshot(webview);
       if (!snapshot.editorPresent) return { ok: false, reason: 'EDITOR_NOT_FOUND' };
       if (snapshot.messages.length > 0 || snapshot.editorText.trim().length > 0) {
@@ -5179,14 +5290,41 @@ export async function startNewConversation(
       }
     } else {
       webview.loadURL(chatRoot);
+      const fresh = await waitForFreshChatDocument(webview, chatRoot, before.timeOrigin, deadline);
+      if (!fresh) return { ok: false, reason: 'PAGE_NOT_READY' };
+      documentState = fresh;
     }
-    const ready = await waitForChatReady(webview, readinessTimeoutMs);
+    const ready = await waitForChatReady(webview, Math.max(0, deadline - Date.now()));
     if (!ready) {
       return { ok: false, reason: 'PAGE_NOT_READY' };
     }
 
-    const code = `
+    const inspectEmptyDocument = async (): Promise<NewConversationResult> => {
+      let previousKey: string | undefined;
+      const originalDocument = reuseEmptyChatRoot && sameRoot ? undefined : before.timeOrigin;
+      // 空会话依赖可核对 DOM 事实，不依赖后台 WebView 可能暂停的绘制帧。
+      // 轮询间隔只是重新采样的节拍；只有两次相同文档／编辑器几何且空态均通过才可继续。
+      while (Date.now() < deadline) {
+        const settled = await waitForFreshChatDocument(webview, chatRoot, originalDocument, deadline);
+        if (!settled) break;
+        documentState = settled;
+        const code = `
       (function() {
+        var newConversationDocument = ${JSON.stringify(documentState.timeOrigin)};
+        var deadline = ${JSON.stringify(deadline)};
+        var expectedRoot = ${JSON.stringify(chatRoot)};
+        var matchesRoot = ${matchesChatRoot.toString()};
+        var readChat = ${readChatPage.toString()};
+        var inspect = function() {
+          if (Date.now() >= deadline || performance.timeOrigin !== newConversationDocument || document.readyState === 'loading'
+            || !matchesRoot(location.href, expectedRoot)) return { ok: false, reason: 'PAGE_NOT_READY' };
+          var snapshot = readChat(document);
+          if (snapshot.messages.length || snapshot.editorText.trim() || snapshot.generating) return { ok: false, reason: 'SESSION_NOT_EMPTY' };
+          if (!snapshot.editorPresent) return { ok: false, reason: 'EDITOR_NOT_FOUND' };
+          return { ok: true, reason: 'READY' };
+        };
+        var initial = inspect();
+        if (!initial.ok) return initial;
         var editor = null;
         var textareas = document.querySelectorAll('textarea');
         for (var i = 0; i < textareas.length; i++) {
@@ -5202,7 +5340,7 @@ export async function startNewConversation(
         editor.focus();
         var focusable = document.activeElement === editor || editor.contains(document.activeElement);
         if (!focusable) return { ok: false, reason: 'EDITOR_NOT_FOCUSABLE' };
-        // 新会话语义校验：会话区不应已存在用户气泡（推荐/欢迎内容不计）。
+        // 兼容旧页面气泡；当前平台消息已由 readChat 的 send/receive_message 完整检查。
         var userBubbles = document.querySelectorAll('[class*="user"], [class*="User"], [data-role="user"]');
         var hasUserContent = false;
         for (var u = 0; u < userBubbles.length; u++) {
@@ -5213,10 +5351,38 @@ export async function startNewConversation(
           var bt = String(b.innerText || '').replace(/\\s+/g, ' ').trim();
           if (bt.length > 2) { hasUserContent = true; break; }
         }
-        return { ok: true, reason: hasUserContent ? 'SESSION_NOT_EMPTY' : 'READY', focusable: focusable };
+        if (hasUserContent) return { ok: false, reason: 'SESSION_NOT_EMPTY' };
+        var current = inspect();
+        if (!current.ok) return current;
+        var rect = editor.getBoundingClientRect();
+        return { ok: true, reason: 'READY', stabilityKey: JSON.stringify([newConversationDocument, editor.tagName,
+          Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height), window.innerWidth, window.innerHeight]) };
       })();
     `;
-    const result = await safeExecuteJS<{ ok: boolean; reason: string }>(webview, code, 8000, 'startNewConversation');
+        let inspected: (NewConversationResult & { stabilityKey?: string }) | undefined;
+        try {
+          inspected = await safeExecuteJS<NewConversationResult & { stabilityKey?: string }>(webview, code, Math.max(1, Math.min(3000, deadline - Date.now())), 'startNewConversation');
+        } catch {
+          // 只读探针超时或文档切换时，重新取得完整文档证据；不重导航、不注入或发送。
+          previousKey = undefined;
+        }
+        if (Date.now() >= deadline) break;
+        if (inspected?.reason === 'SESSION_NOT_EMPTY') return { ok: false, reason: 'SESSION_NOT_EMPTY' };
+        if (inspected && !inspected.ok && inspected.reason !== 'PAGE_NOT_READY') return inspected;
+        const observed = await readChatDocumentState(webview, deadline);
+        if (inspected?.ok && inspected.reason === 'READY' && inspected.stabilityKey
+          && readyChatDocument(webview, chatRoot, observed, originalDocument) && observed.timeOrigin === documentState.timeOrigin) {
+          if (previousKey === inspected.stabilityKey) return { ok: true, reason: 'READY' };
+          previousKey = inspected.stabilityKey;
+        } else {
+          previousKey = undefined;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining > 0) await sleep(Math.min(100, remaining));
+      }
+      return { ok: false, reason: 'PAGE_NOT_READY' };
+    };
+    const result = await inspectEmptyDocument();
     if (!result || result.ok !== true) {
       const reason = (result && result.reason) || 'PAGE_UNKNOWN';
       console.warn('[doubaoBridge] 新对话未就绪:', reason);
@@ -5228,10 +5394,12 @@ export async function startNewConversation(
       return { ok: false, reason: 'SESSION_NOT_EMPTY' };
     }
     if (reuseEmptyChatRoot) {
-      const plainChat = await ensurePlainChatComposer(webview, true);
+      if (Date.now() >= deadline) return { ok: false, reason: 'PAGE_NOT_READY' };
+      const plainChat = await ensurePlainChatComposer(webview, true, Math.max(1, Math.min(3000, deadline - Date.now())));
       if (!plainChat.ok) return plainChat;
     }
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    const final = await inspectEmptyDocument();
+    if (!final.ok) return final;
     console.log('[doubaoBridge] 新对话已就绪（页面状态机验证通过）');
     return { ok: true };
   } catch (err: any) {

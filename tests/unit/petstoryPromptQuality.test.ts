@@ -13,7 +13,10 @@ import { characterContext, chatAssets, optimizationPrompt, analysisPrompt } from
 import { verifyPromptReadyForSubmission, type WebviewHandle } from '../../src/utils/doubaoBridge';
 import examples from '../fixtures/petstory-prompt-quality.json';
 import { TaskService } from '../../main/core/TaskService';
+import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 
+/** 本文件历史正文只验证引用投影；生产资格由专用来源测试与实际媒体入口测试覆盖。 */
+function compilePreview(p: PetStoryProject, shotId: string, kind: PetStoryPromptKind, mode?: PetStoryResolvedMode): ReturnType<typeof compilePrompt> { return compilePrompt(p, shotId, kind, mode, true); }
 function prompt(value = '静态时刻，噜妹看碗。'): PetStoryPrompt { return { original: 'TEST原始', optimized: value, final: value, edited: false, rulesVersion: 'TEST旧规则' }; }
 function fixture(): PetStoryProject {
   return { schemaVersion: 1, id: 'TEST-project', studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 0,
@@ -40,12 +43,13 @@ function attachMedia(p: PetStoryProject): void {
 }
 
 describe('角色上下文与实际用途', (): void => {
-  it.each(examples)('报告离线对照 $label 可沿正式编译出口获得完整提交文本', (example): void => {
+  it.each(examples)('报告离线对照 $label 可沿只读编译预览保留完整文本；缺合同不投产', (example): void => {
     const p = example.project as unknown as PetStoryProject;
-    const compiled = compilePrompt(p, 'TEST-shot', example.kind as PetStoryPromptKind, example.resolvedMode as PetStoryResolvedMode | undefined);
+    expect((): unknown => compilePrompt(p, 'TEST-shot', example.kind as PetStoryPromptKind, example.resolvedMode as PetStoryResolvedMode | undefined)).toThrow('专用目标合同');
+    const compiled = compilePreview(p, 'TEST-shot', example.kind as PetStoryPromptKind, example.resolvedMode as PetStoryResolvedMode | undefined);
     expect(compiled.text.endsWith(compiled.final)).toBe(true);
     expect(compiled.references.map((r): number => r.order)).toEqual(compiled.references.map((_r, index): number => index + 1));
-    if (example.resolvedMode === 'first_last_frame') expect(compilePrompt(p, 'TEST-shot', 'lastFrame').references[0].assetId).toBe('TEST-first');
+    if (example.resolvedMode === 'first_last_frame') expect(compilePreview(p, 'TEST-shot', 'lastFrame').references[0].assetId).toBe('TEST-first');
   });
   it.each([[['lulu']], [['lumei']], [['lulu', 'lumei']], [['lulu', 'clerk']]])('只注入本镜 %j 的档案，保留配角自己的身份', (ids: string[]): void => {
     const p = fixture(); p.plan!.shots[0].characterIds = ids;
@@ -70,59 +74,64 @@ describe('角色上下文与实际用途', (): void => {
     expect(chatAssets(p, 's1')).toEqual(orderedChatAssets(p, 's1'));
     expect(orderedChatAssets(p, 's1').map((a): string => a.id)).toEqual(['a', 'b', 'scene']);
     p.plan!.shots[0].prompts.firstFrame.final = '{{ref:lulu}}定义噜噜，{{ref:lumei}}定义噜妹。';
-    const first = compilePrompt(p, 's1', 'firstFrame');
+    const first = compilePreview(p, 's1', 'firstFrame');
     p.plan!.shots[0].characterIds.reverse();
-    const second = compilePrompt(p, 's1', 'firstFrame');
+    const second = compilePreview(p, 's1', 'firstFrame');
     expect(first.text).toContain('第 1 张图定义噜噜');
     expect(second.text).toContain('第 2 张图定义噜噜');
     expect(second.references.map((r): string => r.assetId)).toEqual(['b', 'a', 'scene']);
     p.plan!.shots[0].prompts.firstFrame.final = '图1：噜噜，图2：噜妹';
-    expect((): unknown => compilePrompt(p, 's1', 'firstFrame')).toThrow('错绑');
+    expect((): unknown => compilePreview(p, 's1', 'firstFrame')).toThrow('错绑');
   });
   it('同框身份图只上传一次，仍绑定两个角色；缺少实际图不得假称已提供', (): void => {
     const p = fixture(); p.assets[0].characterIds = ['lulu', 'lumei']; p.plan!.characters[0].referenceAssetId = 'b';
     const refs = promptReferences(p, p.plan!.shots[0], 'firstFrame');
     expect(refs[0].characterIds).toEqual(['lulu', 'lumei']);
     expect(refs.map((r): string => r.assetId)).toEqual(['b', 'scene']);
+    seedOfflinePromptContracts(p, { shotId: 's1', promptKind: 'firstFrame' });
     p.assets = p.assets.filter((a): boolean => a.id !== 'b');
-    expect((): unknown => compilePrompt(p, 's1', 'firstFrame')).toThrow('缺少');
+    // 合同先发现已上传身份图不再对应当前输入；不能因提前拒绝而要求旧后置错误文案。
+    const before = structuredClone(p);
+    expect((): unknown => compilePrompt(p, 's1', 'firstFrame')).toThrow('素材或用途已变化');
+    expect(p).toEqual(before);
   });
   it('四种用途与参考备选不同，视频不使用角色图号，计划尾图不当实际末帧', (): void => {
     const p = fixture(); attachMedia(p);
-    expect(compilePrompt(p, 's1', 'firstFrame').text).toBe(p.plan!.shots[0].prompts.firstFrame.final);
-    expect(compilePrompt(p, 's1', 'lastFrame').references.map((r): string => r.assetId)).toEqual(['first']);
-    expect(compilePrompt(p, 's1', 'lastFrame').text).toBe(p.plan!.shots[0].prompts.lastFrame!.final);
-    expect(compilePrompt(p, 's1', 'video', 'first_frame').references.map((r): string => r.assetId)).toEqual(['first']);
-    const native = compilePrompt(p, 's1', 'video', 'first_last_frame');
+    expect(compilePreview(p, 's1', 'firstFrame').text).toBe(p.plan!.shots[0].prompts.firstFrame.final);
+    expect(compilePreview(p, 's1', 'lastFrame').references.map((r): string => r.assetId)).toEqual(['first']);
+    expect(compilePreview(p, 's1', 'lastFrame').text).toBe(p.plan!.shots[0].prompts.lastFrame!.final);
+    expect(compilePreview(p, 's1', 'video', 'first_frame').references.map((r): string => r.assetId)).toEqual(['first']);
+    const native = compilePreview(p, 's1', 'video', 'first_last_frame');
     expect(native.references.map((r): string | undefined => r.slot)).toEqual(['first', 'last']);
-    const reference = compilePrompt(p, 's1', 'video', 'reference');
+    const reference = compilePreview(p, 's1', 'video', 'reference');
     expect(reference.resolvedMode).toBe('reference');
     expect(reference.references.every((r): boolean => !r.slot)).toBe(true);
     expect(reference.references).toHaveLength(1);
     p.plan!.shots[0].prompts.video.final = '图1：噜噜';
-    expect((): unknown => compilePrompt(p, 's1', 'video', 'reference')).toThrow('错绑');
-    p.plan!.shots[0].prompts.video.final = '原生首尾帧连接';
+    expect((): unknown => compilePreview(p, 's1', 'video', 'reference')).toThrow('错绑');
+    p.plan!.shots[0].prompts.video.final = '原生首尾帧连接'; p.plan!.shots[0].prompts.video.edited = true;
+    p.promptModel = 'seedance-2.0'; seedOfflinePromptContracts(p, { shotId: 's1', promptKind: 'video' });
     expect((): unknown => compilePrompt(p, 's1', 'video', 'reference')).toThrow('实际模式');
     p.production!.shots.s1.firstFrameId = 'last';
-    expect((): unknown => compilePrompt(p, 's1', 'lastFrame')).toThrow('计划尾帧');
+    expect((): unknown => compilePreview(p, 's1', 'lastFrame')).toThrow('计划尾帧');
   });
   it('continue 描述实际末帧来源，不混用计划尾图', (): void => {
     const p = fixture(); attachMedia(p);
     p.assets.push({ id: 'actual', kind: 'actualEndFrame', shotId: 's1', relativePath: 'shots/s1/actual.png', sourceVideo: { assetId: 'previous-video', taskId: 'TEST', runId: 'TEST', sha256: 'a'.repeat(64), atSeconds: 4.9 } });
     p.production!.shots.s1.firstFrameId = 'actual';
-    const text = compilePrompt(p, 's1', 'video', 'first_last_frame');
+    const text = compilePreview(p, 's1', 'video', 'first_last_frame');
     expect(text.references[0].purpose).toBe('actualEndFrame');
     expect(text.text).toBe(p.plan!.shots[0].prompts.video.final);
     expect(text.references[1].assetId).toBe('last');
   });
-  it('缺少 optimized 或截断 JSON 报错；正常短文本可用，不按长度放过错绑', (): void => {
+  it('分析旧稿缺少optimized仍为空final；截断JSON与错绑继续拒绝，不按长度判断', (): void => {
     const p = fixture(); p.plan!.shots[0].prompts.firstFrame.final = '噜妹静坐。';
-    expect(compilePrompt(p, 's1', 'firstFrame').text).toContain('噜妹静坐。');
+    expect(compilePreview(p, 's1', 'firstFrame').text).toContain('噜妹静坐。');
     expect((): unknown => parsePetStoryAnswer('{"optimized":"被截断')).toThrow();
     const model = JSON.parse(JSON.stringify(p.plan)); delete model.shots[0].prompts.video.optimized;
-    expect((): unknown => validatePetStoryPlan(model, true)).toThrow('optimized');
+    expect(validatePetStoryPlan(model, true).shots[0].prompts.video).toMatchObject({ final: '', optimized: '' });
     p.plan!.shots[0].prompts.firstFrame.final = `${'很长但错绑。'.repeat(500)}图1：噜妹`;
-    expect((): unknown => compilePrompt(p, 's1', 'firstFrame')).toThrow('错绑');
+    expect((): unknown => compilePreview(p, 's1', 'firstFrame')).toThrow('错绑');
   });
 });
 
@@ -191,7 +200,7 @@ describe('保存、候选和正式任务', (): void => {
     project = await projects.savePlan(project.id, project.revision, edited);
     const reopened = await new PetStoryProjects().open(directory);
     expect(reopened.plan!.shots[0].prompts.firstFrame.final).toBe(text);
-    const compiled = compilePrompt(reopened, 's1', 'firstFrame');
+    const compiled = compilePreview(reopened, 's1', 'firstFrame');
     const h = chatHarness();
     await expect(h.chat.draft(project.id, 's1', 'firstFrame')).rejects.toThrow('确认实际基础图片');
     expect(h.tasks()).toHaveLength(0); expect(compiled.text.endsWith(text)).toBe(true);

@@ -26,6 +26,7 @@ declare global {
     canGoForward(): boolean;
     loadURL(url: string): void;
     getURL(): string;
+    isLoadingMainFrame(): boolean;
     executeJavaScript(code: string): Promise<any>;
     addEventListener(
       type: string,

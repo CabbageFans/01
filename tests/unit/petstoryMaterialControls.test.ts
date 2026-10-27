@@ -2,10 +2,12 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PetStoryCapability, PetStoryProject } from '@doubao-studio/contracts';
+import type { PetStoryCapability, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { PetStoryMaterials } from '../../src/components/PetStoryMaterials';
 import { usePetStoryStore } from '../../src/store/usePetStoryStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
+import { petStoryWritingModel } from '../../src/utils/petstoryCandidate';
+import { promptWritingTarget } from '../../main/utils/petstoryEligibility';
 
 const initial = { petstory: usePetStoryStore.getState(), tasks: useTaskStore.getState() };
 const now = '2026-10-26T00:00:00.000Z';
@@ -24,6 +26,11 @@ function editor(html: string): string {
   if (!result) throw new Error('缺少实际正文编辑框');
   return result;
 }
+function editPlanField(html: string): string {
+  const field = html.match(/<textarea\b[^>]*>/g)?.find((entry): boolean => entry.includes('scene:location编辑变化'));
+  if (!field) throw new Error('缺少实际素材编辑意图输入框');
+  return field;
+}
 beforeEach((): void => {
   vi.spyOn(React, 'useSyncExternalStore').mockImplementation(<T,>(_subscribe: (onStoreChange: () => void) => () => void, getSnapshot: () => T): T => getSnapshot());
   const entry = { state: 'supported' as const, free: 'free' as const, reason: 'TEST' };
@@ -41,6 +48,18 @@ beforeEach((): void => {
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
 
 describe('素材文字与媒体独立门禁', (): void => {
+  it('文字目标投影与实际请求顺序一致，显式generic覆盖曾经核对的模型', (): void => {
+    const production = { capability } as NonNullable<PetStoryProject['production']>;
+    project.productionHistory = [production];
+    expect(petStoryWritingModel(project)).toBe('seedance-2.0');
+    project.production = { ...production, capability: { ...capability, videoConfig: { ...capability.videoConfig!, model: 'seedance-2.5' } } };
+    expect(petStoryWritingModel(project)).toBe('seedance-2.5');
+    project.promptCapability = capability; expect(petStoryWritingModel(project)).toBe('seedance-2.0');
+    project.promptModel = 'generic'; expect(petStoryWritingModel(project)).toBe('generic');
+    for (const model of ['generic', 'seedance-2.5', undefined] as const) {
+      project.promptModel = model; expect(petStoryWritingModel(project)).toBe(promptWritingTarget(project, {}).model);
+    }
+  });
   it('剧本未确认时单项生成、审查、编辑和候选采用可用，图片操作全部禁用', (): void => {
     const html = render();
     for (const label of ['豆包重新生成此素材提示词', '审查本项素材正文（暂无图片）', '采用此候选']) expect(button(html, label)).not.toContain('disabled');
@@ -67,5 +86,31 @@ describe('素材文字与媒体独立门禁', (): void => {
     usePetStoryStore.setState({ capability });
     expect(button(render(), '生成此基础图')).not.toContain('disabled');
     expect(button(render(), '上传图片替换')).not.toContain('disabled');
+  });
+  it('结束等待保留原bound记录，素材重生与编辑计划恢复；无关待收取素材不锁本项', (): void => {
+    const job = project.jobs[0]; job.status = 'bound'; job.endedWaitingAt = now;
+    project.jobs.push({ ...job, id: 'TEST-other-job', taskId: 'TEST-other-task', materialId: 'scene:other', endedWaitingAt: undefined });
+    const before = structuredClone(project); const html = render();
+    expect(button(html, '豆包重新生成此素材提示词')).not.toContain('disabled');
+    expect(button(html, '审查本项素材正文（暂无图片）')).not.toContain('disabled');
+    expect(editPlanField(html)).not.toContain('disabled');
+    expect(project).toEqual(before); expect(useTaskStore.getState().tasks).toEqual([]);
+  });
+  it.each(['bound', 'captured'] as const)('本素材%s仍锁新的创作操作，全局待收取仍阻断', (status): void => {
+    project.jobs[0].status = status;
+    for (const global of [false, true]) {
+      project.jobs[0].materialId = global ? undefined : 'scene:location';
+      const html = render(); expect(button(html, '豆包重新生成此素材提示词')).toContain('disabled');
+      expect(editPlanField(html)).toContain('disabled');
+    }
+  });
+  it('结束等待不释放仍活动的原账号任务或租约，其他账号活动不冒充本账号占用', (): void => {
+    project.jobs[0].status = 'bound'; project.jobs[0].endedWaitingAt = now;
+    const active: Task = { id: 'TEST-original-task', projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'chat', status: 'executing', prompt: 'TEST', result: null, outputs: [], createdAt: now, updatedAt: now };
+    useTaskStore.setState({ tasks: [active] });
+    expect(button(render(), '豆包重新生成此素材提示词')).toContain('disabled'); expect(editPlanField(render())).toContain('disabled');
+    expect(useTaskStore.getState().tasks).toEqual([active]);
+    useTaskStore.setState({ tasks: [{ ...active, assignedAccountId: 'TEST-other-account' }] });
+    expect(button(render(), '豆包重新生成此素材提示词')).not.toContain('disabled'); expect(editPlanField(render())).not.toContain('disabled');
   });
 });

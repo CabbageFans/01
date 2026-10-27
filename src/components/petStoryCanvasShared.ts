@@ -8,7 +8,7 @@ export const isCanvasPlanLocked = (project: PetStoryProject): boolean => {
   const production = project.production;
   if (!production) return false;
   if (production.state === 'running' || production.steps.some((step): boolean => step.status !== 'complete')) return true;
-  if (production.target && production.state === 'complete') return false;
+  if (production.state === 'complete') return false;
   return production.phase !== 'materials';
 };
 export const canvasJobLabel = (status: string | undefined): string => ({

@@ -1,11 +1,23 @@
 import { createHash } from 'node:crypto';
 import type { PetStoryMaterial, PetStoryPlan, PetStoryProject, PetStoryPrompt, PetStoryPromptReference, PetStoryShot } from '@doubao-studio/contracts';
 import presets from './petstoryPresets.json';
+import { requirePromptEligibility } from './petstoryEligibility';
 
 export function materialDigest(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 export function storyHash(p: PetStoryProject): string { return materialDigest({ storyId: p.mobileStory?.id, story: p.plan?.adaptedStory }); }
+export function isStoryApproved(p: PetStoryProject): boolean { return !!p.plan && !!p.storyApproval && p.storyApproval.hash === storyHash(p); }
+/** 身份批准绑定当前所选的真实图片；仅保存过设计文字或选过图都不等于批准身份。 */
+export function confirmedCharacterIdentity(p: PetStoryProject, characterId: string): { assetId: string; description: string } | undefined {
+  const material = p.materials?.find((item): boolean => item.kind === 'character' && item.entityId === characterId);
+  const approved = material?.approved; const identity = approved?.identity;
+  const asset = p.assets.find((item): boolean => item.id === material?.selectedAssetId && item.kind === 'character');
+  if (!asset || !approved || !identity || approved.assetId !== asset.id || identity.assetId !== asset.id || approved.sha256 !== asset.validation?.sha256
+    || !asset.validation?.decoded || !(asset.characterIds || (asset.characterId ? [asset.characterId] : [])).includes(characterId)
+    || !Number.isFinite(Date.parse(approved.at)) || typeof identity.description !== 'string' || !identity.description.trim()) return undefined;
+  return { assetId: identity.assetId, description: identity.description };
+}
 export function requireStoryApproval(p: PetStoryProject): void {
-  if (!p.plan || !p.storyApproval || p.storyApproval.hash !== storyHash(p)) throw new Error('请先核对并确认当前剧本，再制作基础素材');
+  if (!isStoryApproved(p)) throw new Error('请先核对并确认当前剧本，再制作基础素材');
 }
 function makePrompt(text: string): PetStoryPrompt { return { original: text, optimized: '', final: '', edited: false, rulesVersion: presets.version }; }
 /** 仅未取得正文的本地预览可以重建；旧保存正文、Chat 和手改均保留全文。 */
@@ -15,16 +27,13 @@ function isInitialLocalPrompt(p: PetStoryProject, material: PetStoryMaterial): b
   // 兼容尚无 sourceJobId 的旧版 Chat 记录，避免把有真实回复的正文误当模板。
   return !p.jobs.some((job): boolean => job.materialId === material.id && job.status === 'applied' && (!!job.rawText || !!job.parsedResult?.optimized));
 }
-/** 正文只能来自已采用的材料 Chat 回复或用户明确编辑；本地设计摘要不能进入生产。 */
+/** 手改正文也保留专用创作依据；用户编辑不能绕过当前合同和来源核对。 */
 export function requireMaterialPromptSource(p: PetStoryProject, materialId: string): PetStoryMaterial {
   const material = p.materials?.find((item): boolean => item.id === materialId);
   if (!material) throw new Error('基础素材不存在');
   const prompt = material.prompt;
   if (!prompt.final.trim()) throw new Error('基础素材尚无最终正文，请先通过豆包生成并采用素材提示词；本地设计摘要仅供预览');
-  if (!prompt.edited) {
-    const source = p.jobs.find((job): boolean => job.id === prompt.sourceJobId);
-    if (!source || source.materialId !== materialId || source.status !== 'applied' || !source.rawText || source.parsedResult?.optimized !== prompt.final) throw new Error('保留的基础素材正文缺少可核对的豆包 Chat 采用来源，请重新生成并采用正文，或由用户明确编辑保存后再制作');
-  }
+  requirePromptEligibility(p, prompt, { materialId });
   return material;
 }
 function syncMaterialPrompt(p: PetStoryProject, old: PetStoryMaterial | undefined, unchanged: boolean, text: string): PetStoryPrompt {
@@ -34,15 +43,16 @@ function syncMaterialPrompt(p: PetStoryProject, old: PetStoryMaterial | undefine
   return { ...old.prompt, needsReview: true };
 }
 /** 只有镜头实际需要的主体进入清单；地点派生图递归包含主场景。 */
-export function requiredMaterialKeys(plan: PetStoryPlan): Set<string> {
+export function requiredMaterialKeys(plan: PetStoryPlan, shotIds?: string[]): Set<string> {
   const keys = new Set<string>();
+  if (shotIds?.some((id): boolean => !plan.shots.some((shot): boolean => shot.id === id))) throw new Error('素材确认目标镜头不存在');
   const addScene = (id: string): void => {
     if (keys.has(`scene:${id}`)) return;
     keys.add(`scene:${id}`);
     const parent = plan.scenes?.find((s): boolean => s.id === id)?.parentSceneId;
     if (parent) addScene(parent);
   };
-  for (const shot of plan.shots) {
+  for (const shot of plan.shots.filter((item): boolean => !shotIds || shotIds.includes(item.id))) {
     for (const id of shot.characterIds) keys.add(`character:${id}`);
     for (const id of shot.propIds || []) keys.add(`prop:${id}`);
     if (shot.sceneId) addScene(shot.sceneId);
@@ -102,13 +112,14 @@ export function requireMaterialInventory(p: PetStoryProject): void {
   const expected = syncMaterials(p);
   if (expected.some((m): boolean => !p.materials?.some((old): boolean => old.id === m.id && old.designHash === m.designHash))) throw new Error('基础素材设计已变化，请重新确认剧本清单');
 }
-export function requireApprovedMaterials(p: PetStoryProject): void {
+export function requireApprovedMaterials(p: PetStoryProject, shotIds?: string[]): void {
   requireMaterialInventory(p);
   const plan = p.plan; if (!plan) throw new Error('剧本不存在');
-  for (const key of requiredMaterialKeys(plan)) materialAsset(p, key);
+  for (const key of requiredMaterialKeys(plan, shotIds)) materialAsset(p, key);
 }
-export function approvedMaterialHash(p: PetStoryProject): string {
-  return materialDigest(p.materials?.map((m): object => ({ id: m.id, designHash: m.designHash, selected: m.selectedAssetId, approved: m.approved })));
+export function approvedMaterialHash(p: PetStoryProject, shotIds?: string[]): string {
+  const keys = shotIds && p.plan ? requiredMaterialKeys(p.plan, shotIds) : undefined;
+  return materialDigest(p.materials?.filter((material): boolean => !keys || keys.has(material.id)).map((m): object => ({ id: m.id, designHash: m.designHash, selected: m.selectedAssetId, approved: m.approved })));
 }
 export function shotMaterialReferences(p: PetStoryProject, shot: PetStoryShot, planned = false): PetStoryPromptReference[] {
   const keys = [...shot.characterIds.map((id): string => `character:${id}`), ...(shot.propIds || []).map((id): string => `prop:${id}`), ...(shot.sceneId ? [`scene:${shot.sceneId}`] : [])];

@@ -7,7 +7,8 @@ export interface PetStoryPromptProfile {
   style: string;
   /** 旧 style 保留供迁移，不跨资产套用。共同字段只描述媒介／画面语言。 */
   assetStyles?: Partial<Record<'common' | 'character' | 'prop' | 'scene', string>>;
-  characters: Record<string, { identity: string; appearance: string }>;
+  /** 可选别名与主配角是用户保存的演员事实；缺失时不从旧稿补造对应。 */
+  characters: Record<string, { identity: string; appearance: string; aliases?: string[]; role?: 'main' | 'supporting' }>;
 }
 export interface PetStoryPromptReference {
   assetId: string;
@@ -20,6 +21,8 @@ export interface PetStoryPromptReference {
 }
 /** 单次 Chat 正文使用的目标生成引用表；与 Chat 看图附件编号分别保存。 */
 export interface PetStoryPromptTaskContract {
+  /** 当次确认设计与已采用边界；不包含上传顺序或计划文件解析结果。 */
+  designHash?: string;
   references: PetStoryPromptReference[];
   dialect: 'seedance20' | 'seedance25' | 'seedream' | 'generic';
   mode?: PetStoryResolvedMode;
@@ -36,6 +39,10 @@ export interface PetStoryCompiledPrompt {
   segments?: ({ text: string } | { referenceOrder: number; sourceText?: string })[];
 }
 export interface PetStoryPrompt {
+  /** 分析附带的兼容草稿，不能代替专用Chat的final。 */
+  draft?: string;
+  /** 手改前真实采用来源，只证明来源基础，不跳过当前资格核对。 */
+  basisJobId?: string;
   original: string;
   optimized: string;
   final: string;
@@ -312,6 +319,8 @@ export interface PetStoryRuntimeTarget {
   capability?: PetStoryCapability;
 }
 export interface PetStoryChatJob {
+  /** 用户结束收候选等待；不表示平台取消或收取成功。 */
+  endedWaitingAt?: string;
   id: string;
   kind: 'analysis' | 'repair' | 'optimize' | 'materialPrompt' | 'assets' | 'review' | 'revise';
   materialId?: string;
@@ -325,6 +334,10 @@ export interface PetStoryChatJob {
   editIntent?: PetStoryMaterialEditIntent;
   capability?: PetStoryCapability;
   inputFinal?: string;
+  /** 审查实际送审的各目标 final；缺失的旧全局审查不能据当前正文补造快照。 */
+  reviewInputFinals?: Record<string, string>;
+  /** 本次分析实际配置的来源称谓与主配角快照；不从后来的配置补造旧合同。 */
+  analysisCastBindings?: Record<string, Pick<PetStoryPromptProfile['characters'][string], 'aliases' | 'role'>>;
   inputHash: string;
   sourceUrl: string;
   /** 缺失表示旧版网页链接直读任务，仅允许保留及只读核对。 */
@@ -356,6 +369,9 @@ export interface PetStoryChatJob {
   parsedResult?: { plan?: PetStoryPlan; optimized?: string; issues?: PetStoryReviewIssue[]; assets?: PetStoryAssetBindings; contentBasis?: PetStoryProject['contentBasis'] };
 }
 export interface PetStoryProject {
+  /** 文字创作目标，不证明网页免费权益或槽位能力。 */
+  promptModel?: NonNullable<Task['videoConfig']>['model'] | 'generic';
+  promptBatch?: PetStoryPromptBatch;
   schemaVersion: 1;
   id: string;
   studioProjectId: string;
@@ -379,6 +395,8 @@ export interface PetStoryProject {
   updatedAt: string;
 }
 export interface PetStoryResult {
+  pendingCandidateJobIds?: string[];
+  promptTargets?: PetStoryPromptBatch['targets'];
   success: boolean;
   exportName?: string;
   /** 仅展示用户选中目录的末级名称，不保存路径或新增项目索引。 */
@@ -390,8 +408,20 @@ export interface PetStoryResult {
   needsRepair?: boolean;
   compiledPrompt?: PetStoryCompiledPrompt;
 }
+
+export interface PetStoryPromptBatch {
+  targets: ({ shotId: string; kind: PetStoryPromptKind; materialId?: never } | { materialId: string; shotId?: never; kind?: never })[];
+  total: number;
+  completed: number;
+  status: 'running' | 'complete' | 'paused';
+  jobId?: string;
+}
 export interface PetStoryMediaCandidate { taskId: string; artifactId: string; createdAt: string }
 export interface PetStoryAPI {
+  promptStageTargets: (projectId: string, revision: number) => Promise<PetStoryResult>;
+  savePromptModel: (projectId: string, revision: number, model?: PetStoryProject['promptModel']) => Promise<PetStoryResult>;
+  savePromptBatch: (projectId: string, revision: number, batch: PetStoryPromptBatch) => Promise<PetStoryResult>;
+  endChatWaiting: (projectId: string, revision: number, jobId: string) => Promise<PetStoryResult>;
   prepareRuntime: (projectId: string, revision: number, kind: PetStoryChatJob['kind'], target?: PetStoryRuntimeTarget) => Promise<PetStoryResult>;
   adoptPlanCandidate: (projectId: string, revision: number, jobId: string) => Promise<PetStoryResult>;
   adoptAssetsCandidate: (projectId: string, revision: number, jobId: string) => Promise<PetStoryResult>;
@@ -424,7 +454,7 @@ export interface PetStoryAPI {
 
   readReference: (projectId: string, assetId: string) => Promise<{ success: boolean; data?: string; error?: string }>;
   create: (studioProjectId: string, accountId: string) => Promise<PetStoryResult>;
-  open: () => Promise<PetStoryResult>;
+  open: (path?: string) => Promise<PetStoryResult>;
   saveSource: (projectId: string, revision: number, text: string) => Promise<PetStoryResult>;
   saveMobileStory: (projectId: string, revision: number, text: string) => Promise<PetStoryResult>;
   addSceneReference: (projectId: string, shotId: string) => Promise<PetStoryResult>;

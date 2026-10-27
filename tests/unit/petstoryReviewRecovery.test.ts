@@ -86,7 +86,7 @@ describe('素材实际图片与格式纠正后的内容审查', (): void => {
     expect(html).toContain('修订所选 0 项问题'); expect(html).toContain('TEST具体证据');
     const revision = await prepare('revise', { ...target, parentJobId: repaired.id, selectedIssueIds: ['TEST-issue'] }); await finish(revision, { optimized: 'TEST局部修订正文' });
     expect(project.jobs.at(-1)!.parentJobId).toBe(repaired.id);
-    await expect(prepare('revise', { ...target, parentJobId: repaired.id })).rejects.toThrow('已修订一次');
+    await expect(prepare('revise', { ...target, parentJobId: repaired.id })).rejects.toThrow('正文已经变化');
     await expect(prepare('revise', { ...target, parentJobId: original.id })).rejects.toThrow('具体目标问题');
   });
   it('其他创作阶段的格式纠正不能冒充审查作为局部修订依据', async (): Promise<void> => {

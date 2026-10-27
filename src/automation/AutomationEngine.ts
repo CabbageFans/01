@@ -50,6 +50,7 @@ export class AutomationEngine {
     } catch (reason: unknown) {
       error = reason instanceof Error ? reason.message : String(reason);
     }
+    if (this.reservations.get(reservation.taskId) !== reservation) return;
     reservation.controller?.abort();
     if (reservation.heartbeat) clearInterval(reservation.heartbeat);
     this.reservations.delete(reservation.taskId);
@@ -64,7 +65,7 @@ export class AutomationEngine {
     if (!reservation || reservation.accountId !== accountId) {
       throw new Error('任务尚未获得执行锁');
     }
-    reservation.controller?.abort();
+    if (reservation.controller) throw new Error('原任务控制器仍持有执行权，不能重复启动');
     reservation.controller = new AbortController();
     return reservation.controller;
   }
@@ -80,9 +81,32 @@ export class AutomationEngine {
     return this.reservations.has(taskId);
   }
 
-  async release(taskId: string): Promise<void> {
+  hasController(taskId: string): boolean {
+    return !!this.reservations.get(taskId)?.controller;
+  }
+
+  ownsController(taskId: string, controller: AbortController): boolean {
+    return this.reservations.get(taskId)?.controller === controller;
+  }
+
+  ownsAccountController(taskId: string, accountId: string, controller: AbortController): boolean {
     const reservation = this.reservations.get(taskId);
-    if (!reservation) {
+    return !!reservation && reservation.accountId === accountId && reservation.controller === controller
+      && this.accountTasks.get(accountId) === taskId && !controller.signal.aborted;
+  }
+
+  /** 外部提交前向正式任务域确认原账号租约；等待期间失去控制权也不能继续发送。 */
+  async confirmSubmissionOwnership(taskId: string, accountId: string, controller: AbortController): Promise<boolean> {
+    if (!this.ownsAccountController(taskId, accountId, controller)) return false;
+    const reservation = this.reservations.get(taskId);
+    if (!reservation) return false;
+    await this.renew(reservation);
+    return this.ownsAccountController(taskId, accountId, controller);
+  }
+
+  async release(taskId: string, controller?: AbortController): Promise<void> {
+    const reservation = this.reservations.get(taskId);
+    if (!reservation || controller && reservation.controller !== controller) {
       return;
     }
     if (reservation.heartbeat) clearInterval(reservation.heartbeat);
@@ -92,4 +116,6 @@ export class AutomationEngine {
   }
 }
 
-export const automationEngine = new AutomationEngine();
+// 开发热更新也必须复用同一个执行租约宿主，不能因模块重载丢失仍在执行的控制器。
+const engineHost = globalThis as typeof globalThis & { __doubaoAutomationEngine?: AutomationEngine };
+export const automationEngine = engineHost.__doubaoAutomationEngine || (engineHost.__doubaoAutomationEngine = new AutomationEngine());

@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { Account, PetStoryCapability, PetStoryChatJob, PetStoryMaterialEditIntent, PetStoryPlan, PetStoryProject, PetStoryResult, PetStoryRuntimeTarget, Task } from '@doubao-studio/contracts';
+import type { Account, PetStoryCapability, PetStoryChatJob, PetStoryMaterial, PetStoryMaterialEditIntent, PetStoryPlan, PetStoryProject, PetStoryPromptBatch, PetStoryResult, PetStoryRuntimeTarget, Task } from '@doubao-studio/contracts';
 import { usePetStoryStore } from '../../src/store/usePetStoryStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
 import { useAccountStore } from '../../src/store/useAccountStore';
@@ -11,6 +11,7 @@ import snapshot from '../fixtures/storyboard-five-shots.json';
 import { PetStoryRuntime } from '../../src/components/PetStoryRuntime';
 import { CanvasPromptEditor } from '../../src/components/PetStoryCanvasPrompt';
 import { PetStoryMaterials } from '../../src/components/PetStoryMaterials';
+import { PetStoryOpenProject } from '../../src/components/PetStoryOpenProject';
 
 const initial = { petstory: usePetStoryStore.getState(), tasks: useTaskStore.getState(), accounts: useAccountStore.getState(), projects: useProjectStore.getState() };
 let project: PetStoryProject;
@@ -19,7 +20,7 @@ const now = '2026-10-25T01:00:00.000Z';
 const prepareRuntime = vi.fn(async (_id: string, _revision: number, kind: PetStoryChatJob['kind'], target?: PetStoryRuntimeTarget): Promise<PetStoryResult> => {
   const index = tasks.length + 1; const id = `TEST-job-${index}`; const taskId = `TEST-task-${index}`;
   project = structuredClone(project); project.revision++;
-  project.jobs.push({ id, taskId, kind, status: 'bound', inputHash: 'TEST', sourceUrl: '', sourceStoryId: project.mobileStory!.id, requestId: `TEST-request-${index}`, expectedIds: [target?.materialId || target?.shotId || 'story'], ...target });
+  project.jobs.push({ id, taskId, kind, status: 'bound', inputHash: 'TEST', sourceUrl: '', sourceStoryId: project.mobileStory!.id, requestId: `TEST-request-${index}`, expectedIds: [target?.materialId || target?.shotId || 'story'], createdAt: new Date(Date.parse(now) + index * 1000).toISOString(), ...target });
   tasks.push({ id: taskId, projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'chat', status: 'queued', prompt: 'TEST 主进程运行时请求替身', runtime: { runId: `TEST-run-${index}` } } as Task);
   return { success: true, project, taskId };
 });
@@ -33,6 +34,25 @@ const adoptAssetsCandidate = vi.fn(async (): Promise<PetStoryResult> => ({ succe
 const adoptPromptCandidate = vi.fn(async (): Promise<PetStoryResult> => ({ success: true, project }));
 const openProject = vi.fn(async (): Promise<PetStoryResult> => ({ success: true, project }));
 const generateMaterials = vi.fn(async (): Promise<PetStoryResult> => ({ success: true, project }));
+const savePromptBatch = vi.fn(async (_id: string, _revision: number, batch: PetStoryPromptBatch): Promise<PetStoryResult> => {
+  project = structuredClone(project); project.revision++; project.promptBatch = structuredClone(batch);
+  return { success: true, project };
+});
+const promptStageTargets = vi.fn(async (): Promise<PetStoryResult> => ({ success: true, project, promptTargets: [], pendingCandidateJobIds: [] }));
+const endChatWaiting = vi.fn(async (_id: string, _revision: number, jobId: string): Promise<PetStoryResult> => {
+  project = structuredClone(project); project.revision++; project.jobs.find((job): boolean => job.id === jobId)!.endedWaitingAt = now;
+  if (project.promptBatch) project.promptBatch.status = 'paused';
+  return { success: true, project };
+});
+const savePromptModel = vi.fn(async (_id: string, _revision: number, model?: PetStoryProject['promptModel']): Promise<PetStoryResult> => {
+  project = structuredClone(project); project.revision++; project.promptModel = model; return { success: true, project };
+});
+const retryUnsubmitted = vi.fn(async (_id: string, jobId: string): Promise<PetStoryResult> => {
+  project = structuredClone(project); project.revision++;
+  const job = project.jobs.find((item): boolean => item.id === jobId)!; job.runId = undefined;
+  const task = tasks.find((item): boolean => item.id === job.taskId)!; task.status = 'queued'; task.executionIntent = 'hold';
+  return { success: true, project, taskId: task.id };
+});
 function capability(): PetStoryCapability {
   const entry = { state: 'unknown' as const, free: 'unknown' as const, reason: 'TEST 仅供文字模型选择' };
   return { accountId: project.accountId, checkedAt: now, freeEvidence: 'unknown', durations: [5], image: entry,
@@ -43,19 +63,51 @@ beforeEach((): void => {
   vi.clearAllMocks(); tasks = [];
   project = { id: 'TEST-project', schemaVersion: 1, studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 8, source: { kind: 'script', url: '', status: 'review_required' }, mobileStory: { id: 'TEST-source', text: snapshot.mobileStory, importedAt: now }, plan: structuredClone(snapshot.plan) as PetStoryPlan, assets: [], jobs: [], updatedAt: now };
   const account: Account = { id: project.accountId, name: 'TEST 原账号', platform: 'doubao', partition: 'TEST', status: 'idle', avatar: '', pinned: false, createdAt: now, updatedAt: now };
-  vi.stubGlobal('window', { electronAPI: { petstory: { prepareRuntime, collectChat, adoptPlanCandidate, adoptAssetsCandidate, adoptPromptCandidate, open: openProject, generateMaterials,
+  vi.stubGlobal('window', { electronAPI: { petstory: { prepareRuntime, collectChat, adoptPlanCandidate, adoptAssetsCandidate, adoptPromptCandidate, open: openProject, generateMaterials, savePromptBatch, promptStageTargets, endChatWaiting, savePromptModel, retryUnsubmitted,
     bindRun: async (_id: string, jobId: string, runId: string): Promise<PetStoryResult> => { project.jobs.find((job): boolean => job.id === jobId)!.runId = runId; return { success: true, project }; }, prepareChat: vi.fn((): never => { throw new Error('运行时入口不得回退到 renderer 提示词'); }) }, tasks: { list: async (): Promise<Task[]> => tasks } } });
   useAccountStore.setState({ accounts: [account] });
   useProjectStore.setState({ projects: [{ id: project.studioProjectId, name: 'TEST 原项目', description: '', color: '#fff', archived: false, createdAt: now, updatedAt: now }] });
-  useTaskStore.setState({ startAutomation: async (taskId: string, beforeDispatch?: (task: Task) => Promise<void>): Promise<boolean> => { if (beforeDispatch) await beforeDispatch(tasks.find((task): boolean => task.id === taskId)!); return true; } });
+  useTaskStore.setState({ activeTaskId: null, accountBusy: {}, startAutomation: async (taskId: string, beforeDispatch?: (task: Task) => Promise<void>): Promise<boolean> => { if (beforeDispatch) await beforeDispatch(tasks.find((task): boolean => task.id === taskId)!); return true; } });
   usePetStoryStore.setState({ project, busy: false, error: '', capability: null, capabilityCheckedInSession: false, freeChatConfirmed: true, promptBatch: { total: 0, completed: 0, status: 'idle' } });
 });
-afterEach((): void => {
-  usePetStoryStore.getState().stopPromptBatch();
+afterEach(async (): Promise<void> => {
+  await usePetStoryStore.getState().stopPromptBatch();
   usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); useAccountStore.setState(initial.accounts); useProjectStore.setState(initial.projects);
   vi.unstubAllGlobals();
 });
 async function finishCurrent(): Promise<void> { await usePetStoryStore.getState().collect(project.jobs.at(-1)!.id); }
+async function failOriginalBatch(): Promise<PetStoryChatJob> {
+  await usePetStoryStore.getState().regenerateAllPrompts(); const original = project.jobs[0];
+  collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => {
+    project = structuredClone(project); project.revision++;
+    const job = project.jobs.find((item): boolean => item.id === jobId)!;
+    job.status = 'invalid'; job.rawText = 'TEST离线原失败回复'; job.error = 'TEST原候选缺项';
+    return { success: false, project, error: job.error, needsRepair: false };
+  });
+  await usePetStoryStore.getState().collect(original.id, false);
+  expect(project.promptBatch).toMatchObject({ status: 'paused', completed: 0, jobId: original.id });
+  return original;
+}
+/** 仅模拟正式采用 IPC 的保存结果；正文仍取原五镜夹具，不属于真实豆包产出。 */
+function adoptOfflinePrompt(jobId: string): PetStoryResult {
+  project = structuredClone(project); project.revision++;
+  const job = project.jobs.find((item): boolean => item.id === jobId)!;
+  const target = project.plan!.shots.find((shot): boolean => shot.id === job.shotId)!.prompts[job.promptKind!]!;
+  job.status = 'applied'; job.resultStatus = 'adopted'; job.parsedResult = { optimized: target.final };
+  target.sourceJobId = job.id; target.candidateJobId = job.id; target.edited = false;
+  return { success: true, project };
+}
+/** 同原五镜角色派生容器；只模拟ID变化和空正文，不另写创作正文。 */
+function installOriginalMaterialContainers(): void {
+  project.materials = project.plan!.characters.slice(0, 2).map((character: PetStoryPlan['characters'][number]): PetStoryMaterial => ({ id: `character:${character.id}`, entityId: character.id, kind: 'character',
+    name: character.name, designHash: 'TEST原设计', prompt: { original: '', optimized: '', final: '', edited: false, rulesVersion: 'TEST离线' } }));
+  usePetStoryStore.setState({ project });
+}
+function replaceFirstMaterialId(): string {
+  const material = project.materials![0]; const id = `${material.id}-new-plan`;
+  material.id = id; material.entityId = `${material.entityId}-new-plan`; material.designHash = 'TEST新设计';
+  usePetStoryStore.setState({ project }); return id;
+}
 
 describe('产品运行时按钮到主进程请求', (): void => {
   it('已有五镜头仍可分析候选、补资产和定点审查修订，不传入 renderer 撰写正文', async (): Promise<void> => {
@@ -156,6 +208,82 @@ describe('产品运行时按钮到主进程请求', (): void => {
     await usePetStoryStore.getState().optimize(project.plan!.shots[0].id, 'video');
     expect(prepareRuntime.mock.calls[0][3]?.capability).toEqual(project.promptCapability);
   });
+  it('输入项目路径复用同一正常打开与画布恢复入口，打开本身不调用文字或媒体', async (): Promise<void> => {
+    const entered = '/OFFLINE/原五镜头/project.json';
+    await usePetStoryStore.getState().openProject(entered);
+    expect(openProject).toHaveBeenCalledWith(entered); expect(usePetStoryStore.getState().project?.id).toBe(project.id);
+    expect(usePetStoryStore.getState().freeChatConfirmed).toBe(false); expect(usePetStoryStore.getState().capabilityCheckedInSession).toBe(false);
+    const html = renderToStaticMarkup(React.createElement(PetStoryOpenProject));
+    expect(html).toContain('打开项目目录'); expect(html).toContain('输入项目路径');
+    expect(prepareRuntime).not.toHaveBeenCalled(); expect(generateMaterials).not.toHaveBeenCalled(); expect(tasks).toHaveLength(0);
+  });
+  it.each([undefined, 'https://www.doubao.com/chat/', 'https://www.doubao.com/chat', 'https://www.doubao.com/chat/local_OFFLINE-temporary', 'https://www.doubao.com/chat/OFFLINE-original'])('原运行只读恢复按具体会话定位而非字符串非空判断：%s', async (url?: string): Promise<void> => {
+    const dispatchEvent = vi.fn(); Object.assign(window, { dispatchEvent });
+    vi.stubGlobal('CustomEvent', class { constructor(public readonly type: string, public readonly options: object) {} });
+    await usePetStoryStore.getState().optimize(project.plan!.shots[0].id, 'firstFrame');
+    const job = project.jobs.at(-1)!; const task = tasks.at(-1)!;
+    task.status = 'paused'; task.runtime!.submittedAt = now; task.runtime!.conversationUrl = url;
+    const beforeCount = tasks.length; const prompt = task.prompt; const runId = task.runtime!.runId;
+    await usePetStoryStore.getState().recoverChat(job.id);
+    expect(dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'reconcile-task-submission', options: { detail: { taskId: task.id, useCurrentPage: !url?.includes('OFFLINE-original') } } }));
+    expect(tasks).toHaveLength(beforeCount); expect(task.prompt).toBe(prompt); expect(task.runtime!.runId).toBe(runId); expect(task.runtime!.submittedAt).toBe(now);
+    expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(generateMaterials).not.toHaveBeenCalled();
+  });
+  it.each(['ambiguous', 'conflict'] as const)('原会话%s时只读恢复不派发当前页面兜底、不重发', async (kind: 'ambiguous' | 'conflict'): Promise<void> => {
+    const dispatchEvent = vi.fn(); Object.assign(window, { dispatchEvent });
+    await usePetStoryStore.getState().optimize(project.plan!.shots[0].id, 'firstFrame');
+    const job = project.jobs.at(-1)!; const task = tasks.at(-1)!;
+    task.status = 'paused'; task.runtime!.submittedAt = now;
+    if (kind === 'ambiguous') task.artifacts = ['OFFLINE-a', 'OFFLINE-b'].map((id): NonNullable<Task['artifacts']>[number] => ({ id, kind: 'file', source: 'page', runId: task.runtime!.runId, url: `https://OFFLINE.invalid/${id}`, conversationUrl: `https://www.doubao.com/chat/${id}`, discoveredAt: now }));
+    else {
+      task.runtime!.conversationUrl = 'https://www.doubao.com/chat/OFFLINE-a';
+      task.runtime!.acceptanceObservation = { schemaVersion: 1, accountId: project.accountId, runId: task.runtime!.runId, conversationUrl: 'https://www.doubao.com/chat/OFFLINE-b', acceptedAt: now, evidence: { kind: 'prompt_published' }, cursor: { messageCount: 1, pollCount: 0 }, expectedArtifact: { kind: 'file', runId: task.runtime!.runId }, lease: { ownerId: 'OFFLINE', acquiredAt: now, expiresAt: now, lastHeartbeatAt: now }, outcome: 'observing' };
+    }
+    await usePetStoryStore.getState().recoverChat(job.id);
+    expect(dispatchEvent).not.toHaveBeenCalled(); expect(usePetStoryStore.getState().error).toContain('绑定冲突');
+    expect(tasks).toHaveLength(1); expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(task.runtime!.submittedAt).toBe(now);
+  });
+  it.each(['stopped', 'cancelled', 'persist_failure'] as const)('未发送原任务%s后沿startBoundChat正式hold重入队，绑定新run且不创建新请求', async (state: string): Promise<void> => {
+    await usePetStoryStore.getState().optimize(project.plan!.shots[0].id, 'firstFrame'); const job = project.jobs[0]; const task = tasks[0];
+    job.requestText = task.prompt;
+    task.status = state === 'cancelled' ? 'cancelled' : 'waiting_verification'; task.errorInfo = { code: state === 'cancelled' ? 'cancelled' : 'page_unrecognized', message: 'TEST提交前阻断', recoverable: true, detectedAt: now };
+    task.runtime = { runId: job.runId!, attempt: 1, stage: 'waiting_verification', message: 'TEST未发送', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { prompt: task.prompt, mode: 'chat', attachments: [] } };
+    const bind = vi.fn(window.electronAPI.petstory.bindRun); window.electronAPI.petstory.bindRun = bind;
+    const start = vi.fn(async (taskId: string, beforeDispatch?: (target: Task) => Promise<void>): Promise<boolean> => {
+      const target = tasks.find((item): boolean => item.id === taskId)!;
+      expect(target).toMatchObject({ id: task.id, status: 'queued', executionIntent: 'hold' });
+      target.runtime = { ...target.runtime!, runId: 'TEST-new-formally-bound-run', attempt: 2, stage: 'injecting_prompt' };
+      await beforeDispatch?.(target); return true;
+    });
+    useTaskStore.setState({ startAutomation: start });
+    if (state === 'persist_failure') {
+      retryUnsubmitted.mockImplementationOnce(async (): Promise<PetStoryResult> => {
+        project = structuredClone(project); project.revision++; project.jobs[0].runId = undefined;
+        return { success: false, project, error: 'TEST旧绑定已解除但TaskService重入队持久化失败' };
+      });
+      await usePetStoryStore.getState().startBoundChat(job.id);
+      expect(project.jobs[0].runId).toBeUndefined(); expect(task.runtime!.runId).toBe(job.runId); expect(start).not.toHaveBeenCalled();
+    }
+    await usePetStoryStore.getState().startBoundChat(job.id);
+    expect(retryUnsubmitted).toHaveBeenCalledWith(project.id, job.id); expect(start).toHaveBeenCalledTimes(1);
+    expect(retryUnsubmitted).toHaveBeenCalledTimes(state === 'persist_failure' ? 2 : 1);
+    expect(bind).toHaveBeenCalledWith(project.id, job.id, 'TEST-new-formally-bound-run');
+    expect(project.jobs).toHaveLength(1); expect(tasks).toHaveLength(1); expect(prepareRuntime).toHaveBeenCalledTimes(1);
+    expect(project.jobs[0].runId).toBe('TEST-new-formally-bound-run'); expect(task.runtime?.submittedAt).toBeUndefined(); expect(usePetStoryStore.getState().error).toBe('');
+  });
+  it.each(['submitted', 'ended', 'run', 'occupied'] as const)('原任务%s证据禁止startBoundChat进入重入队或发送', async (change: string): Promise<void> => {
+    await usePetStoryStore.getState().optimize(project.plan!.shots[0].id, 'firstFrame'); const job = project.jobs[0]; const task = tasks[0];
+    task.status = 'paused'; task.errorInfo = { code: 'page_loading', message: 'TEST提交前阻断', recoverable: true, detectedAt: now };
+    task.runtime = { runId: job.runId!, attempt: 1, stage: 'paused', message: 'TEST未发送', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { prompt: task.prompt, mode: 'chat', attachments: [] } };
+    if (change === 'submitted') task.runtime.submittedAt = now;
+    if (change === 'ended') job.endedWaitingAt = now;
+    if (change === 'run') task.runtime.runId = 'TEST-unrelated-run';
+    if (change === 'occupied') useTaskStore.setState({ accountBusy: { [project.accountId]: true } });
+    const start = vi.fn(async (): Promise<boolean> => true); useTaskStore.setState({ startAutomation: start });
+    await usePetStoryStore.getState().startBoundChat(job.id);
+    expect(retryUnsubmitted).not.toHaveBeenCalled(); expect(start).not.toHaveBeenCalled();
+    expect(tasks).toHaveLength(1); expect(project.jobs).toHaveLength(1); expect(usePetStoryStore.getState().error).toContain('请只读核对');
+  });
   it('基础素材卡有真实编辑计划表单且查看表单不调用豆包或媒体', (): void => {
     project.materials = [{ id: 'scene:location', entityId: 'location', name: 'TEST地点', kind: 'scene', designHash: 'TEST', selectedAssetId: 'TEST-base', prompt: { original: 'TEST', optimized: 'TEST', final: 'TEST', edited: false, rulesVersion: 'TEST' } }];
     project.assets = [{ id: 'TEST-base', kind: 'scene', materialId: 'scene:location', relativePath: 'materials/TEST.png' }];
@@ -163,5 +291,303 @@ describe('产品运行时按钮到主进程请求', (): void => {
     const html = renderToStaticMarkup(React.createElement(PetStoryMaterials, { project, disabled: false }));
     expect(html).toContain('变体／局部编辑计划'); expect(html).toContain('scene:location编辑基准图片'); expect(html).toContain('scene:location编辑变化'); expect(html).toContain('scene:location编辑保留项'); expect(html).toContain('scene:location编辑适用范围');
     expect(html).toContain('豆包生成编辑计划候选（不生成图片）'); expect(prepareRuntime).not.toHaveBeenCalled(); expect(generateMaterials).not.toHaveBeenCalled();
+  });
+  it('补齐入口只使用主进程当前资格清单，已手改且有新候选时不自行循环生成', async (): Promise<void> => {
+    const target = { shotId: 'shot_3', kind: 'video' as const };
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [target], pendingCandidateJobIds: ['TEST-current-candidate'] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(promptStageTargets).toHaveBeenCalledWith(project.id, 8);
+    expect(prepareRuntime.mock.calls[0].slice(2)).toEqual(['optimize', { shotId: target.shotId, promptKind: target.kind }]);
+    expect(usePetStoryStore.getState().error).toContain('新候选待采用'); expect(usePetStoryStore.getState().error).toContain('下游仍引用');
+    await finishCurrent(); expect(tasks).toHaveLength(1);
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [], pendingCandidateJobIds: ['TEST-current-candidate'] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(1); expect(usePetStoryStore.getState().promptBatch).toMatchObject({ status: 'complete', total: 0 });
+    expect(generateMaterials).not.toHaveBeenCalled();
+  });
+  it('启动失败先保留原任务关联并保存暂停；重复继续只提示只读恢复，不再创建请求', async (): Promise<void> => {
+    useTaskStore.setState({ startAutomation: async (): Promise<boolean> => false, error: 'TEST启动未完成' });
+    await usePetStoryStore.getState().regenerateAllPrompts();
+    expect(tasks).toHaveLength(1); expect(project.promptBatch).toMatchObject({ status: 'paused', jobId: project.jobs[0].id, completed: 0 });
+    expect(usePetStoryStore.getState().error).toContain('TEST启动未完成');
+    for (let index = 0; index < 2; index++) {
+      await usePetStoryStore.getState().continuePromptStage();
+      expect(usePetStoryStore.getState().error).toContain('只读重新收取');
+    }
+    expect(tasks).toHaveLength(1); expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(project.promptBatch?.status).toBe('paused');
+  });
+  it('批次停止并重开后不自动发送；原结果已收取只推进一次到保存的下一目标', async (): Promise<void> => {
+    await usePetStoryStore.getState().regenerateAllPrompts(); const original = project.jobs[0];
+    await usePetStoryStore.getState().stopPromptBatch(); expect(project.promptBatch?.status).toBe('paused');
+    await usePetStoryStore.getState().collect(original.id); expect(tasks).toHaveLength(1);
+    await usePetStoryStore.getState().openProject();
+    expect(tasks).toHaveLength(1); expect(usePetStoryStore.getState().promptBatch).toMatchObject({ status: 'paused', completed: 0 });
+    usePetStoryStore.getState().setFreeChatConfirmed(true);
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(2); expect(project.jobs[1]).toMatchObject({ shotId: 'shot_1', promptKind: 'video' });
+    expect(project.promptBatch).toMatchObject({ status: 'running', completed: 1, jobId: project.jobs[1].id });
+  });
+  it('已失败候选重开继续保持暂停，等待新的明确修订操作，不自动重发', async (): Promise<void> => {
+    await usePetStoryStore.getState().regenerateAllPrompts(); await usePetStoryStore.getState().stopPromptBatch();
+    project.jobs[0].status = 'invalid'; project.jobs[0].rawText = 'TEST离线失败原回复';
+    usePetStoryStore.setState({ project }); await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(1); expect(usePetStoryStore.getState().error).toContain('明确修订'); expect(project.promptBatch?.status).toBe('paused');
+  });
+  it.each(['regenerate', 'revise'] as const)('旧invalid批次目标经后来明确%s并采用且当前资格通过后，继续消耗该目标并发送保存的下一项', async (operation: 'regenerate' | 'revise'): Promise<void> => {
+    const original = await failOriginalBatch(); const first = project.promptBatch!.targets[0]; const next = project.promptBatch!.targets[1];
+    const target = { shotId: original.shotId!, promptKind: original.promptKind! };
+    if (operation === 'revise') {
+      await usePetStoryStore.getState().reviewContent(target); await finishCurrent();
+      await usePetStoryStore.getState().reviseContent(project.jobs.at(-1)!.id, target);
+    } else await usePetStoryStore.getState().optimize(target.shotId, target.promptKind);
+    const replacement = project.jobs.at(-1)!; await finishCurrent();
+    adoptPromptCandidate.mockImplementationOnce(async (): Promise<PetStoryResult> => adoptOfflinePrompt(replacement.id));
+    await usePetStoryStore.getState().adoptPromptCandidate(replacement.id);
+    const before = tasks.length; const remaining = project.promptBatch!.targets.slice(1);
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: remaining, pendingCandidateJobIds: [] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(before + 1); expect(project.jobs.at(-1)).toMatchObject({ shotId: next.shotId, promptKind: next.kind });
+    expect(project.promptBatch).toMatchObject({ status: 'running', total: 13, completed: 1, targets: remaining, jobId: project.jobs.at(-1)!.id });
+    expect(project.promptBatch!.targets).not.toContainEqual(first);
+    expect(project.jobs[0]).toMatchObject({ id: original.id, status: 'invalid', rawText: 'TEST离线原失败回复' });
+    expect(project.plan!.shots[0].prompts.firstFrame.sourceJobId).toBe(replacement.id);
+    expect(generateMaterials).not.toHaveBeenCalled();
+  });
+  it.each(['candidate', 'invalid', 'ended'] as const)('旧invalid之后的新%s仍未解决原目标时，继续保持暂停且不隐式重发', async (state: 'candidate' | 'invalid' | 'ended'): Promise<void> => {
+    const original = await failOriginalBatch(); const target = { shotId: original.shotId!, kind: original.promptKind! };
+    const originalFinal = project.plan!.shots[0].prompts.firstFrame.final;
+    await usePetStoryStore.getState().optimize(target.shotId, target.kind); const replacement = project.jobs.at(-1)!;
+    if (state === 'ended') await usePetStoryStore.getState().endChatWaiting(replacement.id);
+    else {
+      await finishCurrent(); const current = project.jobs.find((job): boolean => job.id === replacement.id)!;
+      current.status = state === 'invalid' ? 'invalid' : 'applied'; current.resultStatus = state === 'candidate' ? 'candidate' : undefined;
+      current.parsedResult = { optimized: snapshot.plan.shots[0].prompts.firstFrame.optimized };
+      usePetStoryStore.setState({ project });
+    }
+    const before = tasks.length;
+    // 合格未采用候选会使缺项清单排除此目标；宿主仍必须核对“已采用”，不能当完成。
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: state === 'candidate' ? [] : [target], pendingCandidateJobIds: state === 'candidate' ? [replacement.id] : [] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(before); expect(project.promptBatch).toMatchObject({ status: 'paused', completed: 0, jobId: original.id });
+    expect(project.plan!.shots[0].prompts.firstFrame.final).toBe(originalFinal);
+    expect(project.jobs[0]).toMatchObject({ id: original.id, status: 'invalid', rawText: 'TEST离线原失败回复' });
+    expect(usePetStoryStore.getState().error).toContain('继续不会自动重发');
+  });
+  it('后来明确采用过新结果，但主进程仍判当前模型或事实需修订时，不消费旧invalid目标', async (): Promise<void> => {
+    const original = await failOriginalBatch();
+    await usePetStoryStore.getState().optimize(original.shotId!, original.promptKind!); const replacement = project.jobs.at(-1)!;
+    adoptPromptCandidate.mockImplementationOnce(async (): Promise<PetStoryResult> => adoptOfflinePrompt(replacement.id));
+    await usePetStoryStore.getState().adoptPromptCandidate(replacement.id);
+    const before = tasks.length;
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [{ shotId: original.shotId!, kind: original.promptKind! }], pendingCandidateJobIds: [] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(before); expect(project.promptBatch).toMatchObject({ status: 'paused', completed: 0, jobId: original.id });
+    expect(project.jobs[0].status).toBe('invalid'); expect(usePetStoryStore.getState().error).toContain('继续不会自动重发');
+  });
+  it.each(['bound', 'captured'] as const)('原批次%s任务即使另有已采用同目标结果也仍先只读收取或结束等待', async (state: 'bound' | 'captured'): Promise<void> => {
+    const original = await failOriginalBatch();
+    await usePetStoryStore.getState().optimize(original.shotId!, original.promptKind!); const replacement = project.jobs.at(-1)!;
+    adoptPromptCandidate.mockImplementationOnce(async (): Promise<PetStoryResult> => adoptOfflinePrompt(replacement.id));
+    await usePetStoryStore.getState().adoptPromptCandidate(replacement.id);
+    project.jobs.find((job): boolean => job.id === original.id)!.status = state; usePetStoryStore.setState({ project });
+    const before = tasks.length;
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(before); expect(promptStageTargets).not.toHaveBeenCalled();
+    expect(project.promptBatch).toMatchObject({ status: 'paused', completed: 0 });
+    expect(usePetStoryStore.getState().error).toContain('只读重新收取或明确结束等待');
+  });
+  it('重开前applied结果已因目标变化失效时，用户本次继续重新按当前资格创作，不把旧完成计入', async (): Promise<void> => {
+    await usePetStoryStore.getState().regenerateAllPrompts(); const original = project.jobs[0];
+    await usePetStoryStore.getState().stopPromptBatch(); await usePetStoryStore.getState().collect(original.id);
+    const targets = [{ shotId: original.shotId!, kind: original.promptKind! }];
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: targets }).mockResolvedValueOnce({ success: true, project, promptTargets: targets });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(2); expect(project.jobs[0].id).toBe(original.id);
+    expect(project.jobs[1]).toMatchObject({ shotId: original.shotId, promptKind: original.promptKind });
+    expect(project.promptBatch).toMatchObject({ total: 1, completed: 0, jobId: project.jobs[1].id, status: 'running' });
+  });
+  it('旧素材批次暂停后正常重新分析并采用动态新ID方案，打开与采用不发送，明确继续才重取当前目标', async (): Promise<void> => {
+    installOriginalMaterialContainers();
+    await usePetStoryStore.getState().regenerateAllMaterialPrompts(); const original = project.jobs[0];
+    await usePetStoryStore.getState().stopPromptBatch(); await usePetStoryStore.getState().collect(original.id);
+    const oldTargets = structuredClone(project.promptBatch!.targets);
+    await usePetStoryStore.getState().analyze(); await finishCurrent(); const analysis = project.jobs.at(-1)!;
+    const nextId = `${project.materials![0].id}-new-plan`;
+    adoptPlanCandidate.mockImplementationOnce(async (): Promise<PetStoryResult> => {
+      project = structuredClone(project); project.revision++;
+      project.plan!.characters[0].id = `${project.plan!.characters[0].id}-new-plan`;
+      replaceFirstMaterialId(); return { success: true, project };
+    });
+    await usePetStoryStore.getState().adoptPlanCandidate(analysis.id); await usePetStoryStore.getState().openProject();
+    expect(tasks).toHaveLength(2); expect(promptStageTargets).not.toHaveBeenCalled();
+    expect(project.promptBatch).toMatchObject({ targets: oldTargets, status: 'paused', jobId: original.id });
+    const currentTargets = [{ materialId: nextId }];
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: currentTargets, pendingCandidateJobIds: [] });
+    usePetStoryStore.getState().setFreeChatConfirmed(true);
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(3); expect(project.jobs.at(-1)).toMatchObject({ kind: 'materialPrompt', materialId: nextId });
+    expect(project.promptBatch).toMatchObject({ total: 1, completed: 0, targets: currentTargets, status: 'running' });
+    expect(project.jobs.find((job): boolean => job.id === original.id)).toMatchObject({ status: 'applied', taskId: original.taskId });
+    expect(usePetStoryStore.getState().error).toContain('旧设计的文字批次已过期');
+    expect(prepareRuntime.mock.calls.slice(2).every((call): boolean => call[3]?.materialId !== original.materialId)).toBe(true);
+  });
+  it.each(['invalid', 'ended'] as const)('原%s记录保留且目标容器已删除时，明确继续重算当前缺失目标，不重发旧目标', async (state: 'invalid' | 'ended'): Promise<void> => {
+    installOriginalMaterialContainers();
+    await usePetStoryStore.getState().regenerateAllMaterialPrompts(); const original = project.jobs[0];
+    if (state === 'ended') {
+      tasks[0].runtime!.submittedAt = now;
+      await usePetStoryStore.getState().endChatWaiting(original.id);
+    } else {
+      await usePetStoryStore.getState().stopPromptBatch();
+      project.jobs[0].status = 'invalid'; project.jobs[0].rawText = 'TEST离线原失败回复';
+    }
+    const oldRecord = structuredClone(project.jobs[0]); const nextId = replaceFirstMaterialId();
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [{ materialId: nextId }], pendingCandidateJobIds: [] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(2); expect(project.jobs[1]).toMatchObject({ kind: 'materialPrompt', materialId: nextId });
+    expect(project.jobs[0]).toEqual(oldRecord); expect(tasks[0].runtime!.submittedAt).toBe(state === 'ended' ? now : undefined);
+    expect(project.promptBatch).toMatchObject({ total: 1, completed: 0, targets: [{ materialId: nextId }] });
+    expect(usePetStoryStore.getState().error).toContain('旧设计的文字批次已过期');
+  });
+  it.each(['bound', 'captured'] as const)('原%s尚未结束等待，即使目标删除也先只读核对，不借新方案重算发送', async (state: 'bound' | 'captured'): Promise<void> => {
+    installOriginalMaterialContainers();
+    await usePetStoryStore.getState().regenerateAllMaterialPrompts(); const original = project.jobs[0];
+    await usePetStoryStore.getState().stopPromptBatch(); project.jobs[0].status = state;
+    replaceFirstMaterialId();
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(1); expect(promptStageTargets).not.toHaveBeenCalled();
+    expect(project.promptBatch).toMatchObject({ status: 'paused', completed: 0, jobId: original.id });
+    expect(usePetStoryStore.getState().error).toContain('只读重新收取或明确结束等待');
+  });
+  it('任一保存的后续镜头正文容器删除也重算，不能只检查首项并发送已删除尾帧', async (): Promise<void> => {
+    await usePetStoryStore.getState().regenerateAllPrompts(); const original = project.jobs[0];
+    await usePetStoryStore.getState().stopPromptBatch(); await usePetStoryStore.getState().collect(original.id);
+    const tailShot = project.plan!.shots.find((shot): boolean => !!shot.prompts.lastFrame)!;
+    const removed = { shotId: tailShot.id, kind: 'lastFrame' as const }; delete tailShot.prompts.lastFrame;
+    usePetStoryStore.setState({ project });
+    const current = [{ shotId: project.plan!.shots.at(-1)!.id, kind: 'video' as const }];
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: current, pendingCandidateJobIds: [] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(project.jobs.at(-1)).toMatchObject({ shotId: current[0].shotId, promptKind: current[0].kind });
+    expect(project.promptBatch).toMatchObject({ total: 1, completed: 0, targets: current });
+    expect(project.promptBatch!.targets).not.toContainEqual(removed); expect(tasks).toHaveLength(2);
+    expect(project.jobs[0]).toMatchObject({ id: original.id, status: 'applied' });
+  });
+  it('重算新设计仍保留手改候选和结束等待过滤，不把旧队列删除当作这些目标已采用', async (): Promise<void> => {
+    installOriginalMaterialContainers();
+    await usePetStoryStore.getState().regenerateAllMaterialPrompts(); const original = project.jobs[0];
+    await usePetStoryStore.getState().stopPromptBatch(); await usePetStoryStore.getState().collect(original.id);
+    replaceFirstMaterialId();
+    const shot = project.plan!.shots[0]; const manual = shot.prompts.firstFrame.final;
+    shot.prompts.firstFrame.edited = true; shot.prompts.firstFrame.optimized = 'TEST仅离线新候选';
+    const ended: PetStoryChatJob = { ...original, id: 'TEST-ended-current-target', taskId: 'TEST-ended-task', materialId: undefined, kind: 'optimize', shotId: shot.id, promptKind: 'video', endedWaitingAt: now };
+    const candidate: PetStoryChatJob = { ...original, id: 'TEST-manual-candidate', taskId: 'TEST-candidate-task', materialId: undefined, kind: 'optimize', shotId: shot.id, promptKind: 'firstFrame', resultStatus: 'candidate' };
+    project.jobs.push(ended, candidate); usePetStoryStore.setState({ project });
+    const next = { shotId: project.plan!.shots[1].id, kind: 'video' as const };
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [{ shotId: shot.id, kind: 'video' }, next], pendingCandidateJobIds: [candidate.id] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(2); expect(project.jobs.at(-1)).toMatchObject({ shotId: next.shotId, promptKind: next.kind });
+    expect(project.plan!.shots[0].prompts.firstFrame).toMatchObject({ final: manual, optimized: 'TEST仅离线新候选', edited: true });
+    expect(project.jobs.find((job): boolean => job.id === ended.id)?.endedWaitingAt).toBe(now);
+    expect(usePetStoryStore.getState().error).toContain('新候选待采用'); expect(usePetStoryStore.getState().error).toContain('本次只补齐其他目标');
+    expect(usePetStoryStore.getState().error).toContain('旧设计的文字批次已过期');
+  });
+  it('删除目标但原saved job记录缺失时保留暂停，不推断原任务已经结束而重发', async (): Promise<void> => {
+    installOriginalMaterialContainers();
+    await usePetStoryStore.getState().regenerateAllMaterialPrompts(); const jobId = project.jobs[0].id;
+    await usePetStoryStore.getState().stopPromptBatch(); project.jobs = []; replaceFirstMaterialId();
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(1); expect(promptStageTargets).not.toHaveBeenCalled();
+    expect(project.promptBatch).toMatchObject({ status: 'paused', jobId });
+    expect(usePetStoryStore.getState().error).toContain('原任务归属或状态尚未明确');
+  });
+  it('批次期间更改文字模型暂停后续，原运行保留且晚收取不自动启动另一目标', async (): Promise<void> => {
+    await usePetStoryStore.getState().regenerateAllPrompts(); const original = project.jobs[0];
+    await usePetStoryStore.getState().savePromptModel('seedance-2.5');
+    expect(project.promptModel).toBe('seedance-2.5'); expect(project.promptBatch).toMatchObject({ status: 'paused', jobId: original.id });
+    await usePetStoryStore.getState().collect(original.id);
+    expect(tasks).toHaveLength(1); expect(usePetStoryStore.getState().promptBatch.status).toBe('paused');
+  });
+  it('结束等待后继续仅补其他目标，原任务和原目标不被隐式重新创建', async (): Promise<void> => {
+    await usePetStoryStore.getState().regenerateAllPrompts(); const original = project.jobs[0];
+    await usePetStoryStore.getState().endChatWaiting(original.id);
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [{ shotId: original.shotId!, kind: original.promptKind! }, { shotId: 'shot_3', kind: 'video' }] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(2); expect(project.jobs[0].endedWaitingAt).toBe(now); expect(project.jobs[1]).toMatchObject({ shotId: 'shot_3', promptKind: 'video' });
+    expect(usePetStoryStore.getState().error).toContain('本次只补齐其他目标');
+  });
+  it('两个不同目标先后结束等待后，多次继续与重开均排除全部未解决目标，不只排除最近一项', async (): Promise<void> => {
+    await usePetStoryStore.getState().regenerateAllPrompts(); const first = project.jobs[0];
+    tasks[0].runtime!.submittedAt = now;
+    await usePetStoryStore.getState().endChatWaiting(first.id);
+    const firstTarget = { shotId: first.shotId!, kind: first.promptKind! };
+    const secondTarget = { shotId: 'shot_3', kind: 'video' as const };
+    const thirdTarget = { shotId: 'shot_4', kind: 'video' as const };
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [firstTarget, secondTarget, thirdTarget] });
+    await usePetStoryStore.getState().continuePromptStage();
+    const second = project.jobs[1];
+    expect(second).toMatchObject({ shotId: secondTarget.shotId, promptKind: secondTarget.kind });
+    tasks[1].runtime!.submittedAt = now;
+    await usePetStoryStore.getState().endChatWaiting(second.id);
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [firstTarget, secondTarget, thirdTarget] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(3); expect(project.jobs[2]).toMatchObject({ shotId: thirdTarget.shotId, promptKind: thirdTarget.kind });
+    await finishCurrent(); await usePetStoryStore.getState().openProject();
+    usePetStoryStore.getState().setFreeChatConfirmed(true);
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [firstTarget, secondTarget] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(3); expect(prepareRuntime).toHaveBeenCalledTimes(3);
+    expect(project.jobs.slice(0, 2).map((job): string | undefined => job.endedWaitingAt)).toEqual([now, now]);
+    expect(tasks.slice(0, 2).map((task): string | undefined => task.runtime?.submittedAt)).toEqual([now, now]);
+    expect(usePetStoryStore.getState().error).toContain('明确单项或批量重新生成');
+    expect(usePetStoryStore.getState().promptBatch).toMatchObject({ status: 'complete', total: 0 });
+    expect(generateMaterials).not.toHaveBeenCalled();
+  });
+  it.each(['single', 'batch'] as const)('结束等待记录保留，新的明确%s重新生成仍可创建同目标新请求', async (operation: 'single' | 'batch'): Promise<void> => {
+    const shotId = project.plan!.shots[0].id;
+    await usePetStoryStore.getState().optimize(shotId, 'firstFrame'); const original = project.jobs[0];
+    await usePetStoryStore.getState().endChatWaiting(original.id);
+    if (operation === 'single') await usePetStoryStore.getState().optimize(shotId, 'firstFrame');
+    else await usePetStoryStore.getState().regenerateAllPrompts();
+    expect(tasks).toHaveLength(2); expect(project.jobs[0]).toMatchObject({ id: original.id, endedWaitingAt: now });
+    expect(project.jobs[1]).toMatchObject({ kind: 'optimize', shotId, promptKind: 'firstFrame' });
+    expect(project.jobs[1].id).not.toBe(original.id); expect(project.jobs[1].endedWaitingAt).toBeUndefined();
+    expect(generateMaterials).not.toHaveBeenCalled();
+  });
+  it('结束等待后的新明确创作成功才解除该目标的继续排除，失败与旧请求迟到均不解除', async (): Promise<void> => {
+    const target = { shotId: project.plan!.shots[0].id, kind: 'firstFrame' as const };
+    await usePetStoryStore.getState().optimize(target.shotId, target.kind); const original = project.jobs[0];
+    await usePetStoryStore.getState().endChatWaiting(original.id);
+    project.jobs.push({ ...original, id: 'TEST-older-late', taskId: 'TEST-older-late-task', status: 'applied', endedWaitingAt: undefined, createdAt: '2026-10-24T23:59:59.000Z' });
+    usePetStoryStore.setState({ project });
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [target] });
+    await usePetStoryStore.getState().continuePromptStage(); expect(tasks).toHaveLength(1);
+    await usePetStoryStore.getState().optimize(target.shotId, target.kind); const newRound = project.jobs.at(-1)!;
+    newRound.status = 'invalid'; usePetStoryStore.setState({ project });
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [target] });
+    await usePetStoryStore.getState().continuePromptStage(); expect(tasks).toHaveLength(2);
+    await usePetStoryStore.getState().collect(newRound.id);
+    project.jobs.find((job): boolean => job.id === newRound.id)!.resultStatus = 'stale'; usePetStoryStore.setState({ project });
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [target] });
+    await usePetStoryStore.getState().continuePromptStage(); expect(tasks).toHaveLength(2);
+    project.jobs.find((job): boolean => job.id === newRound.id)!.resultStatus = 'adopted'; usePetStoryStore.setState({ project });
+    // 模拟新一轮已成功后，后续模型/事实改变导致主进程再次给出该缺项；旧 ended 不成为终身禁用。
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [target] });
+    await usePetStoryStore.getState().continuePromptStage();
+    expect(tasks).toHaveLength(3); expect(project.jobs[0].endedWaitingAt).toBe(now);
+    expect(project.jobs.at(-1)).toMatchObject({ kind: 'optimize', shotId: target.shotId, promptKind: target.kind });
+  });
+  it('准备中点击停止会留下已创建hold任务及暂停关联，开始回调不会发送', async (): Promise<void> => {
+    const normalPrepare = prepareRuntime.getMockImplementation()!;
+    let release: () => void = (): void => undefined;
+    const pending = new Promise<void>((resolve): void => { release = resolve; });
+    prepareRuntime.mockImplementationOnce(async (...args: Parameters<typeof normalPrepare>): Promise<PetStoryResult> => { await pending; return normalPrepare(...args); });
+    const start = vi.fn(async (): Promise<boolean> => true); useTaskStore.setState({ startAutomation: start });
+    const operation = usePetStoryStore.getState().regenerateAllPrompts();
+    await vi.waitFor((): void => { expect(prepareRuntime).toHaveBeenCalledTimes(1); });
+    await usePetStoryStore.getState().stopPromptBatch(); release(); await operation;
+    expect(tasks).toHaveLength(1); expect(start).not.toHaveBeenCalled();
+    expect(project.promptBatch).toMatchObject({ status: 'paused', jobId: project.jobs[0].id, completed: 0 });
+    expect(usePetStoryStore.getState().promptBatch.status).toBe('paused');
   });
 });

@@ -241,7 +241,7 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     expect(result.project!.plan).toBeUndefined();
     expect(tasks()).toHaveLength(1);
   });
-  it.each(['video_prompt_not_ready', 'video_assets_not_ready', 'chat_assets_not_ready', 'page_unrecognized', 'cancelled'] as const)('retries the same never-submitted %s failure as hold and binds a new run without creating another task', async (code): Promise<void> => {
+  it.each(['video_prompt_not_ready', 'video_assets_not_ready', 'chat_assets_not_ready', 'page_unrecognized', 'page_changed', 'cancelled'] as const)('retries the same never-submitted %s failure as hold and binds a new run without creating another task', async (code): Promise<void> => {
     const { port, core, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
     const prepared = await chat.prepare(project.id, 'TEST analysis', 'analysis');
@@ -261,16 +261,16 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     expect(tasks()[0].runtime?.submittedAt).toBeUndefined();
     expect(tasks()).toHaveLength(1);
   });
-  it.each(['submitted', 'uncertain', 'wrong-run'] as const)('refuses attachment retry for %s evidence', async (reason): Promise<void> => {
+  it.each(['submitted', 'uncertain', 'wrong-run', 'page-changed-submitted'] as const)('refuses attachment retry for %s evidence', async (reason): Promise<void> => {
     const { port, core, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
     const prepared = await chat.prepare(project.id, 'TEST unsafe retry', 'analysis');
     const task = tasks()[0]; const job = prepared.project!.jobs[0];
     const runtime: TaskRunSnapshot = { runId: 'TEST-bound', attempt: 1, stage: 'failed', message: 'TEST failed', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
       input: { prompt: task.prompt, mode: 'chat', attachments: [] } };
-    core.updateRuntime({ taskId: task.id, status: 'fail', runtime, errorInfo: { code: 'chat_assets_not_ready', message: 'TEST upload', recoverable: true, detectedAt: now } });
+    core.updateRuntime({ taskId: task.id, status: 'fail', runtime, errorInfo: { code: reason === 'page-changed-submitted' ? 'page_changed' : 'chat_assets_not_ready', message: 'TEST upload', recoverable: true, detectedAt: now } });
     await chat.bindRun(project.id, job.id, runtime.runId);
-    core.updateRuntime({ taskId: task.id, runtime: reason === 'wrong-run' ? { ...runtime, runId: 'TEST-other' } : reason === 'submitted' ? { submittedAt: now } : {},
+    core.updateRuntime({ taskId: task.id, runtime: reason === 'wrong-run' ? { ...runtime, runId: 'TEST-other' } : reason === 'submitted' || reason === 'page-changed-submitted' ? { submittedAt: now } : {},
       errorInfo: reason === 'uncertain' ? { code: 'submission_uncertain', message: 'TEST uncertain', recoverable: false, detectedAt: now } : undefined });
     await expect(chat.retryUnsubmitted(project.id, job.id)).rejects.toThrow();
     expect(tasks()).toHaveLength(1);

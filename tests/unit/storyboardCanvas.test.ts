@@ -18,6 +18,7 @@ import { TaskService } from '../../main/core/TaskService';
 import { normalizeTasks } from '../../main/utils/persistenceNormalization';
 import { mediaCommand } from '../../main/utils/petstoryMedia';
 import { optimizationPrompt } from '../../src/utils/petstoryPrompts';
+import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 
 let root: string; let projects: PetStoryProjects; let p: PetStoryProject; let core: TaskService; let tasks: Task[]; let chats: PetStoryChatService;
 const list = (): Task[] => structuredClone(tasks);
@@ -83,7 +84,8 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     const initial = { petstory: usePetStoryStore.getState(), tasks: useTaskStore.getState(), accounts: useAccountStore.getState(), projects: useProjectStore.getState() };
     const now = new Date().toISOString();
     const account: Account = { id: p.accountId, name: 'TEST 原账号替身', platform: 'doubao', avatar: '', partition: 'TEST-only', status: 'idle', pinned: false, createdAt: now, updatedAt: now };
-    vi.stubGlobal('window', { electronAPI: { petstory: { prepareRuntime: chats.prepareRuntime.bind(chats), bindRun: chats.bindRun.bind(chats), collectChat: chats.collect.bind(chats) }, tasks: { list: async (): Promise<Task[]> => list() } } });
+    vi.stubGlobal('window', { electronAPI: { petstory: { prepareRuntime: chats.prepareRuntime.bind(chats), bindRun: chats.bindRun.bind(chats), collectChat: chats.collect.bind(chats),
+      savePromptBatch: async (...args: Parameters<PetStoryProjects['savePromptBatch']>): Promise<{ success: true; project: PetStoryProject }> => ({ success: true, project: await projects.savePromptBatch(...args) }) }, tasks: { list: async (): Promise<Task[]> => list() } } });
     useAccountStore.setState({ accounts: [account] });
     useProjectStore.setState({ projects: [{ id: p.studioProjectId, name: 'TEST 原五镜头容器', description: '', color: '#fff', archived: false, createdAt: now, updatedAt: now }] });
     useTaskStore.setState({ startAutomation: async (taskId: string, beforeDispatch?: (task: Task) => Promise<void>): Promise<boolean> => {
@@ -191,14 +193,19 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     const downloads: DownloadJob[] = [];
     const production = new PetStoryProductionService(projects, { list, create, adopt: (): Task => { throw new Error('TEST unexpected adoption'); }, retryUnsubmitted: (): Task => { throw new Error('TEST unexpected retry'); }, downloads: (): DownloadJob[] => downloads,
       download: async (params: TaskDownloadOutputsParams): Promise<TaskDownloadOutputsResult> => { const output = params.outputs[0]; const now = new Date().toISOString(); const job: DownloadJob = { id: 'TEST-five-download', taskId: output.taskId, accountId: p.accountId, mode: output.mode, url: output.outputs[0], status: 'done', attempts: 1, saveDir: root, filePath: picture, createdAt: now, updatedAt: now }; downloads.push(job); return { success: true, count: 1, failed: 0, jobIds: [job.id] }; } });
-    const shotId = p.plan!.shots[1].id;
-    await expect(production.generateShotMedia(p.id, p.revision, shotId, 'video', capability(), {})).rejects.toThrow('首帧');
-    await expect(production.generateShotMedia(p.id, p.revision, shotId, 'lastFrame', capability(true), {})).rejects.toThrow('首帧');
+    const continuousShotId = p.plan!.shots[1].id;
+    await expect(production.generateShotMedia(p.id, p.revision, continuousShotId, 'video', capability(), {})).rejects.toThrow('首帧');
+    await expect(production.generateShotMedia(p.id, p.revision, continuousShotId, 'lastFrame', capability(true), {})).rejects.toThrow('首帧');
     expect(tasks).toEqual([]);
+    seedOfflinePromptContracts(p); p = await projects.write(p);
+    await expect(production.generateShotMedia(p.id, p.revision, continuousShotId, 'firstFrame', capability(true), {})).rejects.toThrow('前镜实际视频／末帧');
+    expect(tasks).toEqual([]);
+    // 同一原五镜头中，cut节点可独立生成；continue保留真实前镜依赖，不能假造末帧。
+    const shotId = p.plan!.shots[0].id;
     await production.generateShotMedia(p.id, p.revision, shotId, 'firstFrame', capability(true), {});
     const prepared = await production.advance(p.id); expect(prepared.action).toBe('start');
     const task = list()[0]; expect(task.mode).toBe('image'); expect(task.petstory?.stepId).toBeTruthy();
-    expect(task.prompt).toContain(p.plan!.shots[1].prompts.firstFrame.final);
+    expect(task.prompt).toContain(p.plan!.shots[0].prompts.firstFrame.final);
     await runtime(task); await production.bindRun(p.id, task.id, `TEST-run-${task.id}`);
     expect(core.updateRuntime({ taskId: task.id, runtime: { submittedAt: new Date().toISOString() } }).success).toBe(true);
     expect(core.updateStatus({ taskId: task.id, status: 'done', outputs: ['https://TEST.invalid/five-node.png'] }).success).toBe(true);
@@ -209,11 +216,11 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     expect(completed.project!.production!.shots[shotId].firstFrameId).toBeTruthy();
     expect(completed.project!.production!.shots[shotId].plannedEndImageId).toBeUndefined(); expect(completed.project!.production!.shots[shotId].videoId).toBeUndefined();
     p = completed.project!;
-    await expect(production.generateShotMedia(p.id, p.revision, shotId, 'video', capability(), {})).rejects.toThrow('尾帧');
+    await expect(production.generateShotMedia(p.id, p.revision, continuousShotId, 'video', capability(), {})).rejects.toThrow('首帧');
     expect(tasks).toHaveLength(1);
     const oldTask = list()[0]; const oldProduction = structuredClone(p.production);
     const selected = p.assets.find((a): boolean => a.id === p.production!.shots[shotId].firstFrameId)!;
-    expect(selected.generationFinal).toBe(p.plan!.shots[1].prompts.firstFrame.final);
+    expect(selected.generationFinal).toBe(p.plan!.shots[0].prompts.firstFrame.final);
     p = await projects.savePlan(p.id, p.revision, p.plan!);
     expect(p.production).toBeUndefined(); expect(p.productionHistory!.at(-1)).toEqual(oldProduction);
     const chat = await chats.prepare(p.id, optimizationPrompt(p, shotId, 'firstFrame'), 'optimize', undefined, shotId, 'firstFrame');

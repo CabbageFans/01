@@ -2,6 +2,7 @@ import type { PetStoryPlan, PetStoryShot, PetStoryCharacter, PetStoryPrompt, Pet
 
 export { PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptQuality';
 import { compileReferencedText, PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptQuality';
+import { subtitlePolicyIssues } from './petstorySubtitlePolicy';
 const MODES: PetStoryMode[] = ['auto', 'first_frame', 'first_last_frame', 'reference'];
 export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('需要 JSON 对象');
@@ -37,11 +38,15 @@ function characterArray(value: unknown): unknown[] {
   if (!Array.isArray(value)) throw new Error('characters必须是数组');
   return value;
 }
+/** 分析只保存兼容草稿；正式正文必须来自专用任务。 */
 function prompt(value: unknown, field: string, model: boolean): PetStoryPrompt {
-  const p = record(value);
-  const original = text(p.original, `${field}.original`);
-  const optimized = model ? text(p.optimized, `${field}.optimized`) : typeof p.optimized === 'string' ? p.optimized : ''; 
-  return { original, optimized, final: model ? optimized : text(p.final, `${field}.final`),
+  const p = value === undefined ? {} : record(value);
+  if (!model && value !== undefined && typeof p.final !== 'string') throw new Error(`${field}.final必须为文本`);
+  const original = typeof p.original === 'string' ? p.original : '';
+  const optimized = typeof p.optimized === 'string' ? p.optimized : '';
+  return { original, optimized: model ? '' : optimized, final: model ? '' : typeof p.final === 'string' ? p.final : '',
+    draft: model ? optimized || (typeof p.final === 'string' ? p.final : original) || undefined : typeof p.draft === 'string' ? p.draft : undefined,
+    basisJobId: !model && typeof p.basisJobId === 'string' ? p.basisJobId : undefined,
     edited: !model && p.edited === true, rulesVersion: !model && typeof p.rulesVersion === 'string' ? p.rulesVersion : PETSTORY_RULES_VERSION,
     candidateJobId: !model && typeof p.candidateJobId === 'string' ? p.candidateJobId : undefined,
     sourceJobId: !model && typeof p.sourceJobId === 'string' ? p.sourceJobId : undefined, needsReview: !model && p.needsReview === true ? true : undefined,
@@ -61,7 +66,8 @@ export function validatePromptTask(value: unknown): PetStoryPromptTaskContract {
     return { assetId: text(ref.assetId, '目标素材身份'), order: index + 1, purpose: ref.purpose as PetStoryPromptReference['purpose'],
       characterIds: [...ref.characterIds] as string[], materialId: optionalText(ref.materialId, '目标素材ID'), entityId: optionalText(ref.entityId, '目标实体ID'), slot: ref.slot as PetStoryPromptReference['slot'] };
   });
-  return { references, dialect: task.dialect as PetStoryPromptTaskContract['dialect'], mode: task.mode as PetStoryPromptTaskContract['mode'] };
+  if (task.designHash !== undefined && (typeof task.designHash !== 'string' || !/^[a-f0-9]{64}$/.test(task.designHash))) throw new Error('正文设计快照无效');
+  return { designHash: task.designHash as string | undefined, references, dialect: task.dialect as PetStoryPromptTaskContract['dialect'], mode: task.mode as PetStoryPromptTaskContract['mode'] };
 }
 
 function runtimeReferenceIssues(project: PetStoryProject, job: PetStoryChatJob, body: string): string[] {
@@ -80,7 +86,7 @@ function runtimeReferenceIssues(project: PetStoryProject, job: PetStoryChatJob, 
       if (job.promptKind === 'video' && /@(?:\s+图片\s*|图片\s+)\d/u.test(body)) issues.push('Seedance 目标标签内部含空白；请由模型按本次标签表完整返回紧凑的 @图片N，不使用空格或换行分隔');
       const missing = task.references.filter((ref): boolean => !found.includes(ref.order)).map((ref): string => `@图片${ref.order}`);
       if (missing.length) issues.push(`Seedance 正文未在相关位置使用本次目标素材标签：${missing.join('、')}`);
-      if (job.promptKind === 'video' && !body.includes('全程无字幕、无对白文字叠加。')) issues.push('Seedance 正文缺少本次明确约定的字幕约束句：全程无字幕、无对白文字叠加。');
+      if (job.promptKind === 'video') issues.push(...subtitlePolicyIssues(body));
     }
   }
   return issues;
@@ -95,7 +101,7 @@ export function runtimePromptIssues(project: PetStoryProject, job: PetStoryChatJ
   if (job.promptKind !== 'video' || !shot) return issues;
   const dialect = job.promptTask?.dialect;
   const seedance = dialect === 'seedance20' || dialect === 'seedance25';
-  if (seedance && /<声音(?:\s[^>]*)?>[\s\S]*?<\/声音\s*>|<\/声音\s*>/u.test(body)) issues.push('Seedance 声音指令使用了本次明令禁止的 XML 成对标签；每个实际声音内容应写在单一一对尖括号内，不使用 <声音>…</声音>');
+  if (seedance && /<\s*\/\s*[\p{L}_][\p{L}\p{N}_.:-]*\s*>/u.test(body)) issues.push('Seedance 声音指令使用了本次明令禁止的 XML 成对标签；每个实际声音内容应写在单一一对尖括号内，不使用 <声音>…</声音>');
   const blocks = body.match(/\{[^{}]*\}/g) || [];
   const spoken = blocks.flatMap((block): { name: string; language: string; text: string }[] => {
     const match = block.match(/^\{\s*([\s\S]*?)用([^{}]+?)说\s*[：:]\s*([\s\S]*?)\s*\}$/u);
@@ -174,10 +180,8 @@ function scenes(value: unknown): PetStoryScene[] | undefined {
 function legacySceneReferences(s: Record<string, unknown>, model: boolean): string[] | undefined {
   return !model && Array.isArray(s.sceneReferenceAssetIds) ? s.sceneReferenceAssetIds.map((v: unknown): string => id(v, '场景素材引用')) : undefined;
 }
-function requireDialogueInCandidate(model: boolean, dialogue: PetStoryShot['dialogue'], video: unknown, shotId: string): void {
-  if (model && dialogue?.some((d): boolean => !text(record(video).optimized, '视频候选').includes(d.text))) throw new Error(`${shotId}视频提示词遗漏剧本已有台词`);
-}
-/** 模型只提供故事与逻辑引用；实际资产、任务 ID、路径及最终模式不接受模型赋值。 */
+
+function shotPromptRecord(shot: Record<string, unknown>): Record<string, unknown> { return shot.prompts === undefined ? {} : record(shot.prompts); }
 export function validatePetStoryPlan(value: unknown, model: boolean = false): PetStoryPlan {
   const p = record(value);
   const characters = characterArray(p.characters).map((value: unknown): PetStoryCharacter => {
@@ -212,7 +216,7 @@ export function validatePetStoryPlan(value: unknown, model: boolean = false): Pe
     }
     if (!['cut', 'continue'].includes(String(s.transition))) throw new Error(`${shotId}切镜关系无效`);
     if (!MODES.includes(s.requestedMode as PetStoryMode)) throw new Error(`${shotId}模式无效`);
-    const prompts = record(s.prompts);
+    const prompts = shotPromptRecord(s);
     const propIds = s.propIds === undefined ? undefined : ids(s.propIds, `${shotId}.propIds`);
     const sceneId = s.sceneId === undefined ? undefined : id(s.sceneId, '场景引用');
     if (planScenes && (!sceneId || !planScenes.some((sc): boolean => sc.id === sceneId) || !propIds || propIds.some((id): boolean => !planProps?.some((prop): boolean => prop.id === id)))) throw new Error(`${shotId}场景或道具引用缺失／未知`);
@@ -238,9 +242,9 @@ export function validatePetStoryPlan(value: unknown, model: boolean = false): Pe
         return { speakerId, text: text(d.text, '已有台词'), tone: optionalText(d.tone, '语气') || '', pace: optionalText(d.pace, '节奏') || '', delivery: delivery as 'onscreen' | 'offscreen' | 'voiceover' | undefined };
       });
     }
-    const lastFrame = prompts.lastFrame === undefined ? undefined : prompt(prompts.lastFrame, `${shotId}.lastFrame`, model);
+    const lastFrame = prompts.lastFrame === undefined && s.requestedMode !== 'first_last_frame' ? undefined : prompt(prompts.lastFrame, `${shotId}.lastFrame`, model);
     if (s.requestedMode === 'first_last_frame' && !lastFrame) throw new Error(`${shotId}首尾帧模式缺少尾帧提示词`);
-    requireDialogueInCandidate(model, dialogue, prompts.video, shotId);
+
     return { id: shotId, order: index + 1, characterIds: refs, sceneReferenceAssetIds: legacySceneReferences(s, model), scene: text(s.scene, `${shotId}.scene`),
       propIds, propStates, sceneId, sceneView: optionalText(s.sceneView, '视角'), dialogue,
       expression: optionalText(s.expression, '神态'), gaze: optionalText(s.gaze, '视线'), interaction: optionalText(s.interaction, '互动'), camera: optionalText(s.camera, '镜头方式'),

@@ -9,6 +9,7 @@ import { PetStoryProductionService, productionCounts, checkProductionReferences 
 import { resolvePetStoryMode } from '../../main/utils/petstoryModes';
 import { extractActualEndFrame, mediaCommand, validatePetStoryMedia } from '../../main/utils/petstoryMedia';
 import { TaskService } from '../../main/core/TaskService';
+import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 import { normalizeTasks } from '../../main/utils/persistenceNormalization';
 
 let root: string;
@@ -79,6 +80,7 @@ async function complete(taskId: string): Promise<void> {
 }
 async function approve(value: PetStoryCapability = capability()): Promise<void> {
   p = await projects.read(p.id);
+  p.promptCapability = value; seedOfflinePromptContracts(p); p = await projects.write(p);
   const result = await service.approve(p.id, p.revision, value, {});
   expect(result.success).toBe(true);
   p = result.project as PetStoryProject;
@@ -125,13 +127,13 @@ beforeEach(async (): Promise<void> => {
 });
 
 describe('P4 实际入口和请求模式', (): void => {
-  it('存在未收取Chat时，独立文字继续不会放行任何媒体入口', async (): Promise<void> => {
+  it('未收取Chat阻断相关镜头入口，独立素材仍须具有正式正文', async (): Promise<void> => {
     p.jobs.push({ id: 'TEST-unresolved-chat', taskId: 'TEST-uncertain-chat', kind: 'optimize', status: 'bound', inputHash: 'a'.repeat(64), sourceUrl: p.source.url, sourceStoryId: p.mobileStory!.id, shotId: p.plan!.shots[0].id, promptKind: 'video' });
     p = await projects.write(p); const c = capability();
     await expect(service.preview(p.id, c, {})).rejects.toThrow('未收取');
     await expect(service.approve(p.id, p.revision, c, {})).rejects.toThrow('未收取');
     await expect(service.generateShotMedia(p.id, p.revision, p.plan!.shots[0].id, 'firstFrame', c, {})).rejects.toThrow('未收取');
-    await expect(service.generateMaterials(p.id, p.revision, [p.materials![0].id], c)).rejects.toThrow('未收取');
+    await expect(service.generateMaterials(p.id, p.revision, [p.materials![0].id], c)).rejects.toThrow('尚无最终正文');
     expect(tasks).toEqual([]); expect(createdInputs).toEqual([]); expect((await projects.read(p.id)).production).toBeUndefined();
   });
   it('strict native mode never uses two generic images as first/last; explicit fallback retains requested mode', (): void => {

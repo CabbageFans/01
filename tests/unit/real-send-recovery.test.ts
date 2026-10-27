@@ -59,10 +59,16 @@ function isStateMachineProbe(code: string): boolean {
 }
 
 function routeNewConversation(webview: WebviewHandle & { calls: string[] }, stateResult: unknown, ready = true): void {
+  let timeOrigin = 1;
+  (webview.loadURL as ReturnType<typeof vi.fn>).mockImplementation((url: string): void => {
+    timeOrigin++;
+    (webview.getURL as ReturnType<typeof vi.fn>).mockReturnValue(url);
+  });
   const original = webview.executeJavaScript as ReturnType<typeof vi.fn>;
   original.mockImplementation(async (code: string): Promise<unknown> => {
     webview.calls.push(code);
-    if (isStateMachineProbe(code)) return stateResult;
+    if (code.includes('timeOrigin: performance.timeOrigin')) return { href: webview.getURL(), timeOrigin, readyState: 'complete' };
+    if (isStateMachineProbe(code)) return stateResult && typeof stateResult === 'object' ? { stabilityKey: 'OFFLINE-stable', ...stateResult } : stateResult;
     if (isReadyProbe(code)) return ready;
     return null;
   });
@@ -106,6 +112,7 @@ describe('CSV 多语言提示词全文守卫', () => {
 describe('P0-1 startNewConversation 状态机', () => {
   it('输入框不可用（waitForChatReady 超时）→ PAGE_NOT_READY fail-closed', async () => {
     const webview = createMockWebview(() => false);
+    routeNewConversation(webview, { ok: false, reason: 'EDITOR_NOT_FOUND' }, false);
     const result = await startNewConversation(webview, 300);
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('PAGE_NOT_READY');
@@ -220,6 +227,19 @@ describe('P0-2 已提交任务只读核对门禁', () => {
     for (const item of cases) expect(requiresSubmissionReconciliation(item.task), item.name).toBe(item.expected);
   });
 
+  it('已提交普通 Chat 的显式只读恢复不依赖后续异常文案，同时保留媒体和未提交门禁', (): void => {
+    for (const status of ['fail', 'paused', 'waiting_verification', 'cancelled']) {
+      const task = { mode: 'chat', status, runtime: { submittedAt: '2026-10-26T14:22:59.581Z' }, errorInfo: { code: 'unknown', message: '下载电脑版推广弹窗未能安全关闭，已在提交前停止' } };
+      expect(requiresSubmissionReconciliation(task)).toBe(true);
+      expect(requiresSubmissionReconciliation({ ...task, runtime: {} })).toBe(false);
+      expect(requiresSubmissionReconciliation({ ...task, mode: 'video' })).toBe(false);
+      expect(requiresSubmissionReconciliation({ ...task, mode: 'image' })).toBe(false);
+    }
+    for (const status of ['executing', 'generating', 'done', 'queued']) {
+      expect(requiresSubmissionReconciliation({ mode: 'chat', status, runtime: { submittedAt: '2026-10-26T14:22:59.581Z' }, errorInfo: { code: 'unknown' } })).toBe(false);
+    }
+  });
+
   it('发送可用性检查和实际点击共用同一定位器，找不到时 fail-closed', async () => {
     const missing = createMockWebview(() => ({ ok: false }));
     expect(await findSendButtonTarget(missing)).toEqual({ ok: false });
@@ -312,11 +332,19 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     expect(panelSource).toContain('系统不会自动重新提交');
     const readinessIndex = panelSource.indexOf('if (!authorizationTriggeredSubmission && !(await prepareNativeSubmission(webview)).ok)');
     const submittingIndex = panelSource.indexOf("markSubmissionIntent('submitting'");
+    const clickIndex = panelSource.indexOf("submitPromptWithNativeClick(webview, 'native', {");
     expect(readinessIndex, '发送前必须先确认窗口、输入区和控件稳定').toBeGreaterThan(0);
     expect(submittingIndex).toBeGreaterThan(readinessIndex);
-    expect(panelSource.indexOf('submittedAt: submissionMarkedAt')).toBeLessThan(
-      panelSource.indexOf("submitPromptWithNativeClick(webview, mode === 'chat' ? 'guest' : 'native')"),
-    );
+    expect(clickIndex, '唯一真实点击调用必须位于提交意图持久化之后').toBeGreaterThan(submittingIndex);
+    const intentBody = panelSource.slice(panelSource.indexOf('const markSubmissionIntent ='), submittingIndex);
+    expect(intentBody).toContain('submittedAt: markedAt');
+    expect(intentBody).toContain('persistedRuntime?.runId !== expectedRunId || persistedRuntime?.submittedAt !== markedAt');
+    const guardedCall = panelSource.slice(clickIndex, panelSource.indexOf('new Promise<boolean>', clickIndex));
+    expect(guardedCall).toContain('signal: dispatchController.signal');
+    expect(guardedCall).toContain('deadlineAt: dispatchDeadline');
+    expect(guardedCall).toContain('current.runtime?.submittedAt === submissionMarkedAt');
+    expect(guardedCall).toContain('automationEngine.confirmSubmissionOwnership(taskId, accountId, controller)');
+    expect(panelSource).not.toContain("submitPromptWithNativeClick(webview, 'guest'");
     expect(panelSource).toContain('发送动作结果不确定，请人工核对豆包会话；系统未自动重发');
   });
 
@@ -348,7 +376,9 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     );
     expect(nativeClickBody).not.toContain('return submitPrompt(webview)');
     expect(nativeClickBody).toContain('禁止自动回退');
-    expect(nativeClickBody).toContain('prepareNativeSubmission(webview)');
+    expect(nativeClickBody).toContain('prepareNativeSubmission(webview, safety)');
+    expect(nativeClickBody).toContain('await safety.verifyLease()');
+    expect(nativeClickBody).toContain('submissionDispatchAllowed(safety)');
     expect(bridgeSource).toContain('const target = await findSendButtonTarget(webview)');
   });
 

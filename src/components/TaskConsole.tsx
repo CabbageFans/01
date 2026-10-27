@@ -38,6 +38,7 @@ import { useAccountStore } from '../store/useAccountStore';
 import { useProjectStore } from '../store/useProjectStore';
 import TaskDetailModal from './TaskDetailModal';
 import type { Task, TaskUpdateInput } from '../types';
+import { isTaskConversationMissing } from '../utils/taskConversationLocator';
 import {
   TASK_STATUS_CONFIG,
   TASK_STAGE_LABELS,
@@ -503,7 +504,7 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
         key: 'reconcile-submission',
         label: task?.status === 'waiting_generation_confirmation' ? '人工确认后，只读回读原会话' : '核对平台结果（不重新发送）',
         icon: <SyncOutlined />,
-        onClick: () => window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId } })),
+        onClick: () => window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId, useCurrentPage: task?.mode === 'chat' && isTaskConversationMissing(task) } })),
       }] : task?.petstory ? [] : [{
         key: 'edit-rerun',
         label: '编辑提示词并重跑',

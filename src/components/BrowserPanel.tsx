@@ -44,6 +44,7 @@ import {
   getConversationText,
   getChatPageSnapshot,
   readStableChatAnswer,
+  ChatReadbackRecoveryError,
   getSubmissionMessageCount,
   getSubmissionEvidence,
   startNewConversation,
@@ -64,7 +65,8 @@ import {
   updateStableStreak,
   type SubmissionReadback,
 } from '../utils/realSendStateMachine';
-import { diagnoseChatReadback, inspectChatReadback, inspectCreationReadback } from '../utils/chatReadback';
+import { chatRequestIdentity, diagnoseChatReadback, inspectChatReadback, inspectCreationReadback } from '../utils/chatReadback';
+import type { ChatReadbackContext, ChatReadbackResult } from '../utils/chatReadback';
 import { createWebviewResourceScope } from '../utils/webviewLifecycle';
 import type { WebviewResourceScope } from '../utils/webviewLifecycle';
 import { getVideoQuotaUsageUnits } from '../utils/videoQuota';
@@ -95,6 +97,20 @@ import {
   getWebviewHydrationAccountIds,
   isWebviewDocumentReady,
 } from '../utils/webviewHydration';
+
+/** 页面仅提供轮次事实；账号、运行和完整任务输入必须来自正式任务记录。 */
+const taskChatReadbackContext = (task: Task, accountId: string, conversationUrl: string, currentUrl: string): ChatReadbackContext => ({
+  taskId: task.id, runId: task.runtime?.runId || '', currentRunId: useTaskStore.getState().tasks.find((item): boolean => item.id === task.id)?.runtime?.runId || '',
+  accountId: task.assignedAccountId || '', currentAccountId: accountId, conversationUrl, currentConversationUrl: currentUrl,
+  ...(task.runtime?.chatReadback?.runId === task.runtime?.runId ? { userTurnId: task.runtime?.chatReadback?.userTurnId, userMessageId: task.runtime?.chatReadback?.userMessageId } : {}),
+});
+
+const chatReadbackReceipt = (task: Task, evidence: ChatReadbackResult, baselineMessageCount: number): NonNullable<Task['runtime']>['chatReadback'] => {
+  if (!task.runtime?.runId || !evidence.promptPublished || !evidence.association) return undefined;
+  return { runId: task.runtime.runId, baselineMessageCount, ...chatRequestIdentity(task.prompt), association: evidence.association,
+    userTurnId: evidence.userTurnId, userMessageId: evidence.userMessageId, assistantTurnId: evidence.assistantTurnId, assistantMessageId: evidence.assistantMessageId,
+    observedAt: new Date().toISOString() };
+};
 
 /** 将当前对话的结构化解析结果转换为用户可读消息。 */
 const formatResolutionMessage = (result: VideoArtifactResolution): string => {
@@ -529,9 +545,22 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
         // Chat恢复始终走独立消息正文通道，不使用整页文本或视频产物扫描。
         if (task.mode === 'chat') {
-          const raw = await readStableChatAnswer(webview, task.prompt, conversationTarget.url);
+          if (!task.runtime?.runId || !task.runtime.submittedAt || task.runtime.input.prompt !== task.prompt || task.runtime.input.mode !== 'chat') {
+            throw new Error('原运行或输入快照不符；保留记录，未重新发送');
+          }
+          const raw = await readStableChatAnswer(webview, task.prompt, conversationTarget.url, 15_000, {
+            context: taskChatReadbackContext(task, accountId, conversationTarget.url, webview.getURL()),
+            currentRunId: (): string | undefined => useTaskStore.getState().tasks.find((item): boolean => item.id === taskId)?.runtime?.runId,
+            signal: observationController?.signal,
+            onCaptured: async (evidence: ChatReadbackResult): Promise<void> => {
+              const receipt = chatReadbackReceipt(task, evidence, task.runtime?.chatReadback?.baselineMessageCount || 0);
+              if (!receipt || !await useTaskStore.getState().updateTaskRuntime(taskId, { runtime: { chatReadback: receipt } })) throw new Error('原消息轮次保存未确认');
+            },
+          });
+          const verifiedReceipt = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId)?.runtime?.chatReadback;
+          if (verifiedReceipt?.runId !== task.runtime.runId) throw new Error('原消息轮次身份变化；本次正文未绑定');
           const saved = await useTaskStore.getState().updateTaskRuntime(taskId, {
-            runtime: { chatResponse: { text: raw, capturedAt: new Date().toISOString() } },
+            runtime: { chatReadback: verifiedReceipt, chatResponse: { text: raw, capturedAt: new Date().toISOString() } },
           });
           if (!saved) throw new Error('正文保存未确认，保留原任务且不重发');
           await useTaskStore.getState().completeAutomation(taskId, accountId, '', []);
@@ -647,6 +676,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         message.success('平台产物核对成功，任务台账已恢复完成；未重新发送');
       } catch (error: unknown) {
         const reason = error instanceof Error ? error.message : String(error);
+        if (useTaskStore.getState().tasks.find((item): boolean => item.id === taskId)?.runtime?.runId !== task.runtime?.runId) {
+          message.warning('原运行身份已变化，本次只读结果未写入当前运行');
+          return;
+        }
         const isManualObservation = task?.status === 'manual_submission_observing';
         const pauseMessage = `核对未完成：${reason}；任务保持暂停，未重新发送`;
         await useTaskStore.getState().updateTaskRuntime(taskId, {
@@ -655,6 +688,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           errorInfo: { code: isManualObservation ? 'manual_review_required' : 'submission_uncertain', message: pauseMessage, recoverable: true, detectedAt: new Date().toISOString() },
           runtime: {
             stage: 'paused', message: pauseMessage, lastHeartbeatAt: new Date().toISOString(),
+            ...(error instanceof ChatReadbackRecoveryError && error.evidence ? { chatReadbackReview: {
+              runId: task.runtime?.runId || '', checkedAt: new Date().toISOString(), reason: error.evidence.reason || 'reply_not_stable', candidates: error.evidence.candidates,
+            } } : {}),
             manualObservation: isManualObservation && task.runtime?.manualObservation ? {
               ...task.runtime.manualObservation, lastCheckedAt: new Date().toISOString(), outcome: 'manual_review',
             } : task.runtime?.manualObservation,
@@ -1280,7 +1316,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   ) => {
     const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask, retryTask, assignTask, armTasks } =
       useTaskStore.getState();
-    const expectedRunId = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.runId;
+    const initialTask = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+    const expectedRunId = initialTask?.runtime?.runId;
+    // 重挂载／热更新不能接管仍由旧控制器观察的运行，更不能重新创建会话。
+    if (automationEngine.hasController(taskId)) { runningRef.current.delete(accountId); return; }
+    if (initialTask?.runtime?.submittedAt) {
+      const recoveryMessage = '原运行已记录提交；仅恢复原会话回读，不重新准备、注入或发送';
+      await pauseAutomation(taskId, accountId, recoveryMessage, { status: 'paused', code: 'submission_uncertain' });
+      runningRef.current.delete(accountId);
+      await automationEngine.release(taskId);
+      const current = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+      if (current?.runtime?.runId === expectedRunId && current?.runtime?.submittedAt) window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId } }));
+      return;
+    }
     const petstoryTask = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.petstory;
     const strictPrompt = !!petstoryTask || useTaskStore.getState().tasks.find((item) => item.id === taskId)?.promptReadback === 'exact';
     let petstoryGuard: import('@doubao-studio/contracts').PetStoryExecutionGuard | undefined;
@@ -1629,11 +1677,22 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       } else {
         initialMsgCount = await getSubmissionMessageCount(webview);
       }
-      const readSubmissionEvidence = async (): Promise<SubmissionReadback> => mode === 'chat'
-        ? inspectChatReadback(await getChatPageSnapshot(webview), prompt, initialMsgCount)
-        : (petstoryGuard || strictPrompt) && (mode === 'image' || mode === 'video')
+      let latestChatReadback: ChatReadbackResult | undefined;
+      const readSubmissionEvidence = async (): Promise<SubmissionReadback> => {
+        if (mode === 'chat') {
+          const originalTask = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+          const currentUrl = normalizeDoubaoConversationUrl(webview.getURL());
+          // 本次执行已在发送前核对空白基线、全文及附件，且账号由执行租约绑定。
+          // 发送后即记录具体会话与消息轮次，不再要求长规则永远逐字渲染。
+          const context = originalTask?.runtime?.submittedAt && originalTask.runtime.input.prompt === prompt && currentUrl
+            ? taskChatReadbackContext(originalTask, accountId, normalizeDoubaoConversationUrl(originalTask.runtime.conversationUrl) || currentUrl, webview.getURL()) : undefined;
+          latestChatReadback = inspectChatReadback(await getChatPageSnapshot(webview), prompt, initialMsgCount, context);
+          return latestChatReadback;
+        }
+        return (petstoryGuard || strictPrompt) && (mode === 'image' || mode === 'video')
           ? inspectCreationReadback(await getChatPageSnapshot(webview), prompt, mode, initialMsgCount, videoConfig)
-        : getSubmissionEvidence(webview, prompt, generationStartTimeBeforeSubmit, initialMsgCount);
+          : getSubmissionEvidence(webview, prompt, generationStartTimeBeforeSubmit, initialMsgCount);
+      };
       let authorizationTriggeredSubmission = false;
       let submissionMarkedAt: string | undefined;
 
@@ -1812,16 +1871,38 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       // 必须和提交回读使用同一个 DOM 选择器；综合生成检测可能因为网络状态
       // 提前返回而没有消息计数，不能把旧会话消息误当成本次发送回执。
       let submitted = authorizationTriggeredSubmission;
-      // 视频/图片模式下直接用发送按钮提交（聊天+标签模式，发送按钮就是提交）
-      // 之前的"生成视频"文字按钮会发送默认提示词，不是输入框内容
+      // 所有模式仅选择一次原生发送点击；平台不受理时保留原意图，不换策略重发。
       if (!authorizationTriggeredSubmission) {
+        const dispatchController = new AbortController();
+        const abortDispatch = (): void => dispatchController.abort();
+        controller.signal.addEventListener('abort', abortDispatch, { once: true });
+        if (controller.signal.aborted) abortDispatch();
+        let dispatchTimeout: ReturnType<typeof setTimeout> | undefined;
+        const dispatchDeadline = Date.now() + 10_000;
         try {
           submitted = await Promise.race([
-            submitPromptWithNativeClick(webview, mode === 'chat' ? 'guest' : 'native'),
-            new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('提交超时')), 10000)),
+            submitPromptWithNativeClick(webview, 'native', {
+              signal: dispatchController.signal,
+              deadlineAt: dispatchDeadline,
+              isCurrent: (): boolean => {
+                const current = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+                return current?.assignedAccountId === accountId && current.status === 'executing'
+                  && current.runtime?.runId === expectedRunId && current.runtime?.submittedAt === submissionMarkedAt
+                  && current.runtime?.stage === 'submitting' && current.runtime?.input.prompt === prompt
+                  && current.runtime?.input.mode === mode && automationEngine.ownsAccountController(taskId, accountId, controller);
+              },
+              verifyLease: (): Promise<boolean> => automationEngine.confirmSubmissionOwnership(taskId, accountId, controller),
+            }),
+            new Promise<boolean>((_, reject): void => {
+              dispatchTimeout = setTimeout((): void => { abortDispatch(); reject(new Error('提交超时')); }, 10_000);
+            }),
           ]);
         } catch {
           throw new SubmissionSafetyPauseError('发送动作结果不确定，请人工核对豆包会话；系统未自动重发');
+        } finally {
+          abortDispatch();
+          if (dispatchTimeout) clearTimeout(dispatchTimeout);
+          controller.signal.removeEventListener('abort', abortDispatch);
         }
       }
       if (!submitted) {
@@ -1840,12 +1921,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
       }
       if (!submissionConfirmed) {
+        if (latestChatReadback?.candidates.length) await updateTaskRuntime(taskId, { runtime: { chatReadbackReview: {
+          runId: expectedRunId || '', checkedAt: new Date().toISOString(), reason: latestChatReadback.reason || 'submission_not_confirmed', candidates: latestChatReadback.candidates,
+        } } });
         throw new SubmissionSafetyPauseError('发送状态不确定，请人工核对豆包会话；系统未自动重发');
       }
       // 原用户消息已全文匹配即保存具体会话，避免之后验证码／窗口退出丢失恢复定位。
       if (mode === 'chat') {
         const originalUrl = await waitForConcreteConversationUrl(webview, { timeoutMs: 15_000 });
-        if (!originalUrl || !await updateTaskRuntime(taskId, { runtime: { conversationUrl: originalUrl } })) throw new SubmissionSafetyPauseError('原 Chat 会话定位保存失败；保留提交记录且不重发');
+        const originalTask = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+        const receipt = originalTask && latestChatReadback ? chatReadbackReceipt(originalTask, latestChatReadback, initialMsgCount) : undefined;
+        if (!originalUrl || !receipt || !await updateTaskRuntime(taskId, { runtime: { conversationUrl: originalUrl, chatReadback: receipt } })) throw new SubmissionSafetyPauseError('原 Chat 会话定位或消息轮次保存失败；保留提交记录且不重发');
         taskConversationUrl = originalUrl;
       }
       // 普通 Chat 使用发送前的消息基线和独立助手节点，保留快速回复。
@@ -1962,7 +2048,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             if (!taskConversationUrl || !isSameDoubaoConversation(webview.getURL(), taskConversationUrl)) {
               throw new SubmissionSafetyPauseError('观察页面已离开本次原会话；已停止且不会重发');
             }
-            const readback = inspectChatReadback(await getChatPageSnapshot(webview), prompt, initialMsgCount);
+            const currentTask = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+            if (!currentTask?.runtime || currentTask.runtime.runId !== expectedRunId || currentTask.runtime.input.prompt !== prompt) throw new SubmissionSafetyPauseError('原 Chat 运行或输入已变化；未收取，未重发');
+            const readback = inspectChatReadback(await getChatPageSnapshot(webview), prompt, initialMsgCount,
+              taskChatReadbackContext(currentTask, accountId, taskConversationUrl, webview.getURL()));
+            latestChatReadback = readback;
             const replyText = readback.replyRawText;
             stableStreak = updateStableStreak(lastConversationText, replyText, stableStreak);
             lastConversationText = replyText;
@@ -2024,7 +2114,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         const elapsedSec = Math.round((Date.now() - generationWaitStartedAt) / 1000);
         setAccountAutomationState(accountId, 'generating', `等待回复... (${elapsedSec}s)`, 'generating');
       }
-      if (generating) throw new Error('生成超时');
+      if (generating) {
+        if (latestChatReadback?.candidates.length) await updateTaskRuntime(taskId, { runtime: { chatReadbackReview: {
+          runId: expectedRunId || '', checkedAt: new Date().toISOString(), reason: latestChatReadback.reason || 'reply_not_stable', candidates: latestChatReadback.candidates,
+        } } });
+        throw new Error('生成超时');
+      }
 
       setAccountAutomationState(accountId, 'generating', '正在识别并绑定任务产物...', 'extracting_outputs');
 
@@ -2092,8 +2187,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       if (mode === 'chat') {
         if (!chatResponseText.trim()) throw new SubmissionSafetyPauseError('本次 Chat 最终正文为空；已停止且不会重发');
+        const currentTask = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+        const receipt = currentTask && latestChatReadback ? chatReadbackReceipt(currentTask, latestChatReadback, initialMsgCount) : undefined;
+        if (!receipt || receipt.runId !== expectedRunId) throw new SubmissionSafetyPauseError('Chat 原消息身份变化；正文未绑定，不会重发');
         const saved = await updateTaskRuntime(taskId, {
-          runtime: { chatResponse: { text: chatResponseText, capturedAt: new Date().toISOString() } },
+          runtime: { chatReadback: receipt, chatResponse: { text: chatResponseText, capturedAt: new Date().toISOString() } },
         });
         if (!saved) throw new SubmissionSafetyPauseError('Chat 已受理，但最终正文保存失败；请保留原会话，只读补取，不得重发');
       }
@@ -2101,6 +2199,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       // 传入第一个 URL 作为 result（向后兼容），outputs 传完整数组
       await completeAutomation(taskId, accountId, imageUrls[0] || '', imageUrls);
     } catch (err: any) {
+      // 旧控制器的迟到异常不允许把新运行或已完成／已暂停的原运行再次改成失败。
+      const failedTask = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+      if (!automationEngine.ownsController(taskId, controller) || failedTask?.runtime?.runId !== expectedRunId
+        || ['done', 'paused', 'cancelled', 'fail'].includes(failedTask?.status || '')) return;
       const cancelled = err?.name === 'AbortError';
       const safetyPaused = err instanceof SubmissionSafetyPauseError;
       const petstoryPaused = err instanceof PetStoryControlError;
@@ -2209,12 +2311,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     } finally {
       initializationLease?.release();
-      notification.destroy(materialAuthorizationNotificationKey);
-      abortControllersRef.current.delete(taskId);
-      pendingRestartTasksRef.current.delete(taskId);
-      pendingCancellationStatusRef.current.delete(taskId);
-      runningRef.current.delete(accountId);
-      await automationEngine.release(taskId);
+      if (abortControllersRef.current.get(taskId) === controller) abortControllersRef.current.delete(taskId);
+      if (automationEngine.ownsController(taskId, controller)) {
+        notification.destroy(materialAuthorizationNotificationKey);
+        pendingRestartTasksRef.current.delete(taskId);
+        pendingCancellationStatusRef.current.delete(taskId);
+        runningRef.current.delete(accountId);
+      }
+      await automationEngine.release(taskId, controller);
       setTimeout(() => useTaskStore.getState().processQueue(), 0);
     }
   };
