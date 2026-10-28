@@ -60,3 +60,7 @@ The system SHALL support a normal new-project story path and the original five-s
 #### Scenario: External blocker remains
 - **WHEN** login, verification, material approval or reply content prevents completion
 - **THEN** the per-target blocker and original evidence remain visible without developer-written creative bodies or false success.
+
+#### Scenario: Manual assignment updates the renderer without execution
+- **WHEN** a queued task is manually assigned through the normal desktop IPC
+- **THEN** a successful Core data result is returned as the shared TaskResult task field, the renderer reflects the saved account, and execution stays on hold until explicit authorization; actual failures retain their specific reason.

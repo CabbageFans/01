@@ -28,6 +28,8 @@
 - [x] 5.3 原五镜头13项与需要适配基础素材，逐项真实Chat请求／原回复／候选／采用／画布／正常导出与内容核对；阻断逐项记录，不代写。
 - [ ] 5.4 保存重开核对手改、候选、结束等待与批次，不新增请求；交付报告／进度／审阅文件并保留普通应用实例，不进入P5。
 
+- [x] 5.5 修复手动指派IPC成功响应字段，覆盖真实处理器→渲染Store、hold保持及失败透传，不自动授权或发送。
+
 ### 当前验收记录（2026-10-27，GitHub代码检查点）
 
 5.1 最新完整 `pnpm run validate` 成功退出，98文件／1926测试通过，日志 `artifacts/prompt-pipeline-completion/validate-github-checkpoint.log`；contracts、全部类型、Lint 0 error／147 warning、工程／契约规则、双端构建通过。OpenSpec strict和diff检查通过。未删测试、放宽门禁或叠加旧通过数。
@@ -39,3 +41,7 @@
 5.4 原项目可见重开、手改／候选／5条结束等待及complete4/4已验证；最终副本 ended重启后文件／任务哈希不变、0新请求。新建整链、最终交付仍未完成，不勾选5.4。最新报告按实际状态记录，不进入P5。已发现但尚未实施的旧媒体detached clone可见文本污染，以及新会话原生提交未受理的诊断，明确保留为后续。
 
 用户后续明确授权将当前代码提交／推送到GitHub CabbageFans/01，覆盖最初不自动提交的限制；README不创建不修改，私有证据及用户原有未跟踪审计文件留本地。本次是稳定代码检查点，不是发布或全项验收完成；不归档任何变更。
+
+### 手动测试发现的指派IPC修复（2026-10-28）
+
+TaskService.assign确已保存账号，但tasks:assign直接返回Core的data，渲染Store要求TaskResult.task，导致误报失败且UI账号未回填。IPC已显式映射并复用共享类型；真实IPC处理器→Core/Repository→Store回归先复现2失败、修复后4通过，覆盖hold不自动授权／发送、活动任务拒绝与保存失败透传。相关4文件203测试通过，本轮完整validate99文件／1930测试通过，日志`artifacts/prompt-pipeline-completion/validate-assignment-ipc-fix.log`。未替用户点击授权，原5.2／5.4不提前勾选；主进程重启需用户保存输入，已取得用户明确确认。

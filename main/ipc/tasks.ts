@@ -4,7 +4,7 @@
  * 负责：任务队列管理、状态流转、批量操作、生成模式
  */
 
-import { ipcMain, dialog, session } from 'electron';
+import { app, ipcMain, dialog, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
 import { normalizeTasks, normalizeDownloadJobs } from '../utils/persistenceNormalization';
 import { validateDownloadResponse, classifyDownloadException } from '../utils/downloadValidation';
@@ -27,6 +27,7 @@ import type {
   DownloadJob,
   TaskAddParams,
   TaskAssignParams,
+  TaskResult,
   TaskUpdateStatusParams,
   TaskUpdateRuntimeParams,  TaskSetQualityVerdictParams,
   TaskAcquireLockParams,
@@ -621,8 +622,10 @@ export function registerTaskIPC(): () => void {
   // ---- 指派任务给账号 ----
   ipcMain.handle(
     'tasks:assign',
-    async (_event, params: TaskAssignParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
-      return taskService.assign(params);
+    async (_event, params: TaskAssignParams): Promise<TaskResult> => {
+      const result = taskService.assign(params);
+      // IPC 沿用共享 task 字段，不能把 Core 的 data 结构直接交给渲染进程。
+      return result.success ? { success: true, task: result.data } : result;
     }
   );
 
@@ -927,7 +930,7 @@ export function registerTaskIPC(): () => void {
 
   // ---- 保存/获取设置 ----
   const settingsPath = require('path').join(
-    require('electron').app.getPath('userData'),
+    app.getPath('userData'),
     'settings.json'
   );
 
