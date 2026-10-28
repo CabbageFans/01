@@ -6562,7 +6562,7 @@ export async function manualResolveVideoArtifact(
 export async function readPetStoryComposer(webview: WebviewHandle, operation: import('./petstoryControls').PetStoryComposerOperation = {}): Promise<import('./petstoryControls').PetStoryComposerSnapshot> {
   return safeExecuteJS(webview, `(${petStoryComposerProbe.toString()})(${JSON.stringify(operation)})`, 5000, 'petstory_visible_controls');
 }
-export async function inspectPetStoryCapability(webview: WebviewHandle, accountId: string, freeConfirmed: boolean): Promise<import('@doubao-studio/contracts').PetStoryCapability> {
+export async function inspectPetStoryCapability(webview: WebviewHandle, accountId: string, freeConfirmed: boolean, kind?: 'image' | 'video'): Promise<import('@doubao-studio/contracts').PetStoryCapability> {
   // 生图／视频技能切换会重置页面参数，核对入口时保留此前已实际回读的有效规格。
   const initial = await readPetStoryComposer(webview);
   const initialModel = Object.keys(VIDEO_MODEL_UI_LABELS).find((key): boolean => VIDEO_MODEL_UI_LABELS[key] === initial.model);
@@ -6572,6 +6572,13 @@ export async function inspectPetStoryCapability(webview: WebviewHandle, accountI
   if (!await clickAITab(webview, 'image')) throw new Error('图片创作入口未就绪，未上传或提交');
   await sleep(500);
   const image = await readPetStoryComposer(webview);
+  const free = (state: import('@doubao-studio/contracts').PetStoryFreeState): import('@doubao-studio/contracts').PetStoryFreeState => state === 'unknown' && freeConfirmed ? 'free' : state;
+  // 第一张基础图只核对图片入口，不切换或要求视频模式／时长控件。
+  if (kind === 'image') {
+    const unknown = { state: 'unknown' as const, free: 'unknown' as const, reason: '本次只检查图片入口，视频模式尚未核对' };
+    return { accountId, checkedAt: new Date().toISOString(), image: { state: image.present && image.generic ? 'supported' : 'unknown', free: free(image.free), reason: '普通图片创作输入区检查' },
+      modes: { first_frame: unknown, first_last_frame: unknown, reference: unknown }, durations: [], freeEvidence: freeConfirmed ? 'user_confirmed' : image.free === 'free' ? 'visible' : 'unknown' };
+  }
   if (!await clickAITab(webview, 'video')) throw new Error('视频创作入口未就绪，未上传或提交');
   await sleep(500);
   if (previousConfig) await configureVideoOptions(webview, previousConfig);
@@ -6585,7 +6592,6 @@ export async function inspectPetStoryCapability(webview: WebviewHandle, accountI
     await sleep(200);
     variants[mode] = await readPetStoryComposer(webview);
   }
-  const free = (state: import('@doubao-studio/contracts').PetStoryFreeState): import('@doubao-studio/contracts').PetStoryFreeState => state === 'unknown' && freeConfirmed ? 'free' : state;
   const entry = (supported: boolean, label: boolean, snapshot: import('./petstoryControls').PetStoryComposerSnapshot): import('@doubao-studio/contracts').PetStoryEntryCapability => ({
     state: supported ? 'supported' : label ? 'implementation_gap' : 'unknown', free: free(snapshot.free),
     reason: supported ? '当前可见输入槽已识别' : label ? '平台有模式标识但当前槽位结构尚未适配' : '当前未观察到明确模式槽位，不能据此断言平台不支持',

@@ -39,6 +39,7 @@ import {
 } from './utils/webviewNetworkRecovery';
 import { getDataDir, readJSON } from './utils/store';
 import { configureDevelopmentProfile } from './utils/developmentProfile';
+import { parseDevelopmentWindowSize } from './utils/developmentWindow';
 import { prepareWindowForNativeInput, retainMacWindowOnClose, revealRetainedWindow } from './utils/windowLifecycle';
 
 // ==================== 常量 ====================
@@ -48,6 +49,7 @@ const PRELOAD_PATH = path.join(__dirname, 'preload.js');
 
 // 导入的模块仅定义惰性读取函数；此处早于单实例锁、ready 与 Session 初始化。
 const developmentProfile = configureDevelopmentProfile(app, process.argv.slice(1));
+const developmentWindowSize = parseDevelopmentWindowSize(process.argv.slice(1), app.isPackaged);
 if (developmentProfile) {
   console.log(`[Profile] ${developmentProfile.name} userData=${developmentProfile.userData}`);
 }
@@ -184,8 +186,10 @@ async function runOneTimeWebviewNetworkRecovery(): Promise<void> {
 
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    width: developmentWindowSize?.width ?? 1400,
+    height: developmentWindowSize?.height ?? 900,
+    // 仅显式开发验收按内容区定尺，默认窗口和用户日常缩放行为保持不变。
+    useContentSize: !!developmentWindowSize,
     minWidth: 1024,
     minHeight: 680,
     title: '豆包工作室 Doubao Studio',
@@ -211,8 +215,11 @@ function createMainWindow(): BrowserWindow {
   // 窗口准备好后显示
   win.once('ready-to-show', () => {
     win.show();
+    if (developmentWindowSize) {
+      console.log(`[DevelopmentViewport] requested=${developmentWindowSize.width}x${developmentWindowSize.height} window=${win.getSize().join('x')} content=${win.getContentSize().join('x')}`);
+    }
     // CDP 验收已能观察 renderer；不要再额外打开 DevTools 窗口和渲染进程。
-    if (isDev && !localCdp.enabled) {
+    if (isDev && !localCdp.enabled && !developmentWindowSize) {
       win.webContents.openDevTools({ mode: 'detach' });
     }
   });

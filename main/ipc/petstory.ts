@@ -5,7 +5,7 @@ import { BrowserWindow, dialog, ipcMain, nativeImage, shell } from 'electron';
 import { buildPetStoryPromptExport, writePetStoryPromptExport } from '../utils/petstoryExport';
 import type { IpcMainInvokeEvent } from 'electron';
 import type { PetStoryChatJob, PetStoryPlan, PetStoryPromptKind, PetStoryResult } from '@doubao-studio/contracts';
-import { PetStoryProjects } from '../utils/petstoryProject';
+import { PetStoryProjects, projectPath } from '../utils/petstoryProject';
 import { PetStoryChatService } from '../utils/petstoryChat';
 import { PetStoryExistingMediaService } from '../utils/petstoryExistingMedia';
 import { createPetStoryTask, retryPetStoryTask, revisePetStoryHeldPrompt, listTasksForLocalControl } from './tasks';
@@ -22,7 +22,7 @@ const production = new PetStoryProductionService(projects, { list: listTasksForL
 const existingMedia = new PetStoryExistingMediaService(projects, { list: listTasksForLocalControl, downloads: listTaskDownloads });
 const CHANNELS = ['petstory:saveOriginalStory', 'petstory:linkExistingMedia', 'petstory:listExistingMediaCandidates', 'petstory:saveShotPrompt', 'petstory:generateShotMedia', 'petstory:readMedia', 'petstory:exportPrompts', 'petstory:confirmStory', 'petstory:saveMaterialPrompt', 'petstory:addMaterialImage', 'petstory:selectMaterialImage', 'petstory:approveMaterials', 'petstory:generateMaterials', 'petstory:recordPageBindings', 'petstory:bindSharedReference', 'petstory:previewPrompt', 'petstory:savePromptProfile', 'petstory:selectProductionImage', 'petstory:addSceneReference', 'petstory:previewProduction', 'petstory:approveProduction', 'petstory:advanceProduction', 'petstory:pauseProduction', 'petstory:resumeProduction', 'petstory:bindProductionRun', 'petstory:guardProductionTask', 'petstory:create', 'petstory:open', 'petstory:saveSource', 'petstory:saveMobileStory', 'petstory:addReference', 'petstory:savePlan', 'petstory:prepareChat', 'petstory:collectChat', 'petstory:bindRun', 'petstory:retryUnsubmitted', 'petstory:readReference', 'petstory:draftFinal'] as const;
 type Handler = (event: IpcMainInvokeEvent, params: Record<string, unknown>) => Promise<PetStoryResult & { data?: string }>;
-const RUNTIME_CHANNELS = ['petstory:promptStageTargets', 'petstory:savePromptModel', 'petstory:savePromptBatch', 'petstory:endChatWaiting', 'petstory:prepareRuntime', 'petstory:adoptPlanCandidate', 'petstory:adoptAssetsCandidate', 'petstory:adoptPromptCandidate'] as const;
+const RUNTIME_CHANNELS = ['petstory:inspectGeneration', 'petstory:revealAsset', 'petstory:revealProject', 'petstory:promptStageTargets', 'petstory:savePromptModel', 'petstory:savePromptBatch', 'petstory:endChatWaiting', 'petstory:prepareRuntime', 'petstory:adoptPlanCandidate', 'petstory:adoptAssetsCandidate', 'petstory:adoptPromptCandidate'] as const;
 
 /** 仅宿主顶层 frame 可调用；不接受任意目录、文件路径或 shell 参数。 */
 function hostGuard(work: Handler): Handler {
@@ -40,6 +40,21 @@ function dialogOwner(event: IpcMainInvokeEvent): BrowserWindow {
 }
 export function registerPetStoryIPC(): () => void {
   const dispose = replaceIpcHandlers(ipcMain, [...CHANNELS, ...RUNTIME_CHANNELS]);
+  ipcMain.handle('petstory:inspectGeneration', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryGenerationEligibilityResult> => production.inspectGeneration(String(p.id), Number(p.revision), p.target as import('@doubao-studio/contracts').PetStoryRuntimeTarget, p.capability as PetStoryCapability | undefined, p.fallbacks as Record<string, 'first_frame' | 'reference'> | undefined)));
+  ipcMain.handle('petstory:revealAsset', hostGuard(async (_event: IpcMainInvokeEvent, args: Record<string, unknown>): Promise<PetStoryResult> => {
+    const p = await projects.read(String(args.id));
+    const asset = p.assets.find((item): boolean => item.id === args.assetId);
+    if (!asset) throw new Error('素材不属于当前项目');
+    const file = await projectPath(projects.directory(p.id), asset.relativePath);
+    if (!(await fs.stat(file)).isFile()) throw new Error('素材文件不存在');
+    shell.showItemInFolder(file);
+    return { success: true };
+  }));
+  ipcMain.handle('petstory:revealProject', hostGuard(async (_event: IpcMainInvokeEvent, args: Record<string, unknown>): Promise<PetStoryResult> => {
+    const p = await projects.read(String(args.id));
+    shell.showItemInFolder(await projectPath(projects.directory(p.id), 'project.json'));
+    return { success: true };
+  }));
   ipcMain.handle('petstory:prepareRuntime', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => chats.prepareRuntime(String(p.id), Number(p.revision), p.kind as PetStoryChatJob['kind'], p.target as import('@doubao-studio/contracts').PetStoryRuntimeTarget | undefined))));
   ipcMain.handle('petstory:adoptPlanCandidate', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => chats.adoptPlanCandidate(String(p.id), Number(p.revision), String(p.jobId)))));
   ipcMain.handle('petstory:adoptAssetsCandidate', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => chats.adoptAssetsCandidate(String(p.id), Number(p.revision), String(p.jobId)))));

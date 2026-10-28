@@ -116,5 +116,6 @@ export type {
 } from './dto/logs';
 
 export type { ElectronAPI } from './dto/electron-api';
+export type { PetStoryGenerationBlocker, PetStoryGenerationEligibility, PetStoryGenerationEligibilityResult } from './dto/petstory';
 
 export type { PetStoryPromptBatch, PetStoryMaterialEditIntent, PetStoryRuntimeTarget, PetStoryReviewIssue, PetStoryAssetBindings, PetStoryMediaCandidate, PetStoryMaterial, PetStoryProp, PetStoryScene, PetStoryPageBinding, PetStoryPromptProfile, PetStoryPromptReference, PetStoryPromptTaskContract, PetStoryCompiledPrompt, PetStoryCapability, PetStoryEntryCapability, PetStoryFreeState, PetStoryResolvedMode, PetStoryModeResolution, PetStoryMediaValidation, PetStoryTaskBinding, PetStoryProductionStep, PetStoryShotMedia, PetStoryProduction, PetStoryProductionCounts, PetStoryExecutionGuard, PetStoryProductionResult, PetStoryMode, PetStoryPromptKind, PetStoryPrompt, PetStoryCharacter, PetStoryShot, PetStoryPlan, PetStoryAsset, PetStoryChatJob, PetStoryProject, PetStoryResult, PetStoryAPI } from './dto/petstory';

@@ -1,13 +1,15 @@
 import React from 'react';
 import { Button, Empty, Tag } from 'antd';
-import { ArrowRightOutlined, FolderOpenOutlined, PlusOutlined } from '@ant-design/icons';
+import { ArrowRightOutlined, FolderOpenOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../store/useProjectStore';
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
 import { ProjectSwitcher } from './ProjectSwitcher';
 import { PetStoryOpenProject } from './PetStoryOpenProject';
+import { PetStoryCreateProject } from './PetStoryCreateProject';
 import { navigateWorkspace, needsTaskAttention, taskNextAction } from '../utils/workspace';
+import { petStoryJourneyStages, selectPetStoryJourney } from '../utils/petstoryJourney';
 
 export const WorkspaceOverview: React.FC = (): React.ReactElement => {
   const { projects, activeProjectId, selectProject } = useProjectStore();
@@ -16,10 +18,7 @@ export const WorkspaceOverview: React.FC = (): React.ReactElement => {
   const accounts = useAccountStore((state) => state.accounts);
   const attention = tasks.filter((task): boolean => (task.projectId || 'default-project') === activeProjectId && needsTaskAttention(task));
   const accountAttention = accounts.filter((account): boolean => ['login_required', 'action_required', 'unavailable'].includes(account.health?.availability?.state || ''));
-  const createPet = async (): Promise<void> => {
-    navigateWorkspace('create', 'petstory');
-    await pet.createProject();
-  };
+  const journey = pet.project ? selectPetStoryJourney(pet.project, tasks) : null;
   return <div className="overview-grid">
     <section className="workspace-card studio-projects">
       <div className="section-heading"><div><h2>Studio 项目</h2><p>管理通用创作、任务与批次</p></div><ProjectSwitcher variant="actions" /></div>
@@ -31,9 +30,9 @@ export const WorkspaceOverview: React.FC = (): React.ReactElement => {
     </section>
     <section className="workspace-card local-projects">
       <div className="section-heading"><div><h2>萌宠短剧</h2><p>本地目录 · 镜头素材制作</p></div><Tag>本地项目</Tag></div>
-      {pet.project ? <div className="local-project-current"><h3>{pet.projectName || `当前短剧 · ${pet.project.id.slice(0, 8)}`}</h3><p>关联 Studio 项目：{projects.find((project): boolean => project.id === pet.project?.studioProjectId)?.name || '原项目缺失'}</p><p>执行账号：{accounts.find((account): boolean => account.id === pet.project?.accountId)?.name || '原账号缺失'}</p><div className="inline-meta"><Tag>{pet.project.plan?.shots.length || 0} 个镜头</Tag><Tag>{pet.project.production?.state === 'complete' ? '镜头素材已完成' : pet.project.production ? '查看制作进度' : pet.project.plan ? '方案已保存' : '待保存故事'}</Tag></div><Button type="primary" onClick={(): void => navigateWorkspace('create', 'petstory')}>继续当前短剧 <ArrowRightOutlined /></Button></div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="打开本地目录，继续故事与镜头制作" />}
-      <div className="local-project-actions"><Button icon={<PlusOutlined />} disabled={pet.busy} onClick={(): void => { void createPet(); }}>新建短剧目录</Button><PetStoryOpenProject label="打开短剧目录" disabled={pet.busy} onOpened={(): void => navigateWorkspace('create', 'petstory')} /></div>
-      <p className="muted-text">仅显示当前打开项目。制作结束表示镜头素材完成，尚不合成为完整短剧。</p>
+      {pet.project && journey ? <div className="local-project-current"><h3>{pet.projectName || `当前短剧 · ${pet.project.id.slice(0, 8)}`}</h3><p>关联 Studio 项目：{projects.find((project): boolean => project.id === pet.project?.studioProjectId)?.name || '原项目缺失'}</p><p>执行账号：{accounts.find((account): boolean => account.id === pet.project?.accountId)?.name || '原账号缺失'}</p><div className="inline-meta"><Tag>{journey.counts.shots} 个镜头</Tag><Tag>基础图片确认 {journey.counts.materials.confirmed}/{journey.counts.materials.total}</Tag><Tag>当前关键帧 {journey.counts.keyframes.current}/{journey.counts.keyframes.total}</Tag><Tag>当前视频 {journey.counts.videos.current}/{journey.counts.videos.total}</Tag></div><p>推荐下一步：{petStoryJourneyStages.find((stage): boolean => stage.key === journey.stage)?.label}。{journey.reason}</p><p className="muted-text">视频文件校验记录 {journey.counts.videos.validated}/{journey.counts.videos.total} · 人工质量合格 {journey.counts.quality.confirmed}/{journey.counts.quality.total}</p><Button type="primary" onClick={(): void => navigateWorkspace('create', 'petstory')}>继续当前短剧 <ArrowRightOutlined /></Button></div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="打开本地目录，继续故事与镜头制作" />}
+      <div className="local-project-actions"><PetStoryCreateProject onCreated={(): void => navigateWorkspace('create', 'petstory')} /><PetStoryOpenProject label="打开短剧目录" disabled={pet.busy} onOpened={(): void => navigateWorkspace('create', 'petstory')} /></div>
+      <p className="muted-text">仅显示当前打开项目。逐镜素材、文件校验和人工质量分别记录；当前不提供整片合成。</p>
     </section>
     <section className="workspace-card attention-section">
       <div className="section-heading"><div><h2>待处理事项</h2><p>当前 Studio 项目任务与全局账号状态</p></div><Button type="text" onClick={(): void => navigateWorkspace('tasks')}>查看任务中心 <ArrowRightOutlined /></Button></div>

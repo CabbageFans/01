@@ -83,6 +83,43 @@ beforeAll(async (): Promise<void> => {
 afterAll(async (): Promise<void> => fs.rm(root, { recursive: true, force: true }));
 
 describe('通用剧本资产与确认', (): void => {
+  it('只读资格复用正式校验，分别定位入口、正文、确认和首尾帧缺项，不创建任务或写项目', async (): Promise<void> => {
+    const h = await harness('music'); let p = h.project;
+    const firstTarget = { shotId: p.plan!.shots[0].id, promptKind: 'firstFrame' as const };
+    const original = await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8');
+    const initial = await h.service.inspectGeneration(p.id, p.revision, firstTarget);
+    expect(initial.eligibility?.ready).toBe(false);
+    expect(initial.eligibility?.blockers.map((item): string => item.code)).toEqual(expect.arrayContaining(['story', 'materials', 'prompt', 'capability']));
+    expect(initial.eligibility?.blockers.some((item): boolean => !!item.materialId)).toBe(true);
+    expect(await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8')).toBe(original); expect(h.list()).toEqual([]);
+    p = await accepted(h);
+    const saved = await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8');
+    const c = capability(); c.modes = { first_frame: { state: 'unknown', free: 'unknown', reason: 'TEST未检查视频' }, first_last_frame: { state: 'unknown', free: 'unknown', reason: 'TEST未检查视频' }, reference: { state: 'unknown', free: 'unknown', reason: 'TEST未检查视频' } }; c.durations = []; c.videoConfig = undefined;
+    expect((await h.service.inspectGeneration(p.id, p.revision, firstTarget, c)).eligibility).toMatchObject({ ready: true, blockers: [] });
+    const videoTarget = { shotId: firstTarget.shotId, promptKind: 'video' as const };
+    const video = await h.service.inspectGeneration(p.id, p.revision, videoTarget, capability());
+    expect(video.eligibility).toMatchObject({ ready: false, resolvedMode: 'reference', blockers: expect.arrayContaining([expect.objectContaining({ code: 'firstFrame', shotId: firstTarget.shotId, promptKind: 'firstFrame' })]) });
+    expect(await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8')).toBe(saved); expect(h.list()).toEqual([]);
+    await expect(h.service.inspectGeneration(p.id, p.revision - 1, firstTarget, capability())).rejects.toThrow('项目已变化');
+    await expect(h.service.inspectGeneration(p.id, p.revision, { shotId: 'not-owned', promptKind: 'video' }, capability())).rejects.toThrow('不属于当前方案');
+  });
+  it('只读资格与真实单节点生成一致，已完成首帧可进入视频，未知入口和未结束任务仍阻断', async (): Promise<void> => {
+    const h = await harness('music'); let p = await accepted(h); const shotId = p.plan!.shots[0].id;
+    const target = { shotId, promptKind: 'firstFrame' as const };
+    expect((await h.service.inspectGeneration(p.id, p.revision, target, capability())).eligibility?.ready).toBe(true);
+    p = (await h.service.generateShotMedia(p.id, p.revision, shotId, 'firstFrame', capability(), {})).project!;
+    expect((await h.service.inspectGeneration(p.id, p.revision, target, capability())).eligibility?.blockers).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'task' })]));
+    const next = await h.service.advance(p.id); await h.finish(next.taskId!); await h.service.advance(p.id); await h.service.advance(p.id);
+    p = await h.projects.read(p.id);
+    const before = await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8');
+    const result = await h.service.inspectGeneration(p.id, p.revision, { shotId, promptKind: 'video' }, capability());
+    expect(result.eligibility).toMatchObject({ ready: true, resolvedMode: 'reference', blockers: [] });
+    expect(await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8')).toBe(before); expect(h.list()).toHaveLength(1);
+    const expired = capability(); expired.checkedAt = '2000-01-01T00:00:00.000Z';
+    expect((await h.service.inspectGeneration(p.id, p.revision, { shotId, promptKind: 'video' }, expired)).eligibility?.blockers).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'capability', message: expect.stringContaining('已过期') })]));
+    p.plan!.shots[0].requestedMode = 'first_last_frame'; p = await h.projects.savePlan(p.id, p.revision, p.plan!); seedOfflinePromptContracts(p); p = await h.projects.write(p);
+    expect((await h.service.inspectGeneration(p.id, p.revision, { shotId, promptKind: 'video' }, capability())).eligibility).toMatchObject({ ready: false, resolvedMode: 'first_last_frame', blockers: expect.arrayContaining([expect.objectContaining({ code: 'lastFrame', shotId, promptKind: 'lastFrame' })]) });
+  });
   it('直接保存剧本无需来源链接；无人物环境镜头与默认主演配置彼此独立', async (): Promise<void> => {
     const directory = await fs.mkdtemp(path.join(root, 'direct-script-')); const projects = new PetStoryProjects();
     let p = await projects.create(directory, 'TEST-studio', 'TEST-account');

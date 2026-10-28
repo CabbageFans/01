@@ -36,22 +36,23 @@ beforeEach((): void => {
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
 
 describe('当前会话媒体入口授权', (): void => {
-  it('已恢复能力时画布首帧和视频仍禁用，提示核对；当前会话检查后才启用', (): void => {
+  it('已恢复能力时画布首帧和视频仍禁用，异步资格返回前也不凭会话检查解除禁用', (): void => {
     for (const kind of ['firstFrame', 'video'] as const) {
       const html = renderToStaticMarkup(React.createElement(CanvasMediaNode, { project, shot: project.plan!.shots[0], kind, disabled: false }));
-      expect(buttonMarkup(html, kind === 'video' ? '生成视频' : '生成首帧图片')).toContain('disabled');
-      expect(html).toContain('重新核对当前会话的免费入口');
+      expect(buttonMarkup(html, kind === 'video' ? '生成本镜视频' : '生成首帧图片')).toContain('disabled');
+      expect(html).toContain(`本次会话还未核对${kind === 'video' ? '视频' : '图片'}入口`);
     }
     usePetStoryStore.setState({ capabilityCheckedInSession: true });
     const html = renderToStaticMarkup(React.createElement(CanvasMediaNode, { project, shot: project.plan!.shots[0], kind: 'video', disabled: false }));
-    expect(buttonMarkup(html, '生成视频')).not.toContain('disabled'); expect(generate).not.toHaveBeenCalled();
+    // SSR 不执行只读资格查询；“当前检查且后端 ready 才启用”由 DOM 点击测试验证。
+    expect(buttonMarkup(html, '生成本镜视频')).toContain('disabled'); expect(generate).not.toHaveBeenCalled();
   });
   it('已保存制作数量也不能绕过本会话入口核对，检查按钮保持可用', (): void => {
     const html = prepareMarkup();
     expect(buttonMarkup(html, '查看本次实际制作数量')).toContain('disabled');
     expect(buttonMarkup(html, '确认素材，继续镜头制作')).toContain('disabled');
     expect(buttonMarkup(html, '检查当前可见入口（不提交）')).not.toContain('disabled');
-    expect(html).toContain('生成或继续制作前请先检查当前会话的免费入口');
+    expect(html).toContain('新增生成前请先检查当前会话的免费入口；已发送任务可只读恢复');
     usePetStoryStore.setState({ capabilityCheckedInSession: true });
     const checked = prepareMarkup();
     expect(buttonMarkup(checked, '查看本次实际制作数量')).not.toContain('disabled');

@@ -417,7 +417,28 @@ export interface PetStoryPromptBatch {
   jobId?: string;
 }
 export interface PetStoryMediaCandidate { taskId: string; artifactId: string; createdAt: string }
+/** 媒体操作的只读前置反馈；实际提交仍由同一主进程门禁复验。 */
+export interface PetStoryGenerationBlocker {
+  code: 'story' | 'prompt' | 'materials' | 'firstFrame' | 'lastFrame' | 'capability' | 'task' | 'other';
+  message: string;
+  materialId?: string;
+  shotId?: string;
+  promptKind?: PetStoryPromptKind;
+  jobId?: string;
+}
+export interface PetStoryGenerationEligibility {
+  ready: boolean;
+  blockers: PetStoryGenerationBlocker[];
+  resolvedMode?: PetStoryResolvedMode;
+  modeReason?: string;
+}
+export interface PetStoryGenerationEligibilityResult extends PetStoryResult {
+  eligibility?: PetStoryGenerationEligibility;
+}
 export interface PetStoryAPI {
+  inspectGeneration: (projectId: string, revision: number, target: PetStoryRuntimeTarget, capability?: PetStoryCapability, fallbacks?: Record<string, 'first_frame' | 'reference'>) => Promise<PetStoryGenerationEligibilityResult>;
+  revealAsset: (projectId: string, assetId: string) => Promise<PetStoryResult>;
+  revealProject: (projectId: string) => Promise<PetStoryResult>;
   promptStageTargets: (projectId: string, revision: number) => Promise<PetStoryResult>;
   savePromptModel: (projectId: string, revision: number, model?: PetStoryProject['promptModel']) => Promise<PetStoryResult>;
   savePromptBatch: (projectId: string, revision: number, batch: PetStoryPromptBatch) => Promise<PetStoryResult>;

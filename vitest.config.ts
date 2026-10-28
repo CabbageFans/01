@@ -32,6 +32,14 @@ export default defineConfig({
           environment: 'node',
         },
       },
+      {
+        test: {
+          name: 'dom',
+          include: ['tests/**/*.dom.test.{ts,tsx}'],
+          environment: 'happy-dom',
+          setupFiles: ['tests/fixtures/setupDom.ts'],
+        },
+      },
     ],
     // 覆盖率配置
     coverage: {

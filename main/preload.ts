@@ -11,6 +11,9 @@ import type { ElectronAPI, Account, AccountAvailability, AccountPlatform, Task, 
 
 const electronAPI = {
   petstory: {
+    inspectGeneration: (id: string, revision: number, target: import('@doubao-studio/contracts').PetStoryRuntimeTarget, capability?: import('@doubao-studio/contracts').PetStoryCapability, fallbacks?: Record<string, 'first_frame' | 'reference'>): Promise<import('@doubao-studio/contracts').PetStoryGenerationEligibilityResult> => ipcRenderer.invoke('petstory:inspectGeneration', { id, revision, target, capability, fallbacks }),
+    revealAsset: (id: string, assetId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:revealAsset', { id, assetId }),
+    revealProject: (id: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:revealProject', { id }),
     prepareRuntime: (id: string, revision: number, kind: import('@doubao-studio/contracts').PetStoryChatJob['kind'], target?: import('@doubao-studio/contracts').PetStoryRuntimeTarget): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:prepareRuntime', { id, revision, kind, target }),
     adoptPlanCandidate: (id: string, revision: number, jobId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:adoptPlanCandidate', { id, revision, jobId }),
     adoptAssetsCandidate: (id: string, revision: number, jobId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:adoptAssetsCandidate', { id, revision, jobId }),

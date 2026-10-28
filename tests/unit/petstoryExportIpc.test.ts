@@ -146,3 +146,28 @@ it('rejects a selected JSON file other than the canonical project manifest', asy
   expect(await invoke('open')).toMatchObject({ success: false, error: expect.stringContaining('不读取其他 JSON') });
   expect(desktop.createTask).not.toHaveBeenCalled();
 });
+it('reveals only opened project files and registered assets without returning paths, writing the project or dispatching tasks', async (): Promise<void> => {
+  const assetId = 'TEST-result-asset'; const relativePath = 'shots/door/TEST-result.png';
+  await fs.mkdir(path.join(source, 'shots', 'door'), { recursive: true });
+  await fs.writeFile(path.join(source, relativePath), 'TEST registered local result');
+  p.assets.push({ id: assetId, kind: 'scene', relativePath }); p = await projects.write(p);
+  const before = await fs.readFile(path.join(source, 'project.json'), 'utf8');
+  expect(await invoke('revealAsset', { id: p.id, assetId })).toEqual({ success: true });
+  expect(desktop.reveal).toHaveBeenLastCalledWith(path.join(await fs.realpath(source), relativePath));
+  expect(await invoke('revealProject', { id: p.id })).toEqual({ success: true });
+  expect(desktop.reveal).toHaveBeenLastCalledWith(path.join(await fs.realpath(source), 'project.json'));
+  expect(await invoke('revealAsset', { id: p.id, assetId: '../not-owned' })).toMatchObject({ success: false, error: expect.stringContaining('不属于当前项目') });
+  expect(await invoke('revealAsset', { id: p.id, assetId }, { sender: event.sender, senderFrame: {} } as IpcMainInvokeEvent)).toMatchObject({ success: false, error: '仅宿主窗口可访问项目' });
+  await fs.unlink(path.join(source, relativePath)); await fs.symlink(path.join(source, 'project.json'), path.join(source, relativePath));
+  expect(await invoke('revealAsset', { id: p.id, assetId })).toMatchObject({ success: false, error: expect.stringContaining('禁止符号链接') });
+  expect(await fs.readFile(path.join(source, 'project.json'), 'utf8')).toBe(before); expect(desktop.createTask).not.toHaveBeenCalled();
+});
+it('read-only generation inspection is host guarded and rejects stale project versions without task dispatch', async (): Promise<void> => {
+  const args = { id: p.id, revision: p.revision, target: { shotId: 'door', promptKind: 'video' } };
+  const before = await fs.readFile(path.join(source, 'project.json'), 'utf8');
+  const response = await invoke('inspectGeneration', args) as import('@doubao-studio/contracts').PetStoryGenerationEligibilityResult;
+  expect(response).toMatchObject({ success: true, eligibility: { ready: false, blockers: expect.arrayContaining([expect.objectContaining({ code: 'capability' }), expect.objectContaining({ code: 'firstFrame', shotId: 'door' })]) } });
+  expect(await invoke('inspectGeneration', { ...args, revision: p.revision - 1 })).toMatchObject({ success: false, error: expect.stringContaining('项目已变化') });
+  expect(await invoke('inspectGeneration', args, { sender: event.sender, senderFrame: {} } as IpcMainInvokeEvent)).toMatchObject({ success: false, error: '仅宿主窗口可访问项目' });
+  expect(await fs.readFile(path.join(source, 'project.json'), 'utf8')).toBe(before); expect(desktop.createTask).not.toHaveBeenCalled();
+});

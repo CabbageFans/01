@@ -171,7 +171,8 @@ const App: React.FC = (): React.ReactElement => {
           <main className="workspace-content">
             <div className="page-heading"><div><h1>{info.label}</h1><p>{info.description}</p></div>{page === 'create' && <Segmented aria-label="创作模式" value={creationMode} onChange={(value): void => setCreationMode(value as 'studio' | 'petstory')} options={[{ label: '通用创作', value: 'studio' }, { label: '萌宠短剧', value: 'petstory' }]} />}</div>
             <Toolbar page={page} />
-            {page === 'overview' && <WorkspaceOverview />}
+            {/* 新建弹窗的账号／目录选择与创作草稿一样，切去登录后仍保留。 */}
+            <div className={page === 'overview' ? '' : 'page-hidden'}><WorkspaceOverview /></div>
             {/* 业务表单也保留在原位置，导航不会丢失未保存内容。 */}
             <div className={page === 'create' && creationMode === 'studio' || page === 'tasks' ? 'page-fill' : 'page-hidden'}><TaskConsole view={page === 'tasks' ? 'tasks' : 'create'} /></div>
             <div className={page === 'create' && creationMode === 'petstory' ? 'page-fill' : 'page-hidden'}><PetStoryPanel /></div>

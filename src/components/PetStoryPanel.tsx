@@ -1,25 +1,33 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Alert, Button, Card, Checkbox, Collapse, Input, InputNumber, Select, Space, Tag, Typography, Tabs, ConfigProvider, Empty } from 'antd';
-import type { PetStoryPlan, PetStoryShot, PetStoryPrompt, PetStoryPromptKind, PetStoryCharacter, PetStoryProject, PetStoryPromptProfile, PetStoryCompiledPrompt, PetStoryResolvedMode } from '@doubao-studio/contracts';
+import { Alert, Button, Card, Checkbox, Collapse, Input, InputNumber, Select, Space, Tag, Typography, ConfigProvider, Empty, Segmented, message } from 'antd';
+import type { PetStoryPlan, PetStoryShot, PetStoryPrompt, PetStoryCharacter, PetStoryProject, PetStoryPromptProfile } from '@doubao-studio/contracts';
 import { PetStoryPlanAssets } from './PetStoryPlanAssets';
 import { PetStoryMaterials } from './PetStoryMaterials';
 import { PetStoryCanvas } from './PetStoryCanvas';
+import { isTaskConversationMissing } from '../utils/taskConversationLocator';
 import { isCanvasPlanLocked } from './petStoryCanvasShared';
 import { PetStoryOpenProject } from './PetStoryOpenProject';
-import { usePetStoryStore } from '../store/usePetStoryStore';
+import { usePetStoryStore, petStoryPromptActionTargets } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { useProjectStore } from '../store/useProjectStore';
 import { navigateWorkspace } from '../utils/workspace';
 import { useAccountStore } from '../store/useAccountStore';
 import { DEFAULT_PROMPT_PROFILE as DEFAULT_PROMPT_PROFILE_DATA, chatAssets, mobileStoryPrompt } from '../utils/petstoryPrompts';
-import { isTaskConversationMissing } from '../utils/taskConversationLocator';
-import { canStartBoundChat } from '../utils/petstoryCandidate';
+import { PetStoryRuntime, PetStoryCurrentTasks } from './PetStoryRuntime';
+import { PetStoryResults } from './PetStoryResults';
+import { selectPetStoryJourney } from '../utils/petstoryJourney';
+import type { PetStoryJourneyStage } from '../utils/petstoryJourney';
+import { PetStoryCreateProject } from './PetStoryCreateProject';
+import { PetStoryDraftContext, usePetStoryDraft, usePetStoryDraftRegistry, locatePetStoryDraft } from './PetStoryDrafts';
+import { mergePetStoryPlanDraft } from '../utils/petstoryPlanDraft';
+import { petStoryReadOnlyProductionTask } from '../utils/petstoryRecovery';
+import { revealBrowser } from '../utils/workspace';
+import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
 // 保留受控 JSON 资源原值，只收窄 JSON 推断为 string 的角色职责类型。
 const DEFAULT_PROMPT_PROFILE: PetStoryPromptProfile = DEFAULT_PROMPT_PROFILE_DATA as PetStoryPromptProfile;
-const promptLabels: Record<PetStoryPromptKind, string> = { firstFrame: '首帧', lastFrame: '尾帧', video: '视频' };
 function planLocked(project: PetStoryProject | null): boolean { return project ? isCanvasPlanLocked(project) : false; }
 function blankPrompt(): PetStoryPrompt {
   return { original: '', optimized: '', final: '', edited: true, rulesVersion: 'manual' };
@@ -44,9 +52,6 @@ const ReferenceImage: React.FC<{ projectId: string; assetId: string; name: strin
   }, [projectId, assetId]);
   return data ? <img src={data} alt={`${name}项目参考图`} className="w-20 h-20 object-contain rounded bg-gray-950" /> : <Text type="secondary">{error || '读取参考图…'}</Text>;
 };
-function canAnalyzeStory(project: PetStoryProject, freeConfirmed: boolean): boolean {
-  return !!project.mobileStory && freeConfirmed && !project.jobs.some((job): boolean => job.kind === 'analysis' && job.sourceUrl === project.source.url && job.sourceStoryId === project.mobileStory?.id);
-}
 export const PromptProfileEditor: React.FC<{ project: PetStoryProject; disabled: boolean; onDirtyChange: (value: boolean) => void; profile: PetStoryPromptProfile; setProfile: (value: PetStoryPromptProfile) => void }> = ({ project, disabled, onDirtyChange, profile, setProfile }): React.ReactElement => {
   const state = usePetStoryStore();
   const changed = JSON.stringify(profile) !== JSON.stringify(project.promptProfile || DEFAULT_PROMPT_PROFILE);
@@ -54,66 +59,15 @@ export const PromptProfileEditor: React.FC<{ project: PetStoryProject; disabled:
   useEffect((): void => { onDirtyChange(changed); }, [changed, onDirtyChange]);
   return <Collapse items={[{ key: 'profile', label: '默认角色与共同风格（可编辑）', children: <Space direction="vertical" className="w-full">
     <Text type="secondary">可编辑的默认身份与视觉特点；实际参考和明确换装优先。当前剧情的动作、服装和环境在项目或镜头中填写。</Text>
-    {characterIds.map((id: string): React.ReactNode => <div className="w-full" key={id}><Text strong>{id === 'lulu' ? '噜噜' : id === 'lumei' ? '噜妹' : project.plan?.characters.find((character): boolean => character.id === id)?.name || id}</Text>
+    {characterIds.map((id: string): React.ReactNode => <div className="w-full" key={id}><Text strong>{id === 'lulu' ? '噜噜' : id === 'lumei' ? '噜妹' : project.plan?.characters.find((character): boolean => character.id === id)?.name || (id.startsWith('support-') ? '可选配角' : id)}</Text>
       <Space className="w-full" wrap><Select<string[]> className="w-72" mode="tags" aria-label={`${id}来源称谓别名`} placeholder="来源称谓／别名（可选）" disabled={disabled || state.busy} value={profile.characters[id]?.aliases || []} onChange={(aliases: string[]): void => setProfile({ ...profile, characters: { ...profile.characters, [id]: { ...(profile.characters[id] || { identity: '', appearance: '' }), aliases: aliases.length ? aliases : undefined } } })} />
         <Select<'main' | 'supporting' | undefined> className="w-44" allowClear aria-label={`${id}角色职责`} placeholder="主角／配角（未指定）" disabled={disabled || state.busy} value={profile.characters[id]?.role} options={[{ value: 'main', label: '主角' }, { value: 'supporting', label: '配角' }]} onChange={(role: 'main' | 'supporting' | undefined): void => setProfile({ ...profile, characters: { ...profile.characters, [id]: { ...(profile.characters[id] || { identity: '', appearance: '' }), role } } })} /></Space>
       {(['identity', 'appearance'] as const).map((field): React.ReactNode => <TextArea key={field} disabled={disabled || state.busy} aria-label={`${id}${field}预设`} placeholder={field === 'identity' ? '身份锚点' : '仅未指定时的默认造型'} value={profile.characters[id]?.[field] || ''} autoSize={{ minRows: 2, maxRows: 5 }} onChange={(event): void => setProfile({ ...profile, characters: { ...profile.characters, [id]: { ...(profile.characters[id] || { identity: '', appearance: '' }), [field]: event.target.value } } })} />)}</div>)}
+    <Button disabled={disabled || state.busy} onClick={(): void => { const id = `support-${crypto.randomUUID()}`; setProfile({ ...profile, characters: { ...profile.characters, [id]: { identity: '', appearance: '', role: 'supporting' } } }); }}>添加可选配角预设</Button>
     {(['common', 'character', 'prop', 'scene'] as const).map((kind): React.ReactNode => <div className="w-full" key={kind}><Text>{({ common: '共同媒介／画面语言', character: '人物专用风格', prop: '道具专用风格', scene: '场景专用风格' })[kind]}</Text><TextArea disabled={disabled || state.busy} aria-label={`${kind}视觉风格`} value={profile.assetStyles?.[kind] || ''} autoSize={{ minRows: 2, maxRows: 4 }} onChange={(event): void => setProfile({ ...profile, assetStyles: { ...profile.assetStyles, [kind]: event.target.value } })} /></div>)}
     {profile.style && <Collapse items={[{ key: 'legacy-style', label: '旧共同风格（保留，需手动归入适用类别）', children: <pre className="prompt-readonly">{profile.style}</pre> }]} />}
     <Button disabled={disabled || state.busy || (!changed && !!project.promptProfile)} onClick={(): void => { void state.savePromptProfile(profile); }}>保存项目预设（不改写最终文本）</Button>
   </Space> }]} />;
-};
-const CompiledPromptDetails: React.FC<{ project: PetStoryProject; shot: PetStoryShot; kind: PetStoryPromptKind; dirty: boolean }> = ({ project, shot, kind, dirty }): React.ReactElement => {
-  const state = usePetStoryStore();
-  const tasks = useTaskStore((s) => s.tasks);
-  const resolution = project.production?.shots[shot.id] || state.productionResolutions[shot.id];
-  const mode: PetStoryResolvedMode | undefined = resolution?.resolvedMode || (shot.requestedMode === 'auto' ? undefined : shot.requestedMode);
-  const [compiled, setCompiled] = useState<PetStoryCompiledPrompt>();
-  const [error, setError] = useState('');
-  useEffect(() => {
-    let active = true; setCompiled(undefined); setError('');
-    if (!dirty) void window.electronAPI.petstory.previewPrompt(project.id, shot.id, kind, mode).then((result): void => {
-      if (!active) return;
-      setCompiled(result.compiledPrompt); setError(result.error || '');
-    }).catch((): void => { if (active) setError('提交预览读取失败'); });
-    return (): void => { active = false; };
-  }, [project.id, project.revision, shot.id, kind, mode, dirty]);
-  const step = [...(project.production?.steps || [])].reverse().find((s): boolean => s.shotId === shot.id && s.kind === kind);
-  const draft = [...(project.drafts || [])].reverse().find((d): boolean => d.shotId === shot.id && d.kind === kind);
-  const snapshot = step?.compiledPrompt || draft?.compiledPrompt;
-  const task = tasks.find((t): boolean => t.id === (step?.taskId || draft?.taskId));
-  return <Collapse className="mt-2" items={[{ key: 'compiled', label: '提交全文与真实素材用途', children: <Space direction="vertical" className="w-full">
-    <Text>本镜角色：{shot.characterIds.map((id): string => project.plan?.characters.find((c): boolean => c.id === id)?.name || id).join('、') || '无'}；请求 {shot.requestedMode} → {resolution ? `本次解析 ${resolution.resolvedMode}` : '尚未核对实际模式'}</Text>
-    <Text type="secondary">final 是唯一动作正文，编译只对已有引用做确定性映射。下方为计划预览；pending 不是实际页面编号。实际绑定与发送输入单独展示和导出。</Text>
-    {dirty ? <Text>请先保存所有修改以更新提交预览。</Text> : error ? <Alert type="warning" message={error} /> : compiled && <><pre className="prompt-readonly">{compiled.references.map((r): string => `${r.order} · ${r.purpose} · ${r.characterIds.join('、')} · ${r.assetId}${r.slot ? ` · ${r.slot}槽` : ''}`).join('\n')}</pre><pre className="prompt-readonly">{compiled.text}</pre></>}
-    {step?.pageBindings && <><Text strong>本次实际网页素材与引用回读</Text><pre className="prompt-readonly">{step.pageBindings.map((b): string => `${b.order} · ${b.assetId} → ${b.label} · ${b.slot} · ${b.reference}${b.nodeId ? ` · 原生节点 ${b.nodeId}` : ''} · 预览摘要 ${b.previewHash.slice(0, 12)}`).join('\n')}</pre></>}
-    {(snapshot || task) && <><Text strong>{task?.runtime?.submittedAt ? '最近实际提交的运行输入' : '最近已保存任务输入（不表示已提交）'}</Text><pre className="prompt-readonly">{task?.runtime?.input.prompt || snapshot?.text || task?.prompt}</pre></>}
-  </Space> }]} />;
-};
-const MobileStoryInput: React.FC<{ project: PetStoryProject; disabled: boolean; linkUnsaved: boolean; onDirtyChange: (dirty: boolean) => void }> = ({ project: p, disabled, linkUnsaved, onDirtyChange }): React.ReactElement => {
-  const save = usePetStoryStore((state) => state.saveMobileStory);
-  const [storyText, setStoryText] = useState(p.mobileStory?.text || '');
-  const [copyState, setCopyState] = useState('');
-  useEffect((): void => { setStoryText(p.mobileStory?.text || ''); setCopyState(''); }, [p.id, p.mobileStory?.text]);
-  useEffect((): void => { onDirtyChange(storyText !== (p.mobileStory?.text || '')); }, [storyText, p.mobileStory?.text, onDirtyChange]);
-  const phonePrompt = p.source.url ? mobileStoryPrompt(p) : '';
-  const copyPhonePrompt = async (): Promise<void> => {
-    try { await navigator.clipboard.writeText(phonePrompt); setCopyState('已复制，请在手机豆包粘贴发送，再将故事情节复制回来。'); }
-    catch { setCopyState('未能复制，请从下面的提示词框手动选择复制。'); }
-  };
-  return (
-        <div className="mt-4 space-y-2">
-          <Text strong>1. 在手机豆包取得故事情节</Text>
-          <div><Text type="secondary">保存链接后，复制下方提示词到手机豆包发送。取得故事后请对照原视频核对，再复制回来。桌面端不再尝试读取抖音视频。</Text></div>
-          <Button disabled={disabled || !phonePrompt || linkUnsaved} onClick={(): void => { void copyPhonePrompt(); }}>复制手机豆包提示词</Button>
-          {copyState && <div role="status"><Text type="secondary">{copyState}</Text></div>}
-          {phonePrompt && <TextArea aria-label="手机豆包提示词" readOnly value={phonePrompt} autoSize={{ minRows: 3, maxRows: 6 }} />}
-          <div><Text strong>2. 粘贴剧本或手机豆包返回的故事情节</Text></div>
-          <TextArea readOnly={disabled} aria-label="手机豆包故事原文" value={storyText} onChange={(e): void => setStoryText(e.target.value)} autoSize={{ minRows: 5, maxRows: 12 }} maxLength={50_000} showCount placeholder="可直接粘贴已核对剧本，也可粘贴手机豆包故事，包括开头、关键变化和结局；无需 JSON。" />
-          <Button disabled={disabled || linkUnsaved || !storyText.trim() || storyText === p.mobileStory?.text} onClick={(): void => { void save(storyText); }}>保存故事情节</Button>
-          {p.mobileStory && <Tag color="green">{p.source.kind === 'script' ? '剧本原文已保存' : '手机故事原文已保存'}</Tag>}
-        </div>
-  );
 };
 const ProductionImageChoice: React.FC<{ project: PetStoryProject; stepId: string }> = ({ project, stepId }): React.ReactElement | null => {
   const state = usePetStoryStore();
@@ -139,14 +93,16 @@ export const ProductionControls: React.FC<{ project: PetStoryProject; disabled: 
   const materialsReady = !!project.storyApproval && !!project.materials?.length && project.materials.every((m): boolean => m.approved?.assetId === m.selectedAssetId && !!m.approved && (m.kind !== 'character' || (m.approved.identity?.assetId === m.selectedAssetId && m.approved.identity?.description === project.plan?.characters.find((c): boolean => c.id === m.entityId)?.description)));
   const pendingTaskId = production?.steps.find((step): boolean => step.status !== 'complete')?.taskId;
   const pendingTask = useTaskStore((s) => s.tasks.find((task): boolean => task.id === pendingTaskId));
+  const productionTasks = useTaskStore((store) => store.tasks);
+  const readOnlyRecovery = !!petStoryReadOnlyProductionTask(project, productionTasks);
   useEffect((): void => { setFreeConfirmed(false); }, [project.id]);
   return <Card size="small" title={view === 'prepare' ? '核对入口与制作计划' : '镜头制作进度'}>
     <Space direction="vertical" className="w-full">
       <Text type="secondary">在原账号检查一次可见创作入口，无上传、无提交。未识别槽位保留待确认；检查和本地数量均不是豆包官方剩余额度。</Text>
       <Checkbox checked={freeConfirmed} onChange={(event): void => setFreeConfirmed(event.target.checked)}>本人已核对原账号当前图片／视频入口及选定规格免费可用；收费或未知时不勾选</Checkbox>
       <Button disabled={disabled || (production?.state === 'running' && currentEntryChecked)} onClick={(): void => { void state.inspectCapability(freeConfirmed); }}>{currentEntryChecked ? '重新核对当前入口（暂停后）' : '检查当前可见入口（不提交）'}</Button>
-      {capability && !state.capabilityCheckedInSession && <Alert type="info" message="已恢复保存的模型选择，仅用于文字创作；生成或继续制作前请先检查当前会话的免费入口。" />}
-      {!capability && production?.capability && <Alert type="info" message={`已保存检查：${new Date(production.capability.checkedAt).toLocaleString('zh-CN')} · ${production.capability.freeEvidence === 'user_confirmed' ? '本人确认免费' : production.capability.freeEvidence === 'visible' ? '页面观察免费' : '免费状态未知'}。恢复前仍需核对当前入口。`} />}
+      {capability && !state.capabilityCheckedInSession && <Alert type="info" message="已恢复保存的模型选择，仅用于文字创作；新增生成前请先检查当前会话的免费入口；已发送任务可只读恢复。" />}
+      {!capability && production?.capability && <Alert type="info" message={`已保存检查：${new Date(production.capability.checkedAt).toLocaleString('zh-CN')} · ${production.capability.freeEvidence === 'user_confirmed' ? '本人确认免费' : production.capability.freeEvidence === 'visible' ? '页面观察免费' : '免费状态未知'}。新生成前仍需核对当前入口；只读收取不重复发送。`} />}
       {capability && <>
         <Checkbox checked={!!capability.allowPlainReferences} disabled={disabled || production?.state === 'running'} onChange={(e): void => state.setPlainReferences(e.target.checked)}>本人已核对当前入口不支持 @ 素材引用，同意按逐图回读的中文用途映射提交；支持 @ 的入口请勿勾选</Checkbox>
         <Text>免费来源：{capability.freeEvidence === 'user_confirmed' ? '本人确认' : capability.freeEvidence === 'visible' ? '页面观察' : '未知'}；图片：{capability.image.state} / {capability.image.free}；视频规格：{capability.videoConfig ? `${capability.videoConfig.model} · ${capability.videoConfig.aspectRatio}` : '待确认'}；已观察时长：{capability.durations.join(' / ') || '未知'} 秒</Text>
@@ -162,7 +118,7 @@ export const ProductionControls: React.FC<{ project: PetStoryProject; disabled: 
         {view === 'prepare' && readyForShots && <Button type="primary" disabled={disabled || !currentEntryChecked || !counts || !materialsReady} onClick={(): void => { void state.startProduction(); }}>确认素材，继续镜头制作</Button>}
         {production && production.state !== 'complete' && <>
           <Button disabled={state.busy} onClick={(): void => { void state.pauseProduction(); }}>暂停制作</Button>
-          <Button type="primary" disabled={disabled || !currentEntryChecked} onClick={(): void => { void state.resumeProduction(); }}>显式继续原制作</Button>
+          <Button type="primary" disabled={state.busy || !currentEntryChecked && !readOnlyRecovery} onClick={(): void => { void state.resumeProduction(); }}>{readOnlyRecovery && !currentEntryChecked ? '只读继续收取／下载原产物' : '显式继续原制作'}</Button>
           {production.state === 'paused' && pendingTask?.runtime?.submittedAt && isTaskConversationMissing(pendingTask) && <Button disabled={state.busy} onClick={(): void => {
             window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: pendingTask.id, useCurrentPage: true } }));
           }}>只读核对当前原制作会话</Button>}
@@ -170,7 +126,7 @@ export const ProductionControls: React.FC<{ project: PetStoryProject; disabled: 
       </Space>
       {view === 'prepare' && showMaterials && <PetStoryMaterials project={project} disabled={disabled} />}
       {production && production.phase !== 'materials' && view === 'progress' && <>
-        <Alert type={production.state === 'paused' ? 'warning' : production.state === 'complete' ? 'success' : 'info'} message={`${production.state === 'complete' ? '镜头素材已生成并完成下载校验' : `${production.state === 'paused' ? '制作已暂停' : '正在制作镜头素材'} · ${production.message}`}`} />
+        <Alert type={production.state === 'paused' ? 'warning' : production.state === 'complete' ? 'success' : 'info'} message={`${production.state === 'complete' ? '当前批次已完成下载校验；全项目进度以逐镜成果为准' : `${production.state === 'paused' ? '制作已暂停' : '正在制作镜头素材'} · ${production.message}`}`} />
         {project.plan?.shots.map((shot): React.ReactNode => {
           const media = production.shots[shot.id];
           const video = project.assets.find((a): boolean => a.id === media?.videoId);
@@ -187,120 +143,148 @@ export const ProductionControls: React.FC<{ project: PetStoryProject; disabled: 
     </Space>
   </Card>;
 };
-export const PetStoryPanel: React.FC = () => {
-  const state = usePetStoryStore();
-  const taskState = useTaskStore();
-  const tasks = taskState.tasks;
-  const accounts = useAccountStore((s) => s.accounts);
-  const p = state.project;
-  const projects = useProjectStore((s) => s.projects);
-  const [stage, setStage] = useState(0);
-  const [selectedShotId, setSelectedShotId] = useState('');
-  const stageProjectId = useRef('');
-  useEffect((): void => { if (p && p.id !== stageProjectId.current) { stageProjectId.current = p.id; setStage(p.plan ? 4 : 0); } }, [p]);
-  const [link, setLink] = useState('');
-  const [plan, setPlan] = useState<PetStoryPlan | null>(null);
-  const [dirty, setDirty] = useState(false);
-  const [profileDirty, setProfileDirty] = useState(false);
-  const [canvasDirty, setCanvasDirty] = useState(false);
+const JOURNEY_STAGES: PetStoryJourneyStage[] = ['script', 'plan', 'materials', 'keyframes', 'videos', 'results'];
+const STAGE_LABELS = ['输入剧本', '确认方案', '准备基础素材', '制作关键帧', '制作镜头视频', '查看成果'];
+
+export const PetStoryPanel: React.FC = (): React.ReactElement => {
+  const registry = usePetStoryDraftRegistry();
+  return <PetStoryDraftContext.Provider value={registry.value}><PetStoryJourneyContent drafts={registry.drafts} /></PetStoryDraftContext.Provider>;
+};
+const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetStoryDraft[] }> = ({ drafts }): React.ReactElement => {
+  const state = usePetStoryStore(); const p = state.project;
+  const accounts = useAccountStore((store) => store.accounts); const browsingId = useAccountStore((store) => store.selectedAccountId);
+  const projects = useProjectStore((store) => store.projects);
+  const [stage, setStage] = useState(0); const stageProjectId = useRef('');
+  const [selectedShotId, setSelectedShotId] = useState(''); const [notice, setNotice] = useState('');
+  const [link, setLink] = useState(''); const [sourceText, setSourceText] = useState(''); const [inputMode, setInputMode] = useState<'script' | 'link'>('script');
+  const [plan, setPlan] = useState<PetStoryPlan | null>(null); const planBase = useRef<PetStoryPlan | null>(null);
+  const [dirty, setDirty] = useState(false); const [profileDirty, setProfileDirty] = useState(false); const [, setCanvasDirty] = useState(false);
   const [profileDraft, setProfileDraft] = useState<PetStoryPromptProfile>(() => structuredClone(DEFAULT_PROMPT_PROFILE));
-  const profileProjectId = useRef('');
-  useEffect((): void => { if (!p) return; if (profileProjectId.current !== p.id || !profileDirty) { profileProjectId.current = p.id; setProfileDraft(structuredClone(p.promptProfile || DEFAULT_PROMPT_PROFILE)); } }, [p, profileDirty]);
-  const [localProjectId, setLocalProjectId] = useState('');
+  const [sourceEditing, setSourceEditing] = useState(false); const [linkEditing, setLinkEditing] = useState(false);
+  const [promptTargets, setPromptTargets] = useState<NonNullable<import('@doubao-studio/contracts').PetStoryResult['promptTargets']>>([]);
+  const [targetError, setTargetError] = useState(''); const [candidates, setCandidates] = useState<string[]>([]);
+  const analysisBefore = useRef<string>();
+  const journey = p ? selectPetStoryJourney(p) : undefined;
+  const navigate = (next: PetStoryJourneyStage, objectId?: string, kind?: import('@doubao-studio/contracts').PetStoryPromptKind): void => { setStage(JOURNEY_STAGES.indexOf(next)); if (!objectId) return; if (next !== 'materials') setSelectedShotId(objectId); requestAnimationFrame((): void => { const id = next === 'materials' ? `material-${objectId}` : kind ? `shot-media-${objectId}-${kind}` : ''; if (id) document.getElementById(id)?.scrollIntoView({block:'center',behavior:'smooth'}); }); };
   useEffect((): void => {
     if (!p) return;
-    if (p.id !== localProjectId || !dirty) {
-      setPlan(p.plan ? structuredClone(p.plan) : null);
-      setLink(p.source.url);
-      setLocalProjectId(p.id);
-      setDirty(false);
+    if (stageProjectId.current !== p.id) {
+      stageProjectId.current = p.id; setStage(JOURNEY_STAGES.indexOf(selectPetStoryJourney(p).stage)); setSourceEditing(false); setLinkEditing(false); setDirty(false); setProfileDirty(false); setCanvasDirty(false); setNotice('');
+      setSourceText(p.mobileStory?.text || ''); setLink(p.source.url); setPlan(p.plan ? structuredClone(p.plan) : null); planBase.current = p.plan ? structuredClone(p.plan) : null; setProfileDraft(structuredClone(p.promptProfile || DEFAULT_PROMPT_PROFILE));
+    } else {
+      if (!sourceEditing) setSourceText(p.mobileStory?.text || ''); if (!linkEditing) setLink(p.source.url);
+      if (!dirty) { setPlan(p.plan ? structuredClone(p.plan) : null); planBase.current = p.plan ? structuredClone(p.plan) : null; }
+      if (!profileDirty) setProfileDraft(structuredClone(p.promptProfile || DEFAULT_PROMPT_PROFILE));
     }
-  }, [p, dirty, localProjectId]);
-  const edit = (change: (value: PetStoryPlan) => void): void => {
-    if (!plan || planLocked(p)) return;
-    const next = structuredClone(plan);
-    change(next);
-    setPlan(next);
-    setDirty(true);
+  }, [p, sourceEditing, linkEditing, dirty, profileDirty]);
+  useEffect(() => {
+    const locate = (event: Event): void => { const detail = (event as CustomEvent<{stage: string; id: string}>).detail; const index = JOURNEY_STAGES.indexOf(detail.stage as PetStoryJourneyStage); if (index >= 0) setStage(index); else if (detail.stage === 'advanced') setStage(7); };
+    const task = (): void => { document.querySelector('.petstory-current-tasks')?.scrollIntoView({block:'center',behavior:'smooth'}); };
+    window.addEventListener('petstory-locate-draft', locate); window.addEventListener('petstory-locate-task', task); return (): void => { window.removeEventListener('petstory-locate-draft', locate); window.removeEventListener('petstory-locate-task',task); };
+  }, []);
+  useEffect(() => {
+    let active = true; setPromptTargets([]); setCandidates([]); setTargetError('');
+    if (p?.plan) void window.electronAPI.petstory.promptStageTargets(p.id, p.revision).then((result): void => { if (!active) return; if (result.success) { setPromptTargets(result.promptTargets || []); setCandidates(result.pendingCandidateJobIds || []); } else setTargetError(result.error || '当前文字目标尚未核对'); }).catch((): void => { if (active) setTargetError('当前文字目标读取失败，请重新打开项目后核对'); });
+    return (): void => { active = false; };
+  }, [p?.id, p?.revision, p?.plan]);
+  useEffect((): void => {
+    if (!p || !analysisBefore.current) return;
+    const ids = new Set([analysisBefore.current]);
+    for (const item of p.jobs) if (item.parentJobId && ids.has(item.parentJobId)) ids.add(item.id);
+    const result = [...p.jobs].reverse().find((item): boolean => ids.has(item.id) && item.status === 'applied' && !!item.parsedResult?.plan);
+    if (!result) return;
+    analysisBefore.current = undefined;
+    setNotice('方案已就绪：请查看理解与角色对应，再确认制作依据。');
+    if (!drafts.length && stage === 0) setStage(1);
+  }, [p, drafts.length, stage]);
+  const sourceDirty = !!p && sourceText !== (p.mobileStory?.text || '');
+  const linkDirty = !!p && link !== p.source.url;
+  const saveStory = async (): Promise<void> => { if (!p) return; await state.saveOriginalStory(sourceText); const current = usePetStoryStore.getState(); if (!current.error && current.project?.mobileStory?.text === sourceText) { setSourceEditing(false); setNotice('剧本原文已保存。'); } };
+  const saveProfile = async (): Promise<void> => { await state.savePromptProfile(profileDraft); if (!usePetStoryStore.getState().error) setProfileDirty(false); };
+  const savePlanDraft = async (): Promise<void> => {
+    const latest = usePetStoryStore.getState().project;
+    if (!plan || !planBase.current || !latest?.plan) return;
+    try { await state.savePlan(mergePetStoryPlanDraft(planBase.current, plan, latest.plan)); if (!usePetStoryStore.getState().error) setDirty(false); }
+    catch (error: unknown) { setNotice(error instanceof Error ? error.message : '保存方案失败，草稿已保留'); }
   };
-  const updateShot = (id: string, patch: Partial<PetStoryShot>): void => edit((value: PetStoryPlan): void => {
-    value.shots = value.shots.map((s: PetStoryShot): PetStoryShot => s.id === id ? { ...s, ...patch } : s);
-  });
-  const updatePrompt = (id: string, kind: PetStoryPromptKind, final: string): void => edit((value: PetStoryPlan): void => {
-    const prompt = value.shots.find((s: PetStoryShot): boolean => s.id === id)?.prompts[kind];
-    if (!prompt) return;
-    if (prompt.rulesVersion === 'manual') prompt.original = final;
-    prompt.final = final;
-    prompt.edited = true;
-  });
-  const addShot = (): void => edit((value: PetStoryPlan): void => {
-    value.shots.push({ id: `shot-${crypto.randomUUID()}`, order: value.shots.length + 1, characterIds: [], scene: '', action: '', startState: '', endState: '', durationSeconds: NaN,
-      transition: 'cut', requestedMode: 'auto', prompts: { firstFrame: blankPrompt(), video: blankPrompt() } });
-  });
-  const addCharacter = (): void => edit((value: PetStoryPlan): void => {
-    value.characters.push({ id: `support-${crypto.randomUUID()}`, name: '', role: 'supporting', purpose: '', description: '' });
-  });
+  usePetStoryDraft('script', '原剧本 · 输入剧本', sourceDirty, { save: saveStory, discard: (): void => { setSourceText(p?.mobileStory?.text || ''); setSourceEditing(false); }, locate: (): void => locatePetStoryDraft('script','petstory-script') });
+  usePetStoryDraft('link', '可选抖音链接 · 输入剧本', linkDirty, { save: async (): Promise<void> => { await state.saveSource(link); if (!usePetStoryStore.getState().error) setLinkEditing(false); }, discard: (): void => { setLink(p?.source.url || ''); setLinkEditing(false); }, locate: (): void => { setInputMode('link'); locatePetStoryDraft('script','petstory-link'); } });
+  usePetStoryDraft('profile', '制作演员与共同风格 · 输入剧本', profileDirty, { save: saveProfile, discard: (): void => { setProfileDraft(structuredClone(p?.promptProfile || DEFAULT_PROMPT_PROFILE)); setProfileDirty(false); }, locate: (): void => locatePetStoryDraft('script','petstory-profile') });
+  usePetStoryDraft('plan', '故事、角色与镜头设定 · 高级编辑', dirty, { save: savePlanDraft, discard: (): void => { setPlan(p?.plan ? structuredClone(p.plan) : null); setDirty(false); }, locate: (): void => locatePetStoryDraft('advanced','petstory-advanced') });
+  const edit = (change: (value: PetStoryPlan) => void): void => { if (!plan || planLocked(p)) return; const next = structuredClone(plan); change(next); setPlan(next); setDirty(true); };
+  const updateShot = (id: string, patch: Partial<PetStoryShot>): void => edit((value: PetStoryPlan): void => { value.shots = value.shots.map((shot): PetStoryShot => shot.id === id ? {...shot,...patch} : shot); });
+  const addShot = (): void => edit((value: PetStoryPlan): void => { value.shots.push({id:`shot-${crypto.randomUUID()}`,order:value.shots.length+1,characterIds:[],scene:'',action:'',startState:'',endState:'',durationSeconds:5,transition:'cut',requestedMode:'auto',prompts:{firstFrame:blankPrompt(),video:blankPrompt()}}); });
+  const addCharacter = (): void => edit((value: PetStoryPlan): void => { value.characters.push({id:`support-${crypto.randomUUID()}`,name:'',role:'supporting',purpose:'',description:''}); });
   const disabled = state.busy || dirty || profileDirty || planLocked(p);
-  const [storyDirty, setStoryDirty] = useState(false);
-  const sourceDirty = !!p && (link !== p.source.url || storyDirty);
-  const accountName = accounts.find((a): boolean => a.id === p?.accountId)?.name || '原账号缺失';
-  const retryableJob = p?.jobs.find((job): boolean => tasks.some((task): boolean => task.status !== 'queued'
-    && canStartBoundChat(p, job, task, tasks, taskState.activeTaskId === job.taskId || !!taskState.accountBusy[p.accountId])));
-  return <section className={`petstory-panel space-y-4 ${stage === 4 ? 'canvas-active' : ''}`} aria-label="萌宠短剧">
-
-    <Space wrap>
-      <Button onClick={(): void => { void state.createProject(); }} disabled={state.busy || dirty || profileDirty || canvasDirty}>新建项目目录</Button>
-      <PetStoryOpenProject disabled={state.busy || dirty || profileDirty || canvasDirty} />
-      {p && <Button disabled={state.busy || dirty || profileDirty || sourceDirty || canvasDirty} onClick={(): void => { void state.exportPrompts(); }}>导出提示词与引用记录（不生成媒体）</Button>}
-      {p && <><Tag>本地短剧 · {state.projectName || p.id.slice(0, 8)}</Tag><Tag>关联 Studio：{projects.find((project): boolean => project.id === p.studioProjectId)?.name || '原项目缺失'}</Tag><Tag>执行账号：{accountName}</Tag><Tag color={dirty || sourceDirty ? 'orange' : 'default'}>{dirty || sourceDirty ? '有未保存内容' : `已保存 · v${p.revision}`}</Tag></>}
-    </Space>
-    {state.error && <Alert type="error" showIcon message={state.error} />}
-    {state.exportStatus && <Alert type="info" message={state.exportStatus} />}
-    {!p && <Alert type="info" message="先在“账号与浏览器”选择本人豆包账号，再新建短剧目录；也可打开已有目录继续。当前仅制作逐镜素材。" />}
+  const pending = !!p?.jobs.some((job): boolean => !job.endedWaitingAt && ['bound','captured'].includes(job.status));
+  const accountName = accounts.find((account): boolean => account.id === p?.accountId)?.name || '原执行账号缺失';
+  const analyze = async (): Promise<void> => {
+    if (!p) return;
+    if (sourceDirty) { await saveStory(); if (usePetStoryStore.getState().error || usePetStoryStore.getState().project?.mobileStory?.text !== sourceText) return; }
+    if (profileDirty) { await saveProfile(); if (usePetStoryStore.getState().error) return; }
+    const beforeIds = new Set(usePetStoryStore.getState().project?.jobs.map((job): string => job.id));
+    await state.analyze(); const current = usePetStoryStore.getState();
+    const job = current.project?.id === p.id ? current.project.jobs.find((item): boolean => !beforeIds.has(item.id) && item.kind === 'analysis') : undefined;
+    if (!job) return;
+    analysisBefore.current = job.id;
+    const ids = new Set([job.id]); for (const item of current.project?.jobs || []) if (item.parentJobId && ids.has(item.parentJobId)) ids.add(item.id);
+    if (current.project?.jobs.some((item): boolean => ids.has(item.id) && item.status === 'applied' && !!item.parsedResult?.plan)) { setStage(1); setNotice('方案已就绪，请查看并确认。'); analysisBefore.current = undefined; }
+  };
+  const confirm = async (): Promise<void> => { await state.confirmStory(); if (!usePetStoryStore.getState().error && usePetStoryStore.getState().project?.storyApproval) { setNotice('方案已确认。请准备并逐张确认基础素材；尚未生成媒体。'); setStage(2); } };
+  const actionTargets = p ? petStoryPromptActionTargets(p, promptTargets) : [];
+  const resumingBatch = !!p?.promptBatch && p.promptBatch.status !== 'complete' && p.promptBatch.targets.length > 0;
+  const materialTargets = actionTargets.filter((target): boolean => !!target.materialId);
+  const frameTargets = actionTargets.filter((target): boolean => !target.materialId && target.kind !== 'video');
+  const videoTargets = actionTargets.filter((target): boolean => target.kind === 'video');
+  const scopeText = [materialTargets.length && `基础素材${materialTargets.length}项`, frameTargets.length && `关键帧${frameTargets.length}项`, videoTargets.length && `视频${videoTargets.length}项`].filter(Boolean).join('、');
+  const runsText = stage >= 2 && stage <= 4 && (resumingBatch || (stage === 2 ? materialTargets.length > 0 : actionTargets.length > 0));
+  // 返回素材只是导航，不能要求先授权发送，也不能丢弃其他位置保留的草稿。
+  const returningToMaterials = runsText && stage > 2 && materialTargets.length > 0 && !resumingBatch;
+  const batchLabel = `${resumingBatch ? '继续原文字批次' : '生成缺失提示词'}（${scopeText}）`;
+  const mainText = stage === 0 ? (p?.plan ? '保存并重新分析剧本' : '保存并分析剧本') : stage === 1 ? '确认方案并进入素材准备' : runsText ? (returningToMaterials ? '去素材阶段补齐提示词' : batchLabel) : stage === 2 ? '查看并确认基础图片' : stage === 3 ? '查看本镜关键帧制作条件' : stage === 4 ? '查看本镜视频制作条件' : '查看逐镜成果与缺失项';
+  const runMain = async (): Promise<void> => {
+    if (stage === 0) { await analyze(); return; } if (stage === 1) { await confirm(); return; }
+    if (runsText) { if (returningToMaterials) { setStage(2); return; } await state.continuePromptStage(); return; }
+    if (stage === 2) document.getElementById('petstory-materials')?.scrollIntoView({block:'start',behavior:'smooth'});
+    else if (stage === 3 || stage === 4) document.querySelector(`[data-shot-id="${selectedShotId || p?.plan?.shots[0]?.id}"]`)?.scrollIntoView({block:'center',behavior:'smooth'});
+    else setStage(5);
+  };
+  const mainBlocked = state.busy || (stage === 0 ? !sourceText.trim() || !state.freeChatConfirmed || pending || planLocked(p) : stage === 1 ? !p?.plan || dirty || sourceDirty || profileDirty : runsText && !returningToMaterials ? drafts.length > 0 || !state.freeChatConfirmed || state.promptBatch.status === 'running' : false);
+  const stageReason = stage === 0 ? !sourceText.trim() ? '请先粘贴完整剧本。' : pending ? '正在处理原文字任务，请在下方查看进度或恢复原回复。' : !state.freeChatConfirmed ? '请确认绑定账号普通 Chat 免费可用，再开始分析。' : '点击主按钮后保存并发起真实豆包文字创作；当前使用现有自动发送链。' : stage === 1 ? !p?.plan ? '分析结果尚未采用。请查看下方本次结果，采用后再确认。' : '核对故事理解、角色对应、资产和动态镜头；确认不会自动生成图片或视频。' : stage >= 2 && stage <= 4 ? targetError || (returningToMaterials ? '基础素材文字尚有缺项，请先进入素材准备补齐。' : runsText && !state.freeChatConfirmed ? '请先勾选下方普通 Chat 免费可用确认，再发起文字创作。' : candidates.length ? `有 ${candidates.length} 条新候选待选择；保留当前手改正文，采用与确认分开。` : '逐项查看缺失原因，在当前卡片处理。图片生成、重新下载与文字创作分别授权。') : '只展示逐镜文件；人工质量确认和完整短剧合成不由批次完成代替。';
+  const openBound = (): void => { if (p && accounts.some((account): boolean => account.id === p.accountId)) { const interactiveId = findInteractiveAccountId(useTaskStore.getState().accountAutomationState); if (!canSelectAccount(p.accountId, interactiveId)) { message.warning(`任务正在 ${accounts.find((account): boolean => account.id === interactiveId)?.name || '当前账号'} 配置或提交，进入生成阶段后即可切换`); return; } useAccountStore.getState().selectAccount(p.accountId); revealBrowser(); } };
+  return <section className="petstory-panel space-y-4" aria-label="萌宠短剧">
+    <Space wrap><PetStoryCreateProject disabled={drafts.length > 0} /><PetStoryOpenProject disabled={state.busy || drafts.length > 0} />{p && <Button disabled={state.busy || drafts.length > 0} onClick={(): void => { void state.exportPrompts(); }}>导出提示词与引用记录（不生成媒体）</Button>}</Space>
+    {state.error && <Alert type="error" showIcon message={state.error} />}{state.exportStatus && <Alert type="info" message={state.exportStatus} />}
+    {!p && <Card title="从剧本开始制作"><p>新建萌宠短剧，在弹窗中选择执行账号、关联项目和保存目录，然后粘贴完整剧本。已有项目可直接打开继续。</p></Card>}
     {p && <>
-      <nav className="petstory-stages" aria-label="短剧制作阶段"><button className={stage === 4 ? 'active' : ''} aria-current={stage === 4 ? 'step' : undefined} onClick={(): void => setStage(4)}><span>◫</span>分镜生产画布</button>{['故事输入', '角色与草稿分镜', '基础素材与制作准备', '制作进度与素材'].map((label: string, index: number): React.ReactNode => <button key={label} className={stage === index ? 'active' : ''} aria-current={stage === index ? 'step' : undefined} onClick={(): void => setStage(index)}><span>{index + 1}</span>{label}</button>)}</nav>
-      <div className={stage === 4 ? 'stage-content' : 'page-hidden'}><PetStoryCanvas key={p.id} project={p} onDirtyChange={setCanvasDirty} legacyDirty={dirty || profileDirty || sourceDirty} materials={<><PetStoryMaterials project={p} disabled={disabled} generationBlocked={canvasDirty} />{plan && <Collapse items={[{ key: 'inventory', label: '在同页编辑人物、道具与场景档案', children: <><ConfigProvider componentDisabled={state.busy || planLocked(p) || p.jobs.some((j): boolean => !j.endedWaitingAt && (j.status === 'bound' || j.status === 'captured'))}><div className="canvas-character-fields">{plan.characters.map((c, index): React.ReactNode => <div key={c.id}><Text strong>{c.name}</Text><Input aria-label={`${c.id}画布角色名称`} value={c.name} onChange={(e): void => edit((v: PetStoryPlan): void => { v.characters[index].name = e.target.value; })} /><TextArea aria-label={`${c.id}画布角色档案`} value={c.description} onChange={(e): void => edit((v: PetStoryPlan): void => { v.characters[index].description = e.target.value; })} /></div>)}</div><PetStoryPlanAssets plan={plan} disabled={state.busy || planLocked(p) || p.jobs.some((j): boolean => !j.endedWaitingAt && (j.status === 'bound' || j.status === 'captured'))} edit={edit} /></ConfigProvider><Button type="primary" disabled={!dirty || state.busy || planLocked(p)} onClick={(): void => { void state.savePlan(plan).then((): void => { if (!usePetStoryStore.getState().error) setDirty(false); }); }}>保存资产档案修改</Button></> }]} />}<div className="canvas-legacy-references"><Text strong>已有角色档案与用户参考图</Text>{p.plan?.characters.map((character): React.ReactNode => <div key={character.id}><Text strong>{character.name}</Text><p>{character.description}</p>{character.referenceAssetId && <ReferenceImage projectId={p.id} assetId={character.referenceAssetId} name={character.name} />}<Button disabled={disabled} onClick={(): void => { void state.addReference(character.id); }}>选择 / 替换角色参考图</Button></div>)}</div><PromptProfileEditor project={p} profile={profileDraft} setProfile={setProfileDraft} disabled={state.busy || dirty || planLocked(p)} onDirtyChange={setProfileDirty} /></>} controls={<ProductionControls project={p} disabled={state.busy || dirty || profileDirty || sourceDirty || canvasDirty} view="prepare" showMaterials={false} />} /></div>
-      {planLocked(p) && <Alert type="info" showIcon message="方案已进入制作，编辑已锁定；可查看方案、原任务与镜头素材。" />}
-      <div className={stage === 0 ? 'stage-content space-y-4' : 'page-hidden'}>
-      <Card size="small" title="来源与默认主演">
-        <TextArea readOnly={planLocked(p)} aria-label="抖音分享文本或链接" value={link} onChange={(e): void => setLink(e.target.value)} autoSize={{ minRows: 2, maxRows: 4 }} placeholder="可选：粘贴抖音来源链接；已有剧本可直接保存下方原文" />
-        <Space className="mt-2" wrap>
-          <Button onClick={(): void => { void state.saveSource(link); }} disabled={disabled}>保存链接</Button>
-          {(['lulu', 'lumei'] as const).map((id): React.ReactNode => <Button key={id} disabled={disabled} onClick={(): void => { void state.addReference(id); }}>
-            {id === 'lulu' ? '噜噜' : '噜妹'}参考图 {p.assets.some((a): boolean => (a.characterIds || [a.characterId]).includes(id)) ? '✓' : '待选择'}
-          </Button>)}
-        </Space>
-        <Space className="mt-2" wrap>{(['lulu', 'lumei'] as const).map((id): React.ReactNode => <Select key={id} disabled={disabled} className="w-72" value={null} aria-label={`${id}复用同框身份图`} placeholder={`${id === 'lulu' ? '噜噜' : '噜妹'}：确认同框后复用已有图`} options={p.assets.filter((a): boolean => a.kind === 'character').map((a): { value: string; label: string } => ({ value: a.id, label: `已有图 · ${(a.characterIds || [a.characterId]).join('、')}` }))} onChange={(assetId: string): void => { void state.bindSharedReference(id, assetId); }} />)}</Space>
-        <PromptProfileEditor project={p} profile={profileDraft} setProfile={setProfileDraft} disabled={state.busy || dirty || planLocked(p)} onDirtyChange={setProfileDirty} />
-        <MobileStoryInput project={p} disabled={disabled} linkUnsaved={link !== p.source.url} onDirtyChange={setStoryDirty} />
-        <div className="flex gap-3 mt-3">{p.assets.filter((a): boolean => a.kind === 'character' && (a.characterIds || [a.characterId]).some((id): boolean => id === 'lulu' || id === 'lumei')).map((a): React.ReactNode => <ReferenceImage key={a.id} projectId={p.id} assetId={a.id} name={(a.characterIds || [a.characterId]).map((id): string => id === 'lulu' ? '噜噜' : id === 'lumei' ? '噜妹' : id || '').join('、')} />)}</div>
-        <div className="mt-3 space-y-2">
-          <Checkbox disabled={planLocked(p)} checked={state.freeChatConfirmed} onChange={(e): void => state.setFreeChatConfirmed(e.target.checked)}>本人已确认项目原账号当前普通 Chat 免费可用</Checkbox>
-          <Checkbox disabled={planLocked(p)} checked={state.autoRepair} onChange={(e): void => state.setAutoRepair(e.target.checked)}>回复缺项时允许最多追加一次完整修订对话</Checkbox>
-          <div><Button type="primary" disabled={disabled || sourceDirty || !canAnalyzeStory(p, state.freeChatConfirmed)} onClick={(): void => { void state.analyze(); }}>根据已保存故事生成制作方案</Button></div>
-          {retryableJob && <div><Alert className="mb-2" type="warning" showIcon message="原 Chat 任务在提交前停止。处理附件或页面问题后，可保留链接、角色图和原任务重试。" /><Button type="primary" disabled={disabled || !state.freeChatConfirmed} onClick={(): void => { void state.startBoundChat(retryableJob.id); }}>重试原任务（尚未提交）</Button></div>}
-        </div>
-        <div className="mt-3"><Text type="secondary">桌面普通 Chat 仅处理你粘贴的故事与角色参考图。故事不足时请补充原文；工具不获取或分析链接视频。复制提示词、保存原文不会发送模型请求。</Text></div>
-        {p.source.reason && <Alert className="mt-3" type={p.source.status === 'blocked' ? 'error' : 'warning'} message={p.source.reason} />}
-        {p.contentBasis && <Collapse className="mt-3" items={[{ key: 'basis', label: '按粘贴原文整理的故事依据（待本人核对）', children: <Space direction="vertical"><Text>开头：{p.contentBasis.beginning}</Text><Text>变化：{p.contentBasis.middle}</Text><Text>结局：{p.contentBasis.ending}</Text></Space> }]} />}
-      </Card>
-      {p.jobs.length > 0 && <Collapse items={[{ key: 'jobs', label: '本次 Chat 原文、任务绑定与收取结果', children: <Space direction="vertical" className="w-full">
-        {p.jobs.map((job): React.ReactNode => <Card size="small" key={job.id} title={`${job.kind} · ${job.status}`}>
-          <Text type="secondary">任务 {job.taskId} · {tasks.find((t): boolean => t.id === job.taskId)?.status || '原任务缺失'}</Text>
-          {job.runId && <div><Text type="secondary">运行 {job.runId}</Text></div>}
-          {job.error && <Alert type="warning" message={job.error} />}
-          {!job.sourceStoryId && <Tag>旧版链接直读记录，仅供核对</Tag>}
-          <Space className="mt-2" wrap>
-            {canStartBoundChat(p, job, tasks.find((task): boolean => task.id === job.taskId), tasks, taskState.activeTaskId === job.taskId || !!taskState.accountBusy[p.accountId]) && <Button disabled={disabled || sourceDirty || !state.freeChatConfirmed} onClick={(): void => { void state.startBoundChat(job.id); }}>{tasks.find((task): boolean => task.id === job.taskId)?.status === 'queued' ? '启动原绑定 Chat 任务' : '处理阻断后继续原任务（未发送）'}</Button>}
-            <Button disabled={disabled || job.status === 'applied'} onClick={(): void => { void state.collect(job.id); }}>读取原任务已保存正文</Button>
-            <Button disabled={disabled || job.status === 'applied' || !tasks.some((t): boolean => t.id === job.taskId && !!t.runtime?.submittedAt && ['paused', 'fail', 'cancelled', 'waiting_verification'].includes(t.status))} onClick={(): void => { void state.recoverChat(job.id); }}>{isTaskConversationMissing(tasks.find((t): boolean => t.id === job.taskId)) ? '核对当前 Chat 原回复' : '原会话只读补取'}</Button>
-            {!!p.mobileStory && job.sourceStoryId === p.mobileStory.id && job.kind === 'analysis' && job.status === 'invalid' && p.source.status !== 'blocked' && !p.jobs.some((j): boolean => j.parentJobId === job.id) && <Button disabled={disabled || sourceDirty || !state.freeChatConfirmed} onClick={(): void => { void state.correctOnce(job.id); }}>纠正一次结构</Button>}
-          </Space>
-          {job.rawText && <pre className="mt-2 whitespace-pre-wrap break-words text-xs max-h-80 overflow-auto select-text">{job.rawText}</pre>}
-        </Card>)}
-      </Space> }]} />}
+      <Space wrap><Tag>本地短剧 · {state.projectName || p.id.slice(0,8)}</Tag><Tag>关联项目：{projects.find((project): boolean => project.id === p.studioProjectId)?.name || '原项目缺失'}</Tag><Tag>执行账号：{accountName}</Tag><Tag>浏览账号：{accounts.find((account): boolean => account.id === browsingId)?.name || '未选择'}</Tag><Button onClick={openBound}>打开本短剧豆包账号</Button></Space>
+      <div className="journey-sticky" aria-label="当前步骤与推荐操作">
+        <nav className="petstory-stages" aria-label="短剧制作阶段">{STAGE_LABELS.map((label: string,index: number): React.ReactNode => <button key={label} className={stage === index ? 'active' : ''} aria-current={stage === index ? 'step' : undefined} onClick={(): void => setStage(index)}><span>{index+1}</span>{label}</button>)}</nav>
+        <div className="journey-recommendation"><div><strong>当前：{STAGE_LABELS[stage] || (stage === 6 ? '画布全景' : '高级编辑')}</strong><p>{stageReason}</p><small>已确认基础图 {journey?.counts.materials.confirmed}/{journey?.counts.materials.total} · 正文匹配关键帧 {journey?.counts.keyframes.current}/{journey?.counts.keyframes.total} · 正文匹配视频 {journey?.counts.videos.current}/{journey?.counts.videos.total}</small></div>{stage < 6 && <Button type="primary" disabled={mainBlocked} loading={state.busy} onClick={(): void => { void runMain(); }}>{mainText}</Button>}</div>
+        {stage >=2 && stage <=4 && <Space wrap><Checkbox checked={state.freeChatConfirmed} onChange={(event): void => state.setFreeChatConfirmed(event.target.checked)}>已确认执行账号普通 Chat 免费可用（仅文字）</Checkbox>{materialTargets.length >0 && stage >2 && <Button onClick={(): void => setStage(2)}>去补齐基础素材文字</Button>}<span>本阶段服务按依赖串行处理，镜头批次包含首帧、必要尾帧和视频正文。</span></Space>}
+        <Space wrap><Button onClick={(): void => setStage(6)}>画布全景</Button><Button onClick={(): void => setStage(7)}>高级编辑：故事、角色与镜头</Button>{stage === 2 && journey?.counts.materials.confirmed === journey?.counts.materials.total && !!journey?.counts.materials.total && <Button onClick={(): void => setStage(3)}>进入关键帧制作</Button>}{stage === 3 && <Button onClick={(): void => setStage(4)}>查看镜头视频制作</Button>}{stage === 4 && <Button onClick={(): void => setStage(5)}>查看已有成果</Button>}</Space>
+        {drafts.length >0 && <Alert type="warning" message="以下对象有未保存修改；草稿随页面保留" description={<Space direction="vertical">{drafts.map((draft): React.ReactNode => <Space wrap key={draft.id}><strong>{draft.label}</strong><Button size="small" disabled={state.busy} onClick={(): void => { void draft.actions.current.save(); }}>保存并继续</Button><Button size="small" onClick={(): void => draft.actions.current.locate()}>查看修改</Button><Button size="small" disabled={state.busy} onClick={(): void => draft.actions.current.discard()}>放弃本次修改</Button></Space>)}</Space>} />}
       </div>
-      <div className={stage === 1 ? 'stage-content space-y-4' : 'page-hidden'}>
+      {notice && <Alert type="info" message={notice} action={notice.includes('方案已就绪') ? <Button onClick={(): void => setStage(1)}>查看方案结果</Button> : undefined} />}
+      <PetStoryCurrentTasks project={p} onContinue={(): void => { void state.continuePromptStage(); }} />
+      <div hidden={stage !== 0} className={stage === 0 ? 'stage-content space-y-4':'page-hidden'}>
+        <Card title="直接输入剧本"><Segmented aria-label="剧本输入方式" value={inputMode} options={[{value:'script',label:'直接输入剧本'},{value:'link',label:'从抖音链接辅助提取'}]} onChange={(value): void => setInputMode(value as 'script'|'link')} />
+          {inputMode === 'link' && <div className="space-y-2 mt-3"><p>保存来源链接，复制提示词到手机豆包提取故事，再粘贴到下方原文框。桌面不读取链接视频。</p><TextArea id="petstory-link" aria-label="抖音分享文本或链接" value={link} onChange={(event): void => { setLinkEditing(true);setLink(event.target.value); }} /><Button disabled={state.busy || !linkDirty} onClick={(): void => { void state.saveSource(link).then((): void => {if (!usePetStoryStore.getState().error) setLinkEditing(false);}); }}>保存链接</Button><Button disabled={!p.source.url} onClick={(): void => { void navigator.clipboard.writeText(mobileStoryPrompt(p)).then((): void => setNotice('手机提取提示词已复制，取得故事后粘贴下方。')); }}>复制手机豆包提示词</Button></div>}
+          <div className="mt-3"><label htmlFor="petstory-script">完整剧本原文</label><TextArea id="petstory-script" aria-label="完整剧本原文" value={sourceText} readOnly={state.busy || planLocked(p)} autoSize={{minRows:8,maxRows:18}} showCount maxLength={50000} placeholder="粘贴完整故事，无需链接或 JSON。" onChange={(event): void => {setSourceEditing(true);setSourceText(event.target.value);}} /></div>
+          <p className="mt-3">制作演员：{Object.entries(profileDraft.characters).map(([id,character]): string => `${id === 'lulu' ? '噜噜' : id === 'lumei' ? '噜妹' : p.plan?.characters.find((item): boolean => item.id===id)?.name || (id.startsWith('support-') ? '可选配角' : id)}（${character.role === 'supporting' ? '可选配角' : '主演'}）`).join('、')}。未指定配角由剧情决定；可在下方展开编辑。</p>
+          <div id="petstory-profile"><PromptProfileEditor project={p} profile={profileDraft} setProfile={setProfileDraft} disabled={state.busy || planLocked(p)} onDirtyChange={setProfileDirty} /></div>
+          <Space wrap className="mt-3"><Checkbox checked={state.freeChatConfirmed} onChange={(event): void => state.setFreeChatConfirmed(event.target.checked)}>本人已确认执行账号普通 Chat 免费可用</Checkbox><Checkbox checked={state.autoRepair} onChange={(event): void => state.setAutoRepair(event.target.checked)}>回复缺项时允许最多一次自动修订</Checkbox><Button disabled={state.busy || !sourceDirty || !sourceText.trim()} onClick={(): void => { void saveStory(); }}>仅保存剧本</Button></Space>
+          <p>点击上方“保存并分析剧本”才发起文字请求；当前链路由工具自动发送。保存、导航和打开项目不会发送。</p>
+        </Card>
+      </div>
+      <div hidden={stage !== 1} className={stage === 1 ? 'stage-content space-y-4':'page-hidden'}>
+        {p.plan && <Card title="当前采用方案 · 请核对制作依据"><p>{p.plan.understanding || p.plan.sourceSummary}</p><p>{p.plan.adaptedStory}</p><p>人物 {p.plan.characters.length} · 道具 {p.plan.props?.length || 0} · 场景 {p.plan.scenes?.length || 0} · 镜头 {p.plan.shots.length}</p><div className="journey-character-map">{p.plan.characters.map((character): React.ReactNode => <p key={character.id}><strong>{character.aliases?.join('、') || '来源角色见理解'} → {character.name}</strong> · {character.role==='main'?'主演':'配角'}<br/>{character.description}</p>)}</div>{p.plan.shots.map((shot): React.ReactNode => <p key={shot.id}><strong>镜头 {shot.order} · {shot.durationSeconds} 秒</strong> {shot.action}<br/>{shot.startState} → {shot.endState}</p>)}{p.storyApproval && <Tag>已有制作依据确认记录；修改后请重新确认当前方案</Tag>}</Card>}
+        <PetStoryRuntime project={p} disabled={state.busy || dirty || profileDirty || sourceDirty || planLocked(p)} />
+      </div>
+      <div id="petstory-materials" hidden={stage !== 2} className={stage === 2 ? 'stage-content':'page-hidden'}><PetStoryMaterials project={p} disabled={state.busy || dirty || profileDirty} generationBlocked={sourceDirty} onNavigate={(target,objectId): void => navigate(target==='plan'?'plan':'keyframes',objectId)} /></div>
+      <div hidden={![3,4,6].includes(stage)} className={[3,4,6].includes(stage)?'stage-content':'page-hidden'}><PetStoryCanvas key={p.id} project={p} legacyDirty={dirty || profileDirty || sourceDirty} onDirtyChange={setCanvasDirty} materials={null} controls={null} view={stage===3?'keyframes':stage===4?'videos':'panorama'} activeShotId={selectedShotId} onNavigate={navigate} /></div>
+      {stage === 5 && <PetStoryResults project={p} onNavigate={navigate} />}
+      <div id="petstory-advanced" tabIndex={-1} className={stage === 7 ? 'stage-content space-y-4' : 'page-hidden'}>
       {!plan && <Empty description="保存手机故事并生成制作方案后，在这里整理角色与分镜" />}
       {plan && <>
         <ConfigProvider componentDisabled={state.busy || planLocked(p)}>
@@ -321,9 +305,9 @@ export const PetStoryPanel: React.FC = () => {
         </Card>
         <PetStoryPlanAssets plan={plan} disabled={state.busy || planLocked(p)} edit={edit} />
         </ConfigProvider>
-        <Space wrap><Title level={5} className="!m-0">{plan.shots.length} 个镜头 · {plan.characters.length} 个角色</Title><Button onClick={addShot} disabled={state.busy || planLocked(p)}>增加镜头</Button><Button type="primary" disabled={!dirty || state.busy || planLocked(p)} onClick={(): void => { void state.savePlan(plan).then((): void => { if (!usePetStoryStore.getState().error) setDirty(false); }); }}>校验并保存所有修改</Button>{dirty && <Tag color="orange">有未保存修改</Tag>}</Space>
+        <Space wrap><Title level={5} className="!m-0">{plan.shots.length} 个镜头 · {plan.characters.length} 个角色</Title><Button onClick={addShot} disabled={state.busy || planLocked(p)}>增加镜头</Button><Button type="primary" disabled={!dirty || state.busy || planLocked(p)} onClick={(): void => { void savePlanDraft(); }}>校验并保存所有修改</Button>{dirty && <Tag color="orange">有未保存修改</Tag>}</Space>
         <div className="shot-workspace"><nav className="shot-list" aria-label="镜头列表">{plan.shots.map((shot: PetStoryShot): React.ReactNode => <button key={shot.id} className={(plan.shots.find((item): boolean => item.id === selectedShotId)?.id || plan.shots[0]?.id) === shot.id ? 'active' : ''} onClick={(): void => setSelectedShotId(shot.id)}><span className="shot-number">{String(shot.order).padStart(2, '0')}</span><span><strong>{shot.scene || '待填写场景'}</strong><small>{shot.characterIds.map((id: string): string => plan.characters.find((character): boolean => character.id === id)?.name || id).join('、') || '未选角色'}</small><small>{shot.durationSeconds || '—'} 秒 · {shot.transition === 'cut' ? '切镜' : '连续动作'} · {shot.requestedMode}</small></span></button>)}</nav><div className="shot-detail">
-        {plan.shots.map((shot: PetStoryShot, index: number): React.ReactNode => <Card className={(plan.shots.find((item): boolean => item.id === selectedShotId)?.id || plan.shots[0]?.id) === shot.id ? '' : 'page-hidden'} size="small" key={shot.id} title={`镜头 ${shot.order} · ${shot.id}`}>
+        {plan.shots.map((shot: PetStoryShot, index: number): React.ReactNode => <Card className={(plan.shots.find((item): boolean => item.id === selectedShotId)?.id || plan.shots[0]?.id) === shot.id ? '' : 'page-hidden'} size="small" key={shot.id} title={`镜头 ${shot.order}`}>
           <Space wrap>
             <Button disabled={index === 0 || state.busy || planLocked(p)} onClick={(): void => edit((v: PetStoryPlan): void => { [v.shots[index - 1], v.shots[index]] = [v.shots[index], v.shots[index - 1]]; v.shots = renumber(v.shots); })}>上移</Button>
             <Button disabled={index === plan.shots.length - 1 || state.busy || planLocked(p)} onClick={(): void => edit((v: PetStoryPlan): void => { [v.shots[index + 1], v.shots[index]] = [v.shots[index], v.shots[index + 1]]; v.shots = renumber(v.shots); })}>下移</Button>
@@ -346,28 +330,13 @@ export const PetStoryPanel: React.FC = () => {
               <Select disabled={planLocked(p) || state.busy} aria-label={`${shot.id}请求模式`} value={shot.requestedMode} options={[{ value: 'auto', label: '自动选择' }, { value: 'first_frame', label: '首帧' }, { value: 'first_last_frame', label: '首尾帧（待能力确认）' }, { value: 'reference', label: '参考图' }]} onChange={(value: PetStoryShot['requestedMode']): void => updateShot(shot.id, { requestedMode: value, prompts: { ...shot.prompts, lastFrame: value === 'first_last_frame' ? shot.prompts.lastFrame || blankPrompt() : shot.prompts.lastFrame } })} />
             </Space>
             <Space wrap><Button disabled={disabled || !!plan.scenes} onClick={(): void => { void state.addSceneReference(shot.id); }}>添加本镜头场景参考图</Button>{shot.sceneReferenceAssetIds?.map((id): React.ReactNode => <ReferenceImage key={id} projectId={p.id} assetId={id} name="本镜场景" />)}</Space>
-            <div className="prompt-workspace"><Text strong>提示词详情</Text><p className="muted-text">最终正文 final 加上实际模式与素材用途组成提交全文；可在下方回读。手改后重新优化只保存候选，接受后再保存。</p><Tabs items={(['firstFrame', 'lastFrame', 'video'] as const).filter((kind): boolean => !!shot.prompts[kind]).map((kind): { key: string; label: string; children: React.ReactNode } => {
-              const prompt = shot.prompts[kind] as PetStoryPrompt;
-              return { key: kind, label: promptLabels[kind], children: <><Space wrap><Tag>{prompt.rulesVersion === 'manual' ? '尚未优化' : prompt.rulesVersion}</Tag>{prompt.edited && <Tag color="purple">已手动编辑</Tag>}</Space><Tabs defaultActiveKey="final" type="card" size="small" items={[
-                { key: 'original', label: '原始', children: <pre className="prompt-readonly">{prompt.original || '暂无原始文本'}</pre> },
-                { key: 'optimized', label: '优化候选', children: <><pre className="prompt-readonly">{prompt.optimized || '尚未通过 Chat 优化'}</pre><Button disabled={planLocked(p) || state.busy || !prompt.optimized || prompt.final === prompt.optimized} onClick={(): void => updatePrompt(shot.id, kind, prompt.optimized)}>采用候选为最终正文（待保存）</Button><Text type="secondary"> 未采用时保留当前手改。</Text></> },
-                { key: 'final', label: '最终正文', children: <TextArea readOnly={planLocked(p)} aria-label={`${shot.id}${kind}最终提示词`} value={prompt.final} onChange={(event): void => updatePrompt(shot.id, kind, event.target.value)} autoSize={{ minRows: 5, maxRows: 16 }} /> },
-              ]} /><TooltipPrompt locked={planLocked(p)} dirty={dirty} confirmed={state.freeChatConfirmed}><Button disabled={disabled || !state.freeChatConfirmed} onClick={(): void => { void state.optimize(shot.id, kind); }}>仅重新优化此项</Button></TooltipPrompt><CompiledPromptDetails project={p} shot={shot} kind={kind} dirty={dirty || profileDirty} /></> };
-            })} /></div>
             <Button disabled={disabled} onClick={(): void => { void state.draftFinal(shot.id); }}>检查首帧制作前置条件</Button>
           </div>
         </Card>)}
         </div></div>
       </>}
       </div>
-      <div className={stage === 2 || stage === 3 ? 'stage-content space-y-4' : 'page-hidden'}>
-        {stage === 3 && plan && !p.production && <Alert type="info" message="尚未开始制作。请先在制作准备中核对入口与数量，再明确授权生成素材。" action={<Button onClick={(): void => setStage(2)}>前往制作准备</Button>} />}
-        {!plan ? <Empty description="先生成并保存制作方案" /> : <ProductionControls project={p} disabled={state.busy || dirty || profileDirty || sourceDirty} view={stage === 3 ? 'progress' : 'prepare'} />}
-        {stage === 3 && p.assets.some((asset): boolean => asset.kind === 'character') && <Card size="small" title="角色参考素材"><div className="shot-media-strip">{p.assets.filter((asset): boolean => asset.kind === 'character').map((asset): React.ReactNode => <div key={asset.id}><Tag>{p.plan?.characters.find((character): boolean => character.id === asset.characterId)?.name || asset.characterId || '角色参考'}</Tag><ReferenceImage projectId={p.id} assetId={asset.id} name="角色参考" /></div>)}</div></Card>}
-        <p className="muted-text">制作完成仅表示逐镜素材已生成及下载；完整短剧合成尚未实现。首帧／首尾帧原生能力以当前入口核对为准。</p>
-      </div>
+      <div hidden={stage !== 7} className={stage === 7 ? 'stage-content':'page-hidden'}><Collapse items={[{key:'production',label:'高级批量制作、模式备选及原批次恢复',children:<ProductionControls project={p} disabled={state.busy || drafts.length>0} view="prepare" showMaterials={false} />},{key:'progress',label:'原批次素材、多图选择与连续镜头记录',children:<ProductionControls project={p} disabled={state.busy || drafts.length>0} view="progress" showMaterials={false} />}]} /></div>
     </>}
   </section>;
 };
-
-const TooltipPrompt: React.FC<{ locked: boolean; dirty: boolean; confirmed: boolean; children: React.ReactNode }> = ({ locked, dirty, confirmed, children }): React.ReactElement => <div><span title={locked ? '制作中方案已锁定' : dirty ? '请先保存方案修改' : !confirmed ? '请先在故事输入确认原账号普通 Chat 免费' : '发起一次新的普通 Chat 优化请求'}>{children}</span></div>;

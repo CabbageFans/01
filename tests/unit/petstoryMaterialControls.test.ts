@@ -1,4 +1,4 @@
-/** 实际素材卡片权限回归：文字准备不依赖剧本确认，媒体仍受原门禁约束。 */
+/** 素材卡片离线权限投影回归；静态渲染不计作真实界面验收。主进程资格测试另行覆盖。 */
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -8,6 +8,8 @@ import { usePetStoryStore } from '../../src/store/usePetStoryStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
 import { petStoryWritingModel } from '../../src/utils/petstoryCandidate';
 import { promptWritingTarget } from '../../main/utils/petstoryEligibility';
+
+vi.mock('../../src/components/usePetStoryGenerationEligibility', () => ({ usePetStoryGenerationEligibility: () => ({ eligibility: { ready: true, blockers: [] }, loading: false, error: '', refresh: vi.fn() }) }));
 
 const initial = { petstory: usePetStoryStore.getState(), tasks: useTaskStore.getState() };
 const now = '2026-10-26T00:00:00.000Z';
@@ -64,7 +66,7 @@ describe('素材文字与媒体独立门禁', (): void => {
     const html = render();
     for (const label of ['豆包重新生成此素材提示词', '审查本项素材正文（暂无图片）', '采用此候选']) expect(button(html, label)).not.toContain('disabled');
     expect(editor(html)).not.toContain('disabled');
-    for (const label of ['上传图片替换', '接受当前图片', '生成此基础图']) expect(button(html, label)).toContain('disabled');
+    for (const label of ['上传已有图片', '查看后确认使用这张图片', '生成此基础图']) expect(button(html, label)).toContain('disabled');
     const selectInput = html.match(/<input\b[^>]*>/g)?.find((entry): boolean => entry.includes('scene:location选择已有图片'));
     expect(selectInput).toContain('disabled');
   });
@@ -85,7 +87,7 @@ describe('素材文字与媒体独立门禁', (): void => {
     expect(button(render(), '生成此基础图')).toContain('disabled');
     usePetStoryStore.setState({ capability });
     expect(button(render(), '生成此基础图')).not.toContain('disabled');
-    expect(button(render(), '上传图片替换')).not.toContain('disabled');
+    expect(button(render(), '上传已有图片')).not.toContain('disabled');
   });
   it('结束等待保留原bound记录，素材重生与编辑计划恢复；无关待收取素材不锁本项', (): void => {
     const job = project.jobs[0]; job.status = 'bound'; job.endedWaitingAt = now;

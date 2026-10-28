@@ -125,6 +125,10 @@
 .canvas-prompt-input.ant-input:focus { border-color:#0caa9a; box-shadow:0 0 0 2px #0caa9a15; }
 .canvas-prompt-modal .ant-btn-primary { background:#0caa9a !important; border-color:#0caa9a !important; }
 .canvas-prompt-modal .ant-btn-primary:disabled { background:#f6f8f8 !important; border-color:#e2e9e9 !important; }
+/* 全文与长候选在弹窗内滚动，窄窗口仍能直接返回或保存。 */
+.canvas-prompt-modal { top:24px; padding-bottom:24px; }
+.canvas-prompt-modal .ant-modal-body { max-height:calc(100vh - 190px); overflow-y:auto; overscroll-behavior:contain; }
+.canvas-prompt-modal textarea.canvas-prompt-input { height:min(48vh,460px); min-height:180px; max-height:58vh; resize:vertical; }
 .canvas-runtime { margin-top:16px; padding-top:14px; border-top:1px solid #e1ebe8; }
 .canvas-runtime-results { margin-top:12px; }
 .canvas-runtime-result { padding:12px 0; border-bottom:1px solid #e1ebe8; overflow-wrap:anywhere; }
@@ -132,3 +136,27 @@
 .canvas-runtime-result details>div { margin-top:10px; padding-top:8px; border-top:1px solid #e7efec; }
 .canvas-runtime-result p { white-space:pre-wrap; }
 .canvas-review-issue { margin:10px 0; padding:10px; border:1px solid #e1ebe8; border-radius:7px; background:#f8fbfa; }
+/* 阶段操作放在缩放之外；全景保留原画布，同一组编辑器不因导航重建。 */
+.journey-sticky { position:relative; padding:12px; background:var(--bg-primary,#f5f4fa); border:1px solid #a29bfe40; border-radius:10px; box-shadow:0 3px 12px #362b5b0a; }
+.journey-sticky .petstory-stages { display:flex; flex-wrap:wrap; gap:5px; margin:0 0 10px; }
+.journey-sticky .petstory-stages button { flex:1 0 120px; min-width:0; padding:8px; font-size:13px; }
+.journey-recommendation { display:flex; align-items:center; justify-content:space-between; gap:15px; margin-bottom:12px; }
+.journey-recommendation strong { font-size:16px; }
+.journey-recommendation p { margin:5px 0; font-size:13px; }
+.journey-recommendation small { color:#7c7893; }
+.journey-recommendation>.ant-btn { flex-shrink:0; max-width:380px; height:auto; min-height:36px; white-space:normal; }
+.canvas-stage-keyframes .canvas-viewport,.canvas-stage-videos .canvas-viewport { height:auto; min-height:350px; overflow:visible; background-image:none; padding:16px; cursor:default; touch-action:auto; }
+.canvas-stage-keyframes .canvas-content,.canvas-stage-videos .canvas-content { position:relative; width:auto; padding:0; }
+.canvas-stage-keyframes .canvas-column-titles,.canvas-stage-videos .canvas-column-titles,.canvas-stage-keyframes .canvas-story-column,.canvas-stage-videos .canvas-story-column { display:none; }
+.canvas-stage-keyframes .canvas-shot-rows,.canvas-stage-videos .canvas-shot-rows { margin:0; gap:24px; }
+.canvas-stage-keyframes .canvas-shot-row { grid-template-columns:minmax(300px,1.15fr) minmax(280px,1fr); gap:16px; }
+.canvas-stage-keyframes .canvas-shot-row>.canvas-node:nth-child(n+3) { display:none; }
+.canvas-stage-videos .canvas-shot-row { grid-template-columns:minmax(300px,1fr) minmax(280px,1fr); gap:16px; }
+.canvas-stage-videos .canvas-shot-row>.canvas-node:nth-child(-n+2) { display:none; }
+.canvas-stage-keyframes .canvas-shot-row>.canvas-node::after,.canvas-stage-videos .canvas-shot-row>.canvas-node::after { display:none; }
+.canvas-stage-keyframes .canvas-zoom,.canvas-stage-videos .canvas-zoom { display:none; }
+.canvas-stage-keyframes .canvas-navigation,.canvas-stage-videos .canvas-navigation { position:sticky; bottom:0; width:max-content; max-width:100%; flex-wrap:wrap; }
+.canvas-stage-keyframes .canvas-node .ant-btn,.canvas-stage-videos .canvas-node .ant-btn { font-size:13px; }
+.canvas-stage-keyframes .canvas-hint,.canvas-stage-videos .canvas-hint,.canvas-stage-keyframes .canvas-error,.canvas-stage-videos .canvas-error { font-size:12px; }
+.canvas-stage-keyframes .canvas-node,.canvas-stage-videos .canvas-node { scroll-margin-top:300px; }
+@media(max-width:1000px) { .journey-recommendation{align-items:flex-start;flex-direction:column}.canvas-stage-keyframes .canvas-shot-row,.canvas-stage-videos .canvas-shot-row{grid-template-columns:1fr}.journey-sticky{position:relative}.journey-sticky .petstory-stages button{flex-basis:28%} }

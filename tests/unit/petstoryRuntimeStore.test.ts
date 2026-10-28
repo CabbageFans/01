@@ -76,6 +76,64 @@ afterEach(async (): Promise<void> => {
   vi.unstubAllGlobals();
 });
 async function finishCurrent(): Promise<void> { await usePetStoryStore.getState().collect(project.jobs.at(-1)!.id); }
+it('新建可显式选择账号与关联项目，并保留用户当前浏览账号与全局项目', async (): Promise<void> => {
+  const selectedBefore = useAccountStore.getState().selectedAccountId;
+  const activeBefore = useProjectStore.getState().activeProjectId;
+  const create = vi.fn(async (): Promise<PetStoryResult> => ({ success: true, project }));
+  window.electronAPI.petstory.create = create;
+  await usePetStoryStore.getState().createProject({ accountId: 'TEST-explicit-account', studioProjectId: 'TEST-explicit-studio' });
+  expect(create).toHaveBeenCalledWith('TEST-explicit-studio', 'TEST-explicit-account');
+  expect(useAccountStore.getState().selectedAccountId).toBe(selectedBefore);
+  expect(useProjectStore.getState().activeProjectId).toBe(activeBefore);
+  expect(prepareRuntime).not.toHaveBeenCalled();
+});
+it.each(['injecting', 'submitting', 'generating'] as const)('打开项目时另一账号%s：保留项目绑定，并按原交互租约决定是否切换浏览账号', async (automationState): Promise<void> => {
+  const bound = useAccountStore.getState().accounts[0]; const other = { ...bound, id: 'TEST-other-browsing', name: 'TEST 其他浏览账号', partition: 'TEST-other-partition' };
+  vi.stubGlobal('localStorage', { setItem: vi.fn() });
+  const select = vi.fn((accountId: string | null): void => useAccountStore.setState({ selectedAccountId: accountId }));
+  useAccountStore.setState({ accounts: [bound, other], selectedAccountId: other.id, selectAccount: select }); useTaskStore.setState({ accountAutomationState: { [other.id]: automationState } });
+  const before = structuredClone(project); await usePetStoryStore.getState().openProject();
+  expect(usePetStoryStore.getState().project).toEqual(before); expect(usePetStoryStore.getState().project?.accountId).toBe(bound.id); expect(usePetStoryStore.getState().error).toBe('');
+  if (automationState === 'generating') { expect(select).toHaveBeenCalledWith(bound.id); expect(useAccountStore.getState().selectedAccountId).toBe(bound.id); }
+  else { expect(select).not.toHaveBeenCalled(); expect(useAccountStore.getState().selectedAccountId).toBe(other.id); }
+  expect(useTaskStore.getState().accountAutomationState).toEqual({ [other.id]: automationState }); expect(prepareRuntime).not.toHaveBeenCalled();
+});
+it('素材入口检查请求携带图片类型并定位原绑定账号，不发文字创作请求', async (): Promise<void> => {
+  const value = capability(); const dispatch = vi.fn((event: CustomEvent<{ kind?: 'image' | 'video'; accountId: string; resolve: (result: PetStoryCapability) => void }>): boolean => {
+    expect(event.detail.kind).toBe('image'); expect(event.detail.accountId).toBe(project.accountId); event.detail.resolve(value); return true;
+  });
+  Object.assign(window, { dispatchEvent: dispatch });
+  await usePetStoryStore.getState().inspectCapability(true, 'image');
+  expect(dispatch).toHaveBeenCalledOnce(); expect(usePetStoryStore.getState()).toMatchObject({ capability: value, capabilityCheckedInSession: true });
+  expect(prepareRuntime).not.toHaveBeenCalled();
+});
+it.each(['done', 'submitted'] as const)('原媒体任务%s后重开可只读恢复，向后台传未知免费状态阻断任何后续新增生成', async (status): Promise<void> => {
+  const savedCapability = capability(); savedCapability.freeEvidence = 'user_confirmed';
+  const task: Task = { id: 'TEST-media-task', projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'image', status: status === 'done' ? 'done' : 'paused', prompt: 'TEST 原媒体请求', result: null, outputs: [], createdAt: now, updatedAt: now,
+    ...(status === 'submitted' ? { runtime: { runId: 'TEST-media-run', attempt: 1, stage: 'generating', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now, input: { mode: 'image', prompt: 'TEST 原媒体请求', attachments: [] } } } : {}),
+  };
+  tasks.push(task); project.production = { phase: 'shots', state: 'paused', planHash: 'TEST', approvedAt: now, capability: savedCapability, fallbacks: {}, shots: {}, steps: [{ id: 'TEST-step', shotId: project.plan!.shots[0].id, kind: 'firstFrame', taskId: task.id, status: 'bound', inputHash: 'TEST', attachmentAssetIds: [] }], message: 'TEST 暂停' };
+  const resume = vi.fn(async (): Promise<PetStoryResult> => ({ success: true, project }));
+  const advance = vi.fn(async (): Promise<PetStoryResult> => ({ success: true, project }));
+  window.electronAPI.petstory.resumeProduction = resume; window.electronAPI.petstory.advanceProduction = advance;
+  usePetStoryStore.setState({ project, capability: null, capabilityCheckedInSession: false }); useTaskStore.setState({ tasks });
+  const before = structuredClone(project.production.capability);
+  await usePetStoryStore.getState().resumeProduction();
+  expect(resume).toHaveBeenCalledWith(project.id, { ...before, freeEvidence: 'unknown' });
+  expect(usePetStoryStore.getState().error).toBe(''); expect(usePetStoryStore.getState().capabilityCheckedInSession).toBe(false);
+  expect(savedCapability).toEqual(before); expect(tasks).toHaveLength(1); expect(prepareRuntime).not.toHaveBeenCalled(); expect(generateMaterials).not.toHaveBeenCalled();
+});
+it('原媒体任务未发送且未检查当前入口时，恢复仍停在入口核对，不调用后台继续或推进', async (): Promise<void> => {
+  const task: Task = { id: 'TEST-media-task', projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'image', status: 'paused', prompt: 'TEST 原媒体请求', result: null, outputs: [], createdAt: now, updatedAt: now };
+  tasks.push(task); project.production = { phase: 'shots', state: 'paused', planHash: 'TEST', approvedAt: now, capability: capability(), fallbacks: {}, shots: {}, steps: [{ id: 'TEST-step', shotId: project.plan!.shots[0].id, kind: 'firstFrame', taskId: task.id, status: 'bound', inputHash: 'TEST', attachmentAssetIds: [] }], message: 'TEST 暂停' };
+  const resume = vi.fn(async (): Promise<PetStoryResult> => ({ success: true, project }));
+  const advance = vi.fn(async (): Promise<PetStoryResult> => ({ success: true, project }));
+  window.electronAPI.petstory.resumeProduction = resume; window.electronAPI.petstory.advanceProduction = advance;
+  usePetStoryStore.setState({ project, capability: null, capabilityCheckedInSession: false }); useTaskStore.setState({ tasks });
+  await usePetStoryStore.getState().resumeProduction();
+  expect(resume).not.toHaveBeenCalled(); expect(advance).not.toHaveBeenCalled();
+  expect(usePetStoryStore.getState().error).toContain('核对当前入口'); expect(tasks).toHaveLength(1);
+});
 async function failOriginalBatch(): Promise<PetStoryChatJob> {
   await usePetStoryStore.getState().regenerateAllPrompts(); const original = project.jobs[0];
   collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => {
@@ -186,7 +244,7 @@ describe('产品运行时按钮到主进程请求', (): void => {
     project.plan!.understanding = 'TEST 当前剧本理解'; project.plan!.sceneDesign = 'TEST 全场空间连续性';
     project.jobs.push({ id: 'candidate-reply', taskId: 'candidate-task', kind: 'analysis', status: 'applied', inputHash: 'TEST', sourceUrl: '', sourceStoryId: project.mobileStory!.id, requestId: 'candidate-request', rulesVersion: 'TEST-runtime', ruleFiles: ['TEST/storyboard.md'], resultStatus: 'candidate', parsedResult: { plan: structuredClone(project.plan) }, rawText: 'TEST 原回复记录' });
     const html = renderToStaticMarkup(React.createElement(PetStoryRuntime, { project, disabled: false }));
-    expect(html).toContain('重新分析与设计分镜候选'); expect(html).toContain('补齐人物／道具／场景'); expect(html).toContain('采用此分镜方案');
+    expect(html).toContain('重新分析，生成新方案候选'); expect(html).toContain('补齐人物／道具／场景'); expect(html).toContain('采用此分镜方案');
     expect(html).toContain('TEST 当前剧本理解'); expect(html).toContain('TEST 全场空间连续性');
     const promptHtml = renderToStaticMarkup(React.createElement(CanvasPromptEditor, { project, shot: project.plan!.shots[0], kind: 'video', disabled: false, generationBlocked: false, dirtyChanged: (): void => undefined }));
     expect(promptHtml).toContain('审查本项正文'); expect(promptHtml).toContain('文字计划稿');

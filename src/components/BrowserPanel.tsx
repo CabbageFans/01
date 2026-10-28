@@ -1259,14 +1259,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
   useEffect((): (() => void) => {
     const inspect = (event: Event): void => {
-      const detail = (event as CustomEvent<{ accountId: string; freeConfirmed: boolean; resolve: (value: import('@doubao-studio/contracts').PetStoryCapability) => void; reject: (error: Error) => void }>).detail;
+      const detail = (event as CustomEvent<{ accountId: string; freeConfirmed: boolean; kind?: 'image' | 'video'; resolve: (value: import('@doubao-studio/contracts').PetStoryCapability) => void; reject: (error: Error) => void }>).detail;
       const webview = registryRef.current.get(detail.accountId);
       if (!webview || !canSelectAccount(detail.accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState)) || useTaskStore.getState().accountBusy[detail.accountId]) { detail.reject(new Error('原账号窗口未就绪或正在执行任务')); return; }
       // 核对的是项目原账号；沿用前台租约，只改变浏览选中与可见布局，不导航或提交。
       useAccountStore.getState().selectAccount(detail.accountId);
       void new Promise<void>((resolve): void => { requestAnimationFrame((): void => { requestAnimationFrame((): void => resolve()); }); }).then((): Promise<AccountAvailability> => performAvailabilityCheck(detail.accountId, webview, 'pre_task')).then(async (availability): Promise<void> => {
         if (availability.state !== 'ready') throw new Error('请先由本人处理登录或验证，未检查／上传／提交');
-        detail.resolve(await inspectPetStoryCapability(webview, detail.accountId, detail.freeConfirmed));
+        detail.resolve(await inspectPetStoryCapability(webview, detail.accountId, detail.freeConfirmed, detail.kind));
       }).catch((error: unknown): void => detail.reject(error instanceof Error ? error : new Error('入口核对失败')));
     };
     window.addEventListener('petstory-inspect-capability', inspect);

@@ -18,7 +18,7 @@ function tree(node: React.ReactNode): React.ReactElement[] {
 }
 function view(): React.ReactElement[] { return tree(PetStoryRuntime({ project, disabled: false })); }
 function reviewButton(): { disabled: boolean; onClick: () => void } {
-  return view().find((entry): boolean => entry.type === Button && (entry.props as { children: string }).children === '审查当前方案与正文')!.props as { disabled: boolean; onClick: () => void };
+  return view().find((entry): boolean => entry.type === Button && (entry.props as { children: string }).children === '审查当前方案与提示词')!.props as { disabled: boolean; onClick: () => void };
 }
 function focusInput(): { disabled: boolean; maxLength: number; onChange: (event: { target: { value: string } }) => void } {
   return view().find((entry): boolean => entry.type === Input.TextArea)!.props as ReturnType<typeof focusInput>;
