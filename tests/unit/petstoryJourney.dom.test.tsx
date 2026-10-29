@@ -324,6 +324,37 @@ describe('默认可见的任务恢复与新建账号处理', (): void => {
     const button = screen.getByRole('button', { name: '读取原任务已保存回复' }); expect(button.hasAttribute('disabled')).toBe(false);
     fireEvent.click(button); await waitFor((): void => expect(collect).toHaveBeenCalledWith(job.id)); expect(p.jobs).toEqual([job]);
   });
+  it('切镜引用冲突在修订用完后仍有就地整理入口，点击只收取原回复且不要求免费发送确认', async (): Promise<void> => {
+    const root: PetStoryChatJob = { id: 'TEST-analysis', taskId: 'TEST-root-task', kind: 'analysis', status: 'invalid', requestId: 'TEST-root-request', inputHash: 'TEST', sourceUrl: '', error: 'TEST 原分析错误', rawText: 'TEST 原回复' };
+    const repair: PetStoryChatJob = { ...root, id: 'TEST-repair', taskId: 'TEST-repair-task', kind: 'repair', parentJobId: root.id, error: 's2切镜不应绑定上一镜头', rawText: 'TEST 已保存分镜回复' };
+    p.jobs = [root, repair];
+    const task: Task = { id: repair.taskId, projectId: p.studioProjectId, assignedAccountId: p.accountId, mode: 'chat', status: 'done', prompt: 'TEST 原修订请求', result: null, outputs: [], createdAt: now, updatedAt: now,
+      runtime: { runId: 'TEST-run', attempt: 1, stage: 'completed', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now, input: { mode: 'chat', prompt: 'TEST 原修订请求', attachments: [] }, chatResponse: { text: repair.rawText!, capturedAt: now } } };
+    const collect = vi.fn(async (): Promise<void> => updateProject((project): void => {
+      const job = project.jobs.find((item): boolean => item.id === repair.id)!;
+      job.status = 'applied'; job.error = undefined; job.resultStatus = 'candidate';
+      job.formatCorrections = ['镜头 2：保留正常切镜，移除了多余的前镜头绑定。'];
+    }));
+    const correctOnce = vi.fn(async (): Promise<void> => undefined);
+    const startBoundChat = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ project: p, collect, correctOnce, startBoundChat, freeChatConfirmed: false });
+    useTaskStore.setState({ tasks: [task] });
+    const { rerender } = render(<PetStoryCurrentTasks project={p} />);
+    expect(screen.getByText('分镜结构待整理')).toBeDefined();
+    expect(screen.queryByRole('button', { name: '按具体缺项修订一次' })).toBeNull();
+    const button = screen.getByRole('button', { name: '读取原回复并整理分镜结构' });
+    expect(button.hasAttribute('disabled')).toBe(false);
+    expect(collect).not.toHaveBeenCalled(); fireEvent.click(button);
+    await waitFor((): void => expect(collect).toHaveBeenCalledExactlyOnceWith(repair.id));
+    rerender(<PetStoryCurrentTasks project={usePetStoryStore.getState().project!} />);
+    expect(screen.getByText('已整理分镜结构')).toBeDefined();
+    expect(screen.getByText('镜头 2：保留正常切镜，移除了多余的前镜头绑定。')).toBeDefined();
+    expect(screen.queryByText('分镜结构待整理')).toBeNull();
+    expect(correctOnce).not.toHaveBeenCalled(); expect(startBoundChat).not.toHaveBeenCalled();
+    expect(usePetStoryStore.getState().analyze).not.toHaveBeenCalled();
+    expect(useTaskStore.getState().tasks).toEqual([task]);
+    expect(usePetStoryStore.getState().project?.jobs.at(-1)?.rawText).toBe(repair.rawText);
+  });
   it.each(['analysis', 'assets', 'review'] as const)('全局%s的修订回复已保存后不再把原缺项列为当前阻断，失败原文保留在诊断', (kind): void => {
     const root: PetStoryChatJob = { id: 'TEST-invalid-parent', taskId: 'TEST-parent-task', kind, status: 'invalid', requestId: 'TEST-parent-request', inputHash: 'TEST', sourceUrl: '', error: 'TEST 原回复已由修订处理', rawText: 'TEST 已保存的原始失败回复' };
     const repair: PetStoryChatJob = { ...root, id: 'TEST-valid-repair', taskId: 'TEST-repair-task', kind: 'repair', parentJobId: root.id, status: 'applied', resultStatus: 'adopted', error: undefined, rawText: 'TEST 已保存的修订回复' };

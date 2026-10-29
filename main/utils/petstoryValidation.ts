@@ -8,6 +8,24 @@ export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('需要 JSON 对象');
   return value as Record<string, unknown>;
 }
+/** 仅规范模型明确声明的正常切镜，不猜测连续关系，也不放宽已保存方案的校验。 */
+export function normalizeAnalysisCuts(answer: Record<string, unknown>): { answer: Record<string, unknown>; corrections: string[] } {
+  const normalized = structuredClone(answer);
+  const corrections: string[] = [];
+  if (Array.isArray(normalized.shots)) normalized.shots.forEach((value: unknown, index: number): void => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    const shot = value as Record<string, unknown>;
+    const previous: unknown = (normalized.shots as unknown[])[index - 1];
+    if (!previous || typeof previous !== 'object' || Array.isArray(previous)) return;
+    const prior = previous as Record<string, unknown>;
+    // 只清理正确相邻引用：未知、自指、跨镜引用及非法 ID 继续由严格校验拒绝。
+    if (shot.transition !== 'cut' || shot.order !== index + 1 || prior.order !== index || typeof prior.id !== 'string'
+      || !/^[a-zA-Z0-9_-]{1,80}$/.test(prior.id) || shot.id === prior.id || shot.previousShotId !== prior.id) return;
+    delete shot.previousShotId;
+    corrections.push(`镜头 ${index + 1}：保留正常切镜，移除了多余的前镜头绑定。`);
+  });
+  return { answer: normalized, corrections };
+}
 export function text(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${field}不能为空`);
   return value;

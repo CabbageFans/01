@@ -363,6 +363,8 @@ export interface PetStoryChatJob {
   promptTask?: PetStoryPromptTaskContract;
   /** 具体可证明的格式、引用或原台词缺项；不代表创作质量评分。 */
   validationIssues?: string[];
+  /** 接收分析回复时按明确切镜关系清理的冗余字段；原回复 rawText 保持原样。 */
+  formatCorrections?: string[];
   /** 当前事实版本，与候选正文分开；旧请求只能保留为过期候选。 */
   resultStatus?: 'candidate' | 'adopted' | 'stale';
   staleReason?: string;

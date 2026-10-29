@@ -7,7 +7,7 @@ import { useTaskStore } from '../store/useTaskStore';
 import { canvasCopyText, canvasJobLabel, canvasPromptNames } from './petStoryCanvasShared';
 import { isSavedReviewResult, readSavedPromptCandidate, reviewMatchesPrompt } from '../utils/petstoryCandidate';
 import type { CanvasDirtyChanged } from './petStoryCanvasShared';
-import { PetStoryChatRecoveryActions } from './PetStoryTaskRecovery';
+import { PetStoryChatRecoveryActions, PetStoryFormatCorrections } from './PetStoryTaskRecovery';
 import { ReviewIssueSelection } from './PetStoryReviewIssues';
 import { usePetStoryDraft, locatePetStoryDraft } from './PetStoryDrafts';
 
@@ -32,7 +32,7 @@ export const PromptProvenance: React.FC<{ job: PetStoryChatJob; task?: Task }> =
   const label = job.endedWaitingAt ? '已结束等待 · 原平台任务状态独立' : pending ? canvasJobLabel(task?.status) : job.status === 'applied' ? '已保存回复来源' : '回复待核对';
 
   const project = usePetStoryStore((state) => state.project);
-  return <>{project && <PetStoryChatRecoveryActions project={project} job={job} task={task} />}<details className="canvas-provenance"><summary>{label}{capturedAt && ` · ${new Date(capturedAt).toLocaleString('zh-CN')}`}</summary>
+  return <>{project && <PetStoryChatRecoveryActions project={project} job={job} task={task} />}<PetStoryFormatCorrections job={job} /><details className="canvas-provenance"><summary>{label}{capturedAt && ` · ${new Date(capturedAt).toLocaleString('zh-CN')}`}</summary>
     <p>任务 {job.taskId}<br />运行 {job.runId || '待启动'}</p>
     {job.rulesVersion && <p>规则 {job.rulesVersion} · 请求 {job.requestId}<br />{job.ruleFiles?.join('\n')}</p>}
     {job.resultStatus === 'stale' && <p role="alert">过期候选：{job.staleReason || '当前事实已经变化，请按新状态重新生成。'}</p>}

@@ -396,7 +396,7 @@ function taskPurpose(options: DramaRequestOptions, hasPlan: boolean): string {
   return `依据当前镜头状态重新撰写 ${options.promptKind} 的完整正文，用具体视觉／表演设计实现镜头职责。`;
 }
 function outputContract(project: PetStoryProject, options: DramaRequestOptions, target: string): string {
-  const envelope = `必须含 requestId:${JSON.stringify(options.requestId)},targetIds:${JSON.stringify([target])}，集合精确相等。`;
+  const envelope = `必须含 requestId:${JSON.stringify(options.requestId)},targetIds:${JSON.stringify([target])}，集合精确相等。` + (options.kind === 'analysis' ? '\n正常切镜（transition="cut"）必须省略 previousShotId，不填 null、空字符串或前镜ID；只有连续动作（transition="continue"）才绑定紧邻上一镜头。' : '');
   if (['optimize', 'materialPrompt', 'revise'].includes(options.kind)) return `${envelope}\n另外仅需 optimized:string，值为完整中文自然语言生成正文，可包含多个段落；不把分析、计划状态、规则清单、解释或审查意见放入 optimized。只为本目标写作，不返回其他目标。`;
   if (options.kind === 'review') return `${envelope}\n返回 issues:[]。每个问题为 {id:稳定英文ID,targetId:materialId或shotId:promptKind,severity:"error"|"suggestion",evidence:实际来源或候选中具体证据,impact:制作影响,requestedChange:局部需达到的结果}。无实际证据不造问题，无问题返回空数组；targetId必须是本项目实际目标，不能把抽象project当修订对象。`;
   const entities = 'characters:[{id:string,name:string,role:"main"|"supporting",purpose:string,description:string（仅可视身份造型）,continuity:string,aliases:string[],designOrigin:"script"|"proposed"}],props:[{id:string,name:string,aliases:string[],description:string（外形材质）,keyStates:string（完整剧情状态说明，必须是文本而非对象或数组）,appearanceState:string（基础图静态状态）,scale:string,designOrigin:"script"|"proposed"}],scenes:[{id:string,name:string,location:string,time:string,lighting:string,layout:string（世界空间锚点与关系）,view:string,designOrigin:"script"|"proposed",parentSceneId?:string（同地点主图ID）}]。没有该类资产就[]。已有角色、道具和场景ID与用户确认资料保留；同物别名合并，不同物不混为一物，同地点切镜复用sceneId。人物和场景图的正文不在此次生成。未明确外观是proposed设计，不能伪称剧本事实。';

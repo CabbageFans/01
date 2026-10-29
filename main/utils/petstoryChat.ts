@@ -3,7 +3,7 @@ import type { PetStoryAssetBindings, PetStoryCapability, PetStoryChatJob, PetSto
 import { orderedChatAssets, promptContextHashInput, PROMPT_RULES_VERSION, assetCharacterIds } from './petstoryPromptQuality';
 import { PetStoryProjects } from './petstoryProject';
 import { archiveCompletedPetStoryProduction } from './petstoryProductionLifecycle';
-import { parsePetStoryAnswer, record, validatePetStoryPlan, runtimePromptIssues } from './petstoryValidation';
+import { parsePetStoryAnswer, record, validatePetStoryPlan, runtimePromptIssues, normalizeAnalysisCuts } from './petstoryValidation';
 import { confirmedCharacterIdentity, materialAsset, syncMaterials } from './petstoryMaterials';
 import { pendingChatConflicts } from './petstoryPending';
 import { inspectPromptCandidate, inspectPromptEligibility, promptContractFactsCurrent, promptWritingTarget } from './petstoryEligibility';
@@ -449,7 +449,7 @@ export class PetStoryChatService {
       else if (!p.mobileStory || job.sourceStoryId !== p.mobileStory.id) throw new Error('旧版链接直读或其他故事的回复仅保留原文，请粘贴手机豆包故事后生成制作方案');
       else if (job.kind === 'materialPrompt') this.applyMaterialPrompt(p, job, answer);
       else if (job.kind === 'optimize') this.applyOptimization(p, job, answer);
-      else this.applyStory(p, answer);
+      else this.applyStory(p, answer, true, job);
       job.status = 'applied';
       job.error = undefined;
       job.validationIssues = undefined;
@@ -472,7 +472,7 @@ export class PetStoryChatService {
     const current = this.markRuntimeFreshness(p, job);
     if (kind === 'analysis') {
       const candidateProject = structuredClone(p);
-      this.applyStory(candidateProject, answer, false);
+      this.applyStory(candidateProject, answer, false, job);
       job.parsedResult = { plan: candidateProject.plan, contentBasis: candidateProject.contentBasis };
       const issues = job.analysisCastBindings && candidateProject.plan ? analysisCastIssues(candidateProject.plan, job.analysisCastBindings) : [];
       if (issues.length) { job.validationIssues = issues; throw new Error(issues[0]); }
@@ -687,7 +687,7 @@ export class PetStoryChatService {
       && unchanged) { target.final = answer.optimized; target.edited = false; }
   }
 
-  private applyStory(p: PetStoryProject, answer: Record<string, unknown>, preserveManual = true): void {
+  private applyStory(p: PetStoryProject, answer: Record<string, unknown>, preserveManual: boolean = true, job?: PetStoryChatJob): void {
     if (answer.storyUsable === false) {
       p.source = { ...p.source, status: 'blocked', reason: typeof answer.reason === 'string' ? answer.reason : '粘贴的故事情节不足以制作方案，请补充开头、变化与结局' };
       // 已有方案及手改 final 保留；不足的回复不能清空用户成果。
@@ -698,7 +698,9 @@ export class PetStoryChatService {
     for (const field of ['beginning', 'middle', 'ending']) {
       if (typeof basis[field] !== 'string' || !(basis[field] as string).trim()) throw new Error('缺少开头、中间变化或结局；不能把标题／封面算作完整分析');
     }
-    const plan = validatePetStoryPlan(answer, true);
+    const normalized = normalizeAnalysisCuts(answer);
+    if (job) job.formatCorrections = normalized.corrections.length ? normalized.corrections : undefined;
+    const plan = validatePetStoryPlan(normalized.answer, true);
     if (!plan.props || !plan.scenes) throw new Error('本次分析缺少动态道具／场景资产集合，请补齐结构，不允许跳过基础素材');
     this.preserveIdentities(p, plan);
     if (preserveManual) this.preserveManualPrompts(p, plan);

@@ -80,6 +80,7 @@ function validateChatRequestFacts(job: PetStoryChatJob): void {
     || Object.entries(job.reviewInputFinals).some(([key, value]): boolean => !/^(?:(?:character|prop|scene):[a-zA-Z0-9_-]{1,80}|[a-zA-Z0-9_-]{1,80}:(?:firstFrame|lastFrame|video))$/.test(key) || typeof value !== 'string'))) throw new Error('保存的审查逐项正文快照无效');
   if (job.requestText !== undefined && (typeof job.requestText !== 'string' || !job.requestText.trim())) throw new Error('保存的 Chat 原请求无效');
   if (job.validationIssues !== undefined && (!Array.isArray(job.validationIssues) || job.validationIssues.some((issue: unknown): boolean => typeof issue !== 'string' || !issue.trim()))) throw new Error('保存的 Chat 具体缺项无效');
+  if (job.formatCorrections !== undefined && (!['analysis', 'repair'].includes(job.kind) || !Array.isArray(job.formatCorrections) || job.formatCorrections.some((item: unknown): boolean => typeof item !== 'string' || !item.trim()))) throw new Error('保存的分镜结构整理记录无效');
   if (job.frameContextHash !== undefined && !/^[a-f0-9]{64}$/.test(job.frameContextHash)) throw new Error('保存的共同帧正文快照无效');
   if (job.previousBoundaryHash !== undefined && !/^[a-f0-9]{64}$/.test(job.previousBoundaryHash)) throw new Error('保存的前镜采用边界快照无效');
   if (job.promptTask) job.promptTask = validatePromptTask(job.promptTask);

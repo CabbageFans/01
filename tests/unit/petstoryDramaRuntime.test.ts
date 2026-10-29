@@ -11,6 +11,7 @@ import { syncMaterials } from '../../main/utils/petstoryMaterials';
 import { compileMaterialPrompt, compilePrompt } from '../../main/utils/petstoryPromptQuality';
 import { PetStoryProductionService } from '../../main/utils/petstoryProduction';
 import { buildPetStoryPromptExport } from '../../main/utils/petstoryExport';
+import { validatePetStoryPlan } from '../../main/utils/petstoryValidation';
 import originalFive from '../fixtures/drama-runtime-input.json';
 
 const prompt = (body: string): PetStoryPrompt => ({ original: body, optimized: body, final: body, edited: false, rulesVersion: 'TEST-old' });
@@ -81,6 +82,64 @@ async function pauseUncertain(job: PetStoryChatJob, submitted = true): Promise<T
 }
 
 describe('drama runtime 完整正文与候选采用', (): void => {
+  it.each([['analysis', true], ['analysis', false], ['repair', true], ['repair', false]] as const)('%s回复（已有方案=%s）按明确切镜清理冗余前镜引用，保留原文与处理记录且不新增请求', async (kind, hasPlan): Promise<void> => {
+    const incoming = await configuredCastPlan();
+    if (!hasPlan) { p.plan = undefined; p.materials = undefined; p = await projects.write(p); }
+    let job = await prepare('analysis');
+    if (kind === 'repair') {
+      await finish(job, {}, false, '{ TEST 不完整回复');
+      job = await prepare('repair', { parentJobId: job.id });
+    }
+    const previous = structuredClone(p.plan);
+    incoming.shots[1].previousShotId = incoming.shots[0].id;
+    const untouched = structuredClone(incoming);
+    const raw = JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, ...incoming, storyUsable: true, contentBasis: { beginning: 'TEST开头', middle: 'TEST变化', ending: 'TEST结局' } });
+    await finish(job, {}, false, raw);
+    const result = p.jobs.at(-1)!;
+    expect(result.status).toBe('applied');
+    expect(result.rawText).toBe(raw);
+    expect(result.formatCorrections).toEqual(['镜头 2：保留正常切镜，移除了多余的前镜头绑定。']);
+    expect(result.parsedResult?.plan?.shots[1]).toMatchObject({ transition: 'cut', action: incoming.shots[1].action, startState: incoming.shots[1].startState, endState: incoming.shots[1].endState });
+    expect(result.parsedResult?.plan?.shots[1].previousShotId).toBeUndefined();
+    expect(incoming).toEqual(untouched);
+    if (hasPlan) expect(p.plan).toEqual(previous);
+    else { expect(p.plan?.shots[1].previousShotId).toBeUndefined(); expect(result.resultStatus).toBe('adopted'); }
+    expect(tasks()).toHaveLength(kind === 'repair' ? 2 : 1);
+    const reopened = await new PetStoryProjects().open(directory);
+    expect(reopened.jobs.at(-1)?.formatCorrections).toEqual(result.formatCorrections);
+    expect(reopened.jobs.at(-1)?.rawText).toBe(raw);
+    // 持久化方案的校验仍严格；仅接收模型分析回复时处理已声明切镜的冗余字段。
+    expect((): PetStoryPlan => validatePetStoryPlan(incoming)).toThrow('切镜不应绑定上一镜头');
+  });
+  it('已用完修订的旧失败记录可重新读取同一已保存回复恢复，不重复发送或覆盖现有方案', async (): Promise<void> => {
+    const incoming = await configuredCastPlan(); const original = await prepare('analysis');
+    await finish(original, {}, false, '{ TEST 不完整回复');
+    const repair = await prepare('repair', { parentJobId: original.id });
+    incoming.shots[1].previousShotId = incoming.shots[0].id;
+    await finish(repair, { ...incoming, storyUsable: true, contentBasis: { beginning: 'TEST开头', middle: 'TEST变化', ending: 'TEST结局' } });
+    const previous = structuredClone(p.plan); const raw = p.jobs.at(-1)!.rawText;
+    Object.assign(p.jobs.at(-1)!, { status: 'invalid', error: 'shot-1切镜不应绑定上一镜头', parsedResult: undefined, formatCorrections: undefined });
+    p = await projects.write(p);
+    const recovered = await chat.collect(p.id, repair.id); p = recovered.project!;
+    expect(recovered.success).toBe(true); expect(p.jobs.at(-1)?.status).toBe('applied');
+    expect(p.jobs.at(-1)?.rawText).toBe(raw); expect(p.plan).toEqual(previous); expect(tasks()).toHaveLength(2);
+    expect(p.jobs[0].status).toBe('invalid');
+  });
+  it.each(['continue', 'unknown', 'wrong-request', 'missing-basis', 'stale'] as const)('整理切镜引用不放行%s错误或采用过期分析', async (state): Promise<void> => {
+    const incoming = await configuredCastPlan(); const job = await prepare('analysis');
+    const previous = structuredClone(p.plan);
+    incoming.shots[1].previousShotId = state === 'continue' || state === 'unknown' ? 'TEST-unknown' : incoming.shots[0].id;
+    if (state === 'continue') incoming.shots[1].transition = 'continue';
+    if (state === 'stale') p = await projects.savePromptModel(p.id, p.revision, 'seedance-2.0');
+    await finish(job, { ...incoming, ...(state === 'wrong-request' ? { requestId: 'TEST-wrong' } : {}), storyUsable: true,
+      ...(state === 'missing-basis' ? {} : { contentBasis: { beginning: 'TEST开头', middle: 'TEST变化', ending: 'TEST结局' } }) });
+    expect(p.jobs.at(-1)?.status).toBe(state === 'stale' ? 'applied' : 'invalid');
+    if (state === 'stale') {
+      expect(p.jobs.at(-1)?.resultStatus).toBe('stale');
+      await expect(chat.adoptPlanCandidate(p.id, p.revision, job.id)).rejects.toThrow('已过期');
+    }
+    expect(p.plan).toEqual(previous); expect(tasks()).toHaveLength(1);
+  });
   it.each(['no-approval', 'legacy-no-profile', 'selected-unapproved', 'approved', 'stale-digest', 'stale-identity-image', 'stale-date'] as const)('同ID%s旧设计不冒充已确认身份，候选与采用保留本次Chat文字', async (state): Promise<void> => {
     const incoming = await configuredCastPlan(); const newDescription = incoming.characters[0].description + '。'; incoming.characters[0].description = newDescription;
     p.plan!.characters = structuredClone(incoming.characters); p.plan!.characters[0].description = 'TEST上次未确认的同ID设计';

@@ -22,6 +22,14 @@ function jobRepairAncestors(project: PetStoryProject, job: PetStoryChatJob): Pet
   return ancestors;
 }
 
+function hasCutBindingIssue(job: PetStoryChatJob): boolean {
+  return job.status === 'invalid' && ['analysis', 'repair'].includes(job.kind) && /^[a-zA-Z0-9_-]+切镜不应绑定上一镜头$/.test(job.error || '');
+}
+
+/** 结构整理可追溯，不把它显示为内容质量或媒体效果通过。 */
+export const PetStoryFormatCorrections: React.FC<{ job: PetStoryChatJob }> = ({ job }): React.ReactElement | null => job.formatCorrections?.length
+  ? <Alert className="mt-2" type="info" showIcon message="已整理分镜结构" description={<ul>{job.formatCorrections.map((item): React.ReactNode => <li key={item}>{item}</li>)}</ul>} /> : null;
+
 export function petStoryJobTargetName(project: PetStoryProject, job: PetStoryChatJob): string {
   const material = project.materials?.find((item): boolean => item.id === job.materialId);
   if (material) return `${material.name} · 基础素材提示词`;
@@ -33,6 +41,7 @@ export function petStoryJobTargetName(project: PetStoryProject, job: PetStoryCha
 
 export function petStoryJobStatus(job: PetStoryChatJob, task?: Task): { title: string; instruction: string } {
   if (job.endedWaitingAt) return { title: '已结束等待', instruction: '平台任务并未取消，也未认定回复已收到或已采用；可只读检查原回复，其他独立目标仍可继续。' };
+  if (hasCutBindingIssue(job)) return { title: '分镜结构待整理', instruction: '回复已明确采用正常切镜，但保留了多余的前镜头绑定。点击下方按钮，工具会读取已有回复并整理这项结构，保留原文、剧情和台词，再完整校验分镜方案。' };
   if (job.status === 'invalid') return { title: '内容需要处理', instruction: '已保留原回复。查看具体问题后修订，或返回对应对象处理；不要重复发送原请求。' };
   if (job.status === 'applied') {
     if (job.resultStatus === 'stale') return { title: '历史回复待核对', instruction: '当前依据已变化，这条回复仅作历史记录；请查看对应对象的当前内容和制作条件。' };
@@ -69,10 +78,11 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
   const canStart = canStartBoundChat(project, job, task, taskState.tasks, taskState.activeTaskId === job.taskId || !!taskState.accountBusy[project.accountId]);
   const canReconcile = job.status === 'bound' && !!task?.runtime?.submittedAt && ['fail', 'paused', 'cancelled', 'waiting_verification'].includes(task.status);
   const conversation = resolveTaskConversationTarget(task);
-  const canRepair = job.status === 'invalid' && !['repair', 'revise'].includes(job.kind) && !!job.requestId && !project.jobs.some((item): boolean => item.kind === 'repair' && item.parentJobId === job.id);
+  const localFormatFix = hasCutBindingIssue(job);
+  const canRepair = !localFormatFix && job.status === 'invalid' && !['repair', 'revise'].includes(job.kind) && !!job.requestId && !project.jobs.some((item): boolean => item.kind === 'repair' && item.parentJobId === job.id);
   return <><Space wrap className="mt-2" aria-label={`${petStoryJobTargetName(project, job)}处理操作`}>
     {task && <Button size="small" onClick={(): void => openOriginalTask(task)}>{conversation.ok ? '打开对应豆包会话' : '打开执行账号豆包'}</Button>}
-    {job.status !== 'applied' && <Button size="small" disabled={state.busy || !task?.runtime?.chatResponse?.text && job.status !== 'captured'} onClick={(): void => { void state.collect(job.id); }}>读取原任务已保存回复</Button>}
+    {job.status !== 'applied' && <Button size="small" type={localFormatFix ? 'primary' : 'default'} disabled={state.busy || !task?.runtime?.chatResponse?.text && job.status !== 'captured'} onClick={(): void => { void state.collect(job.id); }}>{localFormatFix ? '读取原回复并整理分镜结构' : '读取原任务已保存回复'}</Button>}
     {canReconcile && <Button size="small" disabled={state.busy} onClick={(): void => { void state.recoverChat(job.id); }}>检查原回复（不重复发送）</Button>}
     {canStart && <Button size="small" type="primary" disabled={state.busy || !state.freeChatConfirmed} onClick={(): void => { void state.startBoundChat(job.id); }}>{task?.status === 'queued' ? '继续原文字任务（尚未发送）' : '处理阻断后继续原任务（未发送）'}</Button>}
     {canRepair && <Button size="small" disabled={state.busy || !state.freeChatConfirmed} onClick={(): void => { void state.correctOnce(job.id); }}>按具体缺项修订一次</Button>}
@@ -128,9 +138,10 @@ export const PetStoryCurrentTasks: React.FC<{ project: PetStoryProject; onContin
       const status = petStoryJobStatus(job, original);
       return <section key={job.id} className="border-b border-white/10 py-3 first:pt-0" aria-label={`${petStoryJobTargetName(project, job)}当前任务`}>
         <strong>{petStoryJobTargetName(project, job)}</strong> <Tag color={job.status === 'invalid' ? 'orange' : 'blue'}>{status.title}</Tag>
-        <p className="my-2">{status.instruction}</p>{job.error && <Alert type="warning" message={job.error} showIcon />}
+        <p className="my-2">{status.instruction}</p>{job.error && <Alert type="warning" message={hasCutBindingIssue(job) ? '正常切镜中残留了前镜头绑定，可直接整理已保存的回复。' : job.error} showIcon />}
         <PetStoryChatRecoveryActions project={project} job={job} task={original} />
-        <details className="mt-2"><summary>诊断详情与原始记录</summary><p>任务：{job.taskId}<br />运行：{job.runId || '尚未启动'}</p>{job.rulesVersion && <p>规则：{job.rulesVersion}</p>}{job.rawText && <pre className="prompt-readonly">{job.rawText}</pre>}{jobRepairAncestors(project, job).map((parent): React.ReactNode => <details key={parent.id}><summary>本次修订的原回复记录</summary><p>原任务：{parent.taskId}</p><p>{parent.error}</p>{parent.rawText && <pre className="prompt-readonly">{parent.rawText}</pre>}</details>)}{original?.runtime?.chatReadbackReview && <><p>{original.runtime.chatReadbackReview.reason}</p><pre className="prompt-readonly">{JSON.stringify(original.runtime.chatReadbackReview.candidates, null, 2)}</pre></>}</details>
+        <PetStoryFormatCorrections job={job} />
+        <details className="mt-2"><summary>诊断详情与原始记录</summary><p>任务：{job.taskId}<br />运行：{job.runId || '尚未启动'}</p>{job.error && <p>{job.error}</p>}{job.rulesVersion && <p>规则：{job.rulesVersion}</p>}{job.rawText && <pre className="prompt-readonly">{job.rawText}</pre>}{jobRepairAncestors(project, job).map((parent): React.ReactNode => <details key={parent.id}><summary>本次修订的原回复记录</summary><p>原任务：{parent.taskId}</p><p>{parent.error}</p>{parent.rawText && <pre className="prompt-readonly">{parent.rawText}</pre>}</details>)}{original?.runtime?.chatReadbackReview && <><p>{original.runtime.chatReadbackReview.reason}</p><pre className="prompt-readonly">{JSON.stringify(original.runtime.chatReadbackReview.candidates, null, 2)}</pre></>}</details>
       </section>;
     })}
     <PetStoryProductionRecovery project={project} />
