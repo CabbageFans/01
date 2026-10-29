@@ -177,6 +177,8 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
   });
   it('正式所选首尾帧与Chat历史附件区分，未把历史图当本次编辑基图', (): void => {
     const p = enriched(); withFrames(p); p.production = production('seedance-2.0'); p.production.shots.shot_2 = { firstFrameId: 'TEST-first', plannedEndImageId: 'TEST-last', requestedMode: 'first_last_frame', resolvedMode: 'first_last_frame', reason: 'TEST明确选择' };
+    for (const image of p.assets.filter((asset): boolean => ['TEST-first', 'TEST-last'].includes(asset.id))) image.imageReview = { state: 'adopted', target: { shotId: 'shot_2', kind: image.kind === 'firstFrame' ? 'firstFrame' : 'lastFrame' }, basisHash: 'TEST-explicit-reviewed', adoptedAt: '2026-10-29T00:00:00.000Z', sha256: image.validation?.sha256 };
+    p.adoptedImages = { shot_2: { firstFrameId: 'TEST-first', plannedEndImageId: 'TEST-last' } };
     const data = facts(buildDramaRequest(p, { kind: 'optimize', requestId: 'TEST-selected-frames', shotId: 'shot_2', promptKind: 'video' }).prompt);
     expect(data.attachmentStatus).toMatchObject({ missingRequiredImage: false });
     expect(data.adoptedFrameText).toMatchObject({ firstFrame: { imageStatus: 'actual_selected_image_attached' } });

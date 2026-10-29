@@ -116,3 +116,14 @@ data/
 
 # 用户流程修复的本机窗口与私人请求证据
 /artifacts/user-journey-repair/
+
+# 产品化实机验收的真实项目、会话截图与本机运行快照
+/artifacts/productization-acceptance/
+/docs/productization-evidence/2026-10-29-ui/screenshots/
+/docs/productization-evidence/2026-10-29-ui/analysis-status.json
+/docs/productization-evidence/2026-10-29-ui/journal.json
+/docs/ui-design-review/2026-10-29/exploration/evidence/
+/docs/ui-design-review/2026-10-29/full-product-design/evidence/canvas-comparison.png
+/docs/ui-design-review/2026-10-29/full-product-design/evidence/canvas-focused-comparison.png
+/docs/ui-design-review/2026-10-29/full-product-design/prototype/public/screens/canvas-comparison.png
+/docs/ui-design-review/2026-10-29/full-product-design/prototype/public/screens/canvas-focused-comparison.png

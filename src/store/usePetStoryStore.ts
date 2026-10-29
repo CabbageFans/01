@@ -1,5 +1,6 @@
+import { pendingPetStoryDrafts } from '../utils/petstoryDraftPresence';
 import { create } from 'zustand';
-import type { Task, PetStoryPlan, PetStoryProject, PetStoryPromptKind, PetStoryResult, PetStoryChatJob, PetStoryCapability, PetStoryMaterialEditIntent, PetStoryProductionCounts, PetStoryModeResolution, PetStoryPromptProfile, PetStoryRuntimeTarget, PetStoryPromptBatch } from '@doubao-studio/contracts';
+import type { Task, PetStoryPlan, PetStoryProject, PetStoryPromptKind, PetStoryResult, PetStoryChatJob, PetStoryCapability, PetStoryMaterialEditIntent, PetStoryProductionCounts, PetStoryModeResolution, PetStoryPromptProfile, PetStoryRuntimeTarget, PetStoryPromptBatch, PetStoryConversationReply, PetStoryAdjustmentPreview } from '@doubao-studio/contracts';
 import { useTaskStore } from './useTaskStore';
 import { useAccountStore } from './useAccountStore';
 import { useProjectStore } from './useProjectStore';
@@ -10,6 +11,14 @@ import { petStoryReadOnlyProductionTask } from '../utils/petstoryRecovery';
 import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
 
 interface PetStoryState {
+  previewChatReply: (replyKey: string) => Promise<PetStoryAdjustmentPreview | null>;
+  openChatAdjustment: (target: PetStoryRuntimeTarget) => Promise<void>;
+  captureChatReplies: (adjustmentId: string, conversationUrl: string, replies: PetStoryConversationReply[]) => Promise<void>;
+  adoptChatReply: (replyKey: string) => Promise<void>;
+  endChatAdjustment: () => Promise<void>;
+  chatReadbackError: string;
+  uploadShotImage: (shotId: string, kind: 'firstFrame' | 'lastFrame') => Promise<void>;
+  adoptShotImage: (shotId: string, kind: 'firstFrame' | 'lastFrame', assetId: string) => Promise<void>;
   continuePromptStage: () => Promise<void>;
   savePromptModel: (model?: PetStoryProject['promptModel']) => Promise<void>;
   endChatWaiting: (jobId: string) => Promise<void>;
@@ -77,6 +86,7 @@ interface PetStoryState {
   collect: (jobId: string, allowRepair?: boolean) => Promise<void>;
   draftFinal: (shotId: string) => Promise<void>;
 }
+function isChatAdjusting(p: PetStoryProject | null): boolean { return p?.chatAdjustment?.status === 'active'; }
 const liveJobs = new Set<string>();
 type PromptBatchTarget = { shotId: string; kind: PetStoryPromptKind; materialId?: never } | { materialId: string; shotId?: never; kind?: never };
 function promptTargetKey(target: PromptBatchTarget): string {
@@ -132,11 +142,14 @@ let promptBatchQueue: { projectId: string; targets: PromptBatchTarget[]; jobId?:
 let activeProductionId: string | null = null;
 let productionTickRunning = false;
 const observingProductionTasks = new Set<string>();
+function canTickProduction(state: PetStoryState, id: string | null): id is string {
+  return !!id && state.project?.id === id && !state.busy && !isChatAdjusting(state.project) && !productionTickRunning;
+}
 /** 打开清单不启用接力；只在本会话一次确认或显式继续后推进。 */
 export async function tickPetStoryProduction(): Promise<void> {
   const id = activeProductionId;
   const state = usePetStoryStore.getState();
-  if (!id || state.project?.id !== id || state.busy || productionTickRunning) return;
+  if (!canTickProduction(state, id)) return;
   productionTickRunning = true;
   try {
     const result = await window.electronAPI.petstory.advanceProduction(id);
@@ -184,7 +197,7 @@ async function refreshTasks(): Promise<void> {
 }
 export const usePetStoryStore = create<PetStoryState>((set, get) => {
   const accept = (result: PetStoryResult): void => {
-    if (result.project) set({ project: result.project, projectName: result.displayName ?? (get().project?.id === result.project.id ? get().projectName : '') });
+    if (result.project && (get().project?.id !== result.project.id || result.project.revision >= (get().project?.revision || 0))) set({ project: result.project, projectName: result.displayName ?? (get().project?.id === result.project.id ? get().projectName : '') });
     if (!result.success) set({ error: result.error || '操作未完成' });
   };
   const run = async (work: () => Promise<void>): Promise<void> => {
@@ -208,6 +221,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
   const startBound = async (jobId: string): Promise<void> => {
     const project = get().project;
     const job = project?.jobs.find((j): boolean => j.id === jobId);
+    if (project?.chatAdjustment?.status === 'active') throw new Error('请先采用豆包回复或结束当前调整');
     if (!project || !job || job.endedWaitingAt || job.status !== 'bound') throw new Error('请选择原步骤');
     if (!project.mobileStory || job.sourceStoryId !== project.mobileStory.id) throw new Error('旧版链接直读任务已停用，请保存手机豆包故事后生成制作方案');
     if (!get().freeChatConfirmed) throw new Error('请本人确认当前普通Chat免费可用');
@@ -252,6 +266,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
   const prepare = async (prompt: string, kind: PetStoryChatJob['kind'], parentJobId?: string, shotId?: string, promptKind?: PetStoryPromptKind, materialId?: string): Promise<string | undefined> => {
     const project = get().project;
     if (!project) throw new Error('请先打开或创建项目');
+    if (project.chatAdjustment?.status === 'active') throw new Error('请先采用豆包回复或结束当前调整');
     if (!get().freeChatConfirmed) throw new Error('请先由本人确认当前普通Chat免费可用，未知时暂停');
     if (!useProjectStore.getState().projects.some((p): boolean => p.id === project.studioProjectId && !p.archived)) throw new Error('原 Studio 项目缺失或已归档');
     const account = useAccountStore.getState().accounts.find((a): boolean => a.id === project.accountId);
@@ -262,6 +277,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
   const prepareRuntime = async (kind: PetStoryChatJob['kind'], target?: PetStoryRuntimeTarget): Promise<string | undefined> => {
     const project = get().project;
     if (!project) throw new Error('请先打开或创建项目');
+    if (project.chatAdjustment?.status === 'active') throw new Error('请先采用豆包回复或结束当前调整');
     if (!get().freeChatConfirmed) throw new Error('请先确认当前普通 Chat 免费可用');
     if (!useProjectStore.getState().projects.some((p): boolean => p.id === project.studioProjectId && !p.archived)) throw new Error('原 Studio 项目缺失或已归档');
     const account = useAccountStore.getState().accounts.find((a): boolean => a.id === project.accountId);
@@ -379,6 +395,59 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     await nextPrompt();
   };
   return {
+    chatReadbackError: '',
+    previewChatReply: async (replyKey: string): Promise<PetStoryAdjustmentPreview | null> => {
+      const p = get().project; const a = p?.chatAdjustment;
+      if (!p || a?.status !== 'active') return null;
+      const result = await window.electronAPI.petstory.previewAdjustmentReply(p.id, p.revision, a.id, replyKey);
+      if (!result.success) { set({ error: result.error || '回复尚不能采用，请在豆包中整理' }); return null; }
+      set({ error: '' }); return result.preview || null;
+    },
+    openChatAdjustment: async (target: PetStoryRuntimeTarget): Promise<void> => run(async (): Promise<void> => {
+      await pauseBatch();
+      activeProductionId = null;
+      let p = get().project; if (!p) throw new Error('请先打开项目');
+      if (p.production?.state === 'running') { const paused = await window.electronAPI.petstory.pauseProduction(p.id); accept(paused); if (!paused.success) throw new Error(paused.error || '当前制作未暂停'); const refreshed = get().project; if (!refreshed) throw new Error('项目已关闭'); p = refreshed; }
+      if (useTaskStore.getState().accountBusy[p.accountId] || !canSelectAccount(p.accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))) throw new Error('这个账号仍在执行任务，请等待原任务结束再调整');
+      const result = await window.electronAPI.petstory.beginAdjustment(p.id, p.revision, target); accept(result); await refreshTasks();
+      if (!result.success) return;
+      set({ chatReadbackError: '' });
+      useAccountStore.getState().selectAccount(p.accountId);
+      window.dispatchEvent(new CustomEvent('reveal-workspace-browser'));
+      window.dispatchEvent(new CustomEvent('petstory-open-adjustment'));
+    }),
+    captureChatReplies: async (adjustmentId: string, conversationUrl: string, replies: PetStoryConversationReply[]): Promise<void> => {
+      const p = get().project; if (!p || get().busy || p.chatAdjustment?.id !== adjustmentId || p.chatAdjustment.status !== 'active') return;
+      try {
+        const result = await window.electronAPI.petstory.captureAdjustmentReplies(p.id, adjustmentId, conversationUrl, replies);
+        if (get().project?.id !== p.id || get().project?.chatAdjustment?.id !== adjustmentId) return;
+        accept(result); set({ chatReadbackError: result.success ? '' : result.error || '回复未读取完整' });
+      } catch (error: unknown) { set({ chatReadbackError: error instanceof Error ? error.message : '回复未读取完整' }); }
+    },
+    adoptChatReply: async (replyKey: string): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project; const a = p?.chatAdjustment;
+      if (!p || a?.status !== 'active') throw new Error('请重新打开当前对象的豆包调整');
+      if (pendingPetStoryDrafts(p.id).length) throw new Error('请先保存或放弃尚未保存的修改，再采用豆包回复');
+      // 应用前只读回查具体回复；不会发送、导航或改变输入框。
+      await new Promise<void>((resolve, reject): void => {
+        const timeout = setTimeout((): void => reject(new Error('关联会话未能及时核对，请保持豆包页面打开')), 6000);
+        window.dispatchEvent(new CustomEvent('petstory-verify-adjustment-reply', { detail: { adjustmentId: a.id, replyKey,
+          resolve: (): void => { clearTimeout(timeout); resolve(); }, reject: (error: Error): void => { clearTimeout(timeout); reject(error); } } }));
+      });
+      const latest = get().project;
+      if (!latest || latest.chatAdjustment?.id !== a.id) throw new Error('当前调整已变化，未采用回复');
+      accept(await window.electronAPI.petstory.adoptAdjustmentReply(latest.id, latest.revision, a.id, replyKey)); await refreshTasks();
+    }),
+    endChatAdjustment: async (): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project; const a = p?.chatAdjustment;
+      if (p && a?.status === 'active') { const result = await window.electronAPI.petstory.endAdjustment(p.id, p.revision, a.id); accept(result); if (result.success) { set({ chatReadbackError: '' }); await refreshTasks(); } }
+    }),
+    uploadShotImage: async (shotId: string, kind: 'firstFrame' | 'lastFrame'): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project; if (p) accept(await window.electronAPI.petstory.addShotImage(p.id, p.revision, shotId, kind)); set({ productionCounts: null });
+    }),
+    adoptShotImage: async (shotId: string, kind: 'firstFrame' | 'lastFrame', assetId: string): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project; if (p) accept(await window.electronAPI.petstory.adoptImage(p.id, p.revision, { shotId, kind }, assetId)); set({ productionCounts: null });
+    }),
     savePromptModel: async (model?: PetStoryProject['promptModel']): Promise<void> => run(async (): Promise<void> => {
       await pauseBatch();
       const p = get().project; if (p) accept(await window.electronAPI.petstory.savePromptModel(p.id, p.revision, model));
@@ -543,6 +612,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     setFreeChatConfirmed: (value: boolean): void => set({ freeChatConfirmed: value }),
     setAutoRepair: (value: boolean): void => set({ autoRepair: value }),
     createProject: async (selection?: { accountId: string; studioProjectId: string }): Promise<void> => run(async (): Promise<void> => {
+      if (isChatAdjusting(get().project)) throw new Error('请先采用当前豆包回复或结束调整，再切换短剧项目');
       await pauseBatch();
       activeProductionId = null; promptBatchQueue = null;
       set({ capability: null, capabilityCheckedInSession: false, productionCounts: null, fallbacks: {} });
@@ -553,12 +623,14 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (result.success) { liveJobs.clear(); set({ freeChatConfirmed: false, promptBatch: { total: 0, completed: 0, status: 'idle' } }); }
     }),
     openProject: async (path?: string): Promise<void> => run(async (): Promise<void> => {
+      if (isChatAdjusting(get().project)) throw new Error('请先采用当前豆包回复或结束调整，再切换短剧项目');
       await pauseBatch();
       activeProductionId = null; promptBatchQueue = null;
       liveJobs.clear();
       set({ freeChatConfirmed: false, capability: null, capabilityCheckedInSession: false, productionCounts: null, fallbacks: {} });
       const result = path === undefined ? await window.electronAPI.petstory.open() : await window.electronAPI.petstory.open(path);
       accept(result);
+      await refreshTasks();
       if (result.project) {
         const project = result.project;
         set({ capability: project.promptCapability || null, capabilityCheckedInSession: false, promptBatch: project.promptBatch ? { total: project.promptBatch.total, completed: project.promptBatch.completed, status: project.promptBatch.status === 'complete' ? 'complete' : 'paused' } : { total: 0, completed: 0, status: 'idle' } });
@@ -659,7 +731,7 @@ export function observePetStoryTasks(): () => void {
   const unsubscribe = useTaskStore.subscribe((state): void => {
     void tickPetStoryProduction();
     const p = usePetStoryStore.getState();
-    if (p.busy || !p.project) return;
+    if (p.busy || !p.project || p.project.chatAdjustment?.status === 'active') return;
     const batchJob = p.project.jobs.find((j): boolean => j.id === promptBatchQueue?.jobId);
     if (batchJob && state.tasks.some((t): boolean => t.id === batchJob.taskId && ['fail', 'paused', 'cancelled', 'waiting_verification'].includes(t.status))) {
       void p.stopPromptBatch();

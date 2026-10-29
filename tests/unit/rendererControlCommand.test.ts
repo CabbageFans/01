@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Task } from '../../src/types';
 import { classifyControlRejection, handleControlCommand, type RendererControlDependencies } from '../../src/control/handleControlCommand';
+import { TaskService } from '../../main/core/TaskService';
+import { useTaskStore } from '../../src/store/useTaskStore';
+import { requiresSubmissionReconciliation } from '../../src/utils/realSendStateMachine';
 
 function task(overrides: Partial<Task> = {}): Task {
   return {
@@ -57,6 +60,37 @@ describe('handleControlCommand', () => {
     await expect(handleControlCommand(command(action), d)).resolves.toMatchObject({ ok: true, accepted: true });
     expect(d.abortActive).toHaveBeenCalledWith('task-1', action === 'cancel' ? 'cancelled' : 'paused');
     expect(d.updateStatus).not.toHaveBeenCalled();
+  });
+
+  it('明确cancel暂停的提交不明任务仅结束等待，保留全部原请求证据且不能start/retry重发', async (): Promise<void> => {
+    const now = '2026-10-29T10:00:00.000Z';
+    const original = task({ status: 'paused', mode: 'chat', executionIntent: 'armed', attachments: ['TEST-reference.png'],
+      errorInfo: { code: 'submission_uncertain', message: 'TEST 原提交待核对', detectedAt: now, recoverable: false },
+      runtime: { runId: 'TEST-original-run', attempt: 1, stage: 'paused', message: 'TEST 原运行', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
+        conversationUrl: 'https://www.doubao.com/chat/TEST-original-conversation', input: { prompt: 'TEST original request', mode: 'chat', attachments: ['TEST-reference.png'] } },
+      runHistory: [{ runId: 'TEST-original-run', attempt: 1, startedAt: now }] });
+    let stored = [structuredClone(original)];
+    const core = new TaskService({ store: { read: (): Task[] => structuredClone(stored), replace: (items: Task[]): boolean => { stored = structuredClone(items); return true; } }, defaultProjectId: (): string => 'project-1', now: (): string => now });
+    const d = deps(stored); d.readTasks = async (): Promise<Task[]> => structuredClone(stored);
+    d.updateStatus = vi.fn(async (taskId: string, status: Task['status'], text: string): Promise<boolean> => core.updateStatus({ taskId, status, result: text }).success);
+    await expect(handleControlCommand(command('cancel'), d)).resolves.toMatchObject({ ok: true, code: 'CANCELLED', accepted: true });
+    expect(d.start).not.toHaveBeenCalled(); expect(d.retry).not.toHaveBeenCalled(); expect(d.abortActive).not.toHaveBeenCalled();
+    expect(stored).toHaveLength(1); expect(stored[0]).toEqual({ ...original, status: 'cancelled', result: '任务已由本机控制面取消', updatedAt: now });
+    expect(requiresSubmissionReconciliation(stored[0])).toBe(true); expect(core.retry(original.id)).toMatchObject({ success: false, error: expect.stringContaining('禁止重新发送') });
+    const saved = useTaskStore.getState();
+    try {
+      useTaskStore.setState({ tasks: structuredClone(stored), schedulerPaused: false, accountAutomationState: {} });
+      expect(await useTaskStore.getState().startAutomation(original.id)).toBe(false);
+      expect(useTaskStore.getState().error).toContain('只有排队中的任务可以启动');
+      expect(stored[0].runtime).toEqual(original.runtime); expect(stored[0].errorInfo).toEqual(original.errorInfo);
+    } finally { useTaskStore.setState(saved); }
+  });
+
+  it.each(['start', 'retry', 'pause', 'cancel'] as const)('保护自由对话的源任务拒绝%s，零状态写入和网页动作', async (action): Promise<void> => {
+    const now = '2026-10-29T10:00:00.000Z'; const guarded = task({ status: 'paused', runtime: { runId: 'TEST-run', attempt: 1, stage: 'paused', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
+      input: { prompt: 'TEST', mode: 'chat', attachments: [] }, chatAdjustmentGuard: { projectId: 'TEST-project', adjustmentId: 'TEST-adjustment', active: true } } });
+    const d = deps([guarded]); await expect(handleControlCommand(command(action), d)).resolves.toMatchObject({ ok: false, code: 'TASK_LOCKED', accepted: false });
+    expect(d.start).not.toHaveBeenCalled(); expect(d.retry).not.toHaveBeenCalled(); expect(d.updateStatus).not.toHaveBeenCalled(); expect(d.abortActive).not.toHaveBeenCalled();
   });
 
   it('终态任务拒绝暂停且零写入', async () => {

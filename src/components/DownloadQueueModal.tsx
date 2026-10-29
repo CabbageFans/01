@@ -1,11 +1,12 @@
 import React from 'react';
-import { Button, Empty, List, Modal, Space, Tag, Tooltip } from 'antd';
+import { Button, Empty, List, Modal, Space, Tag } from 'antd';
 import { ReloadOutlined, SyncOutlined } from '@ant-design/icons';
 import type { DownloadJob } from '../types';
 
 interface DownloadQueueModalProps {
   open: boolean;
   embedded?: boolean;
+  scopeLabel?: string;
   jobs: DownloadJob[];
   loading: boolean;
   onClose: () => void;
@@ -16,13 +17,14 @@ interface DownloadQueueModalProps {
 const STATUS_LABELS: Record<DownloadJob['status'], { label: string; color: string }> = {
   queued: { label: '等待下载', color: 'blue' },
   downloading: { label: '下载中', color: 'processing' },
-  done: { label: '已完成', color: 'success' },
+  done: { label: '下载完成', color: 'success' },
   failed: { label: '失败', color: 'error' },
 };
 
 export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
   open,
   embedded = false,
+  scopeLabel = '全部项目',
   jobs,
   loading,
   onClose,
@@ -31,6 +33,7 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
 }) => (
   <DownloadSurface
     embedded={embedded}
+    scopeLabel={scopeLabel}
     title="下载记录"
     open={open}
     onCancel={onClose}
@@ -51,7 +54,7 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
           return (
             <List.Item
               actions={job.status === 'failed' ? [
-                <Button key="retry" size="small" icon={<ReloadOutlined />} onClick={() => onRetry(job)}>
+                <Button key="retry" size="small" aria-label="重新下载" icon={<ReloadOutlined />} onClick={() => onRetry(job)}>
                   重新下载
                 </Button>,
               ] : undefined}
@@ -61,19 +64,14 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
                   <Space size={8}>
                     <Tag color={status.color}>{job.status === 'downloading' && <SyncOutlined spin />} {status.label}</Tag>
                     <span>{job.mode === 'video' ? '视频' : job.mode === 'image' ? '图片' : '文件'}</span>
-                    <span style={{ color: '#888', fontSize: 12 }}>{job.taskId.slice(0, 8)}</span>
+
                   </Space>
                 )}
                 description={(
                   <div style={{ minWidth: 0 }}>
-                    <Tooltip title={job.filePath || job.url}>
-                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {job.filePath || job.url}
-                      </div>
-                    </Tooltip>
-                    <div style={{ color: job.error ? '#c44352' : '#888', marginTop: 4 }}>
-                      {job.error || (job.bytes ? `${(job.bytes / 1024 / 1024).toFixed(1)} MB` : `尝试 ${job.attempts} 次`)}
-                    </div>
+                    <div>{job.filePath?.split(/[/\\]/).pop() || '文件尚未保存'}</div>
+                    <div className="muted-text" style={{ marginTop: 4 }}>{job.status === 'failed' ? '下载未完成，可以重新下载原产物。' : job.bytes ? `${(job.bytes / 1024 / 1024).toFixed(1)} MB` : `已尝试 ${job.attempts} 次`}</div>
+                    <details className="download-file-details"><summary>诊断详情</summary><dl><dt>任务</dt><dd>{job.taskId}</dd><dt>文件位置</dt><dd>{job.filePath || '尚未保存'}</dd><dt>来源</dt><dd>{job.url}</dd>{job.error && <><dt>失败原因</dt><dd>{job.error}</dd></>}</dl></details>
                   </div>
                 )}
               />
@@ -85,4 +83,4 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
   </DownloadSurface>
 );
 
-const DownloadSurface: React.FC<React.ComponentProps<typeof Modal> & { embedded: boolean }> = ({ embedded, children, footer, ...props }): React.ReactElement => embedded ? <div className="embedded-downloads"><div className="download-tools">{typeof footer === 'function' ? null : footer}<span className="muted-text">全局下载记录 · 已下载不代表通过文件解码校验</span></div>{children}</div> : <Modal {...props} footer={footer}>{children}</Modal>;
+const DownloadSurface: React.FC<React.ComponentProps<typeof Modal> & { embedded: boolean; scopeLabel: string }> = ({ embedded, scopeLabel, children, footer, ...props }): React.ReactElement => embedded ? <div className="embedded-downloads"><div className="download-tools">{typeof footer === 'function' ? null : footer}<span className="muted-text">{scopeLabel}下载记录 · 下载完成后仍需检查文件</span></div>{children}</div> : <Modal {...props} footer={footer}>{children}</Modal>;

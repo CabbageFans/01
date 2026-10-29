@@ -145,7 +145,15 @@ describe('原五镜头画布持久化与操作边界', (): void => {
   it('lists and links only the exact same-shot historical image task, without creating generation or changing current finals', async (): Promise<void> => {
     const picture = path.join(root, 'TEST-historical-pixel.png');
     await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=64x96', '-frames:v', '1', '-y', picture]);
-    for (const c of p.plan!.characters) p = await projects.addReference(p.id, c.id, picture);
+    // 旧快照先通过正式方案确认入口补齐素材清单，再上传并明确采用身份图。
+    p.plan!.props = []; p.plan!.scenes = [{ id: 'original-village-road', name: '原村道', location: p.plan!.shots[0].scene, time: '原项目自然光', lighting: '原项目暖自然光', layout: '原项目村道路边', view: '原镜头视角', designOrigin: 'script' }];
+    p.plan!.shots.forEach((shot): void => { shot.propIds = []; shot.sceneId = 'original-village-road'; });
+    p = await projects.write(p); p = await projects.confirmStory(p.id, p.revision);
+    for (const character of p.plan!.characters) {
+      p = await projects.addReference(p.id, character.id, picture);
+      const uploaded = p.assets.at(-1)!; expect(uploaded.imageReview?.state).toBe('candidate');
+      p = await projects.approveMaterials(p.id, p.revision, [{ materialId: `character:${character.id}`, assetId: uploaded.id }]);
+    }
     const shot = p.plan!.shots[0]; const body = shot.prompts.firstFrame.optimized;
     const request = await chats.prepare(p.id, optimizationPrompt(p, shot.id, 'firstFrame'), 'optimize', undefined, shot.id, 'firstFrame');
     const chatTask = list()[0]; await runtime(chatTask, JSON.stringify({ optimized: body }));
@@ -168,6 +176,7 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     const asset = linked.project!.assets.at(-1)!;
     expect(asset).toMatchObject({ origin: 'historical_task', generationPrompt: prompt, generationFinal: body, promptJobId: job.id, shotId: shot.id, taskId: image.id, artifactId: artifact.id, downloadJobId: download.id });
     expect(asset.validation!.decoded).toBe(true); expect(asset.generationFinal).not.toBe(shot.prompts.firstFrame.final);
+    expect(asset.imageReview?.state).toBe('candidate'); expect(linked.project!.adoptedImages?.[shot.id]?.firstFrameId).toBeUndefined();
     expect((await media.link(p.id, linked.project!.revision, shot.id, 'firstFrame', image.id, artifact.id)).project!.assets).toHaveLength(linked.project!.assets.length);
     await expect(media.link(p.id, linked.project!.revision, p.plan!.shots[1].id, 'firstFrame', image.id, artifact.id)).rejects.toThrow('无法精确对应');
     const changed = list().find((t): boolean => t.id === image.id)!; changed.runtime!.input.attachments = [...attachments].reverse();
@@ -186,10 +195,13 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     p.plan!.props = []; p.plan!.scenes = [{ id: 'original-village-road', name: '原村道', location: p.plan!.shots[0].scene, time: '原项目自然光', lighting: '原项目暖自然光', layout: '原项目村道路边', view: '原镜头视角', designOrigin: 'script' }];
     p.plan!.shots.forEach((s): void => { s.propIds = []; s.sceneId = 'original-village-road'; });
     p = await projects.write(p);
-    for (const c of p.plan!.characters) p = await projects.addReference(p.id, c.id, picture);
     p = await projects.confirmStory(p.id, p.revision);
+    for (const character of p.plan!.characters) {
+      p = await projects.addReference(p.id, character.id, picture);
+      p = await projects.approveMaterials(p.id, p.revision, [{ materialId: `character:${character.id}`, assetId: p.assets.at(-1)!.id }]);
+    }
     p = await projects.addMaterialImage(p.id, p.revision, 'scene:original-village-road', picture);
-    p = await projects.approveMaterials(p.id, p.revision, p.materials!.map((m) => ({ materialId: m.id, assetId: m.selectedAssetId! })));
+    p = await projects.approveMaterials(p.id, p.revision, [{ materialId: 'scene:original-village-road', assetId: p.assets.at(-1)!.id }]);
     const downloads: DownloadJob[] = [];
     const production = new PetStoryProductionService(projects, { list, create, adopt: (): Task => { throw new Error('TEST unexpected adoption'); }, retryUnsubmitted: (): Task => { throw new Error('TEST unexpected retry'); }, downloads: (): DownloadJob[] => downloads,
       download: async (params: TaskDownloadOutputsParams): Promise<TaskDownloadOutputsResult> => { const output = params.outputs[0]; const now = new Date().toISOString(); const job: DownloadJob = { id: 'TEST-five-download', taskId: output.taskId, accountId: p.accountId, mode: output.mode, url: output.outputs[0], status: 'done', attempts: 1, saveDir: root, filePath: picture, createdAt: now, updatedAt: now }; downloads.push(job); return { success: true, count: 1, failed: 0, jobIds: [job.id] }; } });
@@ -213,14 +225,18 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     const completed = await production.advance(p.id);
     expect(completed.project!.production).toMatchObject({ state: 'complete', target: { shotId, kind: 'firstFrame' } });
     expect(completed.project!.production!.steps).toHaveLength(1); expect(tasks).toHaveLength(1);
-    expect(completed.project!.production!.shots[shotId].firstFrameId).toBeTruthy();
+    expect(completed.project!.production!.shots[shotId].firstFrameId).toBeUndefined();
+    const generated = completed.project!.assets.find((asset): boolean => asset.shotId === shotId && asset.kind === 'firstFrame')!;
+    expect(generated.imageReview?.state).toBe('candidate'); expect(completed.project!.adoptedImages?.[shotId]?.firstFrameId).toBeUndefined();
     expect(completed.project!.production!.shots[shotId].plannedEndImageId).toBeUndefined(); expect(completed.project!.production!.shots[shotId].videoId).toBeUndefined();
     p = completed.project!;
     await expect(production.generateShotMedia(p.id, p.revision, continuousShotId, 'video', capability(), {})).rejects.toThrow('首帧');
     expect(tasks).toHaveLength(1);
     const oldTask = list()[0]; const oldProduction = structuredClone(p.production);
-    const selected = p.assets.find((a): boolean => a.id === p.production!.shots[shotId].firstFrameId)!;
-    expect(selected.generationFinal).toBe(p.plan!.shots[0].prompts.firstFrame.final);
+    expect(generated.generationFinal).toBe(p.plan!.shots[0].prompts.firstFrame.final);
+    p = await projects.adoptImage(p.id, p.revision, { shotId, kind: 'firstFrame' }, generated.id);
+    expect(p.adoptedImages?.[shotId]?.firstFrameId).toBe(generated.id);
+    expect(p.assets.find((asset): boolean => asset.id === generated.id)?.imageReview?.state).toBe('adopted');
     p = await projects.savePlan(p.id, p.revision, p.plan!);
     expect(p.production).toBeUndefined(); expect(p.productionHistory!.at(-1)).toEqual(oldProduction);
     const chat = await chats.prepare(p.id, optimizationPrompt(p, shotId, 'firstFrame'), 'optimize', undefined, shotId, 'firstFrame');

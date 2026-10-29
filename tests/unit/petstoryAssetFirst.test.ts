@@ -72,7 +72,7 @@ async function harness(which: 'music' | 'repair' = 'repair'): Promise<{
 async function accepted(h: Awaited<ReturnType<typeof harness>>): Promise<PetStoryProject> {
   let p = await h.projects.read(h.project.id); p = await h.projects.confirmStory(p.id, p.revision);
   for (const m of p.materials!) p = await h.projects.addMaterialImage(p.id, p.revision, m.id, m.kind === 'scene' ? blue : red);
-  p = await h.projects.approveMaterials(p.id, p.revision, p.materials!.map((m): { materialId: string; assetId: string } => ({ materialId: m.id, assetId: m.selectedAssetId! })));
+  p = await h.projects.approveMaterials(p.id, p.revision, p.materials!.map((m): { materialId: string; assetId: string } => ({ materialId: m.id, assetId: p.assets.find((asset): boolean => asset.materialId === m.id)!.id })));
   p.promptCapability = capability(); seedOfflinePromptContracts(p); return h.projects.write(p);
 }
 beforeAll(async (): Promise<void> => {
@@ -111,6 +111,9 @@ describe('通用剧本资产与确认', (): void => {
     expect((await h.service.inspectGeneration(p.id, p.revision, target, capability())).eligibility?.blockers).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'task' })]));
     const next = await h.service.advance(p.id); await h.finish(next.taskId!); await h.service.advance(p.id); await h.service.advance(p.id);
     p = await h.projects.read(p.id);
+    const frame = p.assets.find((asset): boolean => asset.shotId === shotId && asset.imageReview?.state === 'candidate')!;
+    expect((await h.service.inspectGeneration(p.id, p.revision, { shotId, promptKind: 'video' }, capability())).eligibility?.ready).toBe(false);
+    p = await h.projects.adoptImage(p.id, p.revision, frame.imageReview!.target, frame.id);
     const before = await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8');
     const result = await h.service.inspectGeneration(p.id, p.revision, { shotId, promptKind: 'video' }, capability());
     expect(result.eligibility).toMatchObject({ ready: true, resolvedMode: 'reference', blockers: [] });
@@ -153,14 +156,16 @@ describe('通用剧本资产与确认', (): void => {
     await expect(chat.draft(p.id, 'moment-0', 'firstFrame')).rejects.toThrow('确认实际基础图片'); expect(h.list()).toEqual([]);
     expect(analysisPrompt(p)).toContain('props:[]');
   });
-  it('图片替换和历史选择取消新图确认，批量接受绑定具体ID和摘要，旧文件保留', async (): Promise<void> => {
+  it('新候选和历史预览不改变当前采用，明确替换后旧图仍保留', async (): Promise<void> => {
     const h = await harness('music'); let p = await accepted(h); const id = p.materials![0].id; const old = p.materials![0].selectedAssetId!;
-    p = await h.projects.addMaterialImage(p.id, p.revision, id, blue); const replacement = p.materials![0].selectedAssetId!;
-    expect(replacement).not.toBe(old); expect(p.materials![0].approved).toBeUndefined(); expect(p.assets.some((a): boolean => a.id === old)).toBe(true);
-    await expect(h.projects.approveMaterials(p.id, p.revision, [{ materialId: id, assetId: old }])).rejects.toThrow('已变化');
-    p = await h.projects.selectMaterialImage(p.id, p.revision, id, old); expect(p.materials![0].approved).toBeUndefined();
-    p = await h.projects.approveMaterials(p.id, p.revision, [{ materialId: id, assetId: old }]); expect(p.materials![0].approved?.sha256).toBe(p.assets.find((a): boolean => a.id === old)?.validation?.sha256);
-    const original = p.assets.find((a): boolean => a.id === old)!; await fs.copyFile(blue, path.join(h.projects.directory(p.id), original.relativePath));
+    const oldApproval = structuredClone(p.materials![0].approved);
+    p = await h.projects.addMaterialImage(p.id, p.revision, id, blue); const replacement = p.assets.at(-1)!.id;
+    expect(p.materials![0]).toMatchObject({ selectedAssetId: old, approved: oldApproval });
+    p = await h.projects.selectMaterialImage(p.id, p.revision, id, replacement); expect(p.materials![0].selectedAssetId).toBe(old);
+    p = await h.projects.approveMaterials(p.id, p.revision, [{ materialId: id, assetId: replacement }]);
+    expect(p.materials![0].selectedAssetId).toBe(replacement); expect(p.assets.some((asset): boolean => asset.id === old)).toBe(true);
+    p = await h.projects.approveMaterials(p.id, p.revision, [{ materialId: id, assetId: old }]);
+    const original = p.assets.find((asset): boolean => asset.id === old)!; await fs.copyFile(blue, path.join(h.projects.directory(p.id), original.relativePath));
     await expect(h.service.approve(p.id, p.revision, capability(), {})).rejects.toThrow('发生变化');
   });
   it('基础图成功只保存待确认候选，失败只重试下载并保留原任务身份', async (): Promise<void> => {
@@ -172,7 +177,7 @@ describe('通用剧本资产与确认', (): void => {
     h.setDownloadFailure(false); const c = capability(); c.freeEvidence = 'unknown'; c.image.free = 'unknown'; await h.service.resume(p.id, c);
     expect((await h.service.advance(p.id)).success).toBe(true); await h.service.advance(p.id); p = await h.projects.read(p.id);
     expect(h.list()).toHaveLength(1); expect(p.production?.phase).toBe('materials'); expect(p.production?.state).toBe('complete');
-    expect(p.materials![0].selectedAssetId).toBeTruthy(); expect(p.materials![0].approved).toBeUndefined(); expect(p.production?.shots).toEqual({});
+    expect(p.materials![0].selectedAssetId).toBeUndefined(); expect(p.assets.at(-1)?.imageReview?.state).toBe('candidate'); expect(p.materials![0].approved).toBeUndefined(); expect(p.production?.shots).toEqual({});
     const chat = new PetStoryChatService(h.projects, { list: h.list, create: (params, accountId): Task => {
       const r = h.core.create(params); if (!r.success) throw new Error(r.error); const assigned = h.core.assign({ taskId: r.data[0].id, accountId }); if (!assigned.success) throw new Error(assigned.error); return assigned.data;
     } });
@@ -187,7 +192,7 @@ describe('通用剧本资产与确认', (): void => {
     expect(next.success, next.error).toBe(true); expect(h.list()[0].attachments).toEqual([await h.projects.referenceFile(p.id, old)]);
     expect(h.list()[0].prompt).toContain('只把外套改成用户确认的绿色'); await h.finish(next.taskId!); await h.service.advance(p.id); await h.service.advance(p.id);
     p = await h.projects.read(p.id); const generated = p.materials!.find((m): boolean => m.id === material.id)!;
-    expect(generated.selectedAssetId).not.toBe(old); expect(generated.approved).toBeUndefined(); expect(p.assets.some((a): boolean => a.id === old)).toBe(true);
+    expect(generated.selectedAssetId).toBe(old); expect(generated.approved?.assetId).toBe(old); expect(p.assets.at(-1)?.imageReview?.state).toBe('candidate'); expect(p.assets.some((a): boolean => a.id === old)).toBe(true);
   });
   it('派生视角必须从已确认主场景生成，而非独立造景', async (): Promise<void> => {
     const h = await harness('music'); let p = h.project; const plan = p.plan!; const main = plan.scenes![0];
@@ -197,8 +202,8 @@ describe('通用剧本资产与确认', (): void => {
     p.promptCapability = capability(); seedOfflinePromptContracts(p); p = await h.projects.write(p);
     await h.service.generateMaterials(p.id, p.revision, ['scene:view-b'], capability()); expect((await h.service.advance(p.id)).success).toBe(false); expect(h.list()).toHaveLength(0);
     p = await h.projects.read(p.id); p = await h.projects.addMaterialImage(p.id, p.revision, `scene:${main.id}`, blue); const selected = p.materials!.find((m): boolean => m.entityId === main.id)!;
-    p = await h.projects.approveMaterials(p.id, p.revision, [{ materialId: selected.id, assetId: selected.selectedAssetId! }]); await h.service.resume(p.id, capability()); const next = await h.service.advance(p.id);
-    expect(next.action).toBe('start'); expect(h.list()[0].attachments).toEqual([await h.projects.referenceFile(p.id, selected.selectedAssetId!)]);
+    p = await h.projects.approveMaterials(p.id, p.revision, [{ materialId: selected.id, assetId: p.assets.at(-1)!.id }]); await h.service.resume(p.id, capability()); const next = await h.service.advance(p.id);
+    expect(next.action).toBe('start'); expect(h.list()[0].attachments).toEqual([await h.projects.referenceFile(p.id, p.assets.find((asset): boolean => asset.materialId === selected.id)!.id)]);
     expect(next.project?.production?.steps[0].compiledPrompt?.references[0].materialId).toBe(selected.id);
   });
 });
@@ -222,7 +227,7 @@ describe('镜头输入与实际引用', (): void => {
   it.each(['first_frame', 'first_last_frame', 'reference'] as const)('%s 严格组装互斥输入，不以文本冒充首尾槽', async (mode: PetStoryResolvedMode): Promise<void> => {
     const h = await harness('music'); let p = await accepted(h); p.plan!.shots = [p.plan!.shots[0]]; p.plan!.shots[0].requestedMode = mode;
     seedOfflinePromptContracts(p); p = await h.projects.write(p); await h.service.approve(p.id, p.revision, capability(), {});
-    for (let i = 0; i < 8; i++) { const next = await h.service.advance(p.id); expect(next.success, next.error).toBe(true); if (next.taskId && next.action === 'start') { if (h.list().find((t): boolean => t.id === next.taskId)?.mode === 'video') break; await h.finish(next.taskId); } }
+    for (let i = 0; i < 12; i++) { const next = await h.service.advance(p.id); expect(next.success, next.error).toBe(true); if (next.project?.production?.state === 'paused') { let current = await h.projects.read(p.id); const candidate = current.assets.find((asset): boolean => asset.imageReview?.state === 'candidate' && !!asset.shotId)!; current = await h.projects.adoptImage(current.id, current.revision, candidate.imageReview!.target, candidate.id); await h.service.resume(current.id, capability()); } if (next.taskId && next.action === 'start') { if (h.list().find((t): boolean => t.id === next.taskId)?.mode === 'video') break; await h.finish(next.taskId); } }
     const video = h.list().find((t): boolean => t.mode === 'video')!; const saved = await h.projects.read(p.id); const step = saved.production!.steps.find((s): boolean => s.kind === 'video')!;
     expect(video.attachments).toHaveLength(mode === 'first_last_frame' ? 2 : mode === 'reference' ? 4 : 1); expect(step.compiledPrompt?.references.map((r): string | undefined => r.slot)).toEqual(mode === 'first_last_frame' ? ['first', 'last'] : mode === 'first_frame' ? ['first'] : [undefined, undefined, undefined, undefined]);
     expect(video.videoConfig?.duration).toBe('5s');

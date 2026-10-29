@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { PetStoryPlan, PetStoryProject, PetStoryPrompt, PetStoryResult, Task, TaskRunSnapshot } from '@doubao-studio/contracts';
+import type { PetStoryChatJob, PetStoryPlan, PetStoryProject, PetStoryPrompt, PetStoryResult, Task, TaskRunSnapshot } from '@doubao-studio/contracts';
 import { extractDouyinLink, parsePetStoryAnswer, validatePetStoryPlan } from '../../main/utils/petstoryValidation';
 import { PetStoryProjects, projectPath } from '../../main/utils/petstoryProject';
 import { checkFinalBindings, finalTaskInput, PetStoryChatService, type PetStoryTaskPort } from '../../main/utils/petstoryChat';
@@ -33,6 +33,21 @@ function testPlan(count = 4): PetStoryPlan {
 }
 function testAnswer(plan: PetStoryPlan = testPlan()): string {
   return JSON.stringify({ storyUsable: true, contentBasis: { beginning: '测试走进商店', middle: '测试店员找到礼物', ending: '测试道谢离开' }, ...plan });
+}
+
+async function runtimeAnalysis(chat: PetStoryChatService, id: string = project.id): Promise<PetStoryChatJob> {
+  const current = await projects.read(id);
+  const prepared = await chat.prepareRuntime(id, current.revision, 'analysis');
+  return prepared.project!.jobs.at(-1)!;
+}
+function runtimeAnswer(job: PetStoryChatJob, body: string = testAnswer()): string {
+  return JSON.stringify({ ...JSON.parse(body), requestId: job.requestId, targetIds: job.expectedIds });
+}
+async function collectAndAdoptPlan(chat: PetStoryChatService, id: string, jobId: string): Promise<PetStoryResult> {
+  const before = await projects.read(id); const collected = await chat.collect(id, jobId);
+  expect(collected.success, collected.error).toBe(true); expect(collected.project!.plan).toEqual(before.plan);
+  expect(collected.project!.jobs.find((job): boolean => job.id === jobId)?.resultStatus).toBe('candidate');
+  return chat.adoptPlanCandidate(id, collected.project!.revision, jobId);
 }
 
 /** 真实 TaskService + 离线内存 Repository，测试不连接任何平台。 */
@@ -204,22 +219,22 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     p = await projects.saveMobileStory(p.id, p.revision, 'TEST 手机新原文：进店找礼物，店员帮忙后道谢离开。');
     expect(p.jobs[0]).toMatchObject({ id: oldId, status: 'invalid', taskId: tasks()[0].id });
     await expect(chat.retryUnsubmitted(p.id, oldId)).rejects.toThrow();
-    await chat.prepare(p.id, analysisPrompt(p), 'analysis');
+    const analysis = await runtimeAnalysis(chat, p.id);
     expect(tasks()).toHaveLength(2);
     expect(tasks()[0].runtime).toBeUndefined();
-    await complete(core, tasks()[1], testAnswer());
-    const result = await chat.collect(p.id, (await projects.read(p.id)).jobs[1].id);
+    await complete(core, tasks()[1], runtimeAnswer(analysis));
+    const result = await collectAndAdoptPlan(chat, p.id, analysis.id);
     expect(result.success).toBe(true);
     expect(result.project!.plan!.shots).toHaveLength(4);
   });
   it('blocks story replacement while a task is bound and protects saved final prompts from source/story replacement', async (): Promise<void> => {
     const { port, core, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
-    await chat.prepare(project.id, 'TEST keep story and final', 'analysis');
+    const analysis = await runtimeAnalysis(chat);
     let p = await projects.read(project.id);
     await expect(projects.saveMobileStory(p.id, p.revision, 'TEST changed')).rejects.toThrow('尚未核对');
-    await complete(core, tasks()[0], testAnswer());
-    p = (await chat.collect(p.id, p.jobs[0].id)).project!;
+    await complete(core, tasks()[0], runtimeAnswer(analysis));
+    p = (await collectAndAdoptPlan(chat, p.id, analysis.id)).project!;
     const edited = structuredClone(p.plan!);
     edited.shots[0].prompts.firstFrame.final = 'TEST user final must survive';
     p = await projects.savePlan(p.id, p.revision, edited);
@@ -312,17 +327,21 @@ describe('PetStory project and real service wiring — offline tests only', (): 
   it('binds a held Chat task before execution, saves full raw body/run ID and accepts the dynamic plan', async (): Promise<void> => {
     const { port, core, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
-    const prepared = await projects.serial(project.id, (): Promise<unknown> => chat.prepare(project.id, 'TEST request %%%%%%%%%% kept as one task', 'analysis'));
+    const prepared = await projects.serial(project.id, async (): Promise<PetStoryResult> => { const current = await projects.read(project.id); return chat.prepareRuntime(current.id, current.revision, 'analysis'); });
     expect(prepared).toMatchObject({ success: true });
     expect(tasks()).toHaveLength(1);
     expect(tasks()[0].executionIntent).toBe('hold');
-    const raw = '```json\n' + testAnswer() + '\n```';
+    const analysis = (await projects.read(project.id)).jobs[0];
+    const raw = '```json\n' + runtimeAnswer(analysis) + '\n```';
     await complete(core, tasks()[0], raw);
     const result = await chat.collect(project.id, (await projects.read(project.id)).jobs[0].id);
     expect(result.success).toBe(true);
     expect(result.project?.jobs[0]).toMatchObject({ rawText: raw, runId: 'test-run', status: 'applied' });
-    expect(result.project?.plan?.shots).toHaveLength(4);
-    expect(result.project?.source.status).toBe('review_required');
+    expect(result.project?.plan).toBeUndefined();
+    expect(result.project?.jobs[0].resultStatus).toBe('candidate');
+    const adopted = await chat.adoptPlanCandidate(project.id, result.project!.revision, analysis.id);
+    expect(adopted.project?.plan?.shots).toHaveLength(4);
+    expect(adopted.project?.source.status).toBe('review_required');
     expect(tasks()).toHaveLength(1);
     expect((await new PetStoryProjects().open(directory)).jobs[0].rawText).toBe(raw);
   });
@@ -344,8 +363,8 @@ describe('PetStory project and real service wiring — offline tests only', (): 
   it('keeps the pasted original on insufficient stories, creates no media tasks, and allows correcting the same project link', async (): Promise<void> => {
     const { port, core, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
-    await chat.prepare(project.id, 'TEST unavailable', 'analysis');
-    await complete(core, tasks()[0], JSON.stringify({ storyUsable: false, reason: 'TEST link unavailable' }));
+    const analysis = await runtimeAnalysis(chat);
+    await complete(core, tasks()[0], runtimeAnswer(analysis, JSON.stringify({ storyUsable: false, reason: 'TEST link unavailable' })));
     const p = await projects.read(project.id);
     const result = await chat.collect(project.id, p.jobs[0].id);
     expect(result.project?.source.status).toBe('blocked');
@@ -394,8 +413,8 @@ describe('PetStory project and real service wiring — offline tests only', (): 
   it('preserves a user final edit arriving during selected optimization, with no media regeneration', async (): Promise<void> => {
     const { port, core, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
-    await chat.prepare(project.id, 'TEST analysis', 'analysis'); await complete(core, tasks()[0], testAnswer());
-    await chat.collect(project.id, (await projects.read(project.id)).jobs[0].id);
+    const analysis = await runtimeAnalysis(chat); await complete(core, tasks()[0], runtimeAnswer(analysis));
+    await collectAndAdoptPlan(chat, project.id, analysis.id);
     const optimized = await chat.prepare(project.id, 'TEST selected optimization', 'optimize', undefined, 's1', 'video');
     let p = await projects.read(project.id);
     const edit = structuredClone(p.plan) as PetStoryPlan;
@@ -441,9 +460,9 @@ describe('PetStory final draft integration — offline tests only', (): void => 
   it('retains the current plan when saving the same source link again, and does not clamp invalid manual edits', async (): Promise<void> => {
     const { port, core, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
-    await chat.prepare(project.id, 'TEST preserve plan', 'analysis');
-    await complete(core, tasks()[0], testAnswer());
-    const result = await chat.collect(project.id, (await projects.read(project.id)).jobs[0].id);
+    const analysis = await runtimeAnalysis(chat);
+    await complete(core, tasks()[0], runtimeAnswer(analysis));
+    const result = await collectAndAdoptPlan(chat, project.id, analysis.id);
     const p = result.project as PetStoryProject;
     const same = await projects.saveSource(p.id, p.revision, p.source.url);
     expect(same.plan?.shots).toHaveLength(4);

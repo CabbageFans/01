@@ -11,6 +11,13 @@ import type { ElectronAPI, Account, AccountAvailability, AccountPlatform, Task, 
 
 const electronAPI = {
   petstory: {
+    previewAdjustmentReply: (id: string, revision: number, adjustmentId: string, replyKey: string): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentPreviewResult> => ipcRenderer.invoke('petstory:previewAdjustmentReply', { id, revision, adjustmentId, replyKey }),
+    beginAdjustment: (id: string, revision: number, target: import('@doubao-studio/contracts').PetStoryRuntimeTarget): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentResult> => ipcRenderer.invoke('petstory:beginAdjustment', { id, revision, target }),
+    captureAdjustmentReplies: (id: string, adjustmentId: string, conversationUrl: string, replies: import('@doubao-studio/contracts').PetStoryConversationReply[]): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentResult> => ipcRenderer.invoke('petstory:captureAdjustmentReplies', { id, adjustmentId, conversationUrl, replies }),
+    adoptAdjustmentReply: (id: string, revision: number, adjustmentId: string, replyKey: string): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentResult> => ipcRenderer.invoke('petstory:adoptAdjustmentReply', { id, revision, adjustmentId, replyKey }),
+    endAdjustment: (id: string, revision: number, adjustmentId: string): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentResult> => ipcRenderer.invoke('petstory:endAdjustment', { id, revision, adjustmentId }),
+    addShotImage: (id: string, revision: number, shotId: string, kind: 'firstFrame' | 'lastFrame'): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:addShotImage', { id, revision, shotId, kind }),
+    adoptImage: (id: string, revision: number, target: import('@doubao-studio/contracts').PetStoryImageTarget, assetId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:adoptImage', { id, revision, target, assetId }),
     inspectGeneration: (id: string, revision: number, target: import('@doubao-studio/contracts').PetStoryRuntimeTarget, capability?: import('@doubao-studio/contracts').PetStoryCapability, fallbacks?: Record<string, 'first_frame' | 'reference'>): Promise<import('@doubao-studio/contracts').PetStoryGenerationEligibilityResult> => ipcRenderer.invoke('petstory:inspectGeneration', { id, revision, target, capability, fallbacks }),
     revealAsset: (id: string, assetId: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:revealAsset', { id, assetId }),
     revealProject: (id: string): Promise<import('@doubao-studio/contracts').PetStoryResult> => ipcRenderer.invoke('petstory:revealProject', { id }),

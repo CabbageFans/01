@@ -501,9 +501,13 @@ function normalizeChatReadbackReview(raw: unknown, runtime: Record<string, unkno
   return { runId: raw.runId as string, checkedAt: raw.checkedAt, reason, candidates };
 }
 
-/**
- * 归一化 TaskRunSnapshot（运行快照）。
- */
+function normalizeChatAdjustmentGuard(raw: unknown): TaskRunSnapshot['chatAdjustmentGuard'] {
+  if (!isObject(raw) || typeof raw.projectId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(raw.projectId)
+    || typeof raw.adjustmentId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(raw.adjustmentId) || typeof raw.active !== 'boolean') return undefined;
+  return { projectId: raw.projectId, adjustmentId: raw.adjustmentId, active: raw.active };
+}
+
+/** 归一化 TaskRunSnapshot（运行快照）；对话保护不依赖原运行状态。 */
 function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): TaskRunSnapshot | undefined {
   if (!isObject(raw)) return undefined;
   const r = raw;
@@ -511,6 +515,7 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): 
   const videoConfig = r.videoConfig ?? (isObject(input) ? input.videoConfig : undefined);
 
   return {
+    chatAdjustmentGuard: normalizeChatAdjustmentGuard(r.chatAdjustmentGuard),
     runId: asString(r.runId, ''),
     attempt: asNonNegativeNumber(r.attempt, 0),
     stage: oneOf(r.stage, VALID_TASK_STAGES, 'queued'),

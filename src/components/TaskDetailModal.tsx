@@ -529,7 +529,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
             <div style={{ color: '#6b6d7c', fontSize: 12, marginBottom: 8 }}>视频配置</div>
             <Space size={8} wrap>
               <Tag color="blue">{VIDEO_MODEL_LABELS[task.videoConfig.model] || task.videoConfig.model}</Tag>
-              <Tag color="purple">{task.videoConfig.duration}</Tag>
+              <Tag>{task.videoConfig.duration}</Tag>
               <Tag color="cyan">{task.videoConfig.aspectRatio}</Tag>
             </Space>
           </div>

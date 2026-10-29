@@ -1,3 +1,4 @@
+import { hasConversationGuard } from '../utils/accountConversationGuard';
 import { randomUUID } from 'crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
@@ -346,6 +347,7 @@ export class TaskService {
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
+    if (task.runtime?.chatAdjustmentGuard?.active) return { success: false, error: '该任务正在保护豆包创作对话，请先采用回复或结束调整' };
     if (ACTIVE.has(task.status)) return { success: false, error: '任务正在自动化执行中，无法重新指派' };
     task.assignedAccountId = params.accountId;
     // 指派本身永远不是执行授权；需要执行时必须显式 armTasks。
@@ -359,6 +361,7 @@ export class TaskService {
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
+    if (task.runtime?.chatAdjustmentGuard?.active) return { success: false, error: '该任务正在保护豆包创作对话，请先采用回复或结束调整' };
     const prompt = params.updates?.prompt?.trim();
     if (!prompt) return { success: false, error: '提示词不能为空' };
     task.prompt = prompt;
@@ -375,6 +378,7 @@ export class TaskService {
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
+    if (params.status === 'cancelled' && task.runtime?.chatAdjustmentGuard?.active) return { success: false, error: '该任务正在保护豆包创作对话，请先采用回复或结束调整' };
     task.status = params.status;
     if (params.result !== undefined) task.result = params.result;
     const timestamp = this.now();
@@ -419,6 +423,7 @@ export class TaskService {
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const index = tasks.findIndex((task) => task.id === taskId);
     if (index < 0) return { success: false, error: '任务不存在' };
+    if (tasks[index].runtime?.chatAdjustmentGuard?.active) return { success: false, error: '该任务正在保护豆包创作对话，请先采用回复或结束调整' };
     if (ACTIVE.has(tasks[index].status)) return { success: false, error: '任务正在执行，请先暂停后再删除' };
     const dependentCount = tasks.filter((task) => task.dependsOnTaskIds?.includes(taskId)).length;
     if (dependentCount > 0) return { success: false, error: `仍有 ${dependentCount} 个任务依赖此任务，请先调整依赖关系` };
@@ -432,6 +437,7 @@ export class TaskService {
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === taskId);
     if (!task) return { success: false, error: '任务不存在' };
+    if (task.runtime?.chatAdjustmentGuard?.active) return { success: false, error: '该任务正在保护豆包创作对话，请先采用回复或结束调整' };
     // PetStory 附件恢复先保存 hold，再显式绑定新 run；任何提交证据都禁止此路径。
     if (executionIntent === 'hold' && (task.runtime?.submittedAt || task.runtime?.acceptanceObservation || task.runtime?.chatResponse)) {
       return { success: false, error: '原任务已有提交或回复证据，禁止附件重试' };
@@ -605,6 +611,8 @@ export class TaskService {
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
+    if (params.runtime && Object.prototype.hasOwnProperty.call(params.runtime, 'chatAdjustmentGuard')) return { success: false, error: '对话保护只能由对应创作调整操作更新' };
+    if (task.runtime?.chatAdjustmentGuard?.active && params.runtime && Object.prototype.hasOwnProperty.call(params.runtime, 'runId') && params.runtime.runId !== task.runtime.runId) return { success: false, error: '自由对话调整尚未结束，不得替换原运行' };
 
     const chatEvidenceRunIds = [params.runtime?.chatReadback?.runId, params.runtime?.chatReadbackReview?.runId].filter((runId): runId is string => runId !== undefined);
     if (chatEvidenceRunIds.some((runId): boolean => !runId || runId !== (params.runtime?.runId || task.runtime?.runId)
@@ -702,11 +710,43 @@ export class TaskService {
     return { success: true, data: task };
   }
 
+  /** 仅同进程短剧服务调用；保存在源 Chat 任务，绝不伪造运行或提交记录。 */
+  setConversationGuard(taskId: string, projectId: string, adjustmentId: string, active: boolean): void {
+    const tasks = this.readTasks();
+    if (!tasks) throw new Error(WRITE_ERROR);
+    const task = tasks.find((item): boolean => item.id === taskId);
+    if (!task || task.mode !== 'chat' || !task.assignedAccountId || !task.runtime) throw new Error('原豆包任务、账号或运行记录缺失，无法保存对话保护');
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(projectId) || !/^[a-zA-Z0-9_-]{1,128}$/.test(adjustmentId) || typeof active !== 'boolean') throw new Error('对话保护归属无效');
+    const existing = task.runtime.chatAdjustmentGuard;
+    const matching = existing?.projectId === projectId && existing.adjustmentId === adjustmentId;
+    if ((existing?.active && !matching) || (!active && !matching)) throw new Error('对话保护不属于本次调整，未解除其他创作保护');
+    if (active) this.requireConversationAccountIdle(tasks, task, projectId, adjustmentId);
+    if (matching && existing.active === active) return;
+    task.runtime.chatAdjustmentGuard = { projectId, adjustmentId, active };
+    task.updatedAt = this.now();
+    if (!this.persist(tasks)) throw new Error(WRITE_ERROR);
+    const saved = this.readPersistedTask(taskId);
+    if (saved?.assignedAccountId !== task.assignedAccountId || !samePersistedChatEvidence(saved?.runtime?.chatAdjustmentGuard, task.runtime.chatAdjustmentGuard)) throw new Error('对话保护写入后回读不一致，请核对原调整');
+  }
+
+  private requireConversationAccountIdle(tasks: Task[], source: Task, projectId: string, adjustmentId: string): void {
+    for (const task of tasks.filter((item): boolean => item.assignedAccountId === source.assignedAccountId)) {
+      const guard = task.runtime?.chatAdjustmentGuard;
+      if (guard?.active && (task.id !== source.id || guard.projectId !== projectId || guard.adjustmentId !== adjustmentId)) throw new Error('这个账号正在保护另一项创作对话');
+      // 明确取消只结束账号占用；原提交证据仍由 retry 的核对门禁保护，绝不变成重发授权。
+      const pendingSubmission = task.status !== 'cancelled' && requiresSubmissionReconciliation(task);
+      if (ACTIVE.has(task.status) || pendingSubmission || (task.lock && Date.parse(task.lock.expiresAt) > this.nowMs())) throw new Error('这个账号还有执行、受理或待核对任务，请先处理原任务');
+    }
+  }
+
   acquireLock(params: TaskAcquireLockParams): TaskServiceResult<Task> {
     const tasks = this.readTasks();
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
+
+    if (hasConversationGuard(task.assignedAccountId)) return { success: false, error: '这个账号正在与豆包调整创作，请先采用回复或结束调整' };
+    if (task.assignedAccountId && tasks.some((item): boolean => item.assignedAccountId === task.assignedAccountId && item.runtime?.chatAdjustmentGuard?.active === true)) return { success: false, error: '这个账号正在与豆包调整创作，请先采用回复或结束调整' };
 
     const nowMs = this.nowMs();
     const accountConflict = task.assignedAccountId && tasks.some((item) =>

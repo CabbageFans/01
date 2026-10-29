@@ -55,7 +55,7 @@ export function petStoryJobStatus(job: PetStoryChatJob, task?: Task): { title: s
       : { title: '正在核对发送结果', instruction: '工具已保存发送意图并观察原会话，目前尚未确认平台受理；不能重复发送。' };
   }
   if (!task) return { title: '原任务记录待载入', instruction: '先刷新任务记录，再核对原请求。此处不会新建或重发任务。' };
-  if (['executing', 'generating', 'manual_submission_observing'].includes(task.status)) return { title: '工具正在处理', instruction: '工具正在准备并执行普通对话请求，当前尚无已发送记录，请等待页面反馈。' };
+  if (['executing', 'generating', 'manual_submission_observing'].includes(task.status)) return { title: '正在处理', instruction: '正在准备这次豆包请求，请等待页面反馈。' };
   return { title: '原任务尚未发送', instruction: '先处理豆包登录、验证或页面阻断，再从这里继续原任务；它会复用原请求。' };
 }
 
@@ -82,7 +82,7 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
   const canRepair = !localFormatFix && job.status === 'invalid' && !['repair', 'revise'].includes(job.kind) && !!job.requestId && !project.jobs.some((item): boolean => item.kind === 'repair' && item.parentJobId === job.id);
   return <><Space wrap className="mt-2" aria-label={`${petStoryJobTargetName(project, job)}处理操作`}>
     {task && <Button size="small" onClick={(): void => openOriginalTask(task)}>{conversation.ok ? '打开对应豆包会话' : '打开执行账号豆包'}</Button>}
-    {job.status !== 'applied' && <Button size="small" type={localFormatFix ? 'primary' : 'default'} disabled={state.busy || !task?.runtime?.chatResponse?.text && job.status !== 'captured'} onClick={(): void => { void state.collect(job.id); }}>{localFormatFix ? '读取原回复并整理分镜结构' : '读取原任务已保存回复'}</Button>}
+    {job.status !== 'applied' && <Button size="small" type={localFormatFix ? 'primary' : 'default'} disabled={state.busy || !task?.runtime?.chatResponse?.text && job.status !== 'captured'} onClick={(): void => { void state.collect(job.id); }}>{localFormatFix ? '读取原回复并整理分镜结构' : '重新保存回复'}</Button>}
     {canReconcile && <Button size="small" disabled={state.busy} onClick={(): void => { void state.recoverChat(job.id); }}>检查原回复（不重复发送）</Button>}
     {canStart && <Button size="small" type="primary" disabled={state.busy || !state.freeChatConfirmed} onClick={(): void => { void state.startBoundChat(job.id); }}>{task?.status === 'queued' ? '继续原文字任务（尚未发送）' : '处理阻断后继续原任务（未发送）'}</Button>}
     {canRepair && <Button size="small" disabled={state.busy || !state.freeChatConfirmed} onClick={(): void => { void state.correctOnce(job.id); }}>按具体缺项修订一次</Button>}
@@ -111,12 +111,14 @@ const PetStoryProductionRecovery: React.FC<{ project: PetStoryProject }> = ({ pr
   const task = tasks.find((item): boolean => item.id === step?.taskId);
   const material = project.materials?.find((item): boolean => item.id === step?.materialId);
   const shot = project.plan?.shots.find((item): boolean => item.id === step?.shotId);
+  const awaitingImage = !!step && step.kind !== 'video' && project.assets.some((asset): boolean => asset.imageReview?.state === 'candidate' && (step?.materialId ? asset.imageReview.target.materialId === step.materialId : asset.imageReview.target.shotId === step?.shotId));
+  const inspectImages = (): void => { const stage = step?.materialId ? 'materials' : 'keyframes'; const id = step?.materialId ? `material-${step.materialId}` : `shot-media-${step?.shotId}-${step?.kind}`; window.dispatchEvent(new CustomEvent('petstory-locate-draft', { detail: { stage, id, objectId: step?.shotId } })); requestAnimationFrame((): void => document.getElementById(id)?.scrollIntoView({ block: 'center', behavior: 'smooth' })); };
   const checked = !!state.capability && state.capabilityCheckedInSession;
   const readOnly = !!petStoryReadOnlyProductionTask(project, tasks);
   return <section className="py-3" aria-label="当前媒体制作任务">
-      <strong>{material?.name || (shot ? `镜头 ${shot.order}` : '当前素材制作')}</strong> <Tag color={production.state === 'paused' ? 'orange' : 'blue'}>{production.state === 'paused' ? '制作已暂停' : '工具正在制作'}</Tag>
+      <strong>{material?.name || (shot ? `镜头 ${shot.order}` : '当前素材制作')}</strong> <Tag color={production.state === 'paused' ? 'orange' : 'blue'}>{production.state === 'paused' ? '制作已暂停' : '正在制作'}</Tag>
       <p className="my-2">{production.message}</p>{step?.error && <Alert type="warning" message={step.error} />}
-      <Space wrap>{task && <Button size="small" onClick={(): void => openOriginalTask(task)}>打开对应豆包会话</Button>}{production.state === 'running' ? <Button size="small" disabled={state.busy} onClick={(): void => { void state.pauseProduction(); }}>暂停后续制作</Button> : <>
+      <Space wrap>{awaitingImage && <Button size="small" type="primary" onClick={inspectImages}>查看待确认图片</Button>}{task && <Button size="small" onClick={(): void => openOriginalTask(task)}>打开对应豆包会话</Button>}{production.state === 'running' ? <Button size="small" disabled={state.busy} onClick={(): void => { void state.pauseProduction(); }}>暂停后续制作</Button> : <>
         {!checked && !readOnly && <Button size="small" disabled={state.busy} onClick={(): void => { void state.inspectCapability(false, step?.kind === 'video' ? 'video' : 'image'); }}>检查当前豆包入口</Button>}
         <Button size="small" disabled={state.busy || !checked && !readOnly} onClick={(): void => { void state.resumeProduction(); }}>{readOnly && !checked ? '只读继续收取／下载原产物' : '继续原制作任务'}</Button>
         {task?.runtime?.submittedAt && <Button size="small" disabled={state.busy} onClick={(): void => { window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id } })); revealBrowser(); }}>检查原制作结果（不重复发送）</Button>}
@@ -131,7 +133,8 @@ export const PetStoryCurrentTasks: React.FC<{ project: PetStoryProject; onContin
   const jobs = currentJobs(project);
   const ended = project.jobs.filter((job): boolean => !!job.endedWaitingAt).length;
   const production = project.production;
-  return <Card size="small" className="petstory-current-tasks" title="当前任务与需要处理的事项">
+  if (!jobs.length && (!production || production.state === 'complete') && !ended) return <></>;
+  return <Card size="small" className="petstory-current-tasks" title="待处理事项">
     {!jobs.length && (!production || production.state === 'complete') && <p role="status">当前没有正在等待的任务。请按当前阶段的推荐操作继续。</p>}
     {jobs.map((job): React.ReactNode => {
       const original = tasks.find((item): boolean => item.id === job.taskId);

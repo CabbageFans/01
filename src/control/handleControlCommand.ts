@@ -56,6 +56,7 @@ export async function handleControlCommand(
     if ((task.batchId || '_unbatched') !== command.batchId) {
       return result(command.commandId, false, 'BATCH_TASK_MISMATCH');
     }
+    if (task.runtime?.chatAdjustmentGuard?.active) return result(command.commandId, false, 'TASK_LOCKED');
 
     if (command.action === 'start') {
       const ok = await deps.start(task.id);
@@ -67,7 +68,7 @@ export async function handleControlCommand(
     }
 
     const targetStatus = command.action === 'cancel' ? 'cancelled' : 'paused';
-    if (task.status === 'queued' || task.status === 'waiting_verification') {
+    if (task.status === 'queued' || task.status === 'waiting_verification' || (command.action === 'cancel' && task.status === 'paused')) {
       const updated = await deps.updateStatus(
         task.id,
         targetStatus,

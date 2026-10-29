@@ -52,6 +52,22 @@ async function finish(job: PetStoryChatJob, result: Record<string, unknown>, bad
   if (!job.runId) await chat.bindRun(p.id, job.id, runtime.runId);
   const collected = await chat.collect(p.id, job.id); p = collected.project!; return p;
 }
+/** 收取和采用是两个动作；每次采用都通过正式服务，先检查候选已经保存。 */
+async function adoptPrompt(job: PetStoryChatJob): Promise<void> {
+  expect(p.jobs.find((item): boolean => item.id === job.id)).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+  p = (await chat.adoptPromptCandidate(p.id, p.revision, job.id)).project!;
+  expect(p.jobs.find((item): boolean => item.id === job.id)?.resultStatus).toBe('adopted');
+}
+async function adoptPlan(job: PetStoryChatJob): Promise<void> {
+  expect(p.jobs.find((item): boolean => item.id === job.id)).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+  p = (await chat.adoptPlanCandidate(p.id, p.revision, job.id)).project!;
+  expect(p.jobs.find((item): boolean => item.id === job.id)?.resultStatus).toBe('adopted');
+}
+async function adoptAssets(job: PetStoryChatJob): Promise<void> {
+  expect(p.jobs.find((item): boolean => item.id === job.id)).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+  p = (await chat.adoptAssetsCandidate(p.id, p.revision, job.id)).project!;
+  expect(p.jobs.find((item): boolean => item.id === job.id)?.resultStatus).toBe('adopted');
+}
 function issue(id: string, targetId: string, severity: PetStoryReviewIssue['severity']): PetStoryReviewIssue {
   return { id, targetId, severity, evidence: `TEST-${id}-具体证据`, impact: `TEST-${id}-制作影响`, requestedChange: `TEST-${id}-修订目标` };
 }
@@ -102,8 +118,11 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(result.parsedResult?.plan?.shots[1]).toMatchObject({ transition: 'cut', action: incoming.shots[1].action, startState: incoming.shots[1].startState, endState: incoming.shots[1].endState });
     expect(result.parsedResult?.plan?.shots[1].previousShotId).toBeUndefined();
     expect(incoming).toEqual(untouched);
-    if (hasPlan) expect(p.plan).toEqual(previous);
-    else { expect(p.plan?.shots[1].previousShotId).toBeUndefined(); expect(result.resultStatus).toBe('adopted'); }
+    expect(result.resultStatus).toBe('candidate'); expect(p.plan).toEqual(previous);
+    if (!hasPlan) {
+      expect(p.plan).toBeUndefined(); await adoptPlan(job);
+      expect(p.plan!.shots[1].previousShotId).toBeUndefined();
+    }
     expect(tasks()).toHaveLength(kind === 'repair' ? 2 : 1);
     const reopened = await new PetStoryProjects().open(directory);
     expect(reopened.jobs.at(-1)?.formatCorrections).toEqual(result.formatCorrections);
@@ -164,7 +183,8 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const adopted = await chat.adoptPlanCandidate(p.id, p.revision, result.id); p = adopted.project!;
     expect(p.plan!.characters[0].description).toBe(expected); expect((await new PetStoryProjects().open(directory)).plan!.characters[0].description).toBe(expected);
     expect(tasks()).toHaveLength(1); expect(p.materials!.find((item): boolean => item.id === material.id)?.approved?.identity).toEqual(state === 'approved' ? material.approved!.identity : undefined);
-    if (!['no-approval', 'legacy-no-profile'].includes(state)) expect(p.plan!.characters[0].referenceAssetId).toBe('TEST-identity');
+    if (state === 'selected-unapproved') expect(p.plan!.characters[0].referenceAssetId).toBeUndefined();
+    else if (!['no-approval', 'legacy-no-profile'].includes(state)) expect(p.plan!.characters[0].referenceAssetId).toBe('TEST-identity');
   });
   it.each(['correct', 'wrong-binding', 'missing-alias', 'missing-actor', 'changed-role', 'role-only-changed', 'extra-actor', 'no-aliases'] as const)('分析%s按本次显式来源绑定校验，错误留原回复与完整候选', async (state): Promise<void> => {
     const plan = await configuredCastPlan(!['no-aliases', 'role-only-changed'].includes(state)); const original = structuredClone(p.plan); const job = await prepare('analysis');
@@ -188,6 +208,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(p.plan).toBeUndefined(); expect(p.jobs.at(-1)).toMatchObject({ status: 'invalid', resultStatus: 'candidate' });
     const repair = await prepare('repair', { parentJobId: job.id }); expect(repair.analysisCastBindings).toEqual(job.analysisCastBindings);
     await finish(repair, { ...plan, storyUsable: true, contentBasis: { beginning: 'TEST开头', middle: 'TEST变化', ending: 'TEST结局' } });
+    expect(p.plan).toBeUndefined(); await adoptPlan(repair);
     expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'adopted' }); expect(p.plan?.characters).toEqual(plan.characters); expect(tasks()).toHaveLength(2);
     expect(p.jobs[0].rawText).not.toBe(p.jobs[1].rawText); expect(p.jobs[0].status).toBe('invalid');
     await expect(chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: job.id })).rejects.toThrow('一次'); expect(tasks()).toHaveLength(2);
@@ -213,6 +234,9 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     else await finish(job, { characters: [], props: [{ id: 'object', name: 'TEST新增道具', aliases: [], description: 'TEST外观', keyStates: 'TEST状态', appearanceState: 'TEST静态', scale: 'TEST比例', designOrigin: 'script' }], scenes: p.plan!.scenes,
       shotBindings: p.plan!.shots.map((shot): object => ({ shotId: shot.id, characterIds: [], propIds: ['object'], propStates: [{ propId: 'object', state: 'TEST起点' }], sceneId: 'location' })) });
     const id = stage === 'analysis' ? 'scene:location' : 'prop:object';
+    expect(p.materials?.find((item): boolean => item.id === id)).toBeUndefined();
+    if (stage === 'analysis') { expect(p.plan).toBeUndefined(); await adoptPlan(job); }
+    else { expect(p.plan!.shots[0].propIds).toEqual([]); await adoptAssets(job); }
     const material = p.materials!.find((item): boolean => item.id === id)!;
     expect(material.prompt.original.trim()).not.toBe(''); expect(material.prompt.final).toBe(''); expect(material.prompt.optimized).toBe('');
     expect((await new PetStoryProjects().open(directory)).materials!.find((item): boolean => item.id === id)!.prompt.final).toBe('');
@@ -225,7 +249,9 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     await expect(production.generateMaterials(p.id, p.revision, [id], available)).rejects.toThrow('尚无最终正文');
     expect((await projects.read(p.id)).production).toBeUndefined(); expect(tasks().every((task): boolean => task.mode === 'chat')).toBe(true);
     const materialJob = await prepare('materialPrompt', { materialId: id }); const body = 'TEST模型完整基础素材正文\n第二段';
-    await finish(materialJob, { optimized: body }); expect(p.materials!.find((item): boolean => item.id === id)!.prompt.sourceJobId).toBe(materialJob.id);
+    await finish(materialJob, { optimized: body });
+    expect(p.materials!.find((item): boolean => item.id === id)!.prompt).toMatchObject({ final: '', optimized: body, candidateJobId: materialJob.id });
+    await adoptPrompt(materialJob); expect(p.materials!.find((item): boolean => item.id === id)!.prompt.sourceJobId).toBe(materialJob.id);
     expect(compileMaterialPrompt(p, id).text).toBe(body); expect(buildPetStoryPromptExport(p, []).prompts.find((entry): boolean => entry.id === id)!.modelPrompt).toBe(body);
     const allowed = await production.generateMaterials(p.id, p.revision, [id], available); expect(allowed.success).toBe(true); expect(allowed.project?.production?.phase).toBe('materials');
     expect(tasks().every((task): boolean => task.mode === 'chat')).toBe(true);
@@ -327,7 +353,9 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const repair = await prepare('repair', { parentJobId: job.id });
     expect(requestFacts(repair).parentResult).toMatchObject({ originalReply: expect.stringContaining(body) });
     const corrected = '以第1张参考图的布局和光线为参考，TEST模型返回的完整静态正文。';
-    await finish(repair, { optimized: corrected }); expect(p.plan!.shots[0].prompts.firstFrame.final).toBe(corrected);
+    await finish(repair, { optimized: corrected });
+    expect(p.plan!.shots[0].prompts.firstFrame).toMatchObject({ final: 'TEST首帧0', optimized: corrected, candidateJobId: repair.id });
+    await adoptPrompt(repair); expect(p.plan!.shots[0].prompts.firstFrame.final).toBe(corrected);
     await expect(prepare('repair', { parentJobId: job.id })).rejects.toThrow('已使用一次');
   });
   it.each([false, true])('确认剧本重复台词按说话者和发声次数保留，额外声音块才报错：同说话者=%s', async (sameSpeaker: boolean): Promise<void> => {
@@ -339,7 +367,9 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(job.requestText).toContain('按确认dialogue的发声次数保留');
     const labels = job.promptTask!.references.map((ref): string => `@图片${ref.order}`).join(' ');
     const body = `${labels} TEST甲整理好衣服。{TEST甲用中文说：“好”} 随后 {${sameSpeaker ? 'TEST甲' : 'TEST乙'}用中文说：“好”}。全程无字幕、无对白文字叠加。`;
-    await finish(job, { optimized: body }); expect(p.jobs.at(-1)?.resultStatus).toBe('adopted'); expect(p.plan!.shots[0].prompts.video.final).toBe(body);
+    await finish(job, { optimized: body });
+    expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: 'TEST视频0', optimized: body, candidateJobId: job.id });
+    await adoptPrompt(job); expect(p.plan!.shots[0].prompts.video.final).toBe(body);
     const extra = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video' });
     await finish(extra, { optimized: `${body} {TEST甲用中文说：“好”}` });
     expect(p.jobs.at(-1)?.validationIssues?.join('\n')).toContain('发声次数与确认剧本不符'); expect(p.plan!.shots[0].prompts.video.final).toBe(body);
@@ -361,6 +391,8 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(parentResult.originalRequest).toBe(job.requestText); expect(request).toContain(invalid.validationIssues![0]);
     const body = `TEST 完整修订正文 ${repair.promptTask!.references.map((ref): string => `@图片${ref.order}`).join(' ')}\n保留 <声音> 与 {模型原有语法}。全程无字幕、无对白文字叠加。`;
     await finish(repair, { optimized: body });
+    expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: 'TEST视频0', optimized: body, candidateJobId: repair.id });
+    await adoptPrompt(repair);
     expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: body, sourceJobId: repair.id, promptTask: repair.promptTask });
     expect((await new PetStoryProjects().open(directory)).plan!.shots[0].prompts.video.promptTask).toEqual(repair.promptTask);
     await expect(prepare('repair', { parentJobId: job.id })).rejects.toThrow('已使用一次');
@@ -385,13 +417,18 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const repair = await prepare('repair', { parentJobId: job.id });
     const body = `${labels} {TEST角色用中文说：“TEST逐字台词”}\nTEST模型自己返回的完整动作。全程无字幕、无对白文字叠加。`;
     await finish(repair, { optimized: body });
+    expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: 'TEST视频0', optimized: body, candidateJobId: repair.id });
+    await adoptPrompt(repair);
     expect(p.plan!.shots[0].prompts.video.final).toBe(body); expect(p.jobs.at(-1)?.rawText).toContain('TEST角色用中文说');
   });
-  it('本次请求加载实质规则，完整新正文自动采用、保存重开、编译保持一致', async (): Promise<void> => {
+  it('本次请求加载实质规则，完整新正文先存候选，明确采用后保存重开、编译保持一致', async (): Promise<void> => {
     const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame' });
     expect(job.ruleFiles?.length).toBeGreaterThan(1); expect(job.rulesVersion).toContain('drama'); expect(job.requestId).toBeTruthy();
     const body = `TEST中文“引号”\n\n${'完整段落。\n'.repeat(500)}结尾`;
-    await finish(job, { optimized: body }); const current = p.plan!.shots[0].prompts.firstFrame;
+    await finish(job, { optimized: body });
+    expect(p.plan!.shots[0].prompts.firstFrame).toMatchObject({ final: 'TEST首帧0', optimized: body, candidateJobId: job.id });
+    expect((await new PetStoryProjects().open(directory)).plan!.shots[0].prompts.firstFrame.final).toBe('TEST首帧0');
+    await adoptPrompt(job); const current = p.plan!.shots[0].prompts.firstFrame;
     expect(current.final).toBe(body); expect(current.sourceJobId).toBe(job.id); expect(current.edited).toBe(false);
     expect(p.jobs[0].rawText).toContain('完整段落'); expect(p.jobs[0].resultStatus).toBe('adopted');
     const reopened = await new PetStoryProjects().open(directory); expect(reopened.plan!.shots[0].prompts.firstFrame).toEqual(current);
@@ -453,6 +490,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const review = await prepare('review', { shotId: 'shot-0', promptKind: 'video' });
     await finish(review, { issues: [{ id: 'saved-old-issue', targetId: 'shot-0:video', evidence: 'TEST旧正文证据', impact: 'TEST制作影响', requestedChange: 'TEST目标', severity: 'warning' }] });
     const creative = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video' }); await finish(creative, { optimized: 'TEST当前新正文' });
+    expect(p.plan!.shots[0].prompts.video.final).toBe('TEST视频0'); await adoptPrompt(creative);
     await expect(prepare('revise', { parentJobId: review.id, shotId: 'shot-0', promptKind: 'video' })).rejects.toThrow('正文已经变化');
     expect(p.plan!.shots[0].prompts.video.final).toBe('TEST当前新正文');
   });
@@ -469,7 +507,10 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const review = await prepare('review'); await finish(review, { issues: [issue('old-body', 'shot-0:video', 'error')] });
     const originalReview = structuredClone(p.jobs.find((job): boolean => job.id === review.id));
     if (change === 'manual') p = await projects.saveShotPrompt(p.id, p.revision, 'shot-0', 'video', 'TEST用户新正文');
-    else { const next = await prepare(change, { shotId: 'shot-0', promptKind: 'video', ...(change === 'revise' ? { parentJobId: review.id } : {}) }); await finish(next, { optimized: 'TEST正常新采用正文' }); }
+    else {
+      const next = await prepare(change, { shotId: 'shot-0', promptKind: 'video', ...(change === 'revise' ? { parentJobId: review.id } : {}) });
+      await finish(next, { optimized: 'TEST正常新采用正文' }); expect(p.plan!.shots[0].prompts.video.final).toBe('TEST视频0'); await adoptPrompt(next);
+    }
     const count = tasks().length;
     await expect(prepare('revise', { parentJobId: review.id, shotId: 'shot-0', promptKind: 'video' })).rejects.toThrow('正文已经变化');
     expect(tasks()).toHaveLength(count); expect(p.jobs.find((job): boolean => job.id === review.id)).toEqual(originalReview);
@@ -494,6 +535,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const review = await prepare('review', { shotId: 'shot-0', promptKind: 'video' }); await finish(review, { issues: [issue('old-local', 'shot-0:video', 'error')] });
     delete p.jobs.find((job): boolean => job.id === review.id)!.reviewInputFinals; p = await projects.write(p);
     const revision = await prepare('revise', { parentJobId: review.id, shotId: 'shot-0', promptKind: 'video' }); await finish(revision, { optimized: 'TEST修订后新正文' });
+    expect(p.plan!.shots[0].prompts.video.final).toBe('TEST视频0'); await adoptPrompt(revision);
     const count = tasks().length;
     await expect(prepare('revise', { parentJobId: review.id, shotId: 'shot-0', promptKind: 'video' })).rejects.toThrow('正文已经变化'); expect(tasks()).toHaveLength(count);
   });
@@ -608,6 +650,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const original = structuredClone(p.plan!.shots); const job = await prepare('assets');
     await finish(job, { characters: [], props: [], scenes: p.plan!.scenes, understanding: 'TEST剧本来源映射', sceneDesign: 'TEST空间锚点',
       shotBindings: original.map((s): object => ({ shotId: s.id, characterIds: [], propIds: [], propStates: [], sceneId: 'location', sourceRefs: ['TEST原文段1'], blocking: 'TEST调度' })) });
+    expect(p.plan!.shots).toEqual(original); expect(p.plan!.sceneDesign).toBe('TEST 空间关系'); await adoptAssets(job);
     expect(p.jobs[0].resultStatus).toBe('adopted');
     p.plan!.shots.forEach((s, index): void => { expect(s.action).toBe(original[index].action); expect(s.startState).toBe(original[index].startState); expect(s.endState).toBe(original[index].endState); expect(s.durationSeconds).toBe(original[index].durationSeconds); expect(s.prompts).toEqual(original[index].prompts); expect(s.sourceRefs).toEqual(['TEST原文段1']); });
     expect((await new PetStoryProjects().open(directory)).plan!.sceneDesign).toBe('TEST空间锚点');
@@ -626,6 +669,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const original = structuredClone(p.plan!.shots); const job = await prepare('assets');
     await finish(job, { characters: [...p.plan!.characters, { id: 'additional', name: 'TEST必要配角', role: 'supporting', purpose: 'TEST用途', description: 'TEST候选外观' }], props: [], scenes: p.plan!.scenes,
       shotBindings: p.plan!.shots.map((shot): object => ({ shotId: shot.id, characterIds: shot.id === 'shot-0' ? ['original', 'additional'] : [], propIds: [], propStates: [], sceneId: 'location' })) });
+    expect(p.plan!.shots).toEqual(original); expect(p.plan!.characters.map((actor): string => actor.id)).toEqual(['original']); await adoptAssets(job);
     expect(p.jobs.at(-1)?.resultStatus).toBe('adopted'); expect(p.plan!.shots[0].characterIds).toEqual(['original', 'additional']);
     expect(p.plan!.shots[0].action).toBe(original[0].action); expect(p.plan!.shots[0].prompts).toEqual(original[0].prompts);
   });
@@ -645,7 +689,9 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const approved = structuredClone(p.materials!.find((item): boolean => item.id === 'scene:location')!); const job = await prepare('assets');
     await finish(job, { characters: [], props: [{ id: 'new-prop', name: 'TEST新增道具', aliases: [], description: 'TEST外观', keyStates: 'TEST状态', scale: 'TEST比例', designOrigin: 'proposed' }], scenes: p.plan!.scenes,
       shotBindings: p.plan!.shots.map((shot): object => ({ shotId: shot.id, characterIds: [], propIds: shot.id === 'shot-0' ? ['new-prop'] : [], propStates: shot.id === 'shot-0' ? [{ propId: 'new-prop', state: 'TEST状态' }] : [], sceneId: 'location' })) });
+    expect(p.plan!.shots[0].propIds).toEqual([]); expect(p.materials!.find((item): boolean => item.id === 'scene:location')).toEqual(approved); await adoptAssets(job);
     expect(p.jobs.at(-1)?.resultStatus).toBe('adopted'); expect(p.plan!.shots[0].propIds).toEqual(['new-prop']);
+    expect(p.plan!.shots[0].sceneId).toBe('location');
     expect(p.materials!.find((item): boolean => item.id === 'scene:location')).toEqual(approved);
   });
   it('即使无当前镜头依赖，也不能删除或重命名已选图片的库存实体', async (): Promise<void> => {
@@ -673,7 +719,10 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const review = await prepare('review', { shotId: 'shot-0', promptKind: 'video' });
     await finish(review, { issues: [{ id: 'issue-0', targetId: 'shot-0:video', evidence: 'TEST正文证据', impact: 'TEST制作影响', requestedChange: 'TEST局部修订目标', severity: 'warning' }] });
     const revision = await prepare('revise', { shotId: 'shot-0', promptKind: 'video', parentJobId: review.id, selectedIssueIds: ['issue-0'] });
-    await finish(revision, { optimized: 'TEST局部修订结果' }); expect(p.plan!.shots[0].prompts.video.final).toBe('TEST局部修订结果'); expect(p.plan!.shots[1].prompts.video.final).toBe('TEST视频1');
+    await finish(revision, { optimized: 'TEST局部修订结果' });
+    expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: 'TEST视频0', optimized: 'TEST局部修订结果', candidateJobId: revision.id });
+    expect(p.plan!.shots[1].prompts.video.final).toBe('TEST视频1'); await adoptPrompt(revision);
+    expect(p.plan!.shots[0].prompts.video.final).toBe('TEST局部修订结果'); expect(p.plan!.shots[1].prompts.video.final).toBe('TEST视频1');
     await expect(prepare('revise', { shotId: 'shot-0', promptKind: 'video', parentJobId: review.id })).rejects.toThrow('正文已经变化');
     const currentReview = await prepare('review', { shotId: 'shot-0', promptKind: 'video' });
     await finish(currentReview, { issues: [issue('current-issue', 'shot-0:video', 'error')] });
@@ -739,7 +788,9 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(p.jobs.at(-1)?.status).toBe('applied'); expect(p.plan).toEqual(original); expect((await new PetStoryProjects().open(directory)).jobs.at(-1)?.reviewFocus).toBe(review.reviewFocus);
   });
   it('素材Chat正文不因规则版本或syncMaterials变回本地模板，设计变更保留待复核', async (): Promise<void> => {
+    const previous = p.materials![0].prompt.final;
     const job = await prepare('materialPrompt', { materialId: 'scene:location' }); await finish(job, { optimized: 'TEST豆包完整场景正文\n第二段' });
+    expect(p.materials![0].prompt).toMatchObject({ final: previous, optimized: 'TEST豆包完整场景正文\n第二段', candidateJobId: job.id }); await adoptPrompt(job);
     const accepted = structuredClone(p.materials![0].prompt);
     expect(accepted.sourceJobId).toBe(job.id);
     p.materials = syncMaterials(p); p = await projects.write(p); expect(p.materials![0].prompt).toEqual(accepted);
@@ -781,6 +832,8 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     p = (await chat.adoptPromptCandidate(p.id, p.revision, job.id)).project!;
     expect(p.materials![0].prompt.editIntent).toEqual(editIntent); expect((await new PetStoryProjects().open(directory)).materials![0].prompt.editIntent).toEqual(editIntent);
     const regenerated = await prepare('materialPrompt', { materialId: 'scene:location' }); await finish(regenerated, { optimized: 'TEST新的普通基础图正文' });
+    expect(p.materials![0].prompt).toMatchObject({ final: 'TEST本次豆包编辑候选\n完整第二段', optimized: 'TEST新的普通基础图正文', candidateJobId: regenerated.id, editIntent });
+    await adoptPrompt(regenerated);
     expect(p.materials![0].prompt.final).toBe('TEST新的普通基础图正文'); expect(p.materials![0].prompt.editIntent).toBeUndefined();
   });
   it('文字模型选择变化使已发请求过期，晚回仅保留完整候选', async (): Promise<void> => {

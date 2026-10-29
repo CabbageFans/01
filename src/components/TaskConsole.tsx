@@ -12,10 +12,8 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Button, Select, Input, Modal, Dropdown, Space, Segmented, Tooltip, message, Switch, Alert, Collapse, Table, Tag } from 'antd';
 import type { MenuProps } from 'antd';
 import {
-  PlusOutlined,
   DeleteOutlined,
   PauseCircleOutlined,
-  DownloadOutlined,
   LoadingOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -36,6 +34,7 @@ import {
 import { useTaskStore, isDependencyBlockedTask, describeDependencyBlock } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
 import { useProjectStore } from '../store/useProjectStore';
+import { usePetStoryStore } from '../store/usePetStoryStore';
 import TaskDetailModal from './TaskDetailModal';
 import type { Task, TaskUpdateInput } from '../types';
 import { isTaskConversationMissing } from '../utils/taskConversationLocator';
@@ -145,6 +144,7 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const activeProject = useProjectStore((state) => state.projects.find((project) => project.id === state.activeProjectId));
   const tasks = allTasks.filter((task) => (task.projectId || 'default-project') === activeProjectId);
+  const storyProject = usePetStoryStore((state) => state.project);
 
   const accounts = useAccountStore((s) => s.accounts);
   const selectAccount = useAccountStore((s) => s.selectAccount);
@@ -152,7 +152,7 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
 
   const [creationAccountId, setCreationAccountId] = useState<string | undefined>(undefined);
   const [query, setQuery] = useState('');
-  const [taskFilter, setTaskFilter] = useState<'all' | 'attention' | 'queued' | 'done'>('all');
+  const [taskFilter, setTaskFilter] = useState<'all' | 'attention' | 'running' | 'queued' | 'done'>('all');
   const [creating, setCreating] = useState(false);
   const [inputText, setInputText] = useState('');
   const [selectedMode, setSelectedMode] = useState<GenerationMode>('chat');
@@ -232,8 +232,9 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
     setAttachmentBase64s({});
     for (const filePath of template.attachments) {
       void window.electronAPI.tasks.readFileAsBase64(filePath).then((result) => {
-        if (result.success && result.data) {
-          setAttachmentBase64s((current) => ({ ...current, [filePath]: result.data! }));
+        const data = result.data;
+        if (result.success && data) {
+          setAttachmentBase64s((current) => ({ ...current, [filePath]: data }));
         }
       });
     }
@@ -308,6 +309,12 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
       setIsCsvImporting(false);
     }
   }, [autoAssign, autoAssignTasks, autoExecute, armTasks, importCsv, isCsvImporting]);
+
+  useEffect((): (() => void) => {
+    const importRequested = (): void => { void handleImportCsv(); };
+    window.addEventListener('import-workspace-csv', importRequested);
+    return (): void => window.removeEventListener('import-workspace-csv', importRequested);
+  }, [handleImportCsv]);
 
   const handleCsvDragEnter = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -539,9 +546,9 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
         <span
           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium"
           style={{
-            backgroundColor: cfg.color + '18',
-            color: cfg.color,
-            border: `1px solid ${cfg.color}30`,
+            backgroundColor: '#F8FAFB',
+            color: '#697584',
+            border: '1px solid #E3E8EB',
           }}
         >
           {({ chat: <MessageOutlined />, image: <PictureOutlined />, video: <VideoCameraOutlined />, music: <AudioOutlined /> })[mode]}
@@ -567,8 +574,9 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
       );
     }
     const cfg = TASK_STATUS_CONFIG[status];
+    const statusColor = status === 'executing' ? '#087F72' : cfg.color;
     return (
-      <span className={`task-status-tag ${cfg.className}`} style={{ borderColor: cfg.color, color: cfg.color }}>
+      <span className={`task-status-tag ${cfg.className}`} style={{ borderColor: statusColor, color: statusColor }}>
         {status === 'generating' && <SyncOutlined spin style={{ marginRight: 4 }} />}
         {status === 'executing' && <ThunderboltOutlined style={{ marginRight: 4 }} />}
         {status === 'waiting_verification' && <LoadingOutlined spin style={{ marginRight: 4 }} />}
@@ -597,19 +605,34 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
     }
   };
 
+  const taskTitle = (task: Task): string => {
+    const productions = [...(storyProject?.productionHistory || []), ...(storyProject?.production ? [storyProject.production] : [])];
+    const step = productions.flatMap((production) => production.steps).find((item): boolean => item.taskId === task.id);
+    const job = storyProject?.jobs.find((item): boolean => item.taskId === task.id);
+    const shotId = step?.shotId || job?.shotId;
+    const shotIndex = storyProject?.plan?.shots.findIndex((shot): boolean => shot.id === shotId) ?? -1;
+    const material = storyProject?.materials?.find((item): boolean => item.id === (step?.materialId || job?.materialId));
+    const kind = step?.kind || job?.promptKind;
+    const kindLabel = kind === 'firstFrame' ? '首帧' : kind === 'lastFrame' ? '尾帧' : kind === 'video' ? '视频' : '图片';
+    if (material) return `${material.name} · ${task.mode === 'chat' ? '图片提示词' : '参考图'}`;
+    if (shotIndex >= 0) return `镜头 ${shotIndex + 1} · ${kindLabel}${task.mode === 'chat' ? '提示词' : ''}`;
+    if (job?.kind === 'analysis' || job?.kind === 'repair') return '故事理解与分镜方案';
+    return `${GENERATION_MODE_CONFIG[task.mode || 'chat'].label}任务`;
+  };
+
   const taskColumns: ColumnsType<Task> = [
-    { title: '任务摘要', key: 'summary', width: 310, render: (_: unknown, task: Task): React.ReactNode => <button className="task-summary-button" onClick={(): void => { setSelectedTask(task); setDetailModalOpen(true); }}><strong>{task.prompt.slice(0, 100)}</strong><small>{task.id.slice(0, 8)} · {taskNextAction(task)}</small></button> },
+    { title: '任务摘要', key: 'summary', width: 310, render: (_: unknown, task: Task): React.ReactNode => <button className="task-summary-button" onClick={(): void => { setSelectedTask(task); setDetailModalOpen(true); }}><strong>{taskTitle(task)}</strong><small>{taskNextAction(task)}</small></button> },
     { title: '类型', width: 88, render: (_: unknown, task: Task): React.ReactNode => renderModeTag(task.mode || 'chat') },
     { title: '执行状态', width: 156, render: (_: unknown, task: Task): React.ReactNode => <div className="task-status-cell">{renderStatusTag(task)}{task.status === 'done' && <small>人工质量{task.qualityVerdict?.status === 'accepted' ? '合格' : task.qualityVerdict?.status === 'rejected' ? '拒收' : '未评'}</small>}</div> },
-    { title: '执行账号', width: 180, render: (_: unknown, task: Task): React.ReactNode => <Select aria-label={`${task.id}执行账号`} size="small" placeholder="未指派" value={task.assignedAccountId || undefined} onChange={(value: string): void => { void handleAssign(task.id, value); }} style={{ width: '100%' }} disabled={!!task.petstory || ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(task.status)} popupMatchSelectWidth={false} options={buildManualAssignmentOptions(accounts, task.mode || 'chat', task.videoConfig?.duration)} /> },
-    { title: '批次 / 阶段', width: 155, render: (_: unknown, task: Task): React.ReactNode => <div className="table-secondary"><span>{task.batchId ? task.batchId.slice(-10) : '无批次'}</span><small>{task.runtime?.stage ? TASK_STAGE_LABELS[task.runtime.stage] || task.runtime.stage : '尚未开始'}{task.dependsOnTaskIds?.length ? ` · ${task.dependsOnTaskIds.length} 项前置` : ''}</small></div> },
+    { title: '执行账号', width: 180, render: (_: unknown, task: Task): React.ReactNode => <Select aria-label={`${taskTitle(task)}执行账号`} size="small" placeholder="未指派" value={task.assignedAccountId || undefined} onChange={(value: string): void => { void handleAssign(task.id, value); }} style={{ width: '100%' }} disabled={!!task.petstory || ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(task.status)} popupMatchSelectWidth={false} options={buildManualAssignmentOptions(accounts, task.mode || 'chat', task.videoConfig?.duration)} /> },
+    { title: '批次 / 阶段', width: 155, render: (_: unknown, task: Task): React.ReactNode => <div className="table-secondary"><span>{task.batchId ? `批次 ${[...new Set(tasks.map((item): string | undefined => item.batchId).filter(Boolean))].indexOf(task.batchId) + 1}` : '单项任务'}</span><small>{task.runtime?.stage ? TASK_STAGE_LABELS[task.runtime.stage] || task.runtime.stage : '尚未开始'}{task.dependsOnTaskIds?.length ? ` · ${task.dependsOnTaskIds.length} 项前置` : ''}</small></div> },
     { title: '更新时间', width: 138, render: (_: unknown, task: Task): React.ReactNode => new Date(task.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) },
     { title: '下一步', width: 165, fixed: 'right', render: (_: unknown, task: Task): React.ReactNode => <Space size={4}>
       {requiresSubmissionReconciliation(task) ? <Button size="small" onClick={(): void => { handleTaskClick(task); revealBrowser(); window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id } })); }}>核对原会话</Button> : task.status === 'queued' && !task.petstory ? <Button size="small" type="primary" disabled={!task.assignedAccountId || !!accountBusy[task.assignedAccountId]} onClick={(): void => { void handleStartTask(task.id); }}>授权执行</Button> : <Button size="small" onClick={(): void => { setSelectedTask(task); setDetailModalOpen(true); }}>详情</Button>}
-      <Dropdown menu={{ items: getContextMenu(task.id) }} trigger={['click']}><Button size="small" aria-label={`${task.id}更多操作`} icon={<MoreOutlined />} /></Dropdown>
+      <Dropdown menu={{ items: getContextMenu(task.id) }} trigger={['click']}><Button size="small" aria-label={`${taskTitle(task)}更多操作`} icon={<MoreOutlined />} /></Dropdown>
     </Space> },
   ];
-  const visibleTasks = tasks.filter((task: Task): boolean => taskFilter === 'all' || taskFilter === 'attention' && needsTaskAttention(task) || task.status === taskFilter).filter((task: Task): boolean => !query.trim() || `${task.prompt} ${task.id} ${task.batchId || ''}`.toLowerCase().includes(query.toLowerCase())).sort((a: Task, b: Task): number => b.updatedAt.localeCompare(a.updatedAt));
+  const visibleTasks = tasks.filter((task: Task): boolean => taskFilter === 'all' || taskFilter === 'attention' && needsTaskAttention(task) || taskFilter === 'running' && ['executing', 'generating'].includes(task.status) || task.status === taskFilter).filter((task: Task): boolean => !query.trim() || `${task.prompt} ${task.id} ${task.batchId || ''}`.toLowerCase().includes(query.toLowerCase())).sort((a: Task, b: Task): number => b.updatedAt.localeCompare(a.updatedAt));
 
   // ---- 统计 ----
 
@@ -637,61 +660,8 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
           <span>导入当前项目；未明确启动的任务不会自动执行</span>
         </div>
       )}
-      {/* 顶部操作栏 */}
-      {view === 'tasks' && <div className="task-console-header">
-        <Tooltip title={`项目 ID：${activeProjectId}`}>
-          <span className="task-console-title">任务调度 · {activeProject?.name || activeProjectId}</span>
-        </Tooltip>
-        <div className="task-console-stats">
-          <span className="stat-badge running"><LoadingOutlined spin={runningCount > 0} /> 运行 {runningCount}</span>
-          <span className="stat-badge queued"><ClockCircleOutlined /> 待执行 {queuedCount}</span>
-          <span className="stat-badge done"><CheckCircleOutlined /> 完成 {doneCount}</span>
-          {failCount > 0 && (
-            <span className="stat-badge fail">
-              <CloseCircleOutlined /> 失败 {failCount}
-            </span>
-          )}
-          {dependencyBlockedCount > 0 && (
-            <Tooltip title="依赖阻断：调度阻断，任务仍在队列中等待重新评估；不计入平台生成失败率，也不会自动重试">
-              <span className="stat-badge fail">
-                <StopOutlined /> 依赖阻断 {dependencyBlockedCount}
-              </span>
-            </Tooltip>
-          )}
-        </div>
-        <div className="task-console-actions">
-          <Button
-            size="small"
-            icon={<PlusOutlined />}
-            onClick={(): void => navigateWorkspace('create', 'studio')}
-            type="primary"
-          >
-            新建创作
-          </Button>
-          <Tooltip title="从 CSV 导入任务批次">
-            <Button
-              size="small"
-              icon={<FileExcelOutlined />}
-              aria-label="导入 CSV"
-              loading={isCsvImporting}
-              disabled={isCsvImporting}
-              onClick={() => void handleImportCsv()}
-            />
-          </Tooltip>
-          {doneCount > 0 && (
-            <Button
-              size="small"
-              icon={<DownloadOutlined />}
-              onClick={() => {
-                // 打开批次选择器；下载范围固定为当前项目和用户选择的单个批次。
-                window.dispatchEvent(new CustomEvent('open-batch-manager'));
-              }}
-            >
-              批量下载
-            </Button>
-          )}
-        </div>
-      </div>}
+      {/* 普通任务列表仅展示当前制作；创建入口统一在短剧对象内。 */}
+      {view === 'tasks' && <div className="task-console-header"><span className="task-console-title">{activeProject?.name || '当前项目'}的任务</span><div className="task-console-stats"><span>运行 {runningCount}</span><span>待执行 {queuedCount}</span><span>生成完成 {doneCount}</span>{failCount > 0 && <span>失败 {failCount}</span>}{dependencyBlockedCount > 0 && <span>等待前置 {dependencyBlockedCount}</span>}</div></div>}
 
       {/* 错误提示 */}
       {error && (
@@ -701,7 +671,7 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
         </div>
       )}
 
-      {view === 'tasks' && <><div className="task-filter-bar"><Input.Search aria-label="搜索任务" placeholder="搜索提示词、任务 ID 或批次" allowClear value={query} onChange={(event): void => setQuery(event.target.value)} /><Segmented value={taskFilter} onChange={(value): void => setTaskFilter(value as typeof taskFilter)} options={[{ label: '全部', value: 'all' }, { label: '待处理', value: 'attention' }, { label: '待执行', value: 'queued' }, { label: '已生成', value: 'done' }]} /></div><div className="task-table"><Table rowKey="id" dataSource={visibleTasks} columns={taskColumns} size="middle" pagination={{ pageSize: 12, showSizeChanger: false }} scroll={{ x: 1192 }} locale={{ emptyText: '当前范围没有任务；到创作工作台创建待执行任务' }} /></div></>}
+      {view === 'tasks' && <><div className="task-filter-bar"><Input.Search aria-label="搜索任务" placeholder="搜索任务内容或批次" allowClear value={query} onChange={(event): void => setQuery(event.target.value)} /><Segmented value={taskFilter} onChange={(value): void => setTaskFilter(value as typeof taskFilter)} options={[{ label: '全部', value: 'all' }, { label: '待处理', value: 'attention' }, { label: '进行中', value: 'running' }, { label: '排队与待执行', value: 'queued' }, { label: '已生成', value: 'done' }]} /></div><div className="task-table"><Table rowKey="id" dataSource={visibleTasks} columns={taskColumns} size="middle" pagination={{ pageSize: 12, showSizeChanger: false }} scroll={{ x: 1192 }} locale={{ emptyText: '当前范围没有任务。开始短剧创作后，可以在这里查看制作进度。' }} /></div></>}
 
       {view === 'create' && <div className="composer-grid">
         <section className="workspace-card composer-editor">

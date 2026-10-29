@@ -24,10 +24,10 @@ export const PetStoryExistingMediaPicker: React.FC<{ project: PetStoryProject; s
     if (current.error) setError(current.error);
     else if (current.project?.assets.some((asset): boolean => asset.shotId === shot.id && asset.taskId === candidate.taskId && asset.artifactId === candidate.artifactId)) setOpen(false);
   };
-  return <><Button className="canvas-history-button" size="small" disabled={disabled} onClick={(): void => { void load(); }}>关联已有豆包{kind === 'video' ? '视频' : '图片'}</Button><Modal title={`镜头 ${shot.order} · 关联已有豆包产物`} open={open} onCancel={(): void => setOpen(false)} onOk={(): void => { void link(); }} okText="关联原产物" confirmLoading={state.busy} okButtonProps={{ disabled: !selected || loading || disabled }}>
-    <p>只显示与本镜当前或历史正文、原账号及素材引用精确对应，并已下载的真实产物。关联会保留旧图和当前提示词。</p>
+  return <><Button className="canvas-history-button" size="small" disabled={disabled} onClick={(): void => { void load(); }}>读取已有豆包{kind === 'video' ? '视频' : '图片候选'}</Button><Modal title={`镜头 ${shot.order} · 关联已有豆包产物`} open={open} onCancel={(): void => setOpen(false)} onOk={(): void => { void link(); }} okText={kind === 'video' ? '关联原视频' : '保存为图片候选'} confirmLoading={state.busy} okButtonProps={{ disabled: !selected || loading || disabled }}>
+    <p>只显示与本镜当前或历史正文、原账号及素材引用精确对应，并已下载的真实产物。当前图片和提示词保持不变；图片读取后还需预览并采用。</p>
     {error && <Alert type="error" message={error} />}
-    <Select className="w-full" aria-label="选择已核验的豆包原任务产物" loading={loading} value={selected} onChange={(value: string): void => setSelected(value)} placeholder={loading ? '正在核验原任务与文件…' : '选择已核验的原任务'} options={candidates.map((item): { value: string; label: string } => ({ value: item.artifactId, label: `${new Date(item.createdAt).toLocaleString('zh-CN')} · 原任务 ${item.taskId.slice(0, 8)}` }))} />
+    <Select className="w-full" aria-label="选择已核验的豆包原任务产物" loading={loading} value={selected} onChange={(value: string): void => setSelected(value)} placeholder={loading ? '正在核验原任务与文件…' : '选择已核验的原任务'} options={candidates.map((item, index): { value: string; label: string } => ({ value: item.artifactId, label: `${new Date(item.createdAt).toLocaleString('zh-CN')} · 产物 ${index + 1}` }))} />
     {!loading && !error && !candidates.length && <p>没有可精确归属的已下载产物。此操作不会新建生成或下载任务。</p>}
   </Modal></>;
 };

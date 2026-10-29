@@ -1,13 +1,15 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryChatJob, PetStoryPromptBatch } from '@doubao-studio/contracts';
+import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryChatJob, PetStoryPromptBatch, PetStoryImageTarget } from '@doubao-studio/contracts';
 import { assetCharacterIds, defaultPromptProfile } from './petstoryPromptQuality';
 import { extractDouyinLink, record, validatePetStoryPlan, validatePromptTask } from './petstoryValidation';
 import { invalidateMaterialDependents, materialAsset, syncMaterials, storyHash, requireMaterialInventory } from './petstoryMaterials';
 import { mediaDigest, validatePetStoryMedia } from './petstoryMedia';
 import { archiveCompletedPetStoryProduction } from './petstoryProductionLifecycle';
 import { validateCastBindings } from './petstoryCast';
+import { validatePetStoryAdjustments } from './petstoryAdjustmentValidation';
+import { imageTargetBasis, imageTargetMatches, selectedShotImageId, reconcileAdoptedImages } from './petstoryImageReview';
 
 export async function projectPath(directory: string, relative: string): Promise<string> {
   if (!relative || path.isAbsolute(relative) || relative.includes('\\') || relative.split('/').some((p: string): boolean => p === '..' || p === '.' || !p)) {
@@ -52,12 +54,24 @@ export function validateProject(value: unknown): PetStoryProject {
     if (char.referenceAssetId && !result.assets.some((a: PetStoryAsset): boolean => a.id === char.referenceAssetId && assetCharacterIds(a).includes(char.id))) throw new Error(`${char.name}参考图错绑`);
   }
   validateChatJobs(result);
+  validatePetStoryAdjustments(result);
   for (const shot of result.plan?.shots || []) {
     if (shot.sceneReferenceAssetIds?.some((id: string): boolean => !result.assets.some((a): boolean => a.id === id && a.kind === 'scene' && (a.shotId === shot.id || !!a.materialId)))) throw new Error('场景参考图错绑');
   }
   validateMaterials(result);
+  validateAdoptedImages(result);
   validateProduction(result, ids);
   return result;
+}
+
+function validateAdoptedImages(result: PetStoryProject): void {
+  for (const [shotId, selected] of Object.entries(result.adoptedImages || {})) {
+    // 旧方案的镜头可能已经删除；历史指针不成为新方案的正式图片，也不能阻断读盘。
+    if (!result.plan?.shots.some((shot): boolean => shot.id === shotId)) continue;
+    for (const [field, kind] of [['firstFrameId', 'firstFrame'], ['plannedEndImageId', 'plannedEndImage']] as const) {
+      if (selected[field] && !result.assets.some((asset): boolean => asset.id === selected[field] && asset.shotId === shotId && asset.kind === kind && asset.imageReview?.state === 'adopted')) throw new Error('正式镜头图片缺少明确采用记录');
+    }
+  }
 }
 
 function validateChatJobs(result: PetStoryProject): void {
@@ -111,8 +125,16 @@ function validateAssets(result: PetStoryProject): Set<string> {
     if (asset.kind === 'video' && (!asset.taskId || !asset.runId || !asset.validation || !asset.downloadJobId || !asset.artifactId)) throw new Error('视频素材缺少真实产物归属');
     if (asset.validation && (asset.validation.decoded !== true || !/^[a-f0-9]{64}$/.test(asset.validation.sha256) || !(asset.validation.bytes > 0) || !(asset.validation.width > 0) || !(asset.validation.height > 0))) throw new Error('媒体校验记录无效');
     if (asset.kind === 'actualEndFrame' && (!asset.sourceVideo || !(asset.sourceVideo.atSeconds >= 0))) throw new Error('真实末帧缺少源视频信息');
+    validateImageReview(asset);
   }
   return ids;
+}
+function validateImageReview(asset: PetStoryAsset): void {
+    if (asset.imageReview) {
+      const review = asset.imageReview;
+      if (!['candidate', 'adopted'].includes(review.state) || !/^[a-f0-9]{64}$/.test(review.basisHash) || !imageTargetMatches(asset, review.target)
+        || review.state === 'adopted' && (!review.adoptedAt || !Number.isFinite(Date.parse(review.adoptedAt)) || review.sha256 !== asset.validation?.sha256)) throw new Error('图片候选或采用记录无效');
+    }
 }
 function validateProduction(result: PetStoryProject, ids: Set<string>): void {
   if (result.production) {
@@ -295,6 +317,7 @@ export class PetStoryProjects {
     }
     p.plan = checked;
     if (p.materials) p.materials = syncMaterials(p);
+    reconcileAdoptedImages(p);
     return this.write(p);
   }
   /** 只合并本项 final；候选回复与其他镜头可在等待保存期间继续回填。 */
@@ -314,47 +337,21 @@ export class PetStoryProjects {
     if (!['lulu', 'lumei', ...(p.plan?.characters.map((c): string => c.id) || [])].includes(characterId)) throw new Error('角色不存在');
     const asset = p.assets.find((a): boolean => a.id === assetId && a.kind === 'character');
     if (!asset) throw new Error('请选已登记的身份参考图');
-    // 显式确认同框图片包含该角色后，复用一个资产而非重复上传两次。
-    asset.characterIds = [...new Set([...assetCharacterIds(asset), characterId])];
-    const char = p.plan?.characters.find((c): boolean => c.id === characterId);
-    if (char) char.referenceAssetId = asset.id;
-    const m = p.materials?.find((m): boolean => m.id === `character:${characterId}`);
-    if (m) { m.selectedAssetId = asset.id; m.approved = undefined; }
-    return this.write(p);
+    // 为新目标保存独立候选记录；原图片的采用、身份映射与历史保持不变。
+    return this.addMaterialImage(id, p.revision, `character:${characterId}`, await projectPath(this.directory(id), asset.relativePath));
   }
   async addReference(id: string, characterId: string, sourcePath: string): Promise<PetStoryProject> {
-    const p = await this.read(id);
-    if (p.production) throw new Error('制作中不能替换角色参考图，请保留原素材绑定');
-    if (!['lulu', 'lumei', ...(p.plan?.characters.map((c): string => c.id) || [])].includes(characterId)) throw new Error('角色 ID 无效');
-    if ((await fs.lstat(sourcePath)).isSymbolicLink()) throw new Error('参考图禁止符号链接');
-    const ext = path.extname(sourcePath).toLowerCase();
-    if (!['.jpg', '.jpeg', '.png', '.webp'].includes(ext) || (await fs.stat(sourcePath)).size > 20 * 1024 * 1024) throw new Error('参考图格式或大小不符合要求');
-    const asset: PetStoryAsset = { id: randomUUID(), kind: 'character', characterId, relativePath: `characters/${randomUUID()}${ext}` };
-    const directory = await projectPath(this.directory(id), 'characters');
-    await fs.mkdir(directory, { recursive: true });
-    const target = await projectPath(this.directory(id), asset.relativePath);
-    await fs.copyFile(sourcePath, target, 1);
-    p.assets.push(asset);
-    const char = p.plan?.characters.find((c): boolean => c.id === characterId);
-    if (char) char.referenceAssetId = asset.id;
-    const material = p.materials?.find((m): boolean => m.id === `character:${characterId}`);
-    if (material) { material.selectedAssetId = asset.id; material.approved = undefined; }
-    return this.write(p);
+    const p = await this.read(id); requireMaterialInventory(p);
+    const materialId = `character:${characterId}`;
+    if (!p.materials?.some((item): boolean => item.id === materialId)) throw new Error('请先在方案中确认此人物，再上传对应图片');
+    return this.addMaterialImage(id, p.revision, materialId, sourcePath);
   }
   async addSceneReference(id: string, shotId: string, sourcePath: string): Promise<PetStoryProject> {
-    const p = await this.read(id);
-    const shot = p.plan?.shots.find((s): boolean => s.id === shotId);
-    if (!shot || p.production) throw new Error('请在确认制作前选择当前镜头的场景参考图');
-    const ext = path.extname(sourcePath).toLowerCase();
-    const info = await fs.lstat(sourcePath);
-    if (info.isSymbolicLink() || !info.isFile() || info.size > 20 * 1024 * 1024 || !['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) throw new Error('场景参考图格式或路径无效');
-    const asset: PetStoryAsset = { id: randomUUID(), kind: 'scene', shotId, relativePath: `shots/${shotId}/${randomUUID()}${ext}` };
-    const target = await projectPath(this.directory(id), asset.relativePath);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await projectPath(this.directory(id), asset.relativePath);
-    await fs.copyFile(sourcePath, target, 1);
-    p.assets.push(asset); shot.sceneReferenceAssetIds = [...(shot.sceneReferenceAssetIds || []), asset.id];
-    return this.write(p);
+    const p = await this.read(id); requireMaterialInventory(p);
+    const shot = p.plan?.shots.find((item): boolean => item.id === shotId);
+    const materialId = `scene:${shot?.sceneId || ''}`;
+    if (!shot || !p.materials?.some((item): boolean => item.id === materialId)) throw new Error('请先确认当前镜头的场景素材，再上传对应图片');
+    return this.addMaterialImage(id, p.revision, materialId, sourcePath);
   }
   private editableMaterials(p: PetStoryProject, revision: number): void {
     if (p.revision !== revision) throw new Error('项目版本变化，请刷新后操作');
@@ -379,12 +376,10 @@ export class PetStoryProjects {
     const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
     const m = p.materials?.find((m): boolean => m.id === materialId);
     if (!m) throw new Error('基础素材不存在');
-    if (m.selectedAssetId === assetId) return p;
-    m.selectedAssetId = assetId; m.approved = undefined;
-    invalidateMaterialDependents(p, materialId);
-    if (m.kind === 'character') { const c = p.plan?.characters.find((c): boolean => c.id === m.entityId); if (c) c.referenceAssetId = assetId; }
-    materialAsset(p, m.id, false);
-    return this.write(p);
+    const asset = p.assets.find((item): boolean => item.id === assetId && imageTargetMatches(item, { materialId }));
+    if (!asset || asset.kind !== m.kind) throw new Error('请选择本素材的具体图片');
+    // 历史列表只负责定位预览；采用必须经 approveMaterials / adoptImage 明确确认。
+    return p;
   }
   async addMaterialImage(id: string, revision: number, materialId: string, sourcePath: string): Promise<PetStoryProject> {
     const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
@@ -398,9 +393,66 @@ export class PetStoryProjects {
     await fs.mkdir(path.dirname(file), { recursive: true }); await projectPath(this.directory(id), asset.relativePath);
     await fs.copyFile(sourcePath, file, 1);
     if ((await mediaDigest(file)).sha256 !== validation.sha256) throw new Error('基础图片复制校验失败，原绑定保留');
-    p.assets.push(asset); m.selectedAssetId = asset.id; m.approved = undefined;
-    invalidateMaterialDependents(p, materialId);
-    if (m.kind === 'character') { const c = p.plan?.characters.find((c): boolean => c.id === m.entityId); if (c) c.referenceAssetId = asset.id; }
+    asset.imageReview = { state: 'candidate', target: { materialId }, basisHash: imageTargetBasis(p, { materialId }) };
+    p.assets.push(asset);
+    return this.write(p);
+  }
+  async addShotImage(id: string, revision: number, shotId: string, kind: 'firstFrame' | 'lastFrame', sourcePath: string): Promise<PetStoryProject> {
+    const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
+    const target: PetStoryImageTarget = { shotId, kind };
+    const basisHash = imageTargetBasis(p, target);
+    const info = await fs.lstat(sourcePath); const ext = path.extname(sourcePath).toLowerCase();
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 20 * 1024 * 1024 || !['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) throw new Error('图片格式或大小无效');
+    const validation = await validatePetStoryMedia(sourcePath, 'image');
+    const asset: PetStoryAsset = { id: randomUUID(), kind: kind === 'lastFrame' ? 'plannedEndImage' : 'firstFrame', shotId,
+      relativePath: `shots/${shotId}/${randomUUID()}${ext}`, validation, imageReview: { state: 'candidate', target, basisHash } };
+    const file = await projectPath(this.directory(id), asset.relativePath);
+    await fs.mkdir(path.dirname(file), { recursive: true }); await projectPath(this.directory(id), asset.relativePath);
+    await fs.copyFile(sourcePath, file, 1);
+    if ((await mediaDigest(file)).sha256 !== validation.sha256) throw new Error('图片复制校验失败，原采用图保留');
+    p.assets.push(asset);
+    return this.write(p);
+  }
+  private async adoptProjectImage(p: PetStoryProject, target: PetStoryImageTarget, assetId: string): Promise<void> {
+    const asset = p.assets.find((item): boolean => item.id === assetId);
+    if (!asset || !imageTargetMatches(asset, target)) throw new Error('图片不属于当前目标');
+    const material = target.materialId ? p.materials?.find((item): boolean => item.id === target.materialId) : undefined;
+    if (target.materialId && (!material || material.kind !== asset.kind)) throw new Error('图片用途与素材不符');
+    const basisHash = imageTargetBasis(p, target);
+    if (asset.imageReview?.state === 'candidate' && asset.imageReview.basisHash !== basisHash) throw new Error('图片候选依据已变化，请重新核对当前目标后准备图片');
+    const file = await projectPath(this.directory(p.id), asset.relativePath);
+    const validation = await validatePetStoryMedia(file, 'image');
+    if (asset.validation && asset.validation.sha256 !== validation.sha256) throw new Error('图片文件已变化，请重新上传后查看采用');
+    asset.validation = validation;
+    const oldId = material?.selectedAssetId || (target.shotId && target.kind ? selectedShotImageId(p, target.shotId, target.kind) : undefined);
+    const adoptedAt = new Date().toISOString();
+    asset.imageReview = { state: 'adopted', target, basisHash, adoptedAt, sha256: validation.sha256 };
+    asset.needsReview = undefined;
+    this.applyImageSelection(p, target, asset, oldId, adoptedAt, validation.sha256);
+  }
+  private applyImageSelection(p: PetStoryProject, target: PetStoryImageTarget, asset: PetStoryAsset, oldId: string | undefined, adoptedAt: string, sha256: string): void {
+    const material = target.materialId ? p.materials?.find((item): boolean => item.id === target.materialId) : undefined;
+    if (material) {
+      material.selectedAssetId = asset.id;
+      const character = material.kind === 'character' ? p.plan?.characters.find((item): boolean => item.id === material.entityId) : undefined;
+      material.approved = { assetId: asset.id, sha256: sha256, at: adoptedAt, ...(character ? { identity: { assetId: asset.id, description: character.description } } : {}) };
+      if (character) character.referenceAssetId = asset.id;
+      if (oldId && oldId !== asset.id) invalidateMaterialDependents(p, material.id);
+    } else if (target.shotId) {
+      p.adoptedImages ||= {};
+      const selected = p.adoptedImages[target.shotId] ||= {};
+      selected[target.kind === 'firstFrame' ? 'firstFrameId' : 'plannedEndImageId'] = asset.id;
+      const media = p.production?.shots[target.shotId];
+      if (media) media[target.kind === 'firstFrame' ? 'firstFrameId' : 'plannedEndImageId'] = asset.id;
+      if (oldId && oldId !== asset.id) for (const item of p.assets) {
+        if (item.shotId === target.shotId && item.id !== asset.id && (item.kind === 'video' || target.kind === 'firstFrame' && item.kind === 'plannedEndImage')) item.needsReview = true;
+      }
+    }
+  }
+  async adoptImage(id: string, revision: number, target: PetStoryImageTarget, assetId: string): Promise<PetStoryProject> {
+    const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
+    if (!target || !!target.materialId === !!target.shotId) throw new Error('请选择唯一图片目标');
+    await this.adoptProjectImage(p, target, assetId);
     return this.write(p);
   }
   async approveMaterials(id: string, revision: number, selections: { materialId: string; assetId: string }[]): Promise<PetStoryProject> {
@@ -408,14 +460,8 @@ export class PetStoryProjects {
     if (!Array.isArray(selections) || !selections.length || new Set(selections.map((s): string => s.materialId)).size !== selections.length) throw new Error('请选择已经查看的具体图片');
     for (const selection of selections) {
       const m = p.materials?.find((m): boolean => m.id === selection.materialId);
-      if (!m || selection.assetId !== m.selectedAssetId) throw new Error('图片选择已变化，请重新查看再确认');
-      const a = materialAsset(p, m.id, false); const file = await projectPath(this.directory(id), a.relativePath);
-      const digest = await mediaDigest(file);
-      if (a.validation && a.validation.sha256 !== digest.sha256) throw new Error(`${m.name}文件已变化，请重新导入图片`);
-      a.validation = await validatePetStoryMedia(file, 'image');
-      const character = m.kind === 'character' ? p.plan?.characters.find((c): boolean => c.id === m.entityId) : undefined;
-      m.approved = { assetId: a.id, sha256: a.validation.sha256, at: new Date().toISOString(),
-        ...(character ? { identity: { description: character.description, assetId: a.id } } : {}) };
+      if (!m) throw new Error('基础素材不存在');
+      await this.adoptProjectImage(p, { materialId: m.id }, selection.assetId);
     }
     return this.write(p);
   }

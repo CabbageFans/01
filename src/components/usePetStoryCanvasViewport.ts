@@ -65,17 +65,17 @@ export function usePetStoryCanvasViewport(projectId: string): {
     host.addEventListener('wheel', wheel, { passive: false });
     return (): void => host.removeEventListener('wheel', wheel);
   }, [update, zoom]);
-  const fit = (): void => {
+  const fit = useCallback((): void => {
     const host = viewportRef.current; const content = contentRef.current; if (!host || !content) return;
     const scale = Math.max(0.18, Math.min(1, (host.clientWidth - 56) / content.scrollWidth, (host.clientHeight - 56) / content.scrollHeight));
     update((): Viewport => ({ x: 28, y: 28, scale }));
-  };
-  const focus = (id: string): void => {
+  }, [update]);
+  const focus = useCallback((id: string): void => {
     const row = Array.from(contentRef.current?.querySelectorAll<HTMLElement>('[data-shot-id]') || []).find((item): boolean => item.dataset.shotId === id);
     if (!row) return;
     const scale = Math.min(1, Math.max(0.8, (viewportRef.current?.clientWidth || 1000) / 1500));
     update((): Viewport => ({ x: 28 - 380 * scale, y: 60 - row.offsetTop * scale, scale }));
-  };
+  }, [update]);
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
     if (event.button !== 0 || isInteractive(event.target)) return;
     event.preventDefault(); // 空白拖动不启动浏览器文字选择，编辑区仍按原生交互处理。

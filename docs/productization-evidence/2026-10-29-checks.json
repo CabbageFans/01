@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-29",
+  "workspace": "/Users/dingzhenyu/Documents/01",
+  "approvedDesignUnchanged": {
+    "design-system.md": true,
+    "interaction-and-button-map.md": true,
+    "prototype/src/App.jsx": true,
+    "prototype/src/Workflow.jsx": true,
+    "prototype/src/Panels.jsx": true,
+    "prototype/src/Management.jsx": true,
+    "prototype/src/prototype.css": true
+  },
+  "validation": {
+    "command": "pnpm run validate",
+    "exitCode": 0,
+    "testFiles": 115,
+    "tests": 2146,
+    "lintErrors": 0,
+    "lintWarnings": 149,
+    "types": true,
+    "projectRules": true,
+    "contracts": true,
+    "rendererBuild": true,
+    "mainBuild": true,
+    "openspecStrict": true,
+    "diffCheck": true
+  },
+  "runtime": {
+    "ordinaryCommand": "pnpm run dev:mac --dev-viewport-size=1280x800",
+    "controlEnabled": false,
+    "cdpEnabled": false,
+    "ipcRegistered": true,
+    "viewportObservation": [
+      "[DevelopmentViewport] requested=1280x800 window=1280x829 content=1280x797"
+    ],
+    "processes": {
+      "launcher": 94536,
+      "vite": 94548,
+      "electron": 94550
+    },
+    "nativeAccessAttempts": 2,
+    "nativeAccessResult": "Mac locked; no native UI state or screenshot available"
+  },
+  "realAcceptance": {
+    "sixStageWorkflow": "pending",
+    "imageHumanApproval": "pending",
+    "freeChatSelectedReplyRealDOM": "pending",
+    "newMedia": "not executed",
+    "1440x900": "pending",
+    "1280x800": "pending",
+    "blocker": "Mac locked; CUA refused native UI access. User unlock requested."
+  },
+  "release": {
+    "committed": false,
+    "pushed": false,
+    "released": false
+  }
+}

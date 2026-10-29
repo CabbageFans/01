@@ -15,21 +15,22 @@ import './styles/global.css';
 const studioTheme = {
   algorithm: theme.defaultAlgorithm,
   token: {
-    // 品牌色 - 紫色系
-    colorPrimary: '#6c5ce7',
-    colorInfo: '#6c5ce7',
+    // 已批准的深青绿色品牌与浅色桌面主题
+    colorPrimary: '#087F72',
+    colorInfo: '#087F72',
     colorSuccess: '#238563',
     colorWarning: '#b97515',
     colorError: '#ce4453',
     fontSize: 14,
-    controlHeight: 34,
+    controlHeight: 36,
+    controlHeightSM: 30,
     // 基础色
-    colorBgBase: '#f5f5f7',
+    colorBgBase: '#F4F6F8',
     colorBgContainer: '#ffffff',
     colorBgElevated: '#ffffff',
-    colorBorder: '#e2e3e8',
-    colorTextBase: '#252631',
-    colorTextSecondary: '#6b6d7c',
+    colorBorder: '#E3E8EB',
+    colorTextBase: '#202A35',
+    colorTextSecondary: '#697584',
     // 圆角
     borderRadius: 8,
     // 字体
@@ -37,7 +38,7 @@ const studioTheme = {
   },
   components: {
     Button: {
-      colorPrimary: '#6c5ce7',
+      colorPrimary: '#087F72',
       algorithm: true,
     },
     Modal: {
@@ -50,7 +51,7 @@ const studioTheme = {
       colorBgContainer: '#ffffff',
     },
     Tag: {
-      borderRadiusSM: 9999,
+      borderRadiusSM: 5,
     },
   },
 };

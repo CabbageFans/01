@@ -14,6 +14,9 @@ import { Button, Input, message, Modal, notification, Popover, Switch, Tooltip }
 import type { Account, AccountAvailability, AccountAvailabilitySource, Task, TaskUpdateInput } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
+import { usePetStoryStore } from '../store/usePetStoryStore';
+import { readPetStoryConversationReplies } from '../utils/petstoryConversationReplies';
+import type { PetStoryConversationReply } from '@doubao-studio/contracts';
 import type { AutomationState } from '../store/useTaskStore';
 import { classifyTaskError } from '../utils/taskRuntime';
 import { evaluateVideoCapability, isRestrictionFailure } from '../utils/videoCapability';
@@ -179,6 +182,12 @@ class GenerationConfirmationPauseError extends Error {
     super('平台正在等待视频生成参数确认；请在原豆包会话中人工确认，系统不会代答或重复发送');
     this.name = 'GenerationConfirmationPauseError';
   }
+}
+
+function hasAccountChatAdjustment(accountId: string | null | undefined): boolean {
+  const current = usePetStoryStore.getState().project;
+  return !!accountId && (current?.accountId === accountId && current.chatAdjustment?.status === 'active'
+    || useTaskStore.getState().tasks.some((task): boolean => task.assignedAccountId === accountId && task.runtime?.chatAdjustmentGuard?.active === true));
 }
 
 const BrowserPanel: React.FC<BrowserPanelProps> = ({
@@ -461,6 +470,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         return;
       }
       const accountId = task?.assignedAccountId;
+      if (hasAccountChatAdjustment(accountId)) { message.info('请先采用当前回复或结束调整，再打开其他任务会话'); return; }
       const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
       let conversationTarget = resolveTaskConversationTarget(task);
       const confirmCurrentSubmission = (task?.mode === 'chat' || (!!task?.petstory && (task.mode === 'image' || task.mode === 'video'))
@@ -1180,6 +1190,82 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     }
   };
 
+  useEffect((): (() => void) => {
+    let stopped = false;
+    let reading = false;
+    let previous = '';
+    let observedAdjustment = '';
+    const readReplies = async (verify = false): Promise<{ projectId: string; adjustmentId: string; url: string; replies: PetStoryConversationReply[] }> => {
+      const p = usePetStoryStore.getState().project; const a = p?.chatAdjustment;
+      if (!p || a?.status !== 'active') throw new Error('当前没有正在调整的创作');
+      const webview = registryRef.current.get(p.accountId);
+      if (!webview || loadingMapRef.current.get(p.accountId) !== false || !isSameDoubaoConversation(webview.getURL(), a.conversationUrl)) throw new Error('请打开这项创作关联的豆包会话，回复只从该会话读取');
+      const url = webview.getURL();
+      const snapshot = await getChatPageSnapshot(webview);
+      if (verify && snapshot.editorText?.trim()) throw new Error('豆包输入框还有未发送草稿，请先发送或清空，再采用回复');
+      const replies = await readPetStoryConversationReplies(snapshot);
+      if (verify) {
+        await new Promise<void>((resolve): void => { setTimeout(resolve, 600); });
+        const checked = await getChatPageSnapshot(webview);
+        if (checked.editorText?.trim()) throw new Error('豆包输入框还有未发送草稿，请先处理后再采用');
+        const second = await readPetStoryConversationReplies(checked);
+        if (JSON.stringify(second.map((r): string => r.key)) !== JSON.stringify(replies.map((r): string => r.key))) throw new Error('回复内容仍在变化，请等待回复完成');
+      }
+      const latest = usePetStoryStore.getState().project;
+      if (latest?.chatAdjustment?.id !== a.id || latest.chatAdjustment.status !== 'active' || !isSameDoubaoConversation(webview.getURL(), url)) throw new Error('会话已变化，未采用回复');
+      return { projectId: p.id, adjustmentId: a.id, url, replies };
+    };
+    const poll = async (): Promise<void> => {
+      const state = usePetStoryStore.getState(); const a = state.project?.chatAdjustment;
+      if (stopped || reading || state.busy || a?.status !== 'active') return;
+      reading = true;
+      try {
+        if (observedAdjustment !== a.id) { observedAdjustment = a.id; previous = ''; }
+        const result = await readReplies();
+        const keys = JSON.stringify(result.replies.map((r): string => r.key));
+        if (keys === previous && !stopped) await state.captureChatReplies(result.adjustmentId, result.url, result.replies);
+        previous = keys;
+      } catch (error: unknown) {
+        previous = '';
+        if (!stopped) usePetStoryStore.setState({ chatReadbackError: error instanceof Error ? error.message : '回复尚未读取完整' });
+      } finally { reading = false; }
+    };
+    const open = async (): Promise<void> => {
+      const p = usePetStoryStore.getState().project; const a = p?.chatAdjustment;
+      if (!p || a?.status !== 'active') return;
+      try {
+        if (!canSelectAccount(p.accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))) throw new Error('另一个账号正在提交，请稍后返回当前调整');
+        useAccountStore.getState().selectAccount(p.accountId);
+        const webview = await waitForConversationNavigator((): HTMLWebViewElement | undefined => registryRef.current.get(p.accountId), { timeoutMs: 12000, isReady: (): boolean => loadingMapRef.current.get(p.accountId) === false });
+        if (!webview || usePetStoryStore.getState().project?.chatAdjustment?.id !== a.id) throw new Error('账号页面未就绪，请稍后重新打开调整');
+        if (!isSameDoubaoConversation(webview.getURL(), a.conversationUrl)) {
+          const current = await getChatPageSnapshot(webview);
+          if (current.editorText?.trim() || current.generating) throw new Error('豆包中有未发送草稿或正在回复，请先处理当前内容，再打开关联会话');
+          const navigation = await openTaskConversation(webview, a.conversationUrl, { timeoutMs: 10000 });
+          if (!navigation.ok) throw new Error('未能打开关联会话，请稍后重试');
+        }
+        usePetStoryStore.setState({ chatReadbackError: '' }); previous = ''; void poll();
+      } catch (error: unknown) { usePetStoryStore.setState({ chatReadbackError: error instanceof Error ? error.message : '关联会话尚未打开' }); }
+    };
+    const verify = (event: Event): void => {
+      const detail = (event as CustomEvent<{ adjustmentId: string; replyKey: string; resolve: () => void; reject: (error: Error) => void }>).detail;
+      if (!detail) return;
+      void readReplies(true).then(async (result): Promise<void> => {
+        if (result.adjustmentId !== detail.adjustmentId || !result.replies.some((r): boolean => r.key === detail.replyKey)) throw new Error('选定回复已不在当前页面，请重新选择');
+        const captured = await window.electronAPI.petstory.captureAdjustmentReplies(result.projectId, result.adjustmentId, result.url, result.replies);
+        if (!captured.success || !captured.project) throw new Error(captured.error || '回复核对未保存');
+        const latest = usePetStoryStore.getState().project;
+        if (latest?.id === result.projectId && captured.project.revision >= latest.revision) usePetStoryStore.setState({ project: captured.project, chatReadbackError: '' });
+        detail.resolve();
+      }).catch((error: unknown): void => detail.reject(error instanceof Error ? error : new Error('回复核对失败')));
+    };
+    const openHandler = (): void => { void open(); };
+    const interval = setInterval((): void => { void poll(); }, 1100);
+    window.addEventListener('petstory-open-adjustment', openHandler);
+    window.addEventListener('petstory-verify-adjustment-reply', verify);
+    return (): void => { stopped = true; clearInterval(interval); window.removeEventListener('petstory-open-adjustment', openHandler); window.removeEventListener('petstory-verify-adjustment-reply', verify); };
+  }, []);
+
   // ---- 立即终止自动化等待；可携带新提示词，在终止后重新排队 ----
   useEffect(() => {
     const handleCancelAutomation = (event: Event) => {
@@ -1217,6 +1303,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         message.warning('该任务没有可验证的原会话地址');
         return;
       }
+      if (hasAccountChatAdjustment(accountId)) { message.info('请先采用当前回复或结束调整，再打开其他任务会话'); return; }
       useAccountStore.getState().selectAccount(accountId);
       const webview = await waitForConversationNavigator(
         () => registryRef.current.get(accountId),

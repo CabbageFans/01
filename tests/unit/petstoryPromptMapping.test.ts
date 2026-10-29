@@ -56,7 +56,9 @@ describe('原正文与目标媒体素材映射', (): void => {
   it('计划首帧仅按原用途落到真实首帧，专用槽位在网页绑定时解析，不补写编辑要求', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; const final = shot.prompts.lastFrame!.final;
     shot.prompts.lastFrame!.promptTask = { references: promptReferences(p, shot, 'lastFrame', undefined, true), dialect: 'seedream' };
-    p.assets.push({ id: 'actual-first', kind: 'firstFrame', shotId: 'shot', relativePath: 'first.png' });
+    p.assets.push({ id: 'actual-first', kind: 'firstFrame', shotId: 'shot', relativePath: 'first.png',
+      validation: { decoded: true, sha256: 'a'.repeat(64), bytes: 10, width: 64, height: 96, checkedAt: p.updatedAt },
+      imageReview: { state: 'adopted', target: { shotId: 'shot', kind: 'firstFrame' }, basisHash: 'a'.repeat(64), adoptedAt: p.updatedAt, sha256: 'a'.repeat(64) } });
     p.production = { state: 'paused', planHash: 'TEST', approvedAt: '2026-10-26T00:00:00.000Z', capability: {} as NonNullable<PetStoryProject['production']>['capability'], fallbacks: {}, steps: [], message: 'TEST', shots: { shot: { requestedMode: 'reference', resolvedMode: 'reference', reason: 'TEST', firstFrameId: 'actual-first' } } };
     const edited = compilePrompt(p, 'shot', 'lastFrame', undefined, true); expect(edited.text).toBe(final);
     const video = shot.prompts.video; video.promptTask = { references: promptReferences(p, shot, 'video', 'first_frame', true), dialect: 'seedance20', mode: 'first_frame' };

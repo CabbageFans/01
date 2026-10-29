@@ -23,7 +23,7 @@ function attachImages(p: PetStoryProject): void {
   for (const character of p.plan!.characters) {
     const id = `TEST-image-${character.id}`;
     character.referenceAssetId = id;
-    p.assets.push({ id, kind: 'character', characterId: character.id, relativePath: `${id}.png`, validation: { decoded: true, sha256: 'a'.repeat(64), width: 64, height: 96, bytes: 100, checkedAt: '2026-10-26T00:00:00.000Z' } });
+    p.assets.push({ id, kind: 'character', characterId: character.id, relativePath: `${id}.png`, imageReview: { state: 'adopted', target: { materialId: `character:${character.id}` }, basisHash: 'a'.repeat(64), adoptedAt: p.updatedAt, sha256: 'a'.repeat(64) }, validation: { decoded: true, sha256: 'a'.repeat(64), width: 64, height: 96, bytes: 100, checkedAt: '2026-10-26T00:00:00.000Z' } });
   }
 }
 function first(p: PetStoryProject): PetStoryPrompt { return p.plan!.shots[0].prompts.firstFrame; }

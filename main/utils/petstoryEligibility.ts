@@ -3,6 +3,7 @@ import type { PetStoryCapability, PetStoryChatJob, PetStoryProject, PetStoryProm
 import { runtimePromptIssues } from './petstoryValidation';
 import { compileReferencedText, materialPromptReferences, plannedReferenceMap, promptReferences } from './petstoryPromptQuality';
 import { isStoryApproved } from './petstoryMaterials';
+import { isPetStoryImageAdopted } from './petstoryImageReview';
 
 export interface PromptEligibilityTarget {
   materialId?: string;
@@ -89,7 +90,7 @@ function hasUnapprovedMaterials(p: PetStoryProject, target: PromptEligibilityTar
   return keys.some((id): boolean => { const material = p.materials?.find((item): boolean => item.id === id); const asset = p.assets.find((item): boolean => item.id === material?.selectedAssetId); return !material?.approved || material.approved.assetId !== asset?.id || material.approved.sha256 !== asset?.validation?.sha256; });
 }
 function bindingEligibility(p: PetStoryProject, target: PromptEligibilityTarget, task?: PetStoryPromptTaskContract): PromptEligibility {
-  const unbound = (target.currentReferences || task?.references)?.some((ref): boolean => ref.assetId.startsWith('pending:') || !p.assets.some((asset): boolean => asset.id === ref.assetId && !!asset.validation));
+  const unbound = (target.currentReferences || task?.references)?.some((ref): boolean => ref.assetId.startsWith('pending:') || !p.assets.some((asset): boolean => asset.id === ref.assetId && isPetStoryImageAdopted(p, asset)));
   const reasons: string[] = [];
   if (!isStoryApproved(p)) reasons.push('正文已采用，当前剧本尚未确认或确认已过期；请先核对并确认剧本，再提交媒体。');
   if (unbound || hasUnapprovedMaterials(p, target)) reasons.push('正文已采用，实际图片／素材确认或网页绑定待完成。');

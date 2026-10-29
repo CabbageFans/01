@@ -21,7 +21,7 @@ import {
   PushpinFilled,
   SafetyCertificateOutlined,
 } from '@ant-design/icons';
-import { Input, Modal, Dropdown, message, Empty, Tooltip, Segmented } from 'antd';
+import { Input, Modal, Dropdown, message, Empty, Segmented, Button } from 'antd';
 import type { MenuProps } from 'antd';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
@@ -31,7 +31,7 @@ import type { AutomationState } from '../store/useTaskStore';
 import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
 import { getAccountWarmupSortRank } from '../utils/accountAvailability';
 
-export const AccountList: React.FC = () => {
+export const AccountList: React.FC = (): React.ReactElement => {
   const {
     accounts,
     selectedAccountId,
@@ -92,6 +92,7 @@ export const AccountList: React.FC = () => {
         const display = AUTO_STATE_DISPLAY[autoState] || AUTO_STATE_DISPLAY.idle;
         return {
           ...display,
+          color: autoState === 'injecting' || autoState === 'submitting' ? '#087F72' : display.color,
           detail: accountAutoMessage[accountId] || '',
         };
       }
@@ -326,15 +327,7 @@ export const AccountList: React.FC = () => {
             可用 {accounts.filter((account) => account.health?.availability?.state === 'ready').length}
           </span>
         </div>
-        <Tooltip title="添加账号">
-          <button
-            className="btn-ghost text-db-accent hover:!text-db-accent-light"
-            aria-label="添加账号"
-            onClick={() => setAddModalOpen(true)}
-          >
-            <PlusOutlined />
-          </button>
-        </Tooltip>
+        <Button size="small" type="primary" icon={<PlusOutlined />} onClick={(): void => setAddModalOpen(true)}>添加</Button>
       </div>
 
       {/* 搜索框 */}
@@ -342,7 +335,8 @@ export const AccountList: React.FC = () => {
         <div className="px-2 pb-1">
           <input
             type="text"
-            placeholder="搜索账号..."
+            aria-label="搜索账号"
+            placeholder="搜索账号"
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
             className="w-full px-2.5 py-1.5 text-xs rounded-md border border-db-border bg-db-surface text-db-text-primary placeholder-db-text-muted focus:outline-none focus:border-db-accent/50"
@@ -358,7 +352,7 @@ export const AccountList: React.FC = () => {
               image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={
                 <span className="text-db-text-muted text-xs">
-                  暂无账号，点击 + 添加
+                  还没有账号，请先添加一个豆包账号
                 </span>
               }
             />
@@ -377,9 +371,14 @@ export const AccountList: React.FC = () => {
                 <div
                   className={`account-row ${isSelected ? 'account-row-selected' : ''} flex items-center gap-3 px-3 py-2.5 rounded-db cursor-pointer transition-all duration-200 border ${
                     isSelected
-                      ? 'bg-db-accent/15 border-db-accent/40 shadow-sm'
+                      ? 'border-db-accent/40'
                       : 'bg-db-surface hover:bg-db-surface-hover border-transparent'
                   }`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`选择账号${account.name}`}
+                  aria-pressed={isSelected}
+                  onKeyDown={(event: React.KeyboardEvent<HTMLDivElement>): void => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); handleSelectAccount(account.id); } }}
                   onClick={() => handleSelectAccount(account.id)}
                 >
                   {/* 头像 */}
@@ -435,7 +434,7 @@ export const AccountList: React.FC = () => {
                     {account.seedanceQuota && (
                       <div
                         className="text-2xs mt-0.5 truncate"
-                        style={{ color: account.seedanceQuota.exhausted ? '#c44352' : '#6855c9' }}
+                        style={{ color: account.seedanceQuota.exhausted ? '#B42318' : '#697584' }}
                         title="仅为本地使用记录预测，不是豆包官方剩余额度；当前免费权益仍需本人核对"
                       >
                         {account.seedanceQuota.exhausted
@@ -452,22 +451,6 @@ export const AccountList: React.FC = () => {
                       </div>
                     )}
                   </div>
-
-                  {/* 置顶快捷按钮 */}
-                  <Tooltip title={account.pinned ? '取消置顶' : '置顶'}>
-                    <button
-                      className={`btn-ghost w-6 h-6 flex-shrink-0 ${
-                        account.pinned ? 'text-db-accent' : 'text-db-text-muted opacity-40 hover:opacity-100'
-                      }`}
-                      onClick={(e) => handleTogglePinned(account, e)}
-                    >
-                      {account.pinned ? (
-                        <PushpinFilled style={{ fontSize: 12 }} />
-                      ) : (
-                        <PushpinOutlined style={{ fontSize: 12 }} />
-                      )}
-                    </button>
-                  </Tooltip>
 
                   {/* 操作按钮 */}
                   <Dropdown
@@ -515,6 +498,7 @@ export const AccountList: React.FC = () => {
             style={{ marginBottom: 12 }}
           />
           <Input
+            aria-label="新账号名称"
             placeholder="输入账号名称（如：工作号-01）"
             value={newAccountName}
             onChange={(e) => setNewAccountName(e.target.value)}
@@ -543,6 +527,7 @@ export const AccountList: React.FC = () => {
       >
         <div className="py-4">
           <Input
+            aria-label="账号新名称"
             placeholder="输入新名称"
             value={editName}
             onChange={(e) => setEditName(e.target.value)}

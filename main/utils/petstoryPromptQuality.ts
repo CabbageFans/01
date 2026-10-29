@@ -3,6 +3,7 @@ import presets from './petstoryPresets.json';
 import { materialAsset, requireApprovedMaterials, requireMaterialPromptSource, shotMaterialReferences } from './petstoryMaterials';
 import { renderReferenceSegments } from './petstoryReferenceText';
 import { requirePromptEligibility } from './petstoryEligibility';
+import { selectedShotImageId } from './petstoryImageReview';
 
 export const PROMPT_RULES_VERSION = presets.version;
 export function defaultPromptProfile(): PetStoryPromptProfile { return structuredClone(presets.profile) as PetStoryPromptProfile; }
@@ -67,14 +68,13 @@ export function promptReferences(p: PetStoryProject, shot: PetStoryShot, kind: P
 }
 function appendFrameReferences(p: PetStoryProject, shot: PetStoryShot, kind: PetStoryPromptKind, mode: PetStoryResolvedMode | undefined, planned: boolean,
   append: (id: string, purpose: PetStoryPromptReference['purpose'], ids: string[], slot?: 'first' | 'last') => void): void {
-    const media = p.production?.shots[shot.id];
-    const first = p.assets.find((a): boolean => a.id === media?.firstFrameId);
+    const first = p.assets.find((a): boolean => a.id === selectedShotImageId(p, shot.id, 'firstFrame'));
     if (!first && !planned) throw new Error('缺少本镜实际首帧');
     if (first && !['firstFrame', 'actualEndFrame'].includes(first.kind)) throw new Error('计划尾帧不能作为实际首帧');
     if (first?.kind === 'actualEndFrame' && !first.sourceVideo) throw new Error('实际末帧缺少源视频');
     append(first?.id || 'pending:first', first?.kind === 'actualEndFrame' ? 'actualEndFrame' : 'firstFrame', shot.characterIds, kind === 'video' && mode !== 'reference' ? 'first' : undefined);
     if (kind === 'video' && mode === 'first_last_frame') {
-      const last = p.assets.find((a): boolean => a.id === media?.plannedEndImageId && a.kind === 'plannedEndImage' && a.shotId === shot.id);
+      const last = p.assets.find((a): boolean => a.id === selectedShotImageId(p, shot.id, 'lastFrame') && a.kind === 'plannedEndImage' && a.shotId === shot.id);
       if (!last && !planned) throw new Error('缺少本镜计划尾帧');
       append(last?.id || 'pending:last', 'plannedEndImage', shot.characterIds, 'last');
     }

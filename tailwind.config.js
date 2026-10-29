@@ -1,35 +1,35 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   content: ['./src/**/*.{ts,tsx,html}'],
-  // 深色主题为核心，Ant Design 5 使用 CSS-in-JS，互不冲突
+  // 统一浅色创作工作台主题，Ant Design 5 使用 CSS-in-JS，互不冲突
   darkMode: 'class',
   theme: {
     extend: {
       colors: {
-        // 豆包工作室品牌色系 - 深色创作者工具风格
+        // 短剧工作室统一色板
         'db-bg': {
-          DEFAULT: '#f5f5f7',
+          DEFAULT: '#F4F6F8',
           secondary: '#ffffff',
           tertiary: '#ffffff',
         },
         'db-surface': {
           DEFAULT: '#ffffff',
-          hover: '#e2e3e8',
+          hover: '#E3E8EB',
           active: '#e9e9f0',
         },
         'db-border': {
-          DEFAULT: '#e2e3e8',
+          DEFAULT: '#E3E8EB',
           light: '#d6d7df',
         },
         'db-accent': {
-          DEFAULT: '#6c5ce7', // 主紫色
-          light: '#6855c9',
-          dark: '#5a4bd1',
+          DEFAULT: '#087F72', // 主要操作
+          light: '#087365',
+          dark: '#066B61',
         },
         'db-text': {
-          primary: '#252631',
-          secondary: '#6b6d7c',
-          muted: '#737584',
+          primary: '#202A35',
+          secondary: '#697584',
+          muted: '#7D8993',
         },
         'db-status': {
           idle: '#4ade80',    // 空闲 - 绿色

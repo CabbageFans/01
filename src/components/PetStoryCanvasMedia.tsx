@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Image, InputNumber, Select, Space } from 'antd';
-import { PictureOutlined, PlayCircleOutlined } from '@ant-design/icons';
+import { PlayCircleOutlined } from '@ant-design/icons';
 import type { PetStoryAsset, PetStoryCompiledPrompt, PetStoryPlan, PetStoryProductionStep, PetStoryProject, PetStoryPromptKind, PetStoryShot, Task } from '@doubao-studio/contracts';
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
+import { PetStoryImageReview } from './PetStoryImageReview';
 import { PetStoryExistingMediaPicker } from './PetStoryExistingMediaPicker';
 import { canvasJobLabel, isCanvasPlanLocked } from './petStoryCanvasShared';
 import { PetStoryMediaEntryCheck, petStoryModeNames } from './PetStoryMediaEntryCheck';
@@ -29,7 +30,7 @@ export const CanvasSubmissionDetails: React.FC<{ project: PetStoryProject; shot:
     }).catch((): void => { if (active) setError('提交预览读取失败'); });
     return (): void => { active = false; };
   }, [open, dirty, project.id, project.revision, shot.id, kind]);
-  return <details className="canvas-provenance" onToggle={(event): void => setOpen(event.currentTarget.open)}><summary>提交全文与实际素材用途</summary>
+  return <details className="canvas-provenance" onToggle={(event): void => setOpen(event.currentTarget.open)}><summary>诊断：提交全文与素材记录</summary>
     {dirty ? <p>先保存修改，再查看提交预览。</p> : error ? <p>{error}</p> : <><pre>{preview?.text || '展开后读取当前计划预览'}</pre><pre>{preview?.references.map((reference): string => `${reference.order} · ${reference.purpose} · ${reference.characterIds.join('、') || '场景/关键帧'}${reference.slot ? ` · ${reference.slot} 槽` : ''}`).join('\n')}</pre></>}
     {step?.pageBindings && <pre>{step.pageBindings.map((binding): string => `${binding.order} · ${binding.label} · ${binding.slot} · ${binding.reference}`).join('\n')}</pre>}
     {task && <><strong>{task.runtime?.acceptanceObservation ? '最近已受理运行的正文' : '最近任务输入（未确认受理）'}</strong><pre>{task.runtime?.input.prompt || task.prompt}</pre><p>任务 {task.id}</p>{step?.compiledPrompt?.final !== shot.prompts[kind]?.final && <p>历史任务使用了当时保存的正文；当前正文已有变化。</p>}</>}
@@ -65,7 +66,7 @@ const ExistingMedia: React.FC<{ project: PetStoryProject; shot: PetStoryShot; as
 </>;
 
 function mediaStatus(asset: PetStoryAsset | undefined, waiting: boolean, task: Task | undefined): string {
-  if (asset?.validation) return '本地文件已校验';
+  if (asset?.validation) return asset.needsReview ? '文件已校验 · 需要复核' : '文件校验通过';
   if (asset) return '已有文件 · 待校验';
   if (!waiting) return '未生成';
   return task?.status === 'done' ? '产物待下载 / 校验' : canvasJobLabel(task?.status);
@@ -115,7 +116,7 @@ export const CanvasVideoSettings: React.FC<{ project: PetStoryProject; shot: Pet
     <label>请求时长（秒）<InputNumber aria-label={`镜头${shot.order}视频时长`} min={5} max={10} precision={0} disabled={locked} value={duration} onChange={(value): void => { if (value !== null) { beginEdit(); setDuration(value); } }} /></label>
     <label>入口不支持请求模式时<Select aria-label={`镜头${shot.order}视频备选模式`} className="w-full" disabled={locked} value={state.fallbacks[shot.id] || 'none'} options={[{ value: 'none', label: '暂停，由我处理（不切换模式）' }, { value: 'first_frame', label: '本人允许改用首帧模式' }, { value: 'reference', label: '本人允许改用多参考模式' }]} onChange={(value: string): void => state.setFallback(shot.id, value === 'none' ? undefined : value as 'first_frame' | 'reference')} /></label>
     <p className="canvas-hint">备选模式授权立即用于下次生成；修改这里不会自动发送请求。</p>
-    {dirty && <Space wrap><Button disabled={locked} onClick={(): void => { void save(); }}>保存视频设置</Button><Button onClick={discard}>放弃本次修改</Button></Space>}
+    {dirty && <Space wrap><Button disabled={locked} onClick={(): void => { void save(); }}>保存视频设置</Button><Button onClick={discard}>放弃修改</Button></Space>}
     <p className="canvas-hint">自动选择按当前已检查入口解析。首尾帧使用平台独立首帧和尾帧槽；多参考中的两张图不代表原生首尾帧。</p>
     {message && <p role="status">{message}</p>}
   </Space></div>;
@@ -148,7 +149,7 @@ function mediaNodeFacts(project: PetStoryProject, shot: PetStoryShot, kind: PetS
   const pendingTask = tasks.find((item): boolean => item.id === step?.taskId);
   const task = tasks.find((item): boolean => item.id === (asset?.taskId || step?.taskId));
   const waiting = !!step && step.status !== 'complete'; const video = kind === 'video';
-  const buttonText = asset ? `重新生成${video ? '视频' : '图片'}（保留旧成果）` : `生成${video ? '本镜视频' : mediaNames[kind]}`;
+  const buttonText = asset ? `重新生成${video ? '视频' : '图片'}` : video ? '生成视频' : '生成图片';
   return { asset, step, pendingTask, task, waiting, video, buttonText };
 }
 
@@ -174,16 +175,26 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
   };
 
   return <div id={`shot-media-${shot.id}-${kind}`} tabIndex={-1} className="canvas-media-node" data-media-kind={kind}><div className="canvas-field-label"><strong>{mediaNames[kind]}</strong><span className={`canvas-state ${asset?.validation ? 'ready' : ''}`}>{mediaStatus(asset, waiting, pendingTask)}</span></div>
-    {video && <CanvasVideoSettings project={project} shot={shot} onDirtyChange={setSettingsDirty} />}
-    {asset ? <ExistingMedia project={project} shot={shot} asset={asset} kind={kind} /> : <div className="canvas-empty-media">{video ? <PlayCircleOutlined /> : <PictureOutlined />}<strong>{waiting ? '等待原任务产物' : `尚无${mediaNames[kind]}`}</strong><span>{video ? '生成后自动下载并在此播放' : '生成并下载后自动回填'}</span></div>}
+    {video && <details className="petstory-secondary-tools"><summary>本镜制作设置</summary><CanvasVideoSettings project={project} shot={shot} onDirtyChange={setSettingsDirty} /></details>}
+    {!video ? <PetStoryImageReview project={project} target={{ shotId: shot.id, kind: kind as 'firstFrame' | 'lastFrame' }} title={`镜头 ${shot.order} · ${kind === 'firstFrame' ? '首帧' : '尾帧'}`} currentAssetId={asset?.id}
+      disabled={disabled} generationDisabled={waiting || !currentEntryChecked || !readiness.eligibility?.ready} generating={readiness.loading}
+      onUpload={async (): Promise<void> => state.uploadShotImage(shot.id, kind as 'firstFrame' | 'lastFrame')}
+      onGenerate={async (): Promise<void> => state.generateShotMedia(shot.id, kind)}
+      onAdopt={async (assetId: string): Promise<void> => state.adoptShotImage(shot.id, kind as 'firstFrame' | 'lastFrame', assetId)}
+      onAdjust={async (): Promise<void> => state.openChatAdjustment({ shotId: shot.id, promptKind: kind })} />
+      : asset ? <ExistingMedia project={project} shot={shot} asset={asset} kind={kind} /> : <div className="canvas-empty-media"><PlayCircleOutlined /><strong>{waiting ? '等待原任务产物' : '尚无镜头视频'}</strong><span>生成后自动下载，再检查文件与画面。</span></div>}
     {waiting && asset && <p className="canvas-hint">新请求：{canvasJobLabel(pendingTask?.status)}；下方仍展示原有成果。</p>}
     <PetStoryGenerationBlockers blockers={readiness.eligibility?.blockers || []} onResolve={(blocker): void => resolveMediaBlocker(blocker, shot, kind, entryId, readiness.refresh, onNavigate)} />
     {readiness.error && <Alert type="warning" message={readiness.error} action={<Button size="small" onClick={readiness.refresh}>重新核对</Button>} />}
     {video && <CanvasVideoResolution shot={shot} eligibility={readiness.eligibility} />}
     {settingsDirty && <Alert type="warning" message="本镜视频设置有未保存修改，请先保存或放弃后再生成。" />}
-    <div id={entryId}><PetStoryMediaEntryCheck project={project} kind={video ? 'video' : 'image'} compact /></div>
-    <div className="canvas-media-actions"><Button type="primary" size="small" loading={readiness.loading} icon={video ? <PlayCircleOutlined /> : <PictureOutlined />} disabled={disabled || waiting || settingsDirty || !currentEntryChecked || !readiness.eligibility?.ready} onClick={(): void => { void state.generateShotMedia(shot.id, kind); }}>{buttonText}</Button>{asset && <Button size="small" onClick={(): void => { void revealAsset(); }}>在文件夹查看</Button>}{task && <Button size="small" disabled={!task.outputs.length || download === '正在重新下载原产物…'} onClick={(): void => { void redownload(); }}>重新下载原产物</Button>}</div>
-    <PetStoryExistingMediaPicker project={project} shot={shot} kind={kind} disabled={disabled || waiting} />
+    <details id={entryId} open={!currentEntryChecked} className="petstory-secondary-tools"><summary>核对生成入口</summary><PetStoryMediaEntryCheck project={project} kind={video ? 'video' : 'image'} compact /></details>
+    {video && <div className="canvas-media-actions">{!asset && <Button type="primary" size="small" loading={readiness.loading} icon={<PlayCircleOutlined />} disabled={disabled || waiting || settingsDirty || !currentEntryChecked || !readiness.eligibility?.ready} onClick={(): void => { void state.generateShotMedia(shot.id, kind); }}>{buttonText}</Button>}{asset && <Button size="small" onClick={(): void => { document.getElementById(`shot-media-${shot.id}-${kind}`)?.querySelector('video')?.focus(); }}>查看视频</Button>}</div>}
+    <details className="petstory-secondary-tools"><summary>更多媒体操作</summary><div className="canvas-media-actions">
+      {video && asset && <Button size="small" disabled={disabled || waiting || settingsDirty || !currentEntryChecked || !readiness.eligibility?.ready} onClick={(): void => { void state.generateShotMedia(shot.id, kind); }}>重新生成视频</Button>}
+      {asset && <Button size="small" onClick={(): void => { void revealAsset(); }}>在文件夹中定位</Button>}
+      {task && <Button size="small" disabled={!task.outputs.length || download === '正在重新下载原产物…'} onClick={(): void => { void redownload(); }}>重新下载</Button>}
+    </div><PetStoryExistingMediaPicker project={project} shot={shot} kind={kind} disabled={disabled || waiting} /></details>
     {download && <p role="status">{download}</p>}
     {task && <button className="canvas-text-button" type="button" onClick={openTask}>打开对应豆包原会话 · {canvasJobLabel(task.status)}</button>}{step?.error && <p className="canvas-error">{step.error}</p>}
     <details className="canvas-provenance"><summary>诊断：模式与任务记录</summary><p>请求模式：{shot.requestedMode}；实际记录：{canvasActualMode(project, shot, tasks)}</p>{task && <p>任务：{task.id}</p>}</details>
@@ -203,11 +214,11 @@ export const CanvasReferenceStrip: React.FC<{ project: PetStoryProject; shot: Pe
     if (material.kind === 'prop') return !!shot.propIds?.includes(material.entityId);
     return shot.sceneId === material.entityId;
   }).map((material): string => material.selectedAssetId || ''));
-  const references = project.assets.filter((asset): boolean => materialIds.has(asset.id) || !!shot.sceneReferenceAssetIds?.includes(asset.id)
-    || (asset.kind === 'character' && shot.characterIds.some((id): boolean => project.plan?.characters.find((character): boolean => character.id === id)?.referenceAssetId === asset.id))).sort((a, b): number => { const order = (asset: PetStoryAsset): number => { if (asset.kind !== 'character') return shot.characterIds.length + (asset.kind === 'prop' ? 1 : 2); return Math.min(...(asset.characterIds || [asset.characterId]).filter((id): id is string => !!id).map((id): number => { const index = shot.characterIds.indexOf(id); return index < 0 ? 999 : index; })); }; return order(a) - order(b); });
+  const references = project.assets.filter((asset): boolean => referenceApproved(project, asset) && (materialIds.has(asset.id) || !!shot.sceneReferenceAssetIds?.includes(asset.id)
+    || (asset.kind === 'character' && shot.characterIds.some((id): boolean => project.plan?.characters.find((character): boolean => character.id === id)?.referenceAssetId === asset.id)))).sort((a, b): number => { const order = (asset: PetStoryAsset): number => { if (asset.kind !== 'character') return shot.characterIds.length + (asset.kind === 'prop' ? 1 : 2); return Math.min(...(asset.characterIds || [asset.characterId]).filter((id): id is string => !!id).map((id): number => { const index = shot.characterIds.indexOf(id); return index < 0 ? 999 : index; })); }; return order(a) - order(b); });
   const required = project.materials?.filter((material): boolean => material.kind === 'character' ? shot.characterIds.includes(material.entityId) : material.kind === 'prop' ? !!shot.propIds?.includes(material.entityId) : shot.sceneId === material.entityId) || [];
-  const missing = required.filter((material): boolean => !project.assets.some((asset): boolean => asset.id === material.selectedAssetId));
-  return <div className="canvas-reference-strip"><strong>本镜素材 · 已选 {references.length} · 缺图 {missing.length}</strong>{missing.map((material): React.ReactNode => <p key={material.id}>{material.name}：还未选择图片 {onNavigate && <Button size="small" onClick={(): void => onNavigate('materials', material.id)}>去补齐此素材</Button>}</p>)}{references.map((asset): React.ReactNode => <div key={asset.id}><CanvasMediaPreview project={project} asset={asset} name="选用的参考图片" /><span>{referenceName(project, asset)} · {referenceApproved(project, asset) ? '已确认' : '已有参考 · 待确认'}</span></div>)}{!references.length && <p>尚未选用确认素材</p>}</div>;
+  const missing = required.filter((material): boolean => !project.assets.some((asset): boolean => asset.id === material.selectedAssetId && referenceApproved(project, asset)));
+  return <div className="canvas-reference-strip"><strong>本镜素材 · 已采用 {references.length} · 缺图 {missing.length}</strong>{missing.map((material): React.ReactNode => <p key={material.id}>{material.name}：还没有已采用图片 {onNavigate && <Button size="small" onClick={(): void => onNavigate('materials', material.id)}>去补齐此素材</Button>}</p>)}{references.map((asset): React.ReactNode => <div key={asset.id}><CanvasMediaPreview project={project} asset={asset} name="选用的参考图片" /><span>{referenceName(project, asset)} · {referenceApproved(project, asset) ? '已确认' : '已有参考 · 待确认'}</span></div>)}{!references.length && <p>尚未选用确认素材</p>}</div>;
 };
 
 /** 解析后的计划模式不冒充当前网页实际已受理的模式。 */

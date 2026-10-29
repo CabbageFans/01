@@ -1,0 +1,189 @@
+{
+  "checks": [
+    {
+      "name": "上传预览前未回填首帧",
+      "passed": true
+    },
+    {
+      "name": "上传采用后仅回填目标首帧",
+      "passed": true
+    },
+    {
+      "name": "未确认替换时保留旧采用图",
+      "passed": true
+    },
+    {
+      "name": "替换后保留成果并标记复核",
+      "passed": true
+    },
+    {
+      "name": "替换后真实旧图保留在历史",
+      "passed": true
+    },
+    {
+      "name": "解释追问回复不能直接采用",
+      "passed": true
+    },
+    {
+      "name": "采用前显示准确回复与目标",
+      "passed": true
+    },
+    {
+      "name": "确认后完成所选回复应用",
+      "passed": true
+    },
+    {
+      "name": "Esc关闭确认层",
+      "passed": true
+    },
+    {
+      "name": "模态确认层焦点循环",
+      "passed": true
+    },
+    {
+      "name": "保存失败时禁用分析并保留原文",
+      "passed": true
+    },
+    {
+      "name": "重试保存成功后分析可用",
+      "passed": true
+    },
+    {
+      "name": "方案候选未采用时不能确认制作",
+      "passed": true
+    },
+    {
+      "name": "方案采用后可显式确认制作依据",
+      "passed": true
+    },
+    {
+      "name": "确认方案交接素材准备",
+      "passed": true
+    },
+    {
+      "name": "缺少确认基础图时阻止生成视频",
+      "passed": true
+    }
+  ],
+  "viewportChecks": [
+    {
+      "page": "overview",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "script",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "plan",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "materials",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "keyframes",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "videos",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "results",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "canvas",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "tasks",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "library",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "accounts",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    },
+    {
+      "page": "settings",
+      "brokenImages": 0,
+      "h": 800,
+      "sw": 1280,
+      "w": 1280
+    }
+  ],
+  "stateChecks": [
+    {
+      "state": "candidate",
+      "overflow": false
+    },
+    {
+      "state": "replacement",
+      "overflow": false
+    },
+    {
+      "state": "chat",
+      "overflow": false
+    },
+    {
+      "state": "reply",
+      "overflow": false
+    },
+    {
+      "state": "failure",
+      "overflow": false
+    },
+    {
+      "state": "saving-error",
+      "overflow": false
+    },
+    {
+      "state": "missing",
+      "overflow": false
+    },
+    {
+      "state": "manual",
+      "overflow": false
+    }
+  ],
+  "consoleErrors": []
+}

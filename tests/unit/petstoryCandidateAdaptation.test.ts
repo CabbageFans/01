@@ -60,7 +60,7 @@ async function importConfirmedImage(color: string = 'red', materialId: string = 
   const filename = path.join(directory, `TEST-${color}.png`);
   await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=${color}:s=64x96`, '-frames:v', '1', '-y', filename]);
   p = await projects.addMaterialImage(p.id, p.revision, materialId, filename);
-  p = await projects.approveMaterials(p.id, p.revision, [{ materialId, assetId: p.materials!.find((item): boolean => item.id === materialId)!.selectedAssetId! }]);
+  p = await projects.approveMaterials(p.id, p.revision, [{ materialId, assetId: p.assets.at(-1)!.id }]);
 }
 function productionService(): PetStoryProductionService {
   return new PetStoryProductionService(projects, { list: (): Task[] => structuredClone(stored), create: (params: TaskAddParams, accountId: string): Task => {
@@ -116,6 +116,8 @@ describe('媒体确认遵守本批实际镜头素材范围', (): void => {
     p = (await chat.prepareRuntime(p.id, p.revision, 'materialPrompt', { materialId: material.id })).project!;
     const job = p.jobs.at(-1)!; const optimized = `TEST离线基础素材正文：${p.plan!.scenes!.find((item): boolean => item.id === material.entityId)!.location}`;
     await record(job, optimized); const collected = await chat.collect(p.id, job.id); expect(collected.success, collected.error).toBe(true); p = collected.project!;
+    expect(p.jobs.at(-1)?.resultStatus).toBe('candidate');
+    p = (await chat.adoptPromptCandidate(p.id, p.revision, job.id)).project!;
     const current = p.materials!.find((item): boolean => item.id === material.id)!; const target = { materialId: material.id };
     expect(inspectPromptEligibility(p, current.prompt, target)).toMatchObject({ state: 'adopted_unbound', writingReady: true });
     const before = structuredClone(p); const entry = buildPetStoryPromptExport(p, []).prompts.find((item): boolean => item.id === material.id)!;

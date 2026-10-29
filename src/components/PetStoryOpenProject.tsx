@@ -4,7 +4,7 @@ import { FolderOpenOutlined } from '@ant-design/icons';
 import { usePetStoryStore } from '../store/usePetStoryStore';
 
 /** 两个打开入口复用同一项目服务，选择器不可用时仍可明确输入已有项目位置。 */
-export const PetStoryOpenProject: React.FC<{ disabled?: boolean; label?: string; onOpened?: () => void }> = ({ disabled = false, label = '打开项目目录', onOpened }): React.ReactElement => {
+export const PetStoryOpenProject: React.FC<{ disabled?: boolean; label?: string; onOpened?: () => void }> = ({ disabled = false, label = '打开项目', onOpened }): React.ReactElement => {
   const state = usePetStoryStore();
   const [visible, setVisible] = useState(false);
   const [projectPath, setProjectPath] = useState('');
@@ -16,7 +16,7 @@ export const PetStoryOpenProject: React.FC<{ disabled?: boolean; label?: string;
   const blocked = disabled || state.busy;
   return <>
     <Button icon={<FolderOpenOutlined />} disabled={blocked} onClick={(): void => { void open(); }}>{label}</Button>
-    <Button size="small" disabled={blocked} onClick={(): void => setVisible(true)}>输入项目路径</Button>
+    <details className="petstory-secondary-tools"><summary>其他打开方式</summary><Button type="text" size="small" disabled={blocked} onClick={(): void => setVisible(true)}>按路径打开</Button></details>
     <Modal title="按路径打开已有短剧" open={visible} onCancel={(): void => { if (!state.busy) setVisible(false); }} onOk={(): void => { void open(projectPath.trim()); }}
       okText="打开项目" cancelText="取消" confirmLoading={state.busy} okButtonProps={{ disabled: blocked || !projectPath.trim() }} cancelButtonProps={{ disabled: state.busy }}>
       <p className="mb-3">文件选择器不可用时，输入已有项目目录或其中 project.json 的完整路径。</p>

@@ -6,6 +6,7 @@ import { PetStoryProjects, projectPath } from './petstoryProject';
 import { identityAsset } from './petstoryPromptQuality';
 import { parsePetStoryAnswer } from './petstoryValidation';
 import { mediaDigest, validatePetStoryMedia } from './petstoryMedia';
+import { imageTargetBasis } from './petstoryImageReview';
 
 interface ExistingMediaPort { list: () => Task[]; downloads: () => DownloadJob[] }
 interface BodyMatch { final: string; jobId?: string }
@@ -132,8 +133,13 @@ export class PetStoryExistingMediaService {
     const destination = await projectPath(this.projects.directory(id), relativePath); await fs.mkdir(path.dirname(destination), { recursive: true });
     await projectPath(this.projects.directory(id), relativePath); await fs.copyFile(downloaded.filePath, destination, 1);
     if ((await mediaDigest(destination)).sha256 !== validation.sha256) throw new Error('历史媒体复制后的摘要不一致，未关联');
-    p.assets.push({ id: assetId, kind: imageKind(kind), shotId, relativePath, taskId: task.id, runId: task.runtime?.runId, artifactId: artifact.id, downloadJobId: downloaded.id, validation,
-      origin: 'historical_task', generationPrompt: task.prompt, generationFinal: body.final, promptJobId: body.jobId });
+    const asset: PetStoryAsset = { id: assetId, kind: imageKind(kind), shotId, relativePath, taskId: task.id, runId: task.runtime?.runId, artifactId: artifact.id, downloadJobId: downloaded.id, validation,
+      origin: 'historical_task', generationPrompt: task.prompt, generationFinal: body.final, promptJobId: body.jobId };
+    if (kind !== 'video') {
+      const target = { shotId, kind };
+      asset.imageReview = { state: 'candidate', target, basisHash: imageTargetBasis(p, target) };
+    }
+    p.assets.push(asset);
     return { success: true, project: await this.projects.write(p) };
   }
 }

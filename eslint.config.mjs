@@ -31,6 +31,8 @@ export default tseslint.config(
       'artifacts/drama-runtime/**',
       'artifacts/chat-internalization/**',
       'artifacts/prompt-pipeline-completion/**',
+      // 独立高保真设计原型自带构建与校验，不属于生产应用源码门禁。
+      'docs/ui-design-review/2026-10-29/full-product-design/prototype/**',
       // contracts 构建产物（.d.ts）由 tsc 生成，不参与 lint
       'packages/contracts/dist/**',
       // 根级 doubaoBridge.ts 是历史游离文件，不在任何 tsconfig include 中

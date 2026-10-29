@@ -1,3 +1,4 @@
+import { registerPetStoryDraft, unregisterPetStoryDraft } from '../utils/petstoryDraftPresence';
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 
 export interface PetStoryDraftActions { save: () => Promise<void>; discard: () => void; locate: () => void }
@@ -9,9 +10,10 @@ export function usePetStoryDraft(id: string, label: string, dirty: boolean, acti
   const registry = useContext(PetStoryDraftContext);
   const current = useRef(actions); current.current = actions;
   useEffect(() => {
-    if (!registry || !dirty) return;
-    registry.register({ id, label, actions: current });
-    return (): void => registry.unregister(id);
+    if (!dirty) return;
+    registerPetStoryDraft(id, label);
+    registry?.register({ id, label, actions: current });
+    return (): void => { unregisterPetStoryDraft(id); registry?.unregister(id); };
   }, [registry, id, label, dirty]);
 }
 export function usePetStoryDraftRegistry(): { value: DraftRegistry; drafts: PetStoryDraft[] } {

@@ -28,7 +28,7 @@ describe('新建入口沿用真实账号边界', (): void => {
   it('全局选择 Dola 时不允许用隐藏的 Dola 值创建短剧', (): void => {
     useAccountStore.setState({ accounts: [{ ...account, id: 'TEST-dola', platform: 'dola' }], selectedAccountId: 'TEST-dola' });
     const create = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ createProject: create });
-    render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建萌宠短剧' }));
+    render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建短剧项目' }));
     const button = screen.getByRole('button', { name: '选择保存目录并创建' });
     expect(button.hasAttribute('disabled')).toBe(true); fireEvent.click(button); expect(create).not.toHaveBeenCalled();
     expect(screen.getByText('还没有选择可用的豆包执行账号；可在这里选择、添加，或前往登录后返回。')).toBeDefined();
@@ -36,14 +36,14 @@ describe('新建入口沿用真实账号边界', (): void => {
   it('其他账号配置／提交期间登录入口保留弹窗，不抢占前台租约', (): void => {
     const select = vi.fn(); const navigate = vi.fn(); window.addEventListener('navigate-workspace', navigate);
     useAccountStore.setState({ selectAccount: select }); useTaskStore.setState({ accountAutomationState: { 'TEST-other': 'submitting' } });
-    render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建萌宠短剧' }));
+    render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建短剧项目' }));
     fireEvent.click(screen.getByRole('button', { name: '去登录／检查账号（返回后继续新建）' }));
-    expect(select).not.toHaveBeenCalled(); expect(navigate).not.toHaveBeenCalled(); expect(screen.getByRole('dialog', { name: '新建萌宠短剧' })).toBeDefined();
+    expect(select).not.toHaveBeenCalled(); expect(navigate).not.toHaveBeenCalled(); expect(screen.getByRole('dialog', { name: '新建短剧项目' })).toBeDefined();
     window.removeEventListener('navigate-workspace', navigate);
   });
   it('关联项目已归档时选择保存目录不可用', (): void => {
     useProjectStore.setState({ projects: useProjectStore.getState().projects.map((project): typeof project => ({ ...project, archived: true })) });
-    render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建萌宠短剧' }));
+    render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建短剧项目' }));
     expect(screen.getByRole('button', { name: '选择保存目录并创建' }).hasAttribute('disabled')).toBe(true);
   });
 });
@@ -65,6 +65,6 @@ describe('镜头视频设置保护并发新结果', (): void => {
     const latest = structuredClone(p); latest.revision++; latest.plan!.shots[0].durationSeconds = [5, 6, 7, 8, 9, 10].find((value): boolean => value !== duration && value !== p.plan!.shots[0].durationSeconds)!;
     await act(async (): Promise<void> => { usePetStoryStore.setState({ project: latest }); }); view.rerender(<CanvasVideoSettings project={latest} shot={latest.plan!.shots[0]} />);
     fireEvent.click(screen.getByRole('button', { name: '保存视频设置' }));
-    await waitFor((): void => expect(screen.getByRole('status').textContent).toMatch(/已有新保存内容/)); expect(save).not.toHaveBeenCalled(); expect((screen.getByRole('spinbutton', { name: '镜头1视频时长' }) as HTMLInputElement).value).toBe(String(duration)); expect(screen.getByRole('button', { name: '放弃本次修改' })).toBeDefined();
+    await waitFor((): void => expect(screen.getByRole('status').textContent).toMatch(/已有新保存内容/)); expect(save).not.toHaveBeenCalled(); expect((screen.getByRole('spinbutton', { name: '镜头1视频时长' }) as HTMLInputElement).value).toBe(String(duration)); expect(screen.getByRole('button', { name: '放弃修改' })).toBeDefined();
   });
 });

@@ -85,7 +85,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
           <Input
             value={downloadDir}
             onChange={(e) => setDownloadDir(e.target.value)}
-            placeholder="留空则使用默认目录（~/Downloads/豆包工作室产物）"
+            placeholder="留空则使用当前默认产物目录"
             style={{ flex: 1 }}
           />
           <Button icon={<FolderOpenOutlined />} onClick={handleSelectDir}>
@@ -94,7 +94,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
         </div>
         {!downloadDir && (
           <div style={{ marginTop: 4, fontSize: 12, color: '#888' }}>
-            默认：~/Downloads/豆包工作室产物
+            留空时使用默认产物目录，已有文件仍保留在原位置
           </div>
         )}
       </div>

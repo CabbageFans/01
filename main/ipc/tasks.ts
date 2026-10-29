@@ -93,6 +93,10 @@ export function retryPetStoryTask(taskId: string): Task {
   if (!result.success) throw new Error(result.error);
   return result.data;
 }
+/** 同进程短剧对话保护接线，复用正式 Repository 并在失败时停止。 */
+export function setPetStoryConversationGuard(taskId: string, projectId: string, adjustmentId: string, active: boolean): void {
+  taskService.setConversationGuard(taskId, projectId, adjustmentId, active);
+}
 
 /** 仅供同进程本机控制面只读使用；返回脱敏由控制面负责。 */
 export function listTasksForLocalControl(): Task[] {

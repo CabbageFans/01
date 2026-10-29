@@ -5,7 +5,7 @@ import type { DownloadJob, PetStoryAsset, PetStoryCapability, PetStoryExecutionG
 import { PetStoryProjects, projectPath } from './petstoryProject';
 import { compilePrompt, compileMaterialPrompt, checkPromptReferences, assetCharacterIds } from './petstoryPromptQuality';
 import { bindReferenceText } from './petstoryReferenceText';
-import { invalidateMaterialDependents, approvedMaterialHash, materialAsset, requireApprovedMaterials, requireMaterialInventory, requireMaterialPromptSource, requiredMaterialKeys } from './petstoryMaterials';
+import { approvedMaterialHash, materialAsset, requireApprovedMaterials, requireMaterialInventory, requireMaterialPromptSource, requiredMaterialKeys } from './petstoryMaterials';
 import type { PetStoryPageBinding, PetStoryRuntimeTarget, PetStoryGenerationBlocker, PetStoryGenerationEligibilityResult, PetStoryModeResolution } from '@doubao-studio/contracts';
 import { finalTaskInput } from './petstoryChat';
 import { validatePetStoryPlan } from './petstoryValidation';
@@ -13,6 +13,7 @@ import { resolvePetStoryMode } from './petstoryModes';
 import { extractActualEndFrame, mediaDigest, validatePetStoryMedia } from './petstoryMedia';
 import { requirePromptEligibility, promptWritingTarget } from './petstoryEligibility';
 import { pendingChatConflicts } from './petstoryPending';
+import { imageTargetBasis, isPetStoryImageAdopted, selectedShotImageId } from './petstoryImageReview';
 
 /** 页面绑定属于本次上传文件与当前编译片段，不接受导出文本作为绑定证据。 */
 function validatePageBinding(p: PetStoryProject, step: PetStoryProductionStep, b: PetStoryPageBinding, index: number): void {
@@ -181,7 +182,7 @@ export class PetStoryProductionService {
     return Object.fromEntries((p.plan?.shots || []).map((shot): [string, PetStoryShotMedia] => {
       const prior = [p.production, ...(p.productionHistory || []).slice().reverse()].find((run): boolean => !!run?.shots[shot.id])?.shots[shot.id];
       const latest = (kind: PetStoryAsset['kind']): string | undefined => [...p.assets].reverse().find((asset): boolean => asset.shotId === shot.id && asset.kind === kind)?.id;
-      return [shot.id, { requestedMode: shot.requestedMode, resolvedMode: prior?.resolvedMode || (shot.requestedMode === 'auto' ? 'reference' : shot.requestedMode), reason: prior?.reason || '仅图片节点授权，视频实际模式尚未确认', firstFrameId: prior?.firstFrameId || latest('firstFrame'), plannedEndImageId: prior?.plannedEndImageId || latest('plannedEndImage'), videoId: prior?.videoId || latest('video'), actualEndFrameId: prior?.actualEndFrameId, startFromPreviousEnd: prior?.startFromPreviousEnd }];
+      return [shot.id, { requestedMode: shot.requestedMode, resolvedMode: prior?.resolvedMode || (shot.requestedMode === 'auto' ? 'reference' : shot.requestedMode), reason: prior?.reason || '仅图片节点授权，视频实际模式尚未确认', firstFrameId: selectedShotImageId(p, shot.id, 'firstFrame'), plannedEndImageId: selectedShotImageId(p, shot.id, 'lastFrame'), videoId: prior?.videoId || latest('video'), actualEndFrameId: prior?.actualEndFrameId, startFromPreviousEnd: prior?.startFromPreviousEnd }];
     }));
   }
   async preview(id: string, capability: PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): Promise<PetStoryProductionResult> {
@@ -327,6 +328,7 @@ export class PetStoryProductionService {
     const previous = shots[requireValue(shot.previousShotId)];
     const video = p.assets.find((asset): boolean => asset.id === previous?.videoId && asset.kind === 'video' && asset.shotId === shot.previousShotId);
     if (!video?.taskId || !video.runId) throw new Error('本镜连续首帧依赖前镜实际视频／末帧；请先完成或选择前镜实际视频，再制作本镜，不能使用计划尾帧');
+    if (video.needsReview) throw new Error('前镜素材已替换，请先复核前镜视频，再制作连续镜头');
     const source = await this.assetFile(p, video.id, 'video');
     const frameId = randomUUID();
     const relativePath = `shots/${shot.id}/${frameId}.png`;
@@ -387,6 +389,7 @@ export class PetStoryProductionService {
   async assetFile(p: PetStoryProject, id: string, kind: 'image' | 'video'): Promise<string> {
     const asset = p.assets.find((a): boolean => a.id === id);
     if (!asset || (kind === 'video' ? asset.kind !== 'video' : asset.kind === 'video')) throw new Error('素材未登记或类别不符');
+    if (kind === 'image' && !isPetStoryImageAdopted(p, asset)) throw new Error('这张图片尚未采用或需要复核，请先预览确认');
     if (kind === 'video') {
       const step = [p.production, ...(p.productionHistory || [])].flatMap((r): PetStoryProductionStep[] => r?.steps || []).find((s): boolean => s.kind === 'video' && s.assetId === asset.id && s.status === 'complete');
       const task = step ? this.originalTask(p, step) : undefined;
@@ -482,6 +485,10 @@ export class PetStoryProductionService {
       const pending = production.steps.find((s): boolean => s.status !== 'complete');
       if (pending) return await this.advancePending(p, pending);
       const plan = requireValue(p.plan);
+      for (const shot of plan.shots) {
+        const media = production.shots[shot.id];
+        if (media) { media.firstFrameId = selectedShotImageId(p, shot.id, 'firstFrame'); media.plannedEndImageId = selectedShotImageId(p, shot.id, 'lastFrame'); }
+      }
       if (production.phase === 'materials') return await this.advanceMaterials(p);
       await this.checkApprovedFiles(p, productionShotScope(production));
       if (production.target) return await this.advanceTarget(p, production.target);
@@ -507,7 +514,7 @@ export class PetStoryProductionService {
         input.prompts = [compiled.text];
         return await this.prepareStep(p, { kind, shotId: shot.id }, input, assetIds, compiled);
       }
-      production.state = 'complete'; production.message = 'P4 全部镜头真实素材已下载并校验；等待用户决定 P5';
+      production.state = 'complete'; production.message = '逐镜素材已下载并校验，请查看实际画面并确认质量';
       return { success: true, project: await this.projects.write(p) };
     } catch (error: unknown) {
       // 下载／验证失败只停止业务推进，保留原任务和所有产物；不进入生成重试。
@@ -614,13 +621,8 @@ export class PetStoryProductionService {
     await this.collectMedia(p, step, { ...task, outputs: [artifact.url] });
     return { success: true, project: await this.projects.write(p) };
   }
-  private async collectMedia(p: PetStoryProject, step: PetStoryProductionStep, task: Task): Promise<void> {
-    if (!step.runId || task.runtime?.runId !== step.runId || !task.runtime.submittedAt) throw new Error('生成结果缺少原运行与单次提交记录');
+  private async importMediaArtifact(p: PetStoryProject, step: PetStoryProductionStep, task: Task, artifact: NonNullable<Task['artifacts']>[number]): Promise<PetStoryAsset | undefined> {
     const kind = step.kind === 'video' ? 'video' : 'image';
-    const artifacts = task.outputs.flatMap((url): NonNullable<Task['artifacts']> => (task.artifacts || []).filter((a): boolean => a.url === url && a.runId === step.runId && a.kind === kind && !['invalid', 'expired'].includes(a.validation?.state || '') && !step.rejectedArtifactIds?.includes(a.id)));
-    if (!artifacts.length) throw new Error('没有属于原运行的可用真实产物，done 或缩略图不算媒体');
-    // 固定选择规则：按本次 outputs 顺序，选择第一个下载且可解码的有效产物。
-    for (const artifact of artifacts) {
       let job = this.tasks.downloads().find((j): boolean => j.taskId === task.id && j.accountId === p.accountId && j.mode === task.mode && j.url === artifact.url && j.status === 'done');
       if (!job) {
         const result = await this.tasks.download({ outputs: [{ taskId: task.id, prompt: task.prompt, outputs: [artifact.url], accountId: p.accountId, mode: task.mode }] });
@@ -633,7 +635,7 @@ export class PetStoryProductionService {
       catch (error: unknown) {
         step.rejectedArtifactIds = [...(step.rejectedArtifactIds || []), artifact.id];
         step.error = error instanceof Error ? error.message : '产物校验失败';
-        continue; // 仅在本次同一输出列表内按顺序找有效文件，不发起新生成。
+        return undefined; // 损坏产物不能采用，也不发起新生成。
       }
       const assetId = randomUUID();
       const ext = kind === 'video' ? '.mp4' : path.extname(job.filePath).toLowerCase();
@@ -646,18 +648,43 @@ export class PetStoryProductionService {
       if ((await mediaDigest(destination)).sha256 !== validation.sha256) throw new Error('下载复制后的素材校验不一致');
       const asset: PetStoryAsset = { id: assetId, kind: step.kind === 'lastFrame' ? 'plannedEndImage' : step.kind, relativePath,
         materialId: step.materialId, generationPrompt: task.prompt, generationFinal: step.compiledPrompt?.final, shotId: step.shotId, characterId: step.characterId, taskId: task.id, runId: step.runId, artifactId: artifact.id, downloadJobId: job.id, validation };
-      p.assets.push(asset); step.assetId = assetId; step.status = 'complete'; step.error = undefined;
-      if (step.materialId) {
-        const material = requireValue(p.materials?.find((m): boolean => m.id === step.materialId));
-        material.selectedAssetId = asset.id; material.approved = undefined;
-        invalidateMaterialDependents(p, material.id);
-        if (material.kind === 'character') requireValue(requireValue(p.plan).characters.find((c): boolean => c.id === material.entityId)).referenceAssetId = asset.id;
-      } else if (step.kind === 'character') requireValue(requireValue(p.plan).characters.find((c): boolean => c.id === step.characterId)).referenceAssetId = assetId;
-      else {
-        const media = this.checked(p).shots[requireValue(step.shotId)];
-        if (step.kind === 'firstFrame') media.firstFrameId = assetId;
-        else if (step.kind === 'lastFrame') media.plannedEndImageId = assetId;
-        else media.videoId = assetId;
+      if (kind === 'image') {
+        const target = step.materialId ? { materialId: step.materialId } : step.kind === 'character' ? { materialId: `character:${requireValue(step.characterId)}` }
+          : { shotId: requireValue(step.shotId), kind: step.kind as 'firstFrame' | 'lastFrame' };
+        asset.imageReview = { state: 'candidate', target, basisHash: imageTargetBasis(p, target) };
+      }
+      return asset;
+  }
+  private async collectMedia(p: PetStoryProject, step: PetStoryProductionStep, task: Task): Promise<void> {
+    if (!step.runId || task.runtime?.runId !== step.runId || !task.runtime.submittedAt) throw new Error('生成结果缺少原运行与单次提交记录');
+    const kind = step.kind === 'video' ? 'video' : 'image';
+    const artifacts = task.outputs.flatMap((url): NonNullable<Task['artifacts']> => (task.artifacts || []).filter((a): boolean => a.url === url && a.runId === step.runId && a.kind === kind && !['invalid', 'expired'].includes(a.validation?.state || '') && !step.rejectedArtifactIds?.includes(a.id)));
+    if (!artifacts.length) throw new Error('没有属于原运行的可用真实产物，done 或缩略图不算媒体');
+    // 同一运行的所有有效图片均保存为候选；下载和文件校验不代表用户采用。
+    let firstAssetId: string | undefined;
+    for (const artifact of artifacts) {
+      const duplicate = p.assets.find((asset): boolean => asset.taskId === task.id && asset.runId === step.runId && asset.artifactId === artifact.id);
+      if (duplicate) { firstAssetId ||= duplicate.id; continue; }
+      let asset: PetStoryAsset | undefined;
+      try { asset = await this.importMediaArtifact(p, step, task, artifact); }
+      catch (error: unknown) {
+        if (!firstAssetId) throw error;
+        step.error = error instanceof Error ? error.message : '部分候选下载失败';
+        // 同一任务后续候选失败时，先保住已取得候选，再暂停原步骤；恢复只重下缺项。
+        await this.projects.write(p);
+        throw error;
+      }
+      if (!asset) continue;
+      p.assets.push(asset); firstAssetId ||= asset.id;
+      if (kind === 'video') { this.checked(p).shots[requireValue(step.shotId)].videoId = asset.id; break; }
+    }
+    if (firstAssetId) {
+      step.assetId = firstAssetId; step.status = 'complete'; step.error = undefined;
+      if (kind === 'image' && this.checked(p).phase !== 'materials') {
+        const production = this.checked(p);
+        production.state = production.target ? 'complete' : 'paused';
+        production.message = '图片已下载，请预览并采用满意的一张';
+        this.authorized.delete(p.id);
       }
       return;
     }

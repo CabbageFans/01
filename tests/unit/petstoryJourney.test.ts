@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PetStoryAsset, PetStoryCapability, PetStoryPlan, PetStoryProduction, PetStoryProject, PetStoryPromptKind, Task } from '@doubao-studio/contracts';
-import { journeyShotAsset, selectPetStoryJourney } from '../../src/utils/petstoryJourney';
+import { journeyAssetMatchesPrompt, journeyShotAsset, selectPetStoryJourney } from '../../src/utils/petstoryJourney';
 import { petStoryJobStatus } from '../../src/components/PetStoryTaskRecovery';
 import snapshot from '../fixtures/storyboard-five-shots.json';
 
@@ -18,6 +18,12 @@ function asset(p: PetStoryProject, shotIndex: number, kind: PetStoryPromptKind):
   const shot = p.plan!.shots[shotIndex];
   return { id: `TEST-${shot.id}-${kind}`, kind: kind === 'lastFrame' ? 'plannedEndImage' : kind, shotId: shot.id, taskId: `TEST-task-${shot.id}-${kind}`, runId: 'TEST-run', relativePath: `assets/TEST-${shot.id}-${kind}`, generationFinal: shot.prompts[kind]?.final,
     validation: { decoded: true, sha256: 'TEST-digest', bytes: 100, width: 720, height: 1280, checkedAt: now } };
+}
+function adoptFrame(p: PetStoryProject, image: PetStoryAsset): void {
+  if (image.kind === 'video' || !image.shotId) return;
+  const kind = image.kind === 'firstFrame' ? 'firstFrame' : 'lastFrame';
+  image.imageReview = { state: 'adopted', target: { shotId: image.shotId, kind }, basisHash: 'TEST-basis', adoptedAt: now, sha256: image.validation?.sha256 };
+  p.adoptedImages = { ...p.adoptedImages, [image.shotId]: { ...p.adoptedImages?.[image.shotId], [kind === 'firstFrame' ? 'firstFrameId' : 'plannedEndImageId']: image.id } };
 }
 function confirmedMaterial(p: PetStoryProject): void {
   const character = p.plan!.characters[0]; character.referenceAssetId = 'TEST-material-image';
@@ -75,14 +81,15 @@ describe('六阶段与实际成果的只读导航投影', (): void => {
   it('历史批次中选择的真实文件优先于无选择的后来文件', (): void => {
     const p = project(); const first = asset(p, 0, 'firstFrame'); const later = { ...first, id: 'TEST-later' }; p.assets.push(first, later);
     const history = production(); history.shots[p.plan!.shots[0].id] = { requestedMode: 'first_frame', resolvedMode: 'first_frame', reason: 'TEST', firstFrameId: first.id };
-    p.productionHistory = [history]; p.production = production();
+    p.productionHistory = [history]; p.production = production(); adoptFrame(p, first);
     expect(journeyShotAsset(p, p.plan!.shots[0], 'firstFrame')?.id).toBe(first.id);
   });
-  it('最近含本镜的记录未选该字段时复用最新同类文件，不回溯更老选择', (): void => {
+  it('没有人工采用记录时，不把历史选择或最新导入候选当正式首帧', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; const older = asset(p, 0, 'firstFrame'); const latest = { ...older, id: 'TEST-latest-import', taskId: undefined }; p.assets.push(older, latest);
     const history = production(); history.shots[shot.id] = { requestedMode: 'first_frame', resolvedMode: 'first_frame', reason: 'TEST', firstFrameId: older.id }; p.productionHistory = [history];
     p.production = production(); p.production.shots[shot.id] = { requestedMode: 'first_frame', resolvedMode: 'first_frame', reason: 'TEST 最新镜头条目尚未选择首帧' };
-    expect(journeyShotAsset(p, shot, 'firstFrame')?.id).toBe(latest.id);
+    expect(journeyShotAsset(p, shot, 'firstFrame')).toBeUndefined();
+    adoptFrame(p, older); expect(journeyShotAsset(p, shot, 'firstFrame')?.id).toBe(older.id);
   });
   it('最近镜头选择指向缺失文件时显示缺失，不擅自采用其他文件', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; p.assets.push(asset(p, 0, 'firstFrame')); p.production = production();
@@ -95,9 +102,15 @@ describe('六阶段与实际成果的只读导航投影', (): void => {
     const projected = selectPetStoryJourney(p).shots[0]; expect(projected.requiresLastFrame).toBe(true); expect(projected.missing).toContain('缺尾帧');
     shot.requestedMode = 'auto'; expect(selectPetStoryJourney(p).shots[0].requiresLastFrame).toBe(false);
   });
+  it('用户上传并采用的图片不依赖生成提示词，但待复核仍明确缺项', (): void => {
+    const p = project(); const image = asset(p, 0, 'firstFrame'); delete image.taskId; delete image.runId; delete image.generationFinal;
+    adoptFrame(p, image); p.assets.push(image);
+    expect(journeyAssetMatchesPrompt(image, undefined)).toBe(true);
+    image.needsReview = true; expect(journeyAssetMatchesPrompt(image, undefined)).toBe(false);
+  });
   it('所有当前文件已具备后才推荐查看成果，质量结论独立计算', (): void => {
     const p = project(); confirmedMaterial(p);
-    for (let index = 0; index < p.plan!.shots.length; index++) for (const kind of ['firstFrame', 'lastFrame', 'video'] as const) if (p.plan!.shots[index].prompts[kind]) p.assets.push(asset(p, index, kind));
+    for (let index = 0; index < p.plan!.shots.length; index++) for (const kind of ['firstFrame', 'lastFrame', 'video'] as const) if (p.plan!.shots[index].prompts[kind]) { const image = asset(p, index, kind); p.assets.push(image); adoptFrame(p, image); }
     expect(selectPetStoryJourney(p).stage).toBe('results');
     expect(selectPetStoryJourney(p).counts.quality.confirmed).toBe(0);
     const video = p.assets.find((item): boolean => item.kind === 'video')!;

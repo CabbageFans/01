@@ -81,3 +81,43 @@ The system SHALL keep regression instructions and internal identifiers in diagno
 #### Scenario: Media authorization is absent
 - **WHEN** normal verification reaches an unapproved image or unauthorized media operation
 - **THEN** evidence records the visible handoff as pending human media acceptance and does not claim end-to-end completion
+
+### Requirement: Approved product design is the implementation baseline
+
+The system SHALL implement the explicitly approved short drama studio design across the application, remove generic creation entry points, retain all short-drama capabilities, and preserve the full ai_story canvas relationships in keyframe and video stages.
+
+#### Scenario: Inspect a different creation stage
+- **WHEN** a user switches stages or opens a node
+- **THEN** the existing canvas and views remain usable and no creation request, approval, or inferred completion occurs
+
+### Requirement: Every image requires explicit preview and adoption
+
+The system SHALL store generated and uploaded images as candidates before adoption for characters, props, scenes, first frames and last frames; candidate arrival SHALL NOT replace an adopted image or permit video references.
+
+#### Scenario: New candidate arrives for an adopted image
+- **WHEN** an image is downloaded or uploaded for that object
+- **THEN** the current adopted image remains unchanged until the user previews and adopts a specific candidate
+
+#### Scenario: Confirm a replacement image
+- **WHEN** the selected candidate passes target, version and file checks and the user confirms adoption
+- **THEN** the new image becomes current, the old image remains in history, existing outcomes remain and related downstream content is marked for review
+
+#### Scenario: Upload a shot frame
+- **WHEN** the user selects an image from a first-frame or last-frame node
+- **THEN** the target and use are determined by that node and the same preview/adoption flow applies without requiring internal identifiers
+
+### Requirement: A chosen free-chat reply applies only to its bound target
+
+The system SHALL bind an adjustment to one creation object and its current basis, protect free conversation from automatic task injection, let the user choose a specific stable assistant reply, preview its full content and target, and apply only after explicit confirmation and freshness checks.
+
+#### Scenario: Discuss several alternatives
+- **WHEN** the user freely chats and multiple assistant replies exist
+- **THEN** no reply is implicitly selected and no automatic task changes the conversation or editor draft
+
+#### Scenario: Adopt a specific reply
+- **WHEN** the user selects a concrete reply and confirms its application preview
+- **THEN** only the bound object is updated, original reply evidence and previous content are retained, and stale or ambiguous replies do not overwrite newer work
+
+#### Scenario: A reply needs structured preparation
+- **WHEN** the chosen reply cannot satisfy the bound creation object
+- **THEN** the UI permits continuing discussion or requesting Doubao preparation and does not generate creative content in program code

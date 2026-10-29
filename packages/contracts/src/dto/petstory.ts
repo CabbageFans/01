@@ -1,3 +1,4 @@
+import type { PetStoryChatAdjustment, PetStoryConversationReply, PetStoryAdjustmentResult, PetStoryAdjustmentPreviewResult } from './petstoryAdjustment';
 import type { Task } from '../domain';
 
 /** PetStory 桌面内部契约；路径和任务绑定只由主进程生成。 */
@@ -165,6 +166,16 @@ export interface PetStoryPlan {
   understanding?: string;
   sceneDesign?: string;
 }
+export type PetStoryImageTarget = { materialId: string; shotId?: never; kind?: never }
+  | { shotId: string; kind: 'firstFrame' | 'lastFrame'; materialId?: never };
+export interface PetStoryImageReview {
+  state: 'candidate' | 'adopted';
+  target: PetStoryImageTarget;
+  /** 候选产生时的对象事实；改动目标后不得静默采用过期候选。 */
+  basisHash: string;
+  adoptedAt?: string;
+  sha256?: string;
+}
 export interface PetStoryAsset {
   id: string;
   kind: 'character' | 'prop' | 'firstFrame' | 'plannedEndImage' | 'video' | 'actualEndFrame' | 'scene';
@@ -185,6 +196,9 @@ export interface PetStoryAsset {
   artifactId?: string;
   downloadJobId?: string;
   validation?: PetStoryMediaValidation;
+  imageReview?: PetStoryImageReview;
+  /** 输入素材已替换，旧文件保留，须人工复核或重新制作。 */
+  needsReview?: boolean;
   sourceVideo?: { assetId: string; taskId: string; runId: string; sha256: string; atSeconds: number };
 }
 export interface PetStoryMediaValidation {
@@ -319,6 +333,8 @@ export interface PetStoryRuntimeTarget {
   capability?: PetStoryCapability;
 }
 export interface PetStoryChatJob {
+  /** 明确选择的自由对话回复，任务ID仅指向提供规则上下文的原请求。 */
+  conversationReply?: { adjustmentId: string; conversationUrl: string; reply: PetStoryConversationReply };
   /** 用户结束收候选等待；不表示平台取消或收取成功。 */
   endedWaitingAt?: string;
   id: string;
@@ -371,6 +387,9 @@ export interface PetStoryChatJob {
   parsedResult?: { plan?: PetStoryPlan; optimized?: string; issues?: PetStoryReviewIssue[]; assets?: PetStoryAssetBindings; contentBasis?: PetStoryProject['contentBasis'] };
 }
 export interface PetStoryProject {
+  /** 同一项目内的对象级自由对话记录，不改变任务执行事实。 */
+  chatAdjustment?: PetStoryChatAdjustment;
+  chatAdjustmentHistory?: PetStoryChatAdjustment[];
   /** 文字创作目标，不证明网页免费权益或槽位能力。 */
   promptModel?: NonNullable<Task['videoConfig']>['model'] | 'generic';
   promptBatch?: PetStoryPromptBatch;
@@ -384,6 +403,8 @@ export interface PetStoryProject {
   mobileStory?: { id: string; text: string; importedAt: string };
   contentBasis?: { beginning: string; middle: string; ending: string };
   assets: PetStoryAsset[];
+  /** 同一项目内经用户明确采用的镜头图片，独立于生成批次和候选文件。 */
+  adoptedImages?: Record<string, { firstFrameId?: string; plannedEndImageId?: string }>;
   promptProfile?: PetStoryPromptProfile;
   /** 仅恢复文字方言选择；媒体生成仍须在当前会话核对。 */
   promptCapability?: PetStoryCapability;
@@ -438,6 +459,13 @@ export interface PetStoryGenerationEligibilityResult extends PetStoryResult {
   eligibility?: PetStoryGenerationEligibility;
 }
 export interface PetStoryAPI {
+  previewAdjustmentReply: (projectId: string, revision: number, adjustmentId: string, replyKey: string) => Promise<PetStoryAdjustmentPreviewResult>;
+  beginAdjustment: (projectId: string, revision: number, target: PetStoryRuntimeTarget) => Promise<PetStoryAdjustmentResult>;
+  captureAdjustmentReplies: (projectId: string, adjustmentId: string, conversationUrl: string, replies: PetStoryConversationReply[]) => Promise<PetStoryAdjustmentResult>;
+  adoptAdjustmentReply: (projectId: string, revision: number, adjustmentId: string, replyKey: string) => Promise<PetStoryAdjustmentResult>;
+  endAdjustment: (projectId: string, revision: number, adjustmentId: string) => Promise<PetStoryAdjustmentResult>;
+  addShotImage: (projectId: string, revision: number, shotId: string, kind: 'firstFrame' | 'lastFrame') => Promise<PetStoryResult>;
+  adoptImage: (projectId: string, revision: number, target: PetStoryImageTarget, assetId: string) => Promise<PetStoryResult>;
   inspectGeneration: (projectId: string, revision: number, target: PetStoryRuntimeTarget, capability?: PetStoryCapability, fallbacks?: Record<string, 'first_frame' | 'reference'>) => Promise<PetStoryGenerationEligibilityResult>;
   revealAsset: (projectId: string, assetId: string) => Promise<PetStoryResult>;
   revealProject: (projectId: string) => Promise<PetStoryResult>;

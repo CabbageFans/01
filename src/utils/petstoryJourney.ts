@@ -36,16 +36,21 @@ function productions(project: PetStoryProject): PetStoryProduction[] {
 /** 仅查找实际绑定的本地文件；批次完成和文字候选都不是产物。 */
 export function journeyShotAsset(project: PetStoryProject, shot: PetStoryShot, kind: PetStoryPromptKind): PetStoryAsset | undefined {
   const assetKind = kind === 'lastFrame' ? 'plannedEndImage' : kind;
-  // 与正式单节点制作一致：最近包含此镜头的记录决定选择；该字段为空才用最新同类文件。
+  if (kind !== 'video') {
+    const imageId = kind === 'firstFrame' ? project.adoptedImages?.[shot.id]?.firstFrameId : project.adoptedImages?.[shot.id]?.plannedEndImageId;
+    return project.assets.find((asset): boolean => asset.id === imageId && asset.shotId === shot.id && asset.kind === assetKind && asset.imageReview?.state === 'adopted');
+  }
   const media = productions(project).find((production): boolean => !!production.shots[shot.id])?.shots[shot.id];
-  const selectedId = kind === 'firstFrame' ? media?.firstFrameId : kind === 'lastFrame' ? media?.plannedEndImageId : media?.videoId;
-  if (selectedId) return project.assets.find((asset): boolean => asset.id === selectedId && asset.shotId === shot.id && asset.kind === assetKind);
-  return [...project.assets].reverse().find((asset): boolean => asset.shotId === shot.id && asset.kind === assetKind);
+  if (media?.videoId) return project.assets.find((asset): boolean => asset.id === media.videoId && asset.shotId === shot.id && asset.kind === 'video');
+  return [...project.assets].reverse().find((asset): boolean => asset.shotId === shot.id && asset.kind === 'video');
 }
 
 /** 当前正文一致性只是成果显示事实；是否允许发送仍由主进程资格服务决定。 */
 export function journeyAssetMatchesPrompt(asset: PetStoryAsset | undefined, prompt: PetStoryPrompt | undefined): boolean {
-  return !!asset?.validation?.decoded && !!prompt?.final.trim() && !prompt.needsReview && asset.generationFinal === prompt.final;
+  if (!asset?.validation?.decoded || asset.needsReview) return false;
+  // 上传图片的采用事实独立于模型提示词；缺少生成正文不代表图片未确认。
+  if (asset.imageReview?.state === 'adopted' && !asset.taskId) return true;
+  return !!prompt?.final.trim() && !prompt.needsReview && asset.generationFinal === prompt.final;
 }
 
 interface JourneyPrompt { prompt: PetStoryPrompt; materialId?: string; shotId?: string; promptKind?: PetStoryPromptKind }

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Button, Input, Modal } from 'antd';
-import { CopyOutlined, ExpandOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CopyOutlined, ExpandOutlined } from '@ant-design/icons';
 import type { PetStoryChatJob, PetStoryProject, PetStoryPrompt, PetStoryPromptKind, PetStoryShot, Task } from '@doubao-studio/contracts';
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
@@ -32,7 +32,8 @@ export const PromptProvenance: React.FC<{ job: PetStoryChatJob; task?: Task }> =
   const label = job.endedWaitingAt ? '已结束等待 · 原平台任务状态独立' : pending ? canvasJobLabel(task?.status) : job.status === 'applied' ? '已保存回复来源' : '回复待核对';
 
   const project = usePetStoryStore((state) => state.project);
-  return <>{project && <PetStoryChatRecoveryActions project={project} job={job} task={task} />}<PetStoryFormatCorrections job={job} /><details className="canvas-provenance"><summary>{label}{capturedAt && ` · ${new Date(capturedAt).toLocaleString('zh-CN')}`}</summary>
+  return <><details className="canvas-provenance"><summary>回复来源与处理记录 · {label}{capturedAt && ` · ${new Date(capturedAt).toLocaleString('zh-CN')}`}</summary>
+    {project && <PetStoryChatRecoveryActions project={project} job={job} task={task} />}<PetStoryFormatCorrections job={job} />
     <p>任务 {job.taskId}<br />运行 {job.runId || '待启动'}</p>
     {job.rulesVersion && <p>规则 {job.rulesVersion} · 请求 {job.requestId}<br />{job.ruleFiles?.join('\n')}</p>}
     {job.resultStatus === 'stale' && <p role="alert">过期候选：{job.staleReason || '当前事实已经变化，请按新状态重新生成。'}</p>}
@@ -69,11 +70,11 @@ const PromptReviewActions: React.FC<{ project: PetStoryProject; shot: PetStorySh
 };
 
 const PromptStatusNotes: React.FC<{ project: PetStoryProject; prompt: PetStoryPrompt }> = ({ project, prompt }): React.ReactElement => <>
-    {!prompt.final.trim() && <p className="canvas-hint">镜头已设计，正文待专用 Chat 生成。请使用本阶段上方的提示词生成入口。</p>}
+    {!prompt.final.trim() && <p className="canvas-hint">这个镜头还没有已采用的提示词，请先生成或在豆包中调整。</p>}
     {prompt.draft && <details><summary>分析附带的创作计划草稿 · 不可直接提交</summary><pre>{prompt.draft}</pre></details>}
     {!!prompt.final && !prompt.promptTask && <p className="canvas-hint">旧正文待适配，请按当前模型／模式通过豆包重新生成或修订。</p>}
     {prompt.edited && prompt.optimized !== prompt.final && <p className="canvas-hint">手改正文已保留；新候选尚未采用，下游使用当前正文。</p>}
-    {!hasApprovedMaterials(project) && <p className="canvas-hint">文字计划稿 · 基础图片尚未全部确认，实际引用与制作条件待核对。</p>}
+    {!hasApprovedMaterials(project) && <p className="canvas-hint">基础图片尚未全部采用，请先准备这个镜头需要的素材。</p>}
     {prompt.needsReview && <p className="canvas-error">当前正文待复核，请查看本项审查问题或回复来源；核对后再采用或保存。</p>}
 </>;
 
@@ -112,7 +113,7 @@ export const CanvasPromptEditor: React.FC<{
     }
   };
   const editor = <Input.TextArea id={fieldId} className="canvas-prompt-input" aria-label={`镜头${shot.order}${canvasPromptNames[kind]}最终正文`} value={text} readOnly={disabled}
-    onChange={(event): void => { setEditing(event.target.value !== savedFinal); setText(event.target.value); }} rows={expanded ? 22 : kind === 'video' ? 15 : 7} />;
+    onChange={(event): void => { setEditing(event.target.value !== savedFinal); setText(event.target.value); }} rows={expanded ? 14 : 6} />;
   const copy = (): void => { void canvasCopyText(text).then((): void => setCopyStatus('已复制')).catch((): void => setCopyStatus('请选中文字复制')); };
   const candidateDisabled = disabled || dirty || candidateJob?.resultStatus === 'stale';
   const adopt = candidateAdoption(candidateJob, state.adoptPromptCandidate);
@@ -123,17 +124,18 @@ export const CanvasPromptEditor: React.FC<{
     <PromptStatusNotes project={project} prompt={prompt} />
     {!expanded && editor}
     <div className="canvas-prompt-actions"><Button size="small" disabled={!text} onClick={copy} icon={<CopyOutlined />}>{copyStatus || '复制'}</Button>
-      <Button size="small" type={dirty ? 'primary' : 'default'} disabled={saveDisabled} onClick={(): void => { void save(text); }}>保存正文</Button>
-      {dirty && <button type="button" onClick={(): void => { setText(prompt.final); setEditing(false); }}>撤销未保存</button>}
+      <Button size="small" type={dirty ? 'primary' : 'default'} disabled={saveDisabled} onClick={(): void => { void save(text); }}>保存修改</Button>
+      {dirty && <button type="button" onClick={(): void => { setText(prompt.final); setEditing(false); }}>放弃修改</button>}
     </div>
     <PromptCandidate prompt={prompt} disabled={candidateDisabled} latestApplied={latestApplied} save={save} adopt={adopt} />
-    <Button size="small" className="canvas-chat-button" icon={<ReloadOutlined />} disabled={disabled || generationBlocked || pending || !state.freeChatConfirmed}
-      onClick={(): void => { void state.optimize(shot.id, kind); }}>{pending ? `普通 Chat · ${canvasJobLabel(task?.status)}` : '豆包重新生成本项提示词'}</Button>
-    <PromptReviewActions project={project} shot={shot} kind={kind} disabled={disabled} generationBlocked={generationBlocked} pending={pending} />
+    <Button size="small" className="canvas-chat-button" disabled={disabled} onClick={(): void => { void state.openChatAdjustment({ shotId: shot.id, promptKind: kind }); }}>在豆包中调整</Button>
+    <details className="petstory-secondary-tools"><summary>更多提示词操作</summary><Button size="small" disabled={disabled || generationBlocked || pending || !state.freeChatConfirmed} onClick={(): void => { void state.optimize(shot.id, kind); }}>{pending ? `豆包 ${canvasJobLabel(task?.status)}` : '重新生成提示词'}</Button>
+      <PromptReviewActions project={project} shot={shot} kind={kind} disabled={disabled} generationBlocked={generationBlocked} pending={pending} />
+    </details>
     {job && <PromptProvenance job={job} task={task} />}{candidateJob && candidateJob.id !== job?.id && <PromptProvenance job={candidateJob} task={tasks.find((item): boolean => item.id === candidateJob.taskId)} />}
-    <Modal className="canvas-prompt-modal" title={`镜头 ${shot.order} · ${canvasPromptNames[kind]} · 完整编辑`} open={expanded} onCancel={(): void => setExpanded(false)} width={880}
-      footer={<><Button onClick={(): void => setExpanded(false)}>返回画布</Button><Button type="primary" disabled={saveDisabled} onClick={(): void => { void save(text); }}>保存正文</Button></>}>
-      <p className="canvas-modal-source">{promptSource(prompt, latestApplied)} · 当前保存正文 {prompt.final.length} 字。保存后用于后续实际任务。</p>{editor}
+    <Modal className="canvas-prompt-modal" title={`镜头 ${shot.order} · ${canvasPromptNames[kind]} · 完整编辑`} open={expanded} onCancel={(): void => setExpanded(false)} width={760}
+      footer={<><Button onClick={(): void => setExpanded(false)}>返回画布</Button><Button type="primary" disabled={saveDisabled} onClick={(): void => { void save(text); }}>保存修改</Button></>}>
+      <p className="canvas-modal-source">{promptSource(prompt, latestApplied)} · 当前已保存 {prompt.final.length} 字。保存后用于后续实际任务。</p>{editor}
       <PromptCandidate prompt={prompt} disabled={candidateDisabled} latestApplied={latestApplied} save={save} adopt={adopt} />
     </Modal>
   </div>;

@@ -19,7 +19,7 @@ vi.mock('electron', () => ({
   dialog: { showOpenDialog: desktop.picker }, shell: { showItemInFolder: desktop.reveal }, nativeImage: {},
   ipcMain: { handle: (channel: string, handler: (event: unknown, args: object) => Promise<unknown>): void => { desktop.handlers.set(channel, handler); }, removeHandler: (channel: string): void => { desktop.handlers.delete(channel); } },
 }));
-vi.mock('../../main/ipc/tasks', () => ({ createPetStoryTask: desktop.createTask, retryPetStoryTask: vi.fn(), revisePetStoryHeldPrompt: vi.fn(), listTasksForLocalControl: desktop.list, downloadTaskOutputs: vi.fn(), listTaskDownloads: vi.fn(), bindPetStoryTask: vi.fn(), bindPetStoryPageInput: vi.fn() }));
+vi.mock('../../main/ipc/tasks', () => ({ createPetStoryTask: desktop.createTask, retryPetStoryTask: vi.fn(), revisePetStoryHeldPrompt: vi.fn(), listTasksForLocalControl: desktop.list, downloadTaskOutputs: vi.fn(), listTaskDownloads: vi.fn(), bindPetStoryTask: vi.fn(), bindPetStoryPageInput: vi.fn(), setPetStoryConversationGuard: vi.fn() }));
 vi.mock('../../main/ipc/accounts', () => ({ listAccountsForLocalControl: vi.fn(() => []) }));
 vi.mock('../../main/ipc/projects', () => ({ loadProjects: vi.fn(() => []) }));
 import { registerPetStoryIPC } from '../../main/ipc/petstory';

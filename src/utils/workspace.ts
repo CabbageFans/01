@@ -3,8 +3,8 @@ import { requiresSubmissionReconciliation } from './realSendStateMachine';
 
 export type WorkspacePage = 'overview' | 'create' | 'tasks' | 'assets' | 'accounts' | 'settings';
 export const WORKSPACE_PAGES: ReadonlyArray<{ id: WorkspacePage; label: string; description: string }> = [
-  { id: 'overview', label: '项目总览', description: '从项目继续你的创作' },
-  { id: 'create', label: '创作工作台', description: '整理想法，准备下一次创作' },
+  { id: 'overview', label: '工作台总览', description: '继续你的短剧创作' },
+  { id: 'create', label: '短剧创作', description: '从剧本到逐镜素材' },
   { id: 'tasks', label: '任务中心', description: '查看执行进度，处理需要你介入的任务' },
   { id: 'assets', label: '素材与下载', description: '查找产物，检查地址与下载结果' },
   { id: 'accounts', label: '账号与浏览器', description: '管理隔离账号，处理登录与平台确认' },

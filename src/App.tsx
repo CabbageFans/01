@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Button, Segmented, Tooltip } from 'antd';
-import { AppstoreOutlined, EditOutlined, UnorderedListOutlined, FolderOpenOutlined, TeamOutlined, SettingOutlined, MenuFoldOutlined, MenuUnfoldOutlined, GlobalOutlined, CloseOutlined, ExpandOutlined, MinusOutlined, BorderOutlined } from '@ant-design/icons';
+import { Button, Tooltip } from 'antd';
+import { AppstoreOutlined, EditOutlined, UnorderedListOutlined, FolderOpenOutlined, TeamOutlined, SettingOutlined, MenuFoldOutlined, MenuUnfoldOutlined, MessageOutlined, VideoCameraOutlined, GlobalOutlined, CloseOutlined, ExpandOutlined, MinusOutlined, BorderOutlined } from '@ant-design/icons';
 import BrowserPanel from './components/BrowserPanel';
+import PetStoryChatAdjustmentPanel from './components/PetStoryChatAdjustmentPanel';
 import { PetStoryPanel } from './components/PetStoryPanel';
 import TaskConsole from './components/TaskConsole';
 import { AccountList } from './components/AccountList';
 import { WorkspaceOverview } from './components/WorkspaceOverview';
 import { observePetStoryTasks } from './store/usePetStoryStore';
 import { Toolbar } from './components/Toolbar';
-import { ProjectSwitcher } from './components/ProjectSwitcher';
 import { useAccountStore } from './store/useAccountStore';
 import { useTaskStore } from './store/useTaskStore';
 import { useProjectStore } from './store/useProjectStore';
@@ -24,7 +24,6 @@ const isMac = /Mac/.test(navigator.platform);
 
 const App: React.FC = (): React.ReactElement => {
   const [page, setPage] = useState<WorkspacePage>('overview');
-  const [creationMode, setCreationMode] = useState<'studio' | 'petstory'>('studio');
   const [collapsed, setCollapsed] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [browserWide, setBrowserWide] = useState(false);
@@ -46,7 +45,6 @@ const App: React.FC = (): React.ReactElement => {
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
   const activeAccount = accounts.find((a) => a.id === activeAccountId) || null;
   const projectTasks = tasks.filter((t: Task): boolean => (t.projectId || 'default-project') === activeProjectId);
-  const running = projectTasks.filter((t: Task): boolean => ['executing', 'generating'].includes(t.status)).length;
   const attention = projectTasks.filter(needsTaskAttention).length;
   const info = WORKSPACE_PAGES.find((item): boolean => item.id === page) || WORKSPACE_PAGES[0];
 
@@ -55,7 +53,6 @@ const App: React.FC = (): React.ReactElement => {
       const detail = (event as CustomEvent<{ page: WorkspacePage; mode?: 'studio' | 'petstory' }>).detail;
       if (!WORKSPACE_PAGES.some((item): boolean => item.id === detail?.page)) return;
       setPage((current: WorkspacePage): WorkspacePage => { if (detail.page === 'accounts' && current !== 'accounts') pageBeforeBrowser.current = current; return detail.page; });
-      if (detail.mode) setCreationMode(detail.mode);
     };
     const reveal = (): void => setBrowserOpen(true);
     const revealWide = (): void => { setBrowserWide(true); setBrowserOpen(true); };
@@ -156,32 +153,33 @@ const App: React.FC = (): React.ReactElement => {
   return (
     <div className={`studio-shell ${collapsed ? 'nav-collapsed' : ''}`}>
       <aside className="studio-nav" aria-label="主导航">
-        <div className="studio-brand"><span className="brand-mark">D</span>{!collapsed && <div><strong>豆包工作室</strong><span>Doubao Studio</span></div>}</div>
+        <div className="studio-brand"><span className="brand-mark"><VideoCameraOutlined /></span>{!collapsed && <div><strong>短剧工作室</strong><span>STORY STUDIO</span></div>}</div>
         <nav>{WORKSPACE_PAGES.map((item): React.ReactNode => <Tooltip key={item.id} title={collapsed ? item.label : ''} placement="right"><button className={`nav-item ${page === item.id ? 'selected' : ''} ${item.id === 'settings' ? 'nav-settings' : ''}`} aria-current={page === item.id ? 'page' : undefined} aria-label={item.label} onClick={(): void => changePage(item.id)}>{pageIcons[item.id]}{!collapsed && <span>{item.label}</span>}</button></Tooltip>)}</nav>
         <div className="nav-footer">{!collapsed && <span>版本 {version || '读取中'}</span>}<Button type="text" aria-label={collapsed ? '展开导航' : '折叠导航'} icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={(): void => setCollapsed(!collapsed)} /></div>
       </aside>
       <div className="studio-main">
         <header className="context-bar">
-          <strong>{info.label}</strong><span className="context-divider" /><ProjectSwitcher variant="context" />
-          <div className="context-actions"><span className="context-running">当前项目 · 运行 {running}</span><Button type="text" onClick={(): void => { setPage('tasks'); window.dispatchEvent(new CustomEvent('filter-attention-tasks')); }}>待处理 {attention}</Button><Button icon={<GlobalOutlined />} onClick={(): void => { setBrowserWide(false); setBrowserOpen(!browserOpen); }}>打开豆包</Button>
+          <strong>创作工作台</strong>{page !== 'overview' && <><span className="context-divider">/</span><span className="context-page">{info.label}</span></>}
+          <div className="context-actions">{attention > 0 && <Button type="text" className="context-attention" onClick={(): void => { setPage('tasks'); window.dispatchEvent(new CustomEvent('filter-attention-tasks')); }}>待处理 {attention}</Button>}<span className="context-account"><span className="context-account-dot" />{activeAccount?.name || '尚未选择账号'}</span><Button icon={<MessageOutlined />} aria-pressed={browserVisible} onClick={(): void => { setBrowserWide(false); setBrowserOpen(!browserOpen); }}>豆包 Chat</Button>
             {!isMac && <div className="window-controls"><Button type="text" aria-label="最小化" icon={<MinusOutlined />} onClick={(): void => window.electronAPI.system.minimize()} /><Button type="text" aria-label="最大化" icon={<BorderOutlined />} onClick={(): void => window.electronAPI.system.toggleMaximize()} /><Button type="text" aria-label="关闭" icon={<CloseOutlined />} onClick={(): void => window.electronAPI.system.close()} /></div>}
           </div>
         </header>
         <div className={`workspace-body ${page === 'accounts' ? 'browser-full' : browserVisible ? 'browser-open' : ''}`}>
           <main className="workspace-content">
-            <div className="page-heading"><div><h1>{info.label}</h1><p>{info.description}</p></div>{page === 'create' && <Segmented aria-label="创作模式" value={creationMode} onChange={(value): void => setCreationMode(value as 'studio' | 'petstory')} options={[{ label: '通用创作', value: 'studio' }, { label: '萌宠短剧', value: 'petstory' }]} />}</div>
+            {page !== 'create' && <div className="page-heading"><div><h1>{page === 'overview' ? '创作工作台' : info.label}</h1><p>{page === 'overview' ? '从一个故事，开始下一部短剧。' : info.description}</p></div></div>}
             <Toolbar page={page} />
             {/* 新建弹窗的账号／目录选择与创作草稿一样，切去登录后仍保留。 */}
             <div className={page === 'overview' ? '' : 'page-hidden'}><WorkspaceOverview /></div>
             {/* 业务表单也保留在原位置，导航不会丢失未保存内容。 */}
-            <div className={page === 'create' && creationMode === 'studio' || page === 'tasks' ? 'page-fill' : 'page-hidden'}><TaskConsole view={page === 'tasks' ? 'tasks' : 'create'} /></div>
-            <div className={page === 'create' && creationMode === 'petstory' ? 'page-fill' : 'page-hidden'}><PetStoryPanel /></div>
-            <div className={page === 'accounts' ? 'account-workspace' : 'page-hidden'}><AccountList /><p className="account-note">浏览选中账号仅切换浏览器；任务执行账号与短剧绑定保持各自归属。</p></div>
+            <div className={page === 'tasks' ? 'page-fill' : 'page-hidden'}><TaskConsole view="tasks" /></div>
+            <div className={page === 'create' ? 'page-fill' : 'page-hidden'}><PetStoryPanel /></div>
+            <div className={page === 'accounts' ? 'account-workspace' : 'page-hidden'}><AccountList /><p className="account-note">选择账号后，在右侧处理登录或查看会话。正在配置或提交时，请先等待当前操作结束。</p></div>
           </main>
           {/* 唯一运行时宿主：只调整 CSS；屏外保持非零尺寸及可合成，不改 key 或 partition。 */}
           <aside className={`browser-host ${page === 'accounts' ? 'is-full' : browserVisible ? 'is-assist' : 'is-parked'} ${interactive || browserWide && browserVisible ? 'is-engaged' : ''}`} aria-label="豆包常驻浏览器" aria-hidden={page !== 'accounts' && !browserVisible} {...(page !== 'accounts' && !browserVisible ? { inert: '' } : {})}>
-            <div className="browser-host-header"><GlobalOutlined /><strong>{activeAccount?.name || '豆包浏览器'}</strong><span className="host-caption">独立会话</span>{page !== 'accounts' && <Button type="text" aria-label="全宽浏览器" icon={<ExpandOutlined />} onClick={(): void => { changePage('accounts'); setBrowserOpen(false); }} />}<Button type="text" disabled={interactive} title={interactive ? '正在配置或提交，保持原账号可见' : undefined} aria-label={page === 'accounts' ? '返回之前的工作区' : '收起浏览器'} icon={<CloseOutlined />} onClick={(): void => { if (page === 'accounts') setPage(pageBeforeBrowser.current); setBrowserOpen(false); }} /></div>
+            <div className="browser-host-header"><GlobalOutlined /><strong>{activeAccount?.name || '豆包浏览器'}</strong><span className="host-caption">豆包 Chat</span>{page !== 'accounts' && <Button type="text" aria-label="全宽浏览器" icon={<ExpandOutlined />} onClick={(): void => { changePage('accounts'); setBrowserOpen(false); }} />}<Button type="text" disabled={interactive} title={interactive ? '正在配置或提交，保持原账号可见' : undefined} aria-label={page === 'accounts' ? '返回之前的工作区' : '收起浏览器'} icon={<CloseOutlined />} onClick={(): void => { if (page === 'accounts') setPage(pageBeforeBrowser.current); setBrowserOpen(false); }} /></div>
             <BrowserPanel accounts={accounts} activeAccount={activeAccount} refreshKey={0} />
+            <PetStoryChatAdjustmentPanel />
           </aside>
         </div>
       </div>

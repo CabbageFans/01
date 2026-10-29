@@ -64,37 +64,37 @@ describe('素材文字与媒体独立门禁', (): void => {
   });
   it('剧本未确认时单项生成、审查、编辑和候选采用可用，图片操作全部禁用', (): void => {
     const html = render();
-    for (const label of ['豆包重新生成此素材提示词', '审查本项素材正文（暂无图片）', '采用此候选']) expect(button(html, label)).not.toContain('disabled');
+    for (const label of ['重新生成提示词', '检查正文', '采用此候选']) expect(button(html, label)).not.toContain('disabled');
     expect(editor(html)).not.toContain('disabled');
-    for (const label of ['上传已有图片', '查看后确认使用这张图片', '生成此基础图']) expect(button(html, label)).toContain('disabled');
-    const selectInput = html.match(/<input\b[^>]*>/g)?.find((entry): boolean => entry.includes('scene:location选择已有图片'));
-    expect(selectInput).toContain('disabled');
+    for (const label of ['上传图片', '生成图片']) expect(button(html, label)).toContain('disabled');
+    expect(html).not.toContain('scene:location选择已有图片'); // 选择历史不再直接改正式采用关系。
+    expect(html).not.toContain('采用这张'); // 没有图片预览时不存在采用动作。
   });
   it('锁定仍阻止编辑与采用，免费Chat未核对或有待处理请求时禁止新的文字请求', (): void => {
     const locked = render(true);
     expect(editor(locked)).toContain('disabled'); expect(button(locked, '采用此候选')).toContain('disabled');
-    for (const label of ['豆包重新生成此素材提示词', '审查本项素材正文（暂无图片）']) {
+    for (const label of ['重新生成提示词', '检查正文']) {
       expect(button(locked, label)).toContain('disabled'); expect(button(render(false, true), label)).toContain('disabled');
     }
     usePetStoryStore.setState({ freeChatConfirmed: false });
-    for (const label of ['豆包重新生成此素材提示词', '审查本项素材正文（暂无图片）']) expect(button(render(), label)).toContain('disabled');
+    for (const label of ['重新生成提示词', '检查正文']) expect(button(render(), label)).toContain('disabled');
   });
   it('确认剧本仍不能绕过当前会话媒体能力核对，核对后才启用图片生成', (): void => {
     project.storyApproval = { hash: 'TEST', at: now };
     usePetStoryStore.setState({ capabilityCheckedInSession: false });
-    expect(button(render(), '生成此基础图')).toContain('disabled');
+    expect(button(render(), '生成图片')).toContain('disabled');
     usePetStoryStore.setState({ capabilityCheckedInSession: true, capability: null });
-    expect(button(render(), '生成此基础图')).toContain('disabled');
+    expect(button(render(), '生成图片')).toContain('disabled');
     usePetStoryStore.setState({ capability });
-    expect(button(render(), '生成此基础图')).not.toContain('disabled');
-    expect(button(render(), '上传已有图片')).not.toContain('disabled');
+    expect(button(render(), '生成图片')).not.toContain('disabled');
+    expect(button(render(), '上传图片')).not.toContain('disabled');
   });
   it('结束等待保留原bound记录，素材重生与编辑计划恢复；无关待收取素材不锁本项', (): void => {
     const job = project.jobs[0]; job.status = 'bound'; job.endedWaitingAt = now;
     project.jobs.push({ ...job, id: 'TEST-other-job', taskId: 'TEST-other-task', materialId: 'scene:other', endedWaitingAt: undefined });
     const before = structuredClone(project); const html = render();
-    expect(button(html, '豆包重新生成此素材提示词')).not.toContain('disabled');
-    expect(button(html, '审查本项素材正文（暂无图片）')).not.toContain('disabled');
+    expect(button(html, '重新生成提示词')).not.toContain('disabled');
+    expect(button(html, '检查正文')).not.toContain('disabled');
     expect(editPlanField(html)).not.toContain('disabled');
     expect(project).toEqual(before); expect(useTaskStore.getState().tasks).toEqual([]);
   });
@@ -102,7 +102,7 @@ describe('素材文字与媒体独立门禁', (): void => {
     project.jobs[0].status = status;
     for (const global of [false, true]) {
       project.jobs[0].materialId = global ? undefined : 'scene:location';
-      const html = render(); expect(button(html, '豆包重新生成此素材提示词')).toContain('disabled');
+      const html = render(); expect(button(html, '重新生成提示词')).toContain('disabled');
       expect(editPlanField(html)).toContain('disabled');
     }
   });
@@ -110,9 +110,9 @@ describe('素材文字与媒体独立门禁', (): void => {
     project.jobs[0].status = 'bound'; project.jobs[0].endedWaitingAt = now;
     const active: Task = { id: 'TEST-original-task', projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'chat', status: 'executing', prompt: 'TEST', result: null, outputs: [], createdAt: now, updatedAt: now };
     useTaskStore.setState({ tasks: [active] });
-    expect(button(render(), '豆包重新生成此素材提示词')).toContain('disabled'); expect(editPlanField(render())).toContain('disabled');
+    expect(button(render(), '重新生成提示词')).toContain('disabled'); expect(editPlanField(render())).toContain('disabled');
     expect(useTaskStore.getState().tasks).toEqual([active]);
     useTaskStore.setState({ tasks: [{ ...active, assignedAccountId: 'TEST-other-account' }] });
-    expect(button(render(), '豆包重新生成此素材提示词')).not.toContain('disabled'); expect(editPlanField(render())).not.toContain('disabled');
+    expect(button(render(), '重新生成提示词')).not.toContain('disabled'); expect(editPlanField(render())).not.toContain('disabled');
   });
 });

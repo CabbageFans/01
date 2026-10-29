@@ -79,7 +79,9 @@ describe('F01 分析只产出设计与兼容草稿', (): void => {
     const plan = originalPlan(); const raw = JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, storyUsable: true,
       contentBasis: { beginning: plan.shots[0].startState, middle: plan.shots[2].action, ending: plan.shots.at(-1)!.endState }, ...plan });
     await recordRun(job, raw); const collected = await chat.collect(p.id, job.id); p = collected.project!;
-    expect(collected.success).toBe(true); expect(p.jobs[0].rawText).toBe(raw); expect(p.jobs[0].resultStatus).toBe('adopted');
+    expect(collected.success).toBe(true); expect(p.jobs[0].rawText).toBe(raw); expect(p.jobs[0].resultStatus).toBe('candidate');
+    p = (await chat.adoptPlanCandidate(p.id, p.revision, job.id)).project!;
+    expect(p.jobs[0].resultStatus).toBe('adopted');
     const reopened = await new PetStoryProjects().open(directory);
     expect(reopened.mobileStory!.text).toBe(snapshot.mobileStory); expect(reopened.plan).toEqual(p.plan);
     for (const shot of reopened.plan!.shots) expect(shot.prompts.firstFrame).toMatchObject({ final: '', optimized: '', edited: false });

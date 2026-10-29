@@ -59,6 +59,9 @@ describe('媒体前置处理反馈', (): void => {
       { id: 'TEST-last', kind: 'plannedEndImage', shotId: shot.id, taskId: 'TEST-task2', relativePath: 'TEST2.png', validation },
       { id: 'TEST-other-shot', kind: 'firstFrame', shotId: 'TEST-other', taskId: 'TEST-task3', relativePath: 'TEST3.png', validation },
     ];
+    p.assets[0].imageReview = { state: 'adopted', target: { shotId: shot.id, kind: 'firstFrame' }, basisHash: 'TEST', adoptedAt: validation.checkedAt };
+    p.assets[1].imageReview = { state: 'adopted', target: { shotId: shot.id, kind: 'lastFrame' }, basisHash: 'TEST', adoptedAt: validation.checkedAt };
+    p.adoptedImages = { [shot.id]: { firstFrameId: 'TEST-first', plannedEndImageId: 'TEST-last' } };
     expect(selectedPetStoryMedia(p, shot, 'firstFrame')?.id).toBe('TEST-first');
     expect(selectedPetStoryMedia(p, shot, 'lastFrame')?.id).toBe('TEST-last');
     expect(selectedPetStoryMedia(p, shot, 'video')).toBeUndefined();
@@ -68,8 +71,10 @@ describe('媒体前置处理反馈', (): void => {
     p.assets = [{ id: 'TEST-chosen', kind: 'firstFrame', shotId: shot.id, taskId: 'TEST-task', relativePath: 'TEST.png', validation }, { id: 'TEST-later', kind: 'firstFrame', shotId: shot.id, taskId: 'TEST-task2', relativePath: 'TEST2.png', validation }];
     const history = { shots: { [shot.id]: { firstFrameId: 'TEST-chosen' } } } as unknown as PetStoryProduction;
     p.productionHistory = [history]; p.production = { shots: {} } as PetStoryProduction;
+    p.assets[0].imageReview = { state: 'adopted', target: { shotId: shot.id, kind: 'firstFrame' }, basisHash: 'TEST', adoptedAt: validation.checkedAt };
+    p.adoptedImages = { [shot.id]: { firstFrameId: 'TEST-chosen' } };
     expect(selectedPetStoryMedia(p, shot, 'firstFrame')?.id).toBe('TEST-chosen');
     p.production.shots[shot.id] = { requestedMode: 'first_frame', resolvedMode: 'first_frame', reason: 'TEST 新条目未选首帧' };
-    expect(selectedPetStoryMedia(p, shot, 'firstFrame')?.id).toBe('TEST-later');
+    expect(selectedPetStoryMedia(p, shot, 'firstFrame')?.id).toBe('TEST-chosen');
   });
 });

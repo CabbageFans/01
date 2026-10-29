@@ -1,0 +1,13 @@
+{
+  "approvedAt": "2026-10-29",
+  "authorization": "用户明确回复：批准",
+  "files": {
+    "design-system.md": "5049f4d9f03700e81c6de9b8e59fb19ae8cd74f2eadf7beee000b3666cbd78f6",
+    "interaction-and-button-map.md": "4071d906cb987554a7be30bcbada2665e94ff7b8e6b1d6df6150797b828be28f",
+    "prototype/src/App.jsx": "d369298e6822a69b559204ad1dcc26a3c3e4a17d6b369491ae7b9ee4271fb2a9",
+    "prototype/src/Workflow.jsx": "778761a5af4b16371b56ab1155ab09415e4c88cbb35596d76d33aa4dfdefecf0",
+    "prototype/src/Panels.jsx": "88d4f802fc6b0781cc65fc570138cc5e07611424b4ddc89b9148b7989641c52c",
+    "prototype/src/Management.jsx": "634dd3827dec64b949f804e8399be3fda69d6367c6546c2e0f333f469e658e7a",
+    "prototype/src/prototype.css": "cb81770353f7c3d35dbb54e108ad871b9343e0bba0a6911fd604e623fcef79dc"
+  }
+}

@@ -85,10 +85,19 @@ async function approve(value: PetStoryCapability = capability()): Promise<void> 
   expect(result.success).toBe(true);
   p = result.project as PetStoryProject;
 }
+async function adoptGeneratedImages(): Promise<void> {
+  let current = await projects.read(p.id);
+  if (current.production?.state !== 'paused' || current.production.steps.some((step): boolean => step.status !== 'complete')) return;
+  for (const asset of current.assets.filter((item): boolean => item.imageReview?.state === 'candidate' && !!item.shotId)) {
+    current = await projects.adoptImage(current.id, current.revision, asset.imageReview!.target, asset.id);
+  }
+  await service.resume(current.id, capability());
+}
 async function advanceToVideo(): Promise<PetStoryProductionResult> {
   for (let i = 0; i < 15; i++) {
     const result = await service.advance(p.id);
     expect(result.success, result.error).toBe(true);
+    await adoptGeneratedImages();
     if (result.taskId && result.action === 'start') {
       if (tasks.find((t): boolean => t.id === result.taskId)?.mode === 'video') return result;
       await complete(result.taskId);
@@ -110,11 +119,11 @@ beforeEach(async (): Promise<void> => {
   p = await projects.saveSource(p.id, p.revision, 'https://v.douyin.com/TEST-p4/');
   p = await projects.saveMobileStory(p.id, p.revision, 'TEST 离线故事，无平台请求');
   p.plan = plan(); p.source.status = 'review_required'; p = await projects.write(p);
+  p = await projects.confirmStory(p.id, p.revision);
   p = await projects.addReference(p.id, 'lulu', picture); p = await projects.addReference(p.id, 'lumei', picture);
   p = await projects.addReference(p.id, 'friend', picture);
-  p = await projects.confirmStory(p.id, p.revision);
   p = await projects.addMaterialImage(p.id, p.revision, 'scene:test-room', picture);
-  p = await projects.approveMaterials(p.id, p.revision, p.materials!.map((m): { materialId: string; assetId: string } => ({ materialId: m.id, assetId: m.selectedAssetId! })));
+  p = await projects.approveMaterials(p.id, p.revision, p.materials!.map((m): { materialId: string; assetId: string } => ({ materialId: m.id, assetId: p.assets.find((asset): boolean => asset.materialId === m.id)!.id })));
   tasks = []; jobs = []; sequence = 0; createdInputs.length = 0; downloadFailure = false; download.mockReset();
   core = new TaskService({ store: { read: list, replace: (value: Task[]): boolean => { tasks = normalizeTasks(structuredClone(value), 'TEST-studio').data; return true; } }, defaultProjectId: (): string => 'TEST-studio', id: (): string => `TEST-task-${++sequence}` });
   download.mockImplementation(async (params: { outputs: { taskId: string; accountId: string; mode: Task['mode']; outputs: string[] }[] }): Promise<object> => {
@@ -187,6 +196,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
     for (let i = 0; i < 50; i++) {
       const result = await service.advance(p.id);
       expect(result.success, result.error).toBe(true);
+      await adoptGeneratedImages();
       if (result.action === 'start' && result.taskId) {
         const repeated = await service.advance(p.id);
         expect(repeated.taskId).toBe(result.taskId);
@@ -273,7 +283,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
     const unknown = capability(); unknown.freeEvidence = 'unknown'; unknown.image.free = 'unknown';
     await service.resume(p.id, unknown);
     expect((await service.advance(p.id)).success).toBe(true); expect(download).toHaveBeenCalledTimes(1); expect(tasks).toHaveLength(1);
-    expect((await service.advance(p.id)).success).toBe(false); expect(tasks).toHaveLength(1);
+    expect((await service.advance(p.id)).project?.production?.state).toBe('paused'); expect(tasks).toHaveLength(1);
   });
   it('an expired or foreign-run artifact cannot enter a download or downstream task', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); await complete(next.taskId || '');
@@ -282,7 +292,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
     artifact.validation = { state: 'expired', checkedAt: new Date().toISOString() };
     expect((await service.advance(p.id)).success).toBe(false); expect(download).not.toHaveBeenCalled(); expect(tasks).toHaveLength(1);
   });
-  it('selects the first decodable output in stable return order, skipping a corrupt image without regeneration', async (): Promise<void> => {
+  it('保存同一运行的可解码图片候选，跳过损坏文件且不自动采用或重生成', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); await complete(next.taskId || '');
     const original = tasks[0].outputs[0];
     core.updateStatus({ taskId: tasks[0].id, status: 'done', outputs: [original, 'https://TEST.invalid/second.png'] });
@@ -297,20 +307,33 @@ describe('P4 顺序素材接力与持久化', (): void => {
     const selected = result.project?.assets.find((a): boolean => a.id === result.project?.production?.steps[0].assetId);
     expect(selected?.artifactId).toBe(tasks[0].artifacts?.find((a): boolean => a.url.endsWith('second.png'))?.id);
   });
-  it('allows a paused image selection before downstream use, retaining old files and task identity', async (): Promise<void> => {
+  it('多个图片均为候选，用户选择具体产物后采用，保留其他候选与任务身份', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); await complete(next.taskId || '');
     core.updateStatus({ taskId: tasks[0].id, status: 'done', outputs: [...tasks[0].outputs, 'https://TEST.invalid/choice.png'] });
-    const imported = await service.advance(p.id); await service.pause(p.id);
-    const step = imported.project?.production?.steps[0]; const oldAsset = imported.project?.assets.find((a): boolean => a.id === step?.assetId);
-    const alternative = tasks[0].artifacts?.find((a): boolean => a.url.endsWith('choice.png'));
-    const changed = await service.selectImage(p.id, step?.id || '', alternative?.id || '');
-    expect(changed.success).toBe(true); expect(changed.project?.production?.steps[0].assetId).not.toBe(oldAsset?.id);
-    expect(changed.project?.assets.some((a): boolean => a.id === oldAsset?.id)).toBe(true);
+    const imported = await service.advance(p.id);
+    const current = imported.project!; const candidates = current.assets.filter((asset): boolean => asset.imageReview?.state === 'candidate');
+    expect(candidates).toHaveLength(2); expect(current.production?.shots['TEST-shot-1'].firstFrameId).toBeUndefined();
+    const alternative = candidates.find((asset): boolean => asset.artifactId === tasks[0].artifacts?.find((item): boolean => item.url.endsWith('choice.png'))?.id)!;
+    const adopted = await projects.adoptImage(current.id, current.revision, alternative.imageReview!.target, alternative.id);
+    expect(adopted.adoptedImages?.['TEST-shot-1'].firstFrameId).toBe(alternative.id);
+    expect(adopted.assets.filter((asset): boolean => asset.imageReview?.state === 'candidate')).toHaveLength(1);
     expect(tasks).toHaveLength(1);
-    const repeated = await service.selectImage(p.id, step?.id || '', alternative?.id || '');
-    expect(repeated.project?.revision).toBe(changed.project?.revision);
-    await service.resume(p.id, capability()); await service.advance(p.id); await service.pause(p.id);
-    await expect(service.selectImage(p.id, step?.id || '', oldAsset?.artifactId || '')).rejects.toThrow('下游已经使用');
+    await service.resume(p.id, capability());
+    expect((await service.advance(p.id)).action).toBe('start');
+  });
+  it('第二张候选下载失败仍保存第一张，恢复只补下载原缺项，不再次生成', async (): Promise<void> => {
+    await approve(); const next = await service.advance(p.id); await complete(next.taskId || '');
+    core.updateStatus({ taskId: tasks[0].id, status: 'done', outputs: [...tasks[0].outputs, 'https://TEST.invalid/second-download.png'] });
+    const originalDownload = download.getMockImplementation(); if (!originalDownload) throw new Error('TEST download missing');
+    download.mockImplementationOnce(originalDownload).mockImplementationOnce(async (): Promise<object> => ({ success: false, failed: 1, count: 0 }));
+    expect((await service.advance(p.id)).success).toBe(false);
+    let saved = await projects.read(p.id);
+    expect(saved.assets.filter((asset): boolean => asset.imageReview?.state === 'candidate')).toHaveLength(1);
+    expect(saved.production?.steps[0].status).toBe('bound'); expect(saved.production?.shots['TEST-shot-1'].firstFrameId).toBeUndefined();
+    await service.resume(p.id, capability()); expect((await service.advance(p.id)).success).toBe(true);
+    saved = await projects.read(p.id);
+    expect(saved.assets.filter((asset): boolean => asset.imageReview?.state === 'candidate')).toHaveLength(2);
+    expect(saved.production?.steps[0].status).toBe('complete'); expect(tasks).toHaveLength(1); expect(download).toHaveBeenCalledTimes(3);
   });
   it('does not accept a download job for a different account', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); await complete(next.taskId || '');

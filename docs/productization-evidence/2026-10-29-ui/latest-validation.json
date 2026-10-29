@@ -1,0 +1,225 @@
+{
+  "recordedAt": "2026-10-29T09:16:38+00:00",
+  "validation": {
+    "command": "pnpm run validate",
+    "cwd": "/Users/dingzhenyu/Documents/01",
+    "exitCode": 0,
+    "logFile": "/tmp/doubao-productization-validate-20261029-ui-final.log",
+    "logSha256": "53eea24c51a09b7ad8e8d67c51513979a76eef373af848432a853d8ec44ee31c",
+    "logCreatedAt": "2026-10-29T09:13:09+00:00",
+    "logLastWrittenAt": "2026-10-29T09:13:55+00:00",
+    "coverageNote": "包含最后的repair候选来源、当前调整来源保护与明确cancel恢复补丁；本次为最终完整门禁。"
+  },
+  "results": {
+    "typeCheck": {
+      "contracts": "passed",
+      "main": "passed",
+      "renderer": "passed",
+      "tests": "passed"
+    },
+    "lint": {
+      "errors": 0,
+      "warnings": 149,
+      "maxWarnings": 149,
+      "historicalBaselineNote": "总警告数与本轮实施前采用的149条门禁基线一致；未提高上限。本轮局部修复petstoryAdjustment.ts及对应测试单独Lint为0错误、0警告。"
+    },
+    "projectChecks": {
+      "ipcFixtures": "7/7 passed",
+      "contractFixtures": "2/2 passed",
+      "structure": "passed",
+      "handleInvokeChannels": 110,
+      "onSendChannels": 5,
+      "contractBoundary": "passed"
+    },
+    "tests": {
+      "filesPassed": 115,
+      "filesTotal": 115,
+      "testsPassed": 2162,
+      "testsTotal": 2162,
+      "vitestDurationSeconds": 33.01
+    },
+    "build": {
+      "renderer": "passed",
+      "main": "passed",
+      "contracts": "passed",
+      "existingWarning": "Vite仍提示部分压缩块超过500kB；未为消除提示改变门禁。"
+    },
+    "gitDiffCheck": {
+      "command": "git diff --check",
+      "exitCode": 0,
+      "status": "passed"
+    },
+    "openSpec": {
+      "command": "openspec validate petstory-user-journey-repair --strict",
+      "exitCode": 0,
+      "status": "passed"
+    }
+  },
+  "relevantRegressionBoundaries": [
+    {
+      "case": "未采用的repair方案候选",
+      "result": "passed",
+      "evidence": "正式服务回归：无plan，analysis时长4秒导致invalid；repair收取为applied/candidate后begin(parentJobId=repair.id)可打开对应会话；磁盘重开仍无plan/materials/storyApproval，repair保持candidate，任务未新增。"
+    },
+    {
+      "case": "已采用的repair方案",
+      "result": "passed",
+      "evidence": "正式服务回归：analysis保留完整parsedResult.plan但invalid时拒绝使用；repair采用后默认begin({})定位repair任务；错run拒绝且不回退invalid analysis。"
+    },
+    {
+      "case": "账号与具体回复保护",
+      "result": "passed_offline",
+      "evidence": "现有回归覆盖具体回复选择、完整预览、旧版本、错误会话、草稿、持久保护、重启及精确释放；这不是当前豆包页面的实机结论。"
+    },
+    {
+      "case": "明确取消旧暂停等待",
+      "result": "passed_offline_in_full_validation",
+      "evidence": "cancel只结束旧占用，完整保留提交/错误/原请求证据；start与retry仍拒绝重发，另一已完成具体会话可保护；有效执行锁及其他自由对话保护仍阻断，主进程拒绝cancel受保护源任务。"
+    }
+  ],
+  "sourceSha256": {
+    "main/utils/petstoryAdjustment.ts": "2055ee8a970be04c2dba82d28c3180208258b12cac2c451e56e44035c193ae9c",
+    "tests/unit/petstoryAdjustment.test.ts": "1943bfeb2e242c28a7835dc31ca25a1b1fa9622a1aca0ec4abef04042158b8b3",
+    "src/components/PetStoryRuntime.tsx": "bfee47c67f017639045a694f0cc284010c637bb8f41b7d98296c05eb71d06afc",
+    "src/components/BrowserPanel.tsx": "dcf02f43fffabac8b571ce90c7af7bc16f5646868d554d60bba2d87def07f7c1",
+    "main/utils/petstoryImageReview.ts": "7da97fd091832918bd2e395657362886a26ca35c78afbb3e17be09410f7d28ac",
+    "main/core/TaskService.ts": "5c5cad77ec8e733d134058846ee9b75513b19ba04ba3e03b188ed0ae93f9a3e1",
+    "src/control/handleControlCommand.ts": "9967217767b2a2f844790dffa27da3ba9d04e1b1fc720eec37e34a3f6b0e1f93",
+    "tests/unit/rendererControlCommand.test.ts": "ce8c889f18d1bcdaaf60055f9aae40d2502893cd6be43986393618b15d22b2aa",
+    "tests/unit/petstoryConversationGuard.test.ts": "24ba758da2d15ab026c99ac6727f91f1b5855219bf4178146a09a1ab1349a581"
+  },
+  "scope": {
+    "productionSourceEdited": false,
+    "uiControlled": false,
+    "platformRequestsMade": false,
+    "userDataWritten": false,
+    "allowedWrites": "工程构建输出、测试隔离临时文件、此验证摘要及/tmp验证日志。",
+    "realUiAcceptance": "由root独立进行；本摘要不代表真实六阶段、媒体生成或人工质量验收通过。"
+  },
+  "previousValidationSnapshots": [
+    {
+      "recordedAt": "2026-10-29T09:02:37+00:00",
+      "validation": {
+        "command": "pnpm run validate",
+        "cwd": "/Users/dingzhenyu/Documents/01",
+        "exitCode": 0,
+        "logFile": "/tmp/doubao-productization-validate-20261029-ui.log",
+        "logSha256": "bb0b7224301566ffdb80c1d8366cdf7cc5ae87fd9a66d5c30eb1a827f3a17821",
+        "logCreatedAt": "2026-10-29T08:59:55+00:00",
+        "logLastWrittenAt": "2026-10-29T09:00:42+00:00"
+      },
+      "results": {
+        "typeCheck": {
+          "contracts": "passed",
+          "main": "passed",
+          "renderer": "passed",
+          "tests": "passed"
+        },
+        "lint": {
+          "errors": 0,
+          "warnings": 149,
+          "maxWarnings": 149,
+          "historicalBaselineNote": "总警告数与本轮实施前采用的149条门禁基线一致；未提高上限。本轮局部修复petstoryAdjustment.ts及对应测试单独Lint为0错误、0警告。"
+        },
+        "projectChecks": {
+          "ipcFixtures": "7/7 passed",
+          "contractFixtures": "2/2 passed",
+          "structure": "passed",
+          "handleInvokeChannels": 110,
+          "onSendChannels": 5,
+          "contractBoundary": "passed"
+        },
+        "tests": {
+          "filesPassed": 115,
+          "filesTotal": 115,
+          "testsPassed": 2162,
+          "testsTotal": 2162,
+          "vitestDurationSeconds": 33.01
+        },
+        "build": {
+          "renderer": "passed",
+          "main": "passed",
+          "contracts": "passed",
+          "existingWarning": "Vite仍提示部分压缩块超过500kB；未为消除提示改变门禁。"
+        },
+        "gitDiffCheck": {
+          "command": "git diff --check",
+          "exitCode": 0,
+          "status": "passed"
+        },
+        "openSpec": {
+          "command": "openspec validate petstory-user-journey-repair --strict",
+          "exitCode": 0,
+          "status": "passed"
+        }
+      },
+      "sourceSha256": {
+        "main/utils/petstoryAdjustment.ts": "b4da3b6599f0c5bea42c4df9c236bee342d5ccf2175306855dc42f058b735ba0",
+        "tests/unit/petstoryAdjustment.test.ts": "8d09d0a0682df70f54fd761f8e84e6c5e0644df5aafabd99874ad5294a3b3285",
+        "src/components/PetStoryRuntime.tsx": "6ae4e53fc50f560fb1803c34de8ddc9cd62800b3d2b9dd42056d7f3574124af2",
+        "src/components/BrowserPanel.tsx": "dcf02f43fffabac8b571ce90c7af7bc16f5646868d554d60bba2d87def07f7c1",
+        "main/utils/petstoryImageReview.ts": "7da97fd091832918bd2e395657362886a26ca35c78afbb3e17be09410f7d28ac",
+        "main/core/TaskService.ts": "74ebcfec7a3decc1cf25e9d6381a2a34224321f44c78f1bba36dbdb2369bd22f"
+      }
+    }
+  ],
+  "intermediateTargetedValidation": {
+    "recordedAt": "2026-10-29T09:12:15+00:00",
+    "scope": "正式取消已暂停旧任务，并保留提交防重发和自由对话保护。",
+    "fullValidationSnapshotNote": "此252项定向结果为中间检查点，现已由最新完整2162项门禁覆盖。",
+    "tests": {
+      "files": [
+        "rendererControlCommand.test.ts",
+        "petstoryConversationGuard.test.ts",
+        "taskService.test.ts",
+        "petstoryAdjustment.test.ts"
+      ],
+      "filesPassed": 4,
+      "testsPassed": 252,
+      "status": "passed"
+    },
+    "types": {
+      "main": "passed",
+      "renderer": "passed",
+      "test": "passed"
+    },
+    "lint": {
+      "errors": 0,
+      "historicalWarnings": 3,
+      "historicalWarningLocations": [
+        "TaskService.ts no-non-null-assertion",
+        "TaskService.updateRuntime complexity",
+        "TaskService.importCsv complexity"
+      ],
+      "newWarnings": 0
+    },
+    "regressions": [
+      "paused显式cancel复用原updateStatus，零start/retry/abort调用，原请求、运行、附件、提交时间、会话、errorInfo和history完整保留。",
+      "真实Store.start拒绝cancelled，Core.retry保留requiresSubmissionReconciliation并拒绝重发。",
+      "cancelled旧提交不明任务不占用另一done源会话的自由调整；ACTIVE、未过期执行锁和其他active保护仍拒绝。",
+      "handler与Core.updateStatus共同拒绝取消正在保护自由对话的源任务。"
+    ],
+    "productionSourceFiles": [
+      "src/control/handleControlCommand.ts",
+      "main/core/TaskService.ts"
+    ],
+    "userDataWritten": false,
+    "uiControlled": false
+  },
+  "historicalReadOnlyReviewFindingsReportedToParent": [
+    {
+      "priority": "P2",
+      "file": "main/utils/petstoryAdjustment.ts",
+      "line": 53,
+      "finding": "已有active调整时仅比较归一化target；不同方案候选均为{}，另一个parentJobId会复用旧sourceJobId与会话。建议明确拒绝切换来源，先结束当前调整。",
+      "status": "historical_report_before_final_validation_not_reassessed_in_final_check"
+    },
+    {
+      "priority": "P2",
+      "file": "src/components/PetStoryRuntime.tsx",
+      "line": 81,
+      "finding": "方案卡按钮只依据resultStatus=candidate启用；invalid且保留parsedResult.plan的分析也可能显示可点操作，后端正确拒绝。建议界面同时要求status=applied。",
+      "status": "historical_report_before_final_validation_not_reassessed_in_final_check"
+    }
+  ]
+}

@@ -7,8 +7,9 @@ import type { IpcMainInvokeEvent } from 'electron';
 import type { PetStoryChatJob, PetStoryPlan, PetStoryPromptKind, PetStoryResult } from '@doubao-studio/contracts';
 import { PetStoryProjects, projectPath } from '../utils/petstoryProject';
 import { PetStoryChatService } from '../utils/petstoryChat';
+import { PetStoryAdjustmentService } from '../utils/petstoryAdjustment';
 import { PetStoryExistingMediaService } from '../utils/petstoryExistingMedia';
-import { createPetStoryTask, retryPetStoryTask, revisePetStoryHeldPrompt, listTasksForLocalControl } from './tasks';
+import { createPetStoryTask, retryPetStoryTask, revisePetStoryHeldPrompt, listTasksForLocalControl, setPetStoryConversationGuard } from './tasks';
 import { PetStoryProductionService } from '../utils/petstoryProduction';
 import type { PetStoryCapability, PetStoryPromptProfile, PetStoryResolvedMode, PetStoryProductionResult } from '@doubao-studio/contracts';
 import { downloadTaskOutputs, listTaskDownloads, bindPetStoryTask, bindPetStoryPageInput } from './tasks';
@@ -18,11 +19,12 @@ import { replaceIpcHandlers } from './lifecycle';
 
 const projects = new PetStoryProjects();
 const chats = new PetStoryChatService(projects, { list: listTasksForLocalControl, create: createPetStoryTask, reviseHeldPrompt: revisePetStoryHeldPrompt, retryUnsubmitted: retryPetStoryTask });
+const adjustments = new PetStoryAdjustmentService(projects, { list: listTasksForLocalControl, create: createPetStoryTask, setConversationGuard: setPetStoryConversationGuard }, chats);
 const production = new PetStoryProductionService(projects, { list: listTasksForLocalControl, create: createPetStoryTask, adopt: bindPetStoryTask, bindPageInput: bindPetStoryPageInput, retryUnsubmitted: retryPetStoryTask, downloads: listTaskDownloads, download: downloadTaskOutputs });
 const existingMedia = new PetStoryExistingMediaService(projects, { list: listTasksForLocalControl, downloads: listTaskDownloads });
 const CHANNELS = ['petstory:saveOriginalStory', 'petstory:linkExistingMedia', 'petstory:listExistingMediaCandidates', 'petstory:saveShotPrompt', 'petstory:generateShotMedia', 'petstory:readMedia', 'petstory:exportPrompts', 'petstory:confirmStory', 'petstory:saveMaterialPrompt', 'petstory:addMaterialImage', 'petstory:selectMaterialImage', 'petstory:approveMaterials', 'petstory:generateMaterials', 'petstory:recordPageBindings', 'petstory:bindSharedReference', 'petstory:previewPrompt', 'petstory:savePromptProfile', 'petstory:selectProductionImage', 'petstory:addSceneReference', 'petstory:previewProduction', 'petstory:approveProduction', 'petstory:advanceProduction', 'petstory:pauseProduction', 'petstory:resumeProduction', 'petstory:bindProductionRun', 'petstory:guardProductionTask', 'petstory:create', 'petstory:open', 'petstory:saveSource', 'petstory:saveMobileStory', 'petstory:addReference', 'petstory:savePlan', 'petstory:prepareChat', 'petstory:collectChat', 'petstory:bindRun', 'petstory:retryUnsubmitted', 'petstory:readReference', 'petstory:draftFinal'] as const;
 type Handler = (event: IpcMainInvokeEvent, params: Record<string, unknown>) => Promise<PetStoryResult & { data?: string }>;
-const RUNTIME_CHANNELS = ['petstory:inspectGeneration', 'petstory:revealAsset', 'petstory:revealProject', 'petstory:promptStageTargets', 'petstory:savePromptModel', 'petstory:savePromptBatch', 'petstory:endChatWaiting', 'petstory:prepareRuntime', 'petstory:adoptPlanCandidate', 'petstory:adoptAssetsCandidate', 'petstory:adoptPromptCandidate'] as const;
+const RUNTIME_CHANNELS = ['petstory:previewAdjustmentReply', 'petstory:beginAdjustment', 'petstory:captureAdjustmentReplies', 'petstory:adoptAdjustmentReply', 'petstory:endAdjustment', 'petstory:addShotImage', 'petstory:adoptImage', 'petstory:inspectGeneration', 'petstory:revealAsset', 'petstory:revealProject', 'petstory:promptStageTargets', 'petstory:savePromptModel', 'petstory:savePromptBatch', 'petstory:endChatWaiting', 'petstory:prepareRuntime', 'petstory:adoptPlanCandidate', 'petstory:adoptAssetsCandidate', 'petstory:adoptPromptCandidate'] as const;
 
 /** 仅宿主顶层 frame 可调用；不接受任意目录、文件路径或 shell 参数。 */
 function hostGuard(work: Handler): Handler {
@@ -40,6 +42,17 @@ function dialogOwner(event: IpcMainInvokeEvent): BrowserWindow {
 }
 export function registerPetStoryIPC(): () => void {
   const dispose = replaceIpcHandlers(ipcMain, [...CHANNELS, ...RUNTIME_CHANNELS]);
+  ipcMain.handle('petstory:previewAdjustmentReply', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => adjustments.preview(String(p.id), Number(p.revision), String(p.adjustmentId), String(p.replyKey)))));
+  ipcMain.handle('petstory:beginAdjustment', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => adjustments.begin(String(p.id), Number(p.revision), p.target as import('@doubao-studio/contracts').PetStoryRuntimeTarget))));
+  ipcMain.handle('petstory:captureAdjustmentReplies', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => adjustments.capture(String(p.id), String(p.adjustmentId), String(p.conversationUrl), p.replies as import('@doubao-studio/contracts').PetStoryConversationReply[]))));
+  ipcMain.handle('petstory:adoptAdjustmentReply', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => adjustments.adopt(String(p.id), Number(p.revision), String(p.adjustmentId), String(p.replyKey)))));
+  ipcMain.handle('petstory:endAdjustment', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => adjustments.end(String(p.id), Number(p.revision), String(p.adjustmentId)))));
+  ipcMain.handle('petstory:addShotImage', hostGuard(async (event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => {
+    const selected = await dialog.showOpenDialog(dialogOwner(event), { title: '选择待预览的关键帧图片', properties: ['openFile'], filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] });
+    if (selected.canceled) return { success: false, error: '已取消' };
+    return projects.serial(String(p.id), async (): Promise<PetStoryResult> => ({ success: true, project: await projects.addShotImage(String(p.id), Number(p.revision), String(p.shotId), p.kind as 'firstFrame' | 'lastFrame', selected.filePaths[0]) }));
+  }));
+  ipcMain.handle('petstory:adoptImage', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), async (): Promise<PetStoryResult> => ({ success: true, project: await projects.adoptImage(String(p.id), Number(p.revision), p.target as import('@doubao-studio/contracts').PetStoryImageTarget, String(p.assetId)) }))));
   ipcMain.handle('petstory:inspectGeneration', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryGenerationEligibilityResult> => production.inspectGeneration(String(p.id), Number(p.revision), p.target as import('@doubao-studio/contracts').PetStoryRuntimeTarget, p.capability as PetStoryCapability | undefined, p.fallbacks as Record<string, 'first_frame' | 'reference'> | undefined)));
   ipcMain.handle('petstory:revealAsset', hostGuard(async (_event: IpcMainInvokeEvent, args: Record<string, unknown>): Promise<PetStoryResult> => {
     const p = await projects.read(String(args.id));
@@ -126,7 +139,7 @@ export function registerPetStoryIPC(): () => void {
     const accountId = String(params.accountId || '');
     if (!loadProjects().some((p): boolean => p.id === studioProjectId && !p.archived)) throw new Error('Studio 项目不存在或已归档');
     if (!listAccountsForLocalControl().some((a): boolean => a.id === accountId && a.platform !== 'dola')) throw new Error('请选择已有豆包账号');
-    const selected = await dialog.showOpenDialog(dialogOwner(event), { title: '选择存放 PetStory project.json 的目录', properties: ['openDirectory', 'createDirectory'] });
+    const selected = await dialog.showOpenDialog(dialogOwner(event), { title: '选择短剧项目存放目录', properties: ['openDirectory', 'createDirectory'] });
     if (selected.canceled) return { success: false, error: '已取消' };
     return { success: true, displayName: path.basename(selected.filePaths[0]), project: await projects.create(selected.filePaths[0], studioProjectId, accountId) };
   }));
@@ -134,7 +147,7 @@ export function registerPetStoryIPC(): () => void {
     const owner = dialogOwner(event);
     let chosen = args.path;
     if (chosen === undefined) {
-      const selected = await dialog.showOpenDialog(owner, { title: '选择 PetStory 目录或其中的 project.json', properties: ['openDirectory', 'openFile'], filters: [{ name: 'PetStory 项目', extensions: ['json'] }] });
+      const selected = await dialog.showOpenDialog(owner, { title: '选择短剧项目目录或其中的 project.json', properties: ['openDirectory', 'openFile'], filters: [{ name: '短剧项目', extensions: ['json'] }] });
       if (selected.canceled) return { success: false, error: '已取消' };
       chosen = selected.filePaths[0];
     }
@@ -144,6 +157,7 @@ export function registerPetStoryIPC(): () => void {
     const directory = info.isDirectory() ? chosen : path.dirname(chosen);
     const project = await projects.open(directory);
     production.suspend(project.id);
+    adjustments.restore(project);
     return { success: true, displayName: path.basename(directory), project };
   }));
   ipcMain.handle('petstory:saveSource', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), async (): Promise<PetStoryResult> => ({

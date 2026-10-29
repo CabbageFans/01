@@ -6,6 +6,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import type { PetStoryProject, PetStoryPrompt, Task, TaskAddParams, TaskRunSnapshot, PetStoryPromptKind, PetStoryResolvedMode } from '@doubao-studio/contracts';
 import { compilePrompt, defaultPromptProfile, orderedChatAssets, promptReferences } from '../../main/utils/petstoryPromptQuality';
+import { mediaCommand } from '../../main/utils/petstoryMedia';
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
 import { PetStoryChatService } from '../../main/utils/petstoryChat';
 import { validatePetStoryPlan, parsePetStoryAnswer } from '../../main/utils/petstoryValidation';
@@ -38,6 +39,7 @@ function fixture(): PetStoryProject {
       durationSeconds: 5, transition: 'cut', requestedMode: 'first_last_frame', prompts: { firstFrame: prompt(), lastFrame: prompt('只改变两人头部视线到求助终态。'), video: prompt('噜妹先停筷，再抬眼向噜噜，噜噜侧头回应。') } }] } };
 }
 function attachMedia(p: PetStoryProject): void {
+  for (const asset of p.assets.filter((item): boolean => ['firstFrame', 'plannedEndImage'].includes(item.kind))) { asset.validation = { decoded: true, sha256: 'a'.repeat(64), bytes: 1, width: 64, height: 96, checkedAt: p.updatedAt }; asset.imageReview = { state: 'adopted', target: { shotId: asset.shotId!, kind: asset.kind === 'firstFrame' ? 'firstFrame' : 'lastFrame' }, basisHash: 'a'.repeat(64), adoptedAt: p.updatedAt, sha256: 'a'.repeat(64) }; }
   p.production = { state: 'paused', planHash: 'a'.repeat(64), approvedAt: new Date().toISOString(), capability: {} as NonNullable<PetStoryProject['production']>['capability'],
     fallbacks: {}, steps: [], message: 'TEST', shots: { s1: { requestedMode: 'first_last_frame', resolvedMode: 'first_last_frame', reason: 'TEST', firstFrameId: 'first', plannedEndImageId: 'last' } } };
 }
@@ -49,7 +51,7 @@ describe('角色上下文与实际用途', (): void => {
     const compiled = compilePreview(p, 'TEST-shot', example.kind as PetStoryPromptKind, example.resolvedMode as PetStoryResolvedMode | undefined);
     expect(compiled.text.endsWith(compiled.final)).toBe(true);
     expect(compiled.references.map((r): number => r.order)).toEqual(compiled.references.map((_r, index): number => index + 1));
-    if (example.resolvedMode === 'first_last_frame') expect(compilePreview(p, 'TEST-shot', 'lastFrame').references[0].assetId).toBe('TEST-first');
+    if (example.resolvedMode === 'first_last_frame') expect(compilePreview(p, 'TEST-shot', 'lastFrame').references[0].assetId).toBe('pending:first');
   });
   it.each([[['lulu']], [['lumei']], [['lulu', 'lumei']], [['lulu', 'clerk']]])('只注入本镜 %j 的档案，保留配角自己的身份', (ids: string[]): void => {
     const p = fixture(); p.plan!.shots[0].characterIds = ids;
@@ -117,7 +119,7 @@ describe('角色上下文与实际用途', (): void => {
   });
   it('continue 描述实际末帧来源，不混用计划尾图', (): void => {
     const p = fixture(); attachMedia(p);
-    p.assets.push({ id: 'actual', kind: 'actualEndFrame', shotId: 's1', relativePath: 'shots/s1/actual.png', sourceVideo: { assetId: 'previous-video', taskId: 'TEST', runId: 'TEST', sha256: 'a'.repeat(64), atSeconds: 4.9 } });
+    p.assets.push({ id: 'actual', kind: 'actualEndFrame', shotId: 's1', relativePath: 'shots/s1/actual.png', validation: { decoded: true, sha256: 'a'.repeat(64), bytes: 1, width: 64, height: 96, checkedAt: p.updatedAt }, sourceVideo: { assetId: 'previous-video', taskId: 'TEST', runId: 'TEST', sha256: 'a'.repeat(64), atSeconds: 4.9 } });
     p.production!.shots.s1.firstFrameId = 'actual';
     const text = compilePreview(p, 's1', 'video', 'first_last_frame');
     expect(text.references[0].purpose).toBe('actualEndFrame');
@@ -151,6 +153,18 @@ beforeEach(async (): Promise<void> => {
 });
 afterEach(async (): Promise<void> => { await fs.rm(directory, { recursive: true, force: true }); });
 
+async function prepareImageInventory(): Promise<string> {
+  const file = path.join(directory, 'TEST.png');
+  await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=red:s=64x96', '-frames:v', '1', '-y', file]);
+  project.plan!.props = []; project.plan!.scenes = [{ id: 'room', name: '面馆', location: '面馆', time: '白天', lighting: '自然光', layout: '桌椅', view: '正面', designOrigin: 'script' }];
+  project.plan!.shots[0].sceneId = 'room'; project.plan!.shots[0].propIds = [];
+  project = await projects.write(project); project = await projects.confirmStory(project.id, project.revision);
+  return file;
+}
+async function adoptCharacter(id: string, file: string): Promise<void> {
+  project = await projects.addReference(project.id, id, file);
+  project = await projects.approveMaterials(project.id, project.revision, [{ materialId: `character:${id}`, assetId: project.assets.at(-1)!.id }]);
+}
 function chatHarness(): { chat: PetStoryChatService; core: TaskService; tasks: () => Task[] } {
   let stored: Task[] = []; let sequence = 0;
   const tasks = (): Task[] => structuredClone(stored);
@@ -170,7 +184,7 @@ async function finish(h: ReturnType<typeof chatHarness>, task: Task, text: strin
 }
 
 describe('保存、候选和正式任务', (): void => {
-  it.each(['before', 'during', 'context', 'unedited'])('重优化保护 %s，未手改且上下文不变才自动采用', async (when: string): Promise<void> => {
+  it.each(['before', 'during', 'context', 'unedited'])('重优化保护 %s，新回复始终先作为候选', async (when: string): Promise<void> => {
     const h = chatHarness();
     if (when === 'before') { const plan = structuredClone(project.plan!); plan.shots[0].prompts.video.final = '用户已确认原文'; project = await projects.savePlan(project.id, project.revision, plan); }
     const prepared = await h.chat.prepare(project.id, 'TEST只优化视频', 'optimize', undefined, 's1', 'video');
@@ -184,7 +198,7 @@ describe('保存、候选和正式任务', (): void => {
     const collected = await h.chat.collect(project.id, prepared.project!.jobs[0].id);
     const target = collected.project!.plan!.shots[0].prompts.video;
     expect(target.optimized).toBe('TEST新候选');
-    expect(target.final).toBe(when === 'unedited' ? 'TEST新候选' : when === 'during' ? '请求期间手改' : oldFinal);
+    expect(target.final).toBe(when === 'during' ? '请求期间手改' : oldFinal);
     const accepted = structuredClone(collected.project!.plan!); accepted.shots[0].prompts.video.final = target.optimized;
     const saved = await projects.savePlan(project.id, collected.project!.revision, accepted);
     const reopened = await new PetStoryProjects().open(directory);
@@ -192,9 +206,10 @@ describe('保存、候选和正式任务', (): void => {
     expect(reopened.plan!.shots[0].prompts.video.original).toBe(saved.plan!.shots[0].prompts.video.original);
   });
   it('长中文、多段落、引号与分隔符保存重开、DTO、正式 hold 任务全文一致；普通 Studio 不注入预设', async (): Promise<void> => {
-    const file = path.join(directory, 'TEST.png'); await fs.writeFile(file, 'TEST离线字节');
-    for (const id of ['lulu', 'lumei']) project = await projects.addReference(project.id, id, file);
+    const file = await prepareImageInventory();
+    for (const id of ['lulu', 'lumei']) await adoptCharacter(id, file);
     project = await projects.bindSharedReference(project.id, project.revision, 'lulu', project.plan!.characters[1].referenceAssetId!);
+    project = await projects.approveMaterials(project.id, project.revision, [{ materialId: 'character:lulu', assetId: project.assets.at(-1)!.id }]);
     const text = `中文“不要改台词”\n\n${'多段落与前爪持物。\n'.repeat(600)}\n%%%%%%%%%%\n结尾不丢失。\n\n`;
     const edited = structuredClone(project.plan!); edited.shots[0].prompts.firstFrame.final = text;
     project = await projects.savePlan(project.id, project.revision, edited);
@@ -208,12 +223,14 @@ describe('保存、候选和正式任务', (): void => {
     expect(generic.success && generic.data[0].prompt).toBe('普通Studio原文');
   });
   it('替换共享图的单人参考时，其余角色保留旧图；新门禁保留旧 hold 原文且执行后拒绝修改', async (): Promise<void> => {
-    const file = path.join(directory, 'TEST.png'); await fs.writeFile(file, 'TEST离线字节');
-    project = await projects.addReference(project.id, 'lulu', file);
+    const file = await prepareImageInventory();
+    await adoptCharacter('lulu', file);
     const shared = project.plan!.characters[0].referenceAssetId!;
     project = await projects.bindSharedReference(project.id, project.revision, 'lumei', shared);
-    project = await projects.addReference(project.id, 'lulu', file);
-    expect(orderedChatAssets(project, 's1').map((a): string => a.id)).toEqual([project.plan!.characters[0].referenceAssetId, shared]);
+    const lumei = project.assets.at(-1)!.id;
+    project = await projects.approveMaterials(project.id, project.revision, [{ materialId: 'character:lumei', assetId: lumei }]);
+    await adoptCharacter('lulu', file);
+    expect(orderedChatAssets(project, 's1').map((a): string => a.id)).toEqual([project.plan!.characters[0].referenceAssetId, lumei]);
     const h = chatHarness(); const oldFinal = project.plan!.shots[0].prompts.firstFrame.final;
     const attachments = await projects.attachments({ ...project, assets: orderedChatAssets(project, 's1') });
     const created = h.core.create({ prompts: [oldFinal], attachments, mode: 'image', executionIntent: 'hold' });

@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import type { PetStoryMaterial, PetStoryPlan, PetStoryProject, PetStoryPrompt, PetStoryPromptReference, PetStoryShot } from '@doubao-studio/contracts';
+import type { PetStoryAsset, PetStoryMaterial, PetStoryPlan, PetStoryProject, PetStoryPrompt, PetStoryPromptReference, PetStoryShot } from '@doubao-studio/contracts';
 import presets from './petstoryPresets.json';
 import { requirePromptEligibility } from './petstoryEligibility';
+import { isPetStoryImageAdopted } from './petstoryImageReview';
 
 export function materialDigest(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 export function storyHash(p: PetStoryProject): string { return materialDigest({ storyId: p.mobileStory?.id, story: p.plan?.adaptedStory }); }
@@ -87,18 +88,30 @@ export function syncMaterials(p: PetStoryProject): PetStoryMaterial[] {
     `生成场景基础参考图，地点：${scene.location}。时间：${scene.time}。光线：${scene.lighting}。\n空间布局、主要地标和相互关系：${scene.layout}。视角：${scene.view}。\n${scene.parentSceneId ? `从主场景 {{ref:scene:${scene.parentSceneId}}} 派生当前视角，保持地标、材质、空间和光线。` : '建立可复用的主场景。'}\n画面不包含人物，不把额外关键道具或人物烘焙进环境。`);
   return items;
 }
+function requireCandidateConfirmation(p: PetStoryProject, materialId: string): void {
+  const material = p.materials?.find((item): boolean => item.id === materialId);
+  if (material && p.assets.some((item): boolean => item.materialId === materialId && item.imageReview?.state === 'candidate')) throw new Error(`${material.name}的当前图片尚未确认`);
+}
+function requireMaterialImageApproval(p: PetStoryProject, material: PetStoryMaterial, asset: PetStoryAsset): void {
+  if (!asset.validation || material.approved?.assetId !== asset.id || material.approved.sha256 !== asset.validation.sha256 || !isPetStoryImageAdopted(p, asset)) throw new Error(`${material.name}的当前图片尚未确认`);
+  if (material.kind === 'character' && (material.approved.identity?.assetId !== asset.id || material.approved.identity.description !== p.plan?.characters.find((c): boolean => c.id === material.entityId)?.description)) throw new Error(`${material.name}的身份文字与具体图片需一并重新确认`);
+}
 export function materialAsset(p: PetStoryProject, materialId: string, requireApproved = true): NonNullable<PetStoryProject['assets'][number]> {
   const material = p.materials?.find((m): boolean => m.id === materialId);
   const asset = p.assets.find((a): boolean => a.id === material?.selectedAssetId);
+  if (!asset && requireApproved) requireCandidateConfirmation(p, materialId);
   if (!material || !asset || asset.kind !== material.kind || (asset.materialId !== material.id && !(material.kind === 'character' && (asset.characterIds || [asset.characterId]).includes(material.entityId)))) throw new Error(`${material?.name || materialId}缺少对应实际基础图`);
-  if (requireApproved && (!asset.validation || material.approved?.assetId !== asset.id || material.approved.sha256 !== asset.validation.sha256)) throw new Error(`${material.name}的当前图片尚未确认`);
+  if (requireApproved) requireMaterialImageApproval(p, material, asset);
   const characterReference = material.kind === 'character' ? p.plan?.characters.find((c): boolean => c.id === material.entityId)?.referenceAssetId : undefined;
   if (characterReference && characterReference !== asset.id) throw new Error(`${material.name}的角色参考与所选基础图片不一致`);
-  if (requireApproved && material.kind === 'character' && (material.approved?.identity?.assetId !== asset.id || material.approved.identity.description !== p.plan?.characters.find((c): boolean => c.id === material.entityId)?.description)) throw new Error(`${material.name}的身份文字与具体图片需一并重新确认`);
   return asset;
 }
 /** 主场景替换后派生图仍保留，但必须重新检查接受。 */
 export function invalidateMaterialDependents(p: PetStoryProject, materialId: string): void {
+  const material = p.materials?.find((item): boolean => item.id === materialId);
+  const affected = new Set(p.plan?.shots.filter((shot): boolean => material?.kind === 'character' ? shot.characterIds.includes(material.entityId)
+    : material?.kind === 'prop' ? !!shot.propIds?.includes(material.entityId) : material?.kind === 'scene' && shot.sceneId === material.entityId).map((shot): string => shot.id));
+  for (const asset of p.assets) if (asset.shotId && affected.has(asset.shotId) && ['firstFrame', 'plannedEndImage', 'video', 'actualEndFrame'].includes(asset.kind)) asset.needsReview = true;
   for (const scene of p.plan?.scenes || []) {
     if (`scene:${scene.parentSceneId}` !== materialId) continue;
     const child = p.materials?.find((m): boolean => m.id === `scene:${scene.id}`);

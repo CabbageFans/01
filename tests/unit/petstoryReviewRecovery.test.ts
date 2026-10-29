@@ -86,6 +86,8 @@ describe('素材实际图片与格式纠正后的内容审查', (): void => {
     expect(html).toContain('修订所选 0 项问题'); expect(html).toContain('TEST具体证据');
     const revision = await prepare('revise', { ...target, parentJobId: repaired.id, selectedIssueIds: ['TEST-issue'] }); await finish(revision, { optimized: 'TEST局部修订正文' });
     expect(project.jobs.at(-1)!.parentJobId).toBe(repaired.id);
+    expect(project.jobs.at(-1)!.resultStatus).toBe('candidate');
+    project = (await chat.adoptPromptCandidate(project.id, project.revision, revision.id)).project!;
     await expect(prepare('revise', { ...target, parentJobId: repaired.id })).rejects.toThrow('正文已经变化');
     await expect(prepare('revise', { ...target, parentJobId: original.id })).rejects.toThrow('具体目标问题');
   });
