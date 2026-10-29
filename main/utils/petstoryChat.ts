@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { PetStoryChatAdjustment, PetStoryConversationReply, PetStoryAssetBindings, PetStoryCapability, PetStoryChatJob, PetStoryMaterialEditIntent, PetStoryPlan, PetStoryPrompt, PetStoryPromptKind, PetStoryProject, PetStoryResult, PetStoryReviewIssue, PetStoryRuntimeTarget, Task, TaskAddParams } from '@doubao-studio/contracts';
+import { isDeepStrictEqual } from 'node:util';
+import type { PetStoryChatAdjustment, PetStoryConversationReply, PetStoryAssetBindings, PetStoryCapability, PetStoryChatJob, PetStoryMaterial, PetStoryMaterialEditIntent, PetStoryPlan, PetStoryPrompt, PetStoryPromptKind, PetStoryProject, PetStoryResult, PetStoryReviewIssue, PetStoryRuntimeTarget, PetStoryShot, Task, TaskAddParams } from '@doubao-studio/contracts';
 import { orderedChatAssets, promptContextHashInput, PROMPT_RULES_VERSION, assetCharacterIds } from './petstoryPromptQuality';
 import { PetStoryProjects } from './petstoryProject';
 import { archiveCompletedPetStoryProduction } from './petstoryProductionLifecycle';
 import { parsePetStoryAnswer, record, validatePetStoryPlan, runtimePromptIssues, normalizeAnalysisCuts } from './petstoryValidation';
-import { confirmedCharacterIdentity, materialAsset, syncMaterials } from './petstoryMaterials';
+import { confirmedCharacterIdentity, materialAsset, requiredMaterialKeys, syncMaterials } from './petstoryMaterials';
 import { pendingChatConflicts } from './petstoryPending';
 import { inspectPromptCandidate, inspectPromptEligibility, promptContractFactsCurrent, promptWritingTarget } from './petstoryEligibility';
 import { buildDramaRequest, previousAdoptedBoundary } from './petstoryRuntimeRequest';
@@ -188,6 +189,44 @@ export function finalTaskInput(plan: PetStoryPlan, shotId: string, kind: PetStor
 function assertChatAvailable(p: PetStoryProject): void {
   if (hasConversationGuard(p.accountId) || p.chatAdjustment?.status === 'active') throw new Error('请先采用豆包回复或结束当前调整');
 }
+
+function previousContinuousShot(plan: PetStoryPlan, shot: PetStoryShot): PetStoryShot | undefined {
+  if (shot.transition !== 'continue') return undefined;
+  return plan.shots.find((item): boolean => item.id === shot.previousShotId && item.id !== shot.id)
+    || plan.shots.filter((item): boolean => item.order < shot.order).sort((a, b): number => b.order - a.order)[0];
+}
+/** 仅比较本镜制作事实；摘要改写和无依赖变化的纯排序不让无关产物失效。 */
+function shotProductionBasis(plan: PetStoryPlan, shot: PetStoryShot, materials: PetStoryMaterial[]): object {
+  const { prompts: _prompts, order: _order, ...design } = shot;
+  const keys = [...requiredMaterialKeys(plan, [shot.id])].sort();
+  return { design, previousContinuousShotId: previousContinuousShot(plan, shot)?.id,
+    materials: keys.map((id): object => ({ id, designHash: materials.find((material): boolean => material.id === id)?.designHash })) };
+}
+function hasSavedPrompt(prompt: PetStoryPrompt): boolean {
+  return !!(prompt.final || prompt.optimized || prompt.edited || prompt.sourceJobId || prompt.basisJobId || prompt.candidateJobId);
+}
+function markPlanProductionReview(p: PetStoryProject, materials: PetStoryMaterial[], changedMaterials: Set<string>, affected: Set<string>): void {
+  for (const material of materials) if (changedMaterials.has(material.id)) {
+    material.approved = undefined;
+    if (hasSavedPrompt(material.prompt)) material.prompt = { ...material.prompt, needsReview: true };
+  }
+  for (const asset of p.assets) {
+    const materialIds = [asset.materialId, asset.imageReview?.target.materialId, ...(asset.kind === 'character' ? assetCharacterIds(asset).map((id): string => `character:${id}`) : [])];
+    if (asset.shotId && affected.has(asset.shotId) || materialIds.some((id): boolean => !!id && changedMaterials.has(id))) asset.needsReview = true;
+  }
+}
+function reconcilePlanImageTargets(p: PetStoryProject, plan: PetStoryPlan): void {
+  for (const [shotId, selected] of Object.entries(p.adoptedImages || {})) {
+    const shot = plan.shots.find((item): boolean => item.id === shotId);
+    if (!shot) { delete p.adoptedImages?.[shotId]; continue; }
+    if (!shot.prompts.lastFrame && selected.plannedEndImageId) {
+      const asset = p.assets.find((item): boolean => item.id === selected.plannedEndImageId);
+      if (asset) asset.needsReview = true;
+      delete selected.plannedEndImageId;
+    }
+  }
+}
+
 export class PetStoryChatService {
   constructor(private readonly projects: PetStoryProjects, private readonly tasks: PetStoryTaskPort) {}
 
@@ -202,7 +241,9 @@ export class PetStoryChatService {
     if (!adjustment.target.materialId && !adjustment.target.shotId) {
       let answer: Record<string, unknown>;
       try { answer = parsePetStoryAnswer(reply.text); } catch { throw new Error('这条回复还不能形成完整方案，请在豆包中将满意内容整理为完整分镜方案后再选择'); }
-      this.applyStory(p, answer, true, job); job.parsedResult = { plan: structuredClone(p.plan), contentBasis: p.contentBasis }; job.resultStatus = 'adopted'; p.jobs.push(job); return;
+      const candidate = structuredClone(p);
+      this.applyStory(candidate, answer, false, job); job.parsedResult = { plan: candidate.plan, contentBasis: candidate.contentBasis };
+      this.adoptPlan(p, job); p.jobs.push(job); return;
     }
     let body = reply.text;
     try { const answer = parsePetStoryAnswer(reply.text); if (typeof answer.optimized === 'string') body = answer.optimized; } catch { /* 完整自然语言正文原样保留，不用程序补写。 */ }
@@ -636,9 +677,42 @@ export class PetStoryChatService {
       const prompt = shot.prompts[kind];
       if (prompt) { prompt.sourceJobId = undefined; prompt.candidateJobId = undefined; prompt.promptTask = undefined; }
     }
-    p.plan = plan; p.contentBasis = job.parsedResult?.contentBasis; p.materials = syncMaterials(p); reconcileAdoptedImages(p); p.storyApproval = undefined;
+    this.preservePlanProduction(p, plan);
+    p.contentBasis = job.parsedResult?.contentBasis; p.storyApproval = undefined;
     p.source = { ...p.source, status: 'review_required', reason: '本次豆包剧本理解与动态分镜已采用，请核对剧本、资产及具体图片；文字结果不代表媒体验收' };
     job.resultStatus = 'adopted';
+  }
+
+  /** 方案明确采用后才合并：旧正文、来源、图片和产物保留，仅标记实际受影响对象。 */
+  private preservePlanProduction(p: PetStoryProject, plan: PetStoryPlan): void {
+    const previous = p.plan;
+    const oldMaterials = syncMaterials(p);
+    const materials = syncMaterials({ ...p, plan });
+    const changedMaterials = new Set(oldMaterials.filter((old): boolean => !materials.some((next): boolean => next.id === old.id && next.designHash === old.designHash)).map((material): string => material.id));
+    // 派生场景的主图改变时，它本身及引用它的镜头也需要复核。
+    for (let pass = 0; pass < (plan.scenes?.length || 0); pass++) for (const scene of plan.scenes || []) {
+      if (scene.parentSceneId && changedMaterials.has(`scene:${scene.parentSceneId}`)) changedMaterials.add(`scene:${scene.id}`);
+    }
+    const affected = new Set<string>();
+    if (previous) for (const old of previous.shots) {
+      const next = plan.shots.find((shot): boolean => shot.id === old.id);
+      if (!next || !isDeepStrictEqual(shotProductionBasis(previous, old, oldMaterials), shotProductionBasis(plan, next, materials))) affected.add(old.id);
+    }
+    // 只沿实际连续前镜传播；无依赖的切镜和纯排序不扩散复核范围。
+    for (let pass = 0; pass < plan.shots.length; pass++) for (const shot of plan.shots) {
+      const predecessor = previousContinuousShot(plan, shot);
+      if (predecessor && affected.has(predecessor.id)) affected.add(shot.id);
+    }
+    for (const shot of plan.shots) {
+      const old = previous?.shots.find((item): boolean => item.id === shot.id);
+      for (const kind of ['firstFrame', 'lastFrame', 'video'] as const) {
+        const prompt = old?.prompts[kind];
+        if (shot.prompts[kind] && prompt && hasSavedPrompt(prompt)) shot.prompts[kind] = { ...structuredClone(prompt), ...(affected.has(shot.id) ? { needsReview: true } : {}) };
+      }
+    }
+    markPlanProductionReview(p, materials, changedMaterials, affected);
+    reconcilePlanImageTargets(p, plan);
+    p.plan = plan; p.materials = materials;
   }
 
   private adoptAssets(p: PetStoryProject, job: PetStoryChatJob): void {

@@ -61,6 +61,13 @@ describe('六阶段与实际成果的只读导航投影', (): void => {
     expect(selectPetStoryJourney(p).counts.materials).toMatchObject({ selected: 1, confirmed: 0 });
     expect(selectPetStoryJourney(p).stage).toBe('materials');
   });
+  it.each(['needsReview', 'candidate', 'digest', 'date'] as const)('素材%s仍保留旧图，但不能沿旧approved记录误计已确认', (state): void => {
+    const p = project(); confirmedMaterial(p); const image = p.assets[0];
+    if (state === 'needsReview') image.needsReview = true;
+    else image.imageReview = { state: state === 'candidate' ? 'candidate' : 'adopted', target: { materialId: p.materials![0].id }, basisHash: 'TEST-basis', sha256: state === 'digest' ? 'TEST-changed' : image.validation!.sha256, adoptedAt: state === 'date' ? undefined : now };
+    expect(selectPetStoryJourney(p).counts.materials).toMatchObject({ selected: 1, confirmed: 0 });
+    expect(selectPetStoryJourney(p).stage).toBe('materials'); expect(p.assets[0].id).toBe('TEST-material-image');
+  });
   it('已解码的旧正文视频独立显示文件校验，不当作当前视频完成', (): void => {
     const p = project(); p.assets.push({ ...asset(p, 0, 'video'), generationFinal: 'TEST-obsolete-body' });
     const counts = selectPetStoryJourney(p).counts;
@@ -106,6 +113,12 @@ describe('六阶段与实际成果的只读导航投影', (): void => {
     const p = project(); const image = asset(p, 0, 'firstFrame'); delete image.taskId; delete image.runId; delete image.generationFinal;
     adoptFrame(p, image); p.assets.push(image);
     expect(journeyAssetMatchesPrompt(image, undefined)).toBe(true);
+    image.needsReview = true; expect(journeyAssetMatchesPrompt(image, undefined)).toBe(false);
+  });
+  it('自由Chat具体回复图片明确采用后可作为当前图，仍保留真实会话来源而不伪造生成正文', (): void => {
+    const p = project(); const image = asset(p, 0, 'firstFrame'); delete image.generationFinal; adoptFrame(p, image);
+    image.imageReview!.sourceReply = { adjustmentId: 'TEST-adjustment', replyKey: 'TEST-reply', urlHash: 'TEST-url' }; p.assets.push(image);
+    expect(image.taskId).toBeDefined(); expect(journeyAssetMatchesPrompt(image, undefined)).toBe(true);
     image.needsReview = true; expect(journeyAssetMatchesPrompt(image, undefined)).toBe(false);
   });
   it('所有当前文件已具备后才推荐查看成果，质量结论独立计算', (): void => {

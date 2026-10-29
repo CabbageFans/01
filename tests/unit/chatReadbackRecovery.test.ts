@@ -118,7 +118,7 @@ describe('F03 原任务只读恢复（离线）', (): void => {
     const sent = { getAttribute: (name: string): string | null => name === 'data-testid' ? 'send_message' : name === 'data-message-id' ? 'OFFLINE-user-id' : null,
       querySelector: (): object => content, closest: (): object => ({ getAttribute: (): string => user.turnId! }) };
     const received = { getAttribute: (name: string): string | null => name === 'data-testid' ? 'receive_message' : null,
-      querySelector: (): object => ({ textContent: rawReply }) };
+      querySelector: (): object => ({ textContent: rawReply }), querySelectorAll: (): object[] => [] };
     const document = { querySelectorAll: (selector: string): object[] => selector.startsWith('[data-testid="send_message"]') ? [sent, received] : [] };
     const snapshot = await getChatPageSnapshot({ executeJavaScript: async (script: string): Promise<ChatPageSnapshot> => runInNewContext(script, { document }) as ChatPageSnapshot,
       getURL: (): string => context.conversationUrl, loadURL: (): void => {} });

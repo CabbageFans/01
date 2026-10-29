@@ -11,9 +11,6 @@ import { PetStoryChatRecoveryActions, PetStoryFormatCorrections } from './PetSto
 import { ReviewIssueSelection } from './PetStoryReviewIssues';
 import { usePetStoryDraft, locatePetStoryDraft } from './PetStoryDrafts';
 
-function hasApprovedMaterials(project: PetStoryProject): boolean {
-  return !!project.storyApproval && !!project.materials?.length && project.materials.every((material): boolean => !!material.approved && material.approved.assetId === material.selectedAssetId);
-}
 function candidateAdoption(job: PetStoryChatJob | undefined, adopt: (jobId: string) => Promise<void>): (() => Promise<void>) | undefined {
   if (!job?.requestId) return undefined;
   return async (): Promise<void> => adopt(job.id);
@@ -45,12 +42,12 @@ export const PromptProvenance: React.FC<{ job: PetStoryChatJob; task?: Task }> =
   </details></>;
 };
 
-const PromptCandidate: React.FC<{ prompt: PetStoryPrompt; disabled: boolean; latestApplied: boolean; save: (value: string) => Promise<void>; adopt?: () => Promise<void> }> = ({ prompt, disabled, latestApplied, save, adopt }): React.ReactElement | null => {
+const PromptCandidate: React.FC<{ prompt: PetStoryPrompt; disabled: boolean; latestApplied: boolean; expanded?: boolean; save: (value: string) => Promise<void>; adopt?: () => Promise<void> }> = ({ prompt, disabled, latestApplied, expanded, save, adopt }): React.ReactElement | null => {
   if (!prompt.optimized) return null;
   const adopted = prompt.optimized === prompt.final;
-  const label = adopted ? latestApplied ? '查看已采用的豆包回复' : '查看已有采用正文' : latestApplied ? '已保存的豆包候选 · 未采用' : '已有保存候选 · 未采用';
-  return <details className="canvas-candidate" open={!adopted || undefined}><summary>{label}</summary><pre>{prompt.optimized}</pre>
-    <Button size="small" disabled={disabled || adopted} onClick={(): void => { void (adopt ? adopt() : save(prompt.optimized)); }}>采用这条回复</Button>
+  const label = adopted ? latestApplied ? '查看已采用的豆包回复' : '查看已有采用正文' : '新提示词待确认 · 查看完整候选';
+  return <details className="canvas-candidate" open={expanded || undefined}><summary>{label}</summary><pre>{prompt.optimized}</pre>
+    {!adopted && <Button size="small" type="primary" disabled={disabled} onClick={(): void => { void (adopt ? adopt() : save(prompt.optimized)); }}>采用这条回复</Button>}
   </details>;
 };
 
@@ -69,12 +66,11 @@ const PromptReviewActions: React.FC<{ project: PetStoryProject; shot: PetStorySh
     {review && <ReviewIssueSelection key={`${review.id}:${shot.id}:${kind}`} issues={issues} targetLabel={`镜头 ${shot.order} ${canvasPromptNames[kind]}`} disabled={actionDisabled} revised={revised} onRevise={async (selectedIssueIds: string[]): Promise<void> => state.reviseContent(review.id, { shotId: shot.id, promptKind: kind, selectedIssueIds })} />}</>;
 };
 
-const PromptStatusNotes: React.FC<{ project: PetStoryProject; prompt: PetStoryPrompt }> = ({ project, prompt }): React.ReactElement => <>
+const PromptStatusNotes: React.FC<{ prompt: PetStoryPrompt }> = ({ prompt }): React.ReactElement => <>
     {!prompt.final.trim() && <p className="canvas-hint">这个镜头还没有已采用的提示词，请先生成或在豆包中调整。</p>}
     {prompt.draft && <details><summary>分析附带的创作计划草稿 · 不可直接提交</summary><pre>{prompt.draft}</pre></details>}
     {!!prompt.final && !prompt.promptTask && <p className="canvas-hint">旧正文待适配，请按当前模型／模式通过豆包重新生成或修订。</p>}
     {prompt.edited && prompt.optimized !== prompt.final && <p className="canvas-hint">手改正文已保留；新候选尚未采用，下游使用当前正文。</p>}
-    {!hasApprovedMaterials(project) && <p className="canvas-hint">基础图片尚未全部采用，请先准备这个镜头需要的素材。</p>}
     {prompt.needsReview && <p className="canvas-error">当前正文待复核，请查看本项审查问题或回复来源；核对后再采用或保存。</p>}
 </>;
 
@@ -121,22 +117,21 @@ export const CanvasPromptEditor: React.FC<{
   return <div className="canvas-prompt" data-prompt-kind={kind}>
     <div className="canvas-field-label"><strong>{canvasPromptNames[kind]}</strong><button type="button" aria-label={`放大镜头${shot.order}${canvasPromptNames[kind]}`} onClick={(): void => setExpanded(true)}><ExpandOutlined /> 全文</button></div>
     <div className="canvas-source"><span className={prompt.edited ? 'source-manual' : ''}>{promptSource(prompt, latestApplied)}</span><span>{text.length} 字</span></div>
-    <PromptStatusNotes project={project} prompt={prompt} />
+    <PromptStatusNotes prompt={prompt} />
     {!expanded && editor}
-    <div className="canvas-prompt-actions"><Button size="small" disabled={!text} onClick={copy} icon={<CopyOutlined />}>{copyStatus || '复制'}</Button>
-      <Button size="small" type={dirty ? 'primary' : 'default'} disabled={saveDisabled} onClick={(): void => { void save(text); }}>保存修改</Button>
+    {dirty && <div className="canvas-prompt-actions"><Button size="small" type="primary" disabled={saveDisabled} onClick={(): void => { void save(text); }}>保存修改</Button>
       {dirty && <button type="button" onClick={(): void => { setText(prompt.final); setEditing(false); }}>放弃修改</button>}
-    </div>
+    </div>}
     <PromptCandidate prompt={prompt} disabled={candidateDisabled} latestApplied={latestApplied} save={save} adopt={adopt} />
     <Button size="small" className="canvas-chat-button" disabled={disabled} onClick={(): void => { void state.openChatAdjustment({ shotId: shot.id, promptKind: kind }); }}>在豆包中调整</Button>
-    <details className="petstory-secondary-tools"><summary>更多提示词操作</summary><Button size="small" disabled={disabled || generationBlocked || pending || !state.freeChatConfirmed} onClick={(): void => { void state.optimize(shot.id, kind); }}>{pending ? `豆包 ${canvasJobLabel(task?.status)}` : '重新生成提示词'}</Button>
+    <details className="petstory-secondary-tools"><summary>更多提示词操作</summary><Button size="small" disabled={!text} onClick={copy} icon={<CopyOutlined />}>{copyStatus || '复制'}</Button><Button size="small" disabled={disabled || generationBlocked || pending || !state.freeChatConfirmed} onClick={(): void => { void state.optimize(shot.id, kind); }}>{pending ? `豆包 ${canvasJobLabel(task?.status)}` : '重新生成提示词'}</Button>
       <PromptReviewActions project={project} shot={shot} kind={kind} disabled={disabled} generationBlocked={generationBlocked} pending={pending} />
     </details>
-    {job && <PromptProvenance job={job} task={task} />}{candidateJob && candidateJob.id !== job?.id && <PromptProvenance job={candidateJob} task={tasks.find((item): boolean => item.id === candidateJob.taskId)} />}
+    {(job || candidateJob) && <details className="canvas-provenance"><summary>生成记录／诊断详情</summary>{job && <PromptProvenance job={job} task={task} />}{candidateJob && candidateJob.id !== job?.id && <PromptProvenance job={candidateJob} task={tasks.find((item): boolean => item.id === candidateJob.taskId)} />}</details>}
     <Modal className="canvas-prompt-modal" title={`镜头 ${shot.order} · ${canvasPromptNames[kind]} · 完整编辑`} open={expanded} onCancel={(): void => setExpanded(false)} width={760}
       footer={<><Button onClick={(): void => setExpanded(false)}>返回画布</Button><Button type="primary" disabled={saveDisabled} onClick={(): void => { void save(text); }}>保存修改</Button></>}>
       <p className="canvas-modal-source">{promptSource(prompt, latestApplied)} · 当前已保存 {prompt.final.length} 字。保存后用于后续实际任务。</p>{editor}
-      <PromptCandidate prompt={prompt} disabled={candidateDisabled} latestApplied={latestApplied} save={save} adopt={adopt} />
+      <PromptCandidate prompt={prompt} disabled={candidateDisabled} latestApplied={latestApplied} expanded save={save} adopt={adopt} />
     </Modal>
   </div>;
 };

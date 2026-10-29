@@ -7,13 +7,13 @@ export async function readPetStoryConversationReplies(snapshot: ChatPageSnapshot
   const result: PetStoryConversationReply[] = [];
   let precedingUserText = '';
   for (const message of snapshot.messages) {
-    const text = message.rawText ?? message.renderedSource;
+    const text = message.rawText ?? message.renderedSource ?? '';
     if (message.role === 'user') { precedingUserText = text?.trim() ? text : ''; continue; }
-    if (!text?.trim() || !precedingUserText) continue;
-    const identity = { text, precedingUserText, turnId: message.turnId || '', messageId: message.messageId || '' };
+    if ((!text.trim() && !message.imageUrls?.length) || !precedingUserText) continue;
+    const identity = { text, precedingUserText, turnId: message.turnId || '', messageId: message.messageId || '', ...(message.imageUrls?.length ? { imageUrls: message.imageUrls } : {}) };
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(identity)));
     const key = Array.from(new Uint8Array(digest), (byte): string => byte.toString(16).padStart(2, '0')).join('');
-    result.push({ key, text, precedingUserText, turnId: message.turnId, messageId: message.messageId, capturedAt: new Date().toISOString() });
+    result.push({ key, text, precedingUserText, turnId: message.turnId, messageId: message.messageId, ...(message.imageUrls?.length ? { imageUrls: message.imageUrls } : {}), capturedAt: new Date().toISOString() });
   }
   if (result.length > 100 || new Set(result.map((reply): string => reply.key)).size !== result.length) throw new Error('当前可见回复无法唯一识别，请在豆包中定位需要的回复');
   return result;

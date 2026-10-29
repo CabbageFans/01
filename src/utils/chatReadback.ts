@@ -2,7 +2,7 @@ import { isSameDoubaoConversation } from './taskConversationLocator';
 
 /** 普通 Chat 只读取消息区；不把侧栏、编辑器或页面脚本当成回复。 */
 export interface ChatPageSnapshot {
-  messages: { role: 'user' | 'assistant'; text: string; rawText?: string; renderedSource?: string; codeSpans?: number; fencedCode?: { language: string; text: string }[]; headingCount?: number; attachmentOnly?: boolean; turnId?: string; messageId?: string }[];
+  messages: { role: 'user' | 'assistant'; text: string; rawText?: string; renderedSource?: string; codeSpans?: number; fencedCode?: { language: string; text: string }[]; headingCount?: number; attachmentOnly?: boolean; turnId?: string; messageId?: string; imageUrls?: string[] }[];
   editorPresent: boolean;
   editorText: string;
   generating: boolean;
@@ -73,6 +73,12 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
     const turnId = node.closest?.('[data-testid="union_message"]')?.getAttribute('data-target-id') || undefined;
     const messageId = node.getAttribute('data-message-id') || node.getAttribute('data-msg-id') || undefined;
     const attachmentOnly = !content && node.getAttribute('data-testid') === 'send_message' && !!node.querySelector('img');
+    // 图片必须来自这条助手消息本身；不收集头像、视频封面、用户附件或整页最后一张图。
+    const imageUrls = node.getAttribute('data-testid') === 'receive_message' ? [...new Set(Array.from(node.querySelectorAll('img')).flatMap((image): string[] => {
+      const src = image.currentSrc || image.src;
+      if (!/^https:\/\//i.test(src) || /(?:avatar|emoji|icon|logo|badge)/i.test(src) || image.closest('video') || image.naturalWidth < 100 || image.naturalHeight < 100) return [];
+      return [src];
+    }))] : [];
     // 普通 Chat 的同一 union_message 会把附件和正文分别渲染成 send_message。
     // 只合并有明确共同 turn、图片及唯一正文的附件块；未知／跨 turn 空消息仍保留并阻断。
     if (attachmentIsGrouped(node)) return undefined;
@@ -86,6 +92,7 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
       ...(attachmentOnly ? { attachmentOnly: true } : {}),
       ...(turnId ? { turnId } : {}),
       ...(messageId ? { messageId } : {}),
+      ...(imageUrls.length ? { imageUrls } : {}),
     };
   };
   for (const node of messageNodes) {

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Card, Collapse, Input, Select, Space, Tag, Typography } from 'antd';
+import { Button, Card, Checkbox, Collapse, Input, Select, Space, Tag, Typography } from 'antd';
 import type { PetStoryMaterial, PetStoryProject } from '@doubao-studio/contracts';
 import { isMaterialPromptBlocked, isSavedReviewResult, readSavedPromptCandidate, reviewMatchesPrompt } from '../utils/petstoryCandidate';
 import { usePetStoryStore } from '../store/usePetStoryStore';
@@ -8,13 +8,28 @@ import { PetStoryImageReview, imageBelongsToTarget } from './PetStoryImageReview
 import { PromptProvenance } from './PetStoryCanvasPrompt';
 import { ReviewIssueSelection } from './PetStoryReviewIssues';
 import { PetStoryMediaEntryCheck } from './PetStoryMediaEntryCheck';
-import { PetStoryGenerationBlockers } from './PetStoryGenerationBlockers';
+import { generationBlockerAction } from './PetStoryGenerationBlockers';
 import { usePetStoryGenerationEligibility } from './usePetStoryGenerationEligibility';
 import type { PetStoryGenerationBlocker } from './usePetStoryGenerationEligibility';
 import { locatePetStoryDraft, usePetStoryDraft } from './PetStoryDrafts';
+import '../styles/petstory-materials.css';
 
 const labels = { character: '人物', prop: '道具', scene: '场景' };
 export type PetStoryMaterialNavigate = (target: 'plan' | 'keyframes', objectId?: string) => void;
+/** 只展开设置，不运行检查、发送或生成；实际检查仍由用户点击。 */
+function revealMaterialSettings(): void {
+  const settings = document.getElementById('petstory-material-entry');
+  if (settings instanceof HTMLDetailsElement) settings.open = true;
+  settings?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+function reviewMaterialPlan(onNavigate?: PetStoryMaterialNavigate): void {
+  if (onNavigate) onNavigate('plan');
+  else window.dispatchEvent(new CustomEvent('petstory-journey-focus', { detail: { target: 'plan' } }));
+}
+function materialCandidateCount(project: PetStoryProject, material: PetStoryMaterial): number {
+  return project.assets.filter((asset): boolean => imageBelongsToTarget(project, asset, { materialId: material.id }) && asset.id !== material.selectedAssetId && asset.imageReview?.state !== 'adopted').length
+    + (project.assets.some((asset): boolean => asset.id === material.selectedAssetId && imageBelongsToTarget(project, asset, { materialId: material.id }) && asset.imageReview?.state !== 'adopted') && !isPetStoryMaterialImageApproved(project, material) ? 1 : 0);
+}
 function materialControlsLocked(project: PetStoryProject, disabled: boolean): boolean {
   const production = project.production;
   return disabled || production?.state === 'running';
@@ -22,7 +37,8 @@ function materialControlsLocked(project: PetStoryProject, disabled: boolean): bo
 /** 仅投影已保存的选图及确认记录用于数量展示；生成资格由主进程只读核对。 */
 export function isPetStoryMaterialImageApproved(project: PetStoryProject, material: PetStoryMaterial): boolean {
   const asset = project.assets.find((item): boolean => item.id === material.selectedAssetId);
-  if (!asset?.validation || material.approved?.assetId !== asset.id || material.approved.sha256 !== asset.validation.sha256) return false;
+  if (!asset?.validation?.decoded || asset.needsReview || asset.imageReview?.state === 'candidate' || material.approved?.assetId !== asset.id || material.approved.sha256 !== asset.validation.sha256) return false;
+  if (asset.imageReview?.state === 'adopted' && (asset.imageReview.sha256 !== asset.validation.sha256 || !asset.imageReview.adoptedAt)) return false;
   if (material.kind !== 'character') return true;
   const character = project.plan?.characters.find((item): boolean => item.id === material.entityId);
   return !!character && material.approved.identity?.assetId === asset.id && material.approved.identity.description === character.description;
@@ -70,39 +86,49 @@ const MaterialCard: React.FC<MaterialCardProps> = ({ project, material: m, disab
   const chatBlocked = isMaterialPromptBlocked(project, m.id, tasks);
   const candidateJob = [...project.jobs].reverse().find((j): boolean => j.materialId === m.id && j.status === 'applied' && (m.prompt.candidateJobId ? j.id === m.prompt.candidateJobId : readSavedPromptCandidate(j.rawText) === m.prompt.optimized));
   const chatCandidate = !!candidateJob;
+  // 旧优化正文可能早已采用后被用户手改；只有实际待采用回复才提升为下一步。
+  const hasPromptCandidate = !!m.prompt.optimized.trim() && m.prompt.optimized !== m.prompt.final && !!candidateJob && candidateJob.resultStatus !== 'stale' && candidateJob.resultStatus !== 'adopted';
   const adoptCandidate = async (): Promise<void> => { if (candidateJob?.requestId) await state.adoptPromptCandidate(candidateJob.id); else await savePrompt(m.prompt.optimized); };
   const review = [...project.jobs].reverse().find((item): boolean => isSavedReviewResult(item, project.jobs) && reviewMatchesPrompt(item, m.id, m.prompt.final) && item.parsedResult?.issues?.some((issue): boolean => issue.targetId === m.id || issue.targetId === m.entityId) === true);
   const revised = !!review && project.jobs.some((item): boolean => item.kind === 'revise' && item.parentJobId === review.id && item.materialId === m.id);
   const character = project.plan?.characters.find((c): boolean => m.kind === 'character' && c.id === m.entityId);
   const approved = isPetStoryMaterialImageApproved(project, m);
-  const hasImages = project.assets.some((asset): boolean => imageBelongsToTarget(project, asset, { materialId: m.id }));
+  const candidateCount = materialCandidateCount(project, m);
+  const selectedImage = project.assets.find((asset): boolean => asset.id === m.selectedAssetId && imageBelongsToTarget(project, asset, { materialId: m.id }));
+  const currentImage = selectedImage && selectedImage.imageReview?.state !== 'candidate' && (approved || selectedImage.imageReview?.state === 'adopted' || m.approved?.assetId === selectedImage.id) ? selectedImage : undefined;
+  const promptBlocker = readiness.eligibility?.blockers.find((blocker): boolean => blocker.code === 'prompt');
+  const promptReady = !!m.prompt.final.trim() && !m.prompt.needsReview && !promptBlocker;
   const mediaDisabled = disabled || !project.storyApproval;
   const currentEntryChecked = !!state.capability && state.capabilityCheckedInSession;
   const used = project.plan?.shots.filter((s): boolean => m.kind === 'character' ? s.characterIds.includes(m.entityId) : m.kind === 'prop' ? !!s.propIds?.includes(m.entityId) : s.sceneId === m.entityId).map((s): string => String(s.order)).join('、');
   const resolveBlocker = (blocker: PetStoryGenerationBlocker): void => {
     if (blocker.code === 'story') {
-      if (onNavigate) onNavigate('plan');
-      else document.getElementById('petstory-material-story-confirm')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      reviewMaterialPlan(onNavigate);
       return;
     }
-    if (blocker.code === 'capability') { document.getElementById('petstory-material-entry')?.scrollIntoView({ block: 'center', behavior: 'smooth' }); return; }
+    if (blocker.code === 'capability') { revealMaterialSettings(); return; }
     if (blocker.code === 'task') { window.dispatchEvent(new CustomEvent('petstory-locate-task', { detail: { jobId: blocker.jobId } })); return; }
     if (blocker.code === 'materials' && blocker.materialId) { document.getElementById(`material-${blocker.materialId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }); return; }
     if (blocker.code === 'prompt') { setPromptOpen(true); requestAnimationFrame((): void => { document.getElementById(fieldId)?.focus(); document.getElementById(fieldId)?.scrollIntoView({ block: 'center', behavior: 'smooth' }); }); return; }
     readiness.refresh();
   };
   const textDisabled = disabled || generationBlocked || dirty || !state.freeChatConfirmed || chatBlocked;
-  return <Card className="petstory-material-card" id={`material-${m.id}`} size="small" data-material-id={m.id} data-dirty={dirty ? 'true' : 'false'} title={<Space wrap><Tag>{labels[m.kind]}</Tag>{m.name}<Tag color={approved ? 'green' : hasImages ? 'orange' : 'default'}>{approved ? '已采用' : hasImages ? '图片待确认' : '尚无图片'}</Tag></Space>}>
+  // 待选择和已有图片可直接查看，不展示与当前操作无关的媒体入口阻断。
+  const blocker = !candidateCount && !currentImage ? promptReady ? readiness.eligibility?.blockers[0] : hasPromptCandidate ? undefined : promptBlocker : undefined;
+  const status = candidateCount ? currentImage ? '有新图片待确认' : '图片待确认' : currentImage && !approved ? '需要复核' : approved ? '已采用' : promptReady ? '待生成图片' : hasPromptCandidate ? '提示词待采用' : '提示词待准备';
+  return <Card className="petstory-material-card" id={`material-${m.id}`} size="small" data-material-id={m.id} data-material-state={status} data-dirty={dirty ? 'true' : 'false'} title={<Space wrap><Tag>{labels[m.kind]}</Tag>{m.name}<Tag color={approved && !candidateCount ? 'green' : candidateCount || currentImage ? 'orange' : 'default'}>{status}</Tag></Space>}>
     <Space direction="vertical" className="w-full">
-      <Typography.Text type="secondary">用于镜头 {used || '基础素材'}</Typography.Text>
-      <PetStoryImageReview project={project} target={{ materialId: m.id }} title={`${m.name} · ${labels[m.kind]}参考图`} currentAssetId={approved ? m.selectedAssetId : undefined} identity={character?.description}
+      <Typography.Text type="secondary">{used ? `用于镜头 ${used}` : '可复用基础素材'}</Typography.Text>
+      <PetStoryImageReview project={project} target={{ materialId: m.id }} title={`${m.name} · ${labels[m.kind]}参考图`} currentAssetId={currentImage?.id} currentNeedsReview={!!currentImage && !approved} identity={character?.description}
         disabled={mediaDisabled} generationDisabled={generationBlocked || dirty || !currentEntryChecked || !readiness.eligibility?.ready} generating={readiness.loading}
+        promptReady={promptReady} preparePromptLabel={hasPromptCandidate ? '查看并采用提示词' : '生成提示词'} preparePromptDisabled={hasPromptCandidate ? disabled || dirty : textDisabled} onPreparePrompt={async (): Promise<void> => { if (hasPromptCandidate) setPromptOpen(true); else await state.regenerateMaterialPrompt(m.id); }}
         onUpload={async (): Promise<void> => state.addMaterialImage(m.id)} onGenerate={async (): Promise<void> => state.generateMaterials([m.id])}
         onAdopt={async (assetId: string): Promise<void> => state.approveMaterials([{ materialId: m.id, assetId }])}
         onAdjust={async (): Promise<void> => state.openChatAdjustment({ materialId: m.id })} batchSelectedId={checkedAssetId} onBatchSelection={check} />
-      <PetStoryGenerationBlockers blockers={readiness.eligibility?.blockers || []} onResolve={resolveBlocker} />
-      {readiness.error && <Alert type="warning" message={readiness.error} action={<Button onClick={readiness.refresh}>重新核对</Button>} />}
-      {dirty && <Alert type="warning" message={`「${m.name}」提示词有未保存修改，请在下面保存或放弃。`} />}
+      {blocker && <div className="petstory-material-reason" role="status"><span>{blocker.message}</span><Button type="link" size="small" onClick={(): void => resolveBlocker(blocker)}>{generationBlockerAction(blocker)}</Button></div>}
+      {!candidateCount && !currentImage && !promptReady && !hasPromptCandidate && !state.freeChatConfirmed && <div className="petstory-material-reason"><span>生成提示词前，请确认普通 Chat 免费可用。</span><Button type="link" size="small" onClick={revealMaterialSettings}>查看生成设置</Button></div>}
+      {readiness.error && !candidateCount && !currentImage && <div className="petstory-material-reason" role="status"><span>{readiness.error}</span><Button type="link" size="small" onClick={readiness.refresh}>重新核对</Button></div>}
+      {dirty && <Typography.Text type="warning">提示词有未保存修改，请保存或放弃。</Typography.Text>}
       <Collapse className="w-full" activeKey={promptOpen ? ['prompt'] : []} onChange={(keys): void => setPromptOpen(keys.includes('prompt'))} items={[{ key: 'prompt', label: '查看与编辑图片提示词', forceRender: true, children: <Space direction="vertical" className="w-full">
         <Typography.Text type="secondary">{chatCandidate && m.prompt.final === m.prompt.optimized ? '豆包回复 · 当前使用' : m.prompt.edited ? '用户编辑 · 当前使用' : '已有保存正文'}{m.prompt.needsReview ? ' · 需要复核' : ''}</Typography.Text>
         <Input.TextArea id={fieldId} aria-label={`${m.id}基础图最终提示词`} disabled={disabled} autoSize={{ minRows: 5, maxRows: 14 }} value={prompt} onChange={(e): void => { setEditing(e.target.value !== m.prompt.final); setPrompt(e.target.value); }} />
@@ -114,8 +140,10 @@ const MaterialCard: React.FC<MaterialCardProps> = ({ project, material: m, disab
         {job && <PromptProvenance job={job} task={tasks.find((task): boolean => task.id === job.taskId)} />}
         <Typography.Text type="secondary">新图片会进入候选区，采用后才可引用。重新生成提示词不会生成图片。</Typography.Text>
       </Space> }]} />
-      <MaterialEditPlan project={project} material={m} disabled={disabled || generationBlocked || dirty} />
-      <details><summary>诊断：素材记录</summary>{m.id}</details>
+      <details className="petstory-secondary-tools petstory-material-more"><summary>更多操作</summary><Space direction="vertical" className="w-full">
+        <MaterialEditPlan project={project} material={m} disabled={disabled || generationBlocked || dirty} />
+        <details><summary>生成记录／诊断详情</summary>{m.id}</details>
+      </Space></details>
     </Space>
   </Card>;
 };
@@ -128,7 +156,7 @@ function materialReadinessUnchanged(previous: { revision: number; ready: boolean
 
 const MaterialsAdvancedControls: React.FC<{ project: PetStoryProject; locked: boolean; generationBlocked: boolean }> = ({ project, locked, generationBlocked }): React.ReactElement => {
   const state = usePetStoryStore(); const materials = project.materials || [];
-  return <details><summary>高级：补齐清单／重新生成全部素材提示词</summary><Space direction="vertical" className="w-full"><Typography.Text type="secondary">补齐清单保留现有镜头和成果。重新生成全部仅请求 {materials.length} 项人物／道具／场景提示词，不含关键帧或视频；手改正文保留，新回复作为待采用候选，不会自动生图。</Typography.Text><Space wrap><Button disabled={locked || generationBlocked || !project.plan || !state.freeChatConfirmed} onClick={(): void => { void state.extractAssets(); }}>豆包分析并补齐资产清单</Button><Button disabled={locked || generationBlocked || !materials.length || !state.freeChatConfirmed || state.promptBatch.status === 'running'} onClick={(): void => { void state.regenerateAllMaterialPrompts(); }}>重新生成全部基础素材提示词 · {materials.length} 项</Button><Button disabled={locked || !project.plan?.props || !project.plan?.scenes} onClick={(): void => { void state.confirmStory(); }}>重新确认当前方案（不生成媒体）</Button></Space></Space></details>;
+  return <details><summary>补充素材清单与批量提示词</summary><Space direction="vertical" className="w-full"><Typography.Text type="secondary">补充清单保留现有镜头和成果。重新生成只准备 {materials.length} 项基础素材提示词，手改正文保留，新回复待你采用。</Typography.Text><Space wrap><Button disabled={locked || generationBlocked || !project.plan || !state.freeChatConfirmed} onClick={(): void => { void state.extractAssets(); }}>补充素材清单</Button><Button disabled={locked || generationBlocked || !materials.length || !state.freeChatConfirmed || state.promptBatch.status === 'running'} onClick={(): void => { void state.regenerateAllMaterialPrompts(); }}>重新生成全部素材提示词 · {materials.length} 项</Button></Space></Space></details>;
 };
 
 export const PetStoryMaterials: React.FC<{ project: PetStoryProject; disabled: boolean; generationBlocked?: boolean; onNavigate?: PetStoryMaterialNavigate; showStageActions?: boolean }> = ({ project, disabled, generationBlocked = false, onNavigate, showStageActions = true }): React.ReactElement => {
@@ -140,22 +168,32 @@ export const PetStoryMaterials: React.FC<{ project: PetStoryProject; disabled: b
   const locked = materialControlsLocked(project, disabled);
   const materials = project.materials || [];
   const selections = materialSelections(project, checked);
-  const missing = materials.filter((m): boolean => !project.assets.some((asset): boolean => imageBelongsToTarget(project, asset, { materialId: m.id }))).map((m): string => m.id);
+  const pending = materials.filter((material): boolean => materialCandidateCount(project, material) > 0).length;
+  const missing = materials.filter((material): boolean => !isPetStoryMaterialImageApproved(project, material) && !materialCandidateCount(project, material)).map((material): string => material.id);
   const confirmed = materials.filter((m): boolean => isPetStoryMaterialImageApproved(project, m)).length;
   const allConfirmed = materials.length > 0 && confirmed === materials.length;
   const missingReady = !!missing.length && missing.every((id): boolean => readiness[id]?.revision === project.revision && readiness[id].ready);
-  return <Card size="small" title="准备基础素材 · 人物／道具／场景">
+  // 未确认的方案不投影为一套可执行素材；确认入口始终回到方案审阅。
+  if (!project.storyApproval) return <Card className="petstory-materials-panel" size="small" title="准备基础素材">
+    <div className="petstory-material-plan-required" role="status"><Typography.Text type="secondary">方案确认后，显示人物、道具和场景素材。</Typography.Text><Button id="petstory-material-story-confirm" type="primary" onClick={(): void => reviewMaterialPlan(onNavigate)}>查看并确认方案</Button></div>
+  </Card>;
+  return <Card className="petstory-materials-panel" size="small" title="准备基础素材 · 人物／道具／场景">
     <Space direction="vertical" className="w-full">
-      <Alert type={allConfirmed ? 'success' : 'info'} showIcon message={`已确认 ${confirmed} / ${materials.length} 项 · 仍缺图片 ${missing.length} 项`} description="逐项查看提示词和图片。生成或上传后先预览，只有你采用的图片才用于镜头制作。" />
-      {!project.storyApproval && <Alert type="warning" message="当前方案还未确认为制作依据，确认后可生成或上传基础图片。" action={onNavigate ? <Button onClick={(): void => onNavigate('plan')}>查看并确认方案</Button> : <Button id="petstory-material-story-confirm" disabled={locked || !project.plan?.props || !project.plan?.scenes} onClick={(): void => { void state.confirmStory(); }}>确认当前方案</Button>} />}
-      <div id="petstory-material-entry" className="w-full"><PetStoryMediaEntryCheck project={project} kind="image" disabled={disabled} /></div>
-      {showStageActions && <details className="petstory-secondary-tools"><summary>批量准备与采用</summary><Space wrap><Button disabled={locked || generationBlocked || !missingReady} onClick={(): void => { void state.generateMaterials(missing); }}>生成缺失基础图 · {missing.length} 项</Button><Button disabled={locked || !project.storyApproval || !selections.length} onClick={(): void => { void state.approveMaterials(selections); }}>采用已选的 {selections.length} 张</Button></Space></details>}
-      {!!missing.length && !missingReady && <Typography.Text type="secondary">缺图项目的具体前置条件和处理按钮在下方对应素材卡中。已有图片可以直接查看确认，无需重新生成。</Typography.Text>}
-      <div className="petstory-material-filters" role="group" aria-label="筛选基础素材">{[{ value: 'all', label: '全部' }, ...Object.entries(labels).map(([value, label]): { value: string; label: string } => ({ value, label }))].map((item): React.ReactNode => <Button key={item.value} type={filter === item.value ? 'primary' : 'text'} onClick={(): void => setFilter(item.value)}>{item.label}</Button>)}</div>
+      <div className="petstory-material-summary"><Typography.Text type="secondary">已采用 {confirmed}/{materials.length} · 待确认 {pending} · 缺少 {missing.length}</Typography.Text><div className="petstory-material-settings-links">
+        <details id="petstory-material-entry" className="petstory-secondary-tools"><summary>生成设置／入口检查</summary><Space direction="vertical" className="w-full">
+          <Checkbox checked={state.freeChatConfirmed} disabled={locked} onChange={(event): void => state.setFreeChatConfirmed(event.target.checked)}>本人已确认当前账号普通 Chat 免费可用</Checkbox>
+          <PetStoryMediaEntryCheck project={project} kind="image" disabled={disabled} />
+        </Space></details>
+        <details className="petstory-secondary-tools"><summary>更多操作</summary><Space direction="vertical" className="w-full">
+          {showStageActions && <><Typography.Text type="secondary">批量准备只生成当前缺图项；批量采用只包含你已逐张检查并勾选的图片。</Typography.Text><Space wrap><Button disabled={locked || generationBlocked || !missingReady} onClick={(): void => { void state.generateMaterials(missing); }}>生成缺失基础图 · {missing.length} 项</Button><Button disabled={locked || !selections.length} onClick={(): void => { void state.approveMaterials(selections); }}>采用已选的 {selections.length} 张</Button></Space></>}
+          <MaterialsAdvancedControls project={project} locked={locked} generationBlocked={generationBlocked} />
+          {onNavigate && <Button onClick={(): void => onNavigate('keyframes')}>查看关键帧制作与缺项</Button>}
+        </Space></details>
+      </div></div>
+      <div className="petstory-material-filters" role="group" aria-label="筛选基础素材">{[{ value: 'all', label: '全部' }, ...Object.entries(labels).map(([value, label]): { value: string; label: string } => ({ value, label }))].map((item): React.ReactNode => <Button key={item.value} type="text" aria-pressed={filter === item.value} onClick={(): void => setFilter(item.value)}>{item.label}</Button>)}</div>
       <div className="petstory-material-grid">{materials.filter((material): boolean => filter === 'all' || material.kind === filter).map((m): React.ReactNode => <MaterialCard key={m.id} project={project} material={m} disabled={locked} generationBlocked={generationBlocked} onNavigate={onNavigate} onReadiness={onReadiness} checkedAssetId={checked[m.id]} check={(assetId: string, value: boolean): void => setChecked((old): Record<string, string> => { const next = { ...old }; if (value) next[m.id] = assetId; else delete next[m.id]; return next; })} />)}</div>
-      {!materials.length && <Typography.Text type="secondary">采用并确认分析方案后，显示这份剧本需要的动态素材清单。</Typography.Text>}
-      {onNavigate && <Button type={allConfirmed ? 'primary' : 'default'} onClick={(): void => onNavigate('keyframes')}>{allConfirmed ? '基础素材已确认，进入关键帧制作' : '查看关键帧制作与缺项'}</Button>}
-      <MaterialsAdvancedControls project={project} locked={locked} generationBlocked={generationBlocked} />
+      {!materials.length && <Typography.Text type="secondary">当前方案没有列出基础素材。可在更多操作中补充素材清单。</Typography.Text>}
+      {allConfirmed && onNavigate && <Button onClick={(): void => onNavigate('keyframes')}>基础素材已采用，进入关键帧制作</Button>}
     </Space>
   </Card>;
 };

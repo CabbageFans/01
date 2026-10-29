@@ -40,7 +40,9 @@ describe('当前会话媒体入口授权', (): void => {
     for (const kind of ['firstFrame', 'video'] as const) {
       const html = renderToStaticMarkup(React.createElement(CanvasMediaNode, { project, shot: project.plan!.shots[0], kind, disabled: false }));
       expect(buttonMarkup(html, kind === 'video' ? '生成视频' : '生成图片')).toContain('disabled');
-      expect(html).toContain(`本次会话还未核对${kind === 'video' ? '视频' : '图片'}入口`);
+      expect(html).toContain(`本次尚未检查${kind === 'video' ? '视频' : '图片'}入口`);
+      expect(html).toContain('<summary>生成设置／入口检查</summary>');
+      expect(html).not.toMatch(/<details[^>]*id="shot-entry-[^"]*"[^>]*\sopen(?:="")?/);
     }
     usePetStoryStore.setState({ capabilityCheckedInSession: true });
     const html = renderToStaticMarkup(React.createElement(CanvasMediaNode, { project, shot: project.plan!.shots[0], kind: 'video', disabled: false }));

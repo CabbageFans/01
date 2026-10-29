@@ -21,6 +21,38 @@ beforeEach((): void => {
 afterEach((): void => { cleanup(); unregisterPetStoryDraft(`${project.id}:TEST-draft`); usePetStoryStore.setState(initial); vi.restoreAllMocks(); });
 
 describe('自由对话的具体回复选择与确认', (): void => {
+  it.each([false, true])('选中具体图片回复才收取到锁定首帧候选，完整预览后另行采用（部分下载失败=%s）', async (partial): Promise<void> => {
+    project.chatAdjustment!.target = { shotId: 'shot_1', promptKind: 'firstFrame' };
+    const selected = { ...reply('TEST-image-reply', ''), imageUrls: ['https://p3.byteimg.com/TEST-frame.png'] }; project.chatAdjustment!.replies = [selected];
+    let imported = 0;
+    const importImages = vi.fn(async (): Promise<void> => {
+      imported++;
+      usePetStoryStore.setState({ error: partial && imported === 1 ? 'TEST 第二张原图下载失败，先取得的候选保留' : '', project: { ...project, revision: 2, assets: [{ id: 'TEST-image-candidate', kind: 'firstFrame', shotId: 'shot_1', relativePath: 'TEST-candidate.png', imageReview: { state: 'candidate', target: { shotId: 'shot_1', kind: 'firstFrame' }, basisHash: 'TEST', sourceReply: { adjustmentId: 'TEST-adjustment', replyKey: selected.key, urlHash: 'TEST' } } }] } });
+    });
+    const adopt = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ project, importChatImages: importImages, adoptShotImage: adopt });
+    Object.defineProperty(window, 'electronAPI', { configurable: true, value: { petstory: { readReference: vi.fn(async (): Promise<{ success: true; data: string }> => ({ success: true, data: 'data:image/png;base64,TEST-preview' })) } } });
+    render(<PetStoryChatAdjustmentPanel />); fireEvent.click(screen.getByRole('button', { name: /选择回复/ }));
+    expect(importImages).not.toHaveBeenCalled(); expect(screen.queryByRole('button', { name: '查看并采用图片' })).toBeNull();
+    fireEvent.click(screen.getByRole('radio', { name: '豆包回复 1' })); fireEvent.click(screen.getByRole('button', { name: '查看并采用图片' }));
+    let dialog = (await screen.findByText('镜头 1 · 首帧 · 选择图片')).closest('[role="dialog"]') as HTMLElement;
+    expect(importImages).toHaveBeenCalledExactlyOnceWith(selected.key); expect(adopt).not.toHaveBeenCalled(); expect(usePetStoryStore.getState().project?.adoptedImages).toBeUndefined();
+    if (partial) {
+      expect(within(dialog).getByText('TEST 第二张原图下载失败，先取得的候选保留')).toBeDefined(); expect(usePetStoryStore.getState().project?.chatAdjustment?.status).toBe('active');
+      fireEvent.click(within(dialog).getByRole('button', { name: '重试剩余原图' })); await waitFor((): void => expect(importImages).toHaveBeenCalledTimes(2));
+      dialog = (await screen.findByText('镜头 1 · 首帧 · 选择图片')).closest('[role="dialog"]') as HTMLElement;
+      expect(within(dialog).queryByText('TEST 第二张原图下载失败，先取得的候选保留')).toBeNull(); expect(adopt).not.toHaveBeenCalled();
+    }
+    const confirm = within(dialog).getByRole('button', { name: '采用这张' }); await waitFor((): void => expect(confirm.hasAttribute('disabled')).toBe(false)); fireEvent.click(confirm);
+    await waitFor((): void => expect(adopt).toHaveBeenCalledExactlyOnceWith('shot_1', 'firstFrame', 'TEST-image-candidate'));
+  });
+
+  it('方案或视频提示词没有图片归属时说明入口，不猜测应用到首帧', (): void => {
+    project.chatAdjustment!.replies = [{ ...reply('TEST-image-reply', ''), imageUrls: ['https://p3.byteimg.com/TEST-frame.png'] }]; usePetStoryStore.setState({ project });
+    render(<PetStoryChatAdjustmentPanel />); choose(1);
+    expect(screen.getByText('当前对象没有图片用途。请从具体基础素材、首帧或尾帧打开调整后收取图片。')).toBeDefined();
+    expect(screen.queryByRole('button', { name: '查看并采用图片' })).toBeNull(); expect(screen.getByRole('button', { name: '应用到当前创作' }).hasAttribute('disabled')).toBe(true);
+  });
   it.each([
     { body: { requestId: 'TEST-hidden-request', targetIds: ['TEST-hidden-target'], understanding: 'TEST 真实回复的故事理解', sceneDesign: 'TEST 真实回复的场景安排', shots: [{ id: 'TEST-hidden-shot', order: 1, action: 'TEST 真实回复的动作' }] }, visible: 'TEST 真实回复的故事理解' },
     { body: { requestId: 'TEST-hidden-request', optimized: 'TEST 真实回复的完整提示词，保留 {模型正文中的括号}。' }, visible: 'TEST 真实回复的完整提示词，保留 {模型正文中的括号}。' },

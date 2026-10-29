@@ -11,6 +11,12 @@ import { validateCastBindings } from './petstoryCast';
 import { validatePetStoryAdjustments } from './petstoryAdjustmentValidation';
 import { imageTargetBasis, imageTargetMatches, selectedShotImageId, reconcileAdoptedImages } from './petstoryImageReview';
 
+/** 内部收取来源与候选一起原子保存，不出现“图片已存但回复来源未存”的中间状态。 */
+interface PetStoryImageImportSource {
+  taskId: string; runId?: string; downloadJobId: string;
+  sourceReply: { adjustmentId: string; replyKey: string; urlHash: string };
+}
+
 export async function projectPath(directory: string, relative: string): Promise<string> {
   if (!relative || path.isAbsolute(relative) || relative.includes('\\') || relative.split('/').some((p: string): boolean => p === '..' || p === '.' || !p)) {
     throw new Error('项目文件路径越界');
@@ -134,6 +140,7 @@ function validateImageReview(asset: PetStoryAsset): void {
       const review = asset.imageReview;
       if (!['candidate', 'adopted'].includes(review.state) || !/^[a-f0-9]{64}$/.test(review.basisHash) || !imageTargetMatches(asset, review.target)
         || review.state === 'adopted' && (!review.adoptedAt || !Number.isFinite(Date.parse(review.adoptedAt)) || review.sha256 !== asset.validation?.sha256)) throw new Error('图片候选或采用记录无效');
+      if (review.sourceReply && (!/^[a-f0-9-]{36}$/i.test(review.sourceReply.adjustmentId) || !/^[a-f0-9]{64}$/.test(review.sourceReply.replyKey) || !/^[a-f0-9]{64}$/.test(review.sourceReply.urlHash))) throw new Error('图片回复来源记录无效');
     }
 }
 function validateProduction(result: PetStoryProject, ids: Set<string>): void {
@@ -381,23 +388,24 @@ export class PetStoryProjects {
     // 历史列表只负责定位预览；采用必须经 approveMaterials / adoptImage 明确确认。
     return p;
   }
-  async addMaterialImage(id: string, revision: number, materialId: string, sourcePath: string): Promise<PetStoryProject> {
+  async addMaterialImage(id: string, revision: number, materialId: string, sourcePath: string, source?: PetStoryImageImportSource): Promise<PetStoryProject> {
     const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
     const m = p.materials?.find((m): boolean => m.id === materialId);
     if (!m) throw new Error('基础素材不存在');
     const info = await fs.lstat(sourcePath); const ext = path.extname(sourcePath).toLowerCase();
     if (!info.isFile() || info.isSymbolicLink() || info.size > 20 * 1024 * 1024 || !['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) throw new Error('基础图格式或大小无效');
     const validation = await validatePetStoryMedia(sourcePath, 'image');
-    const asset: PetStoryAsset = { id: randomUUID(), materialId, kind: m.kind, relativePath: `materials/${randomUUID()}${ext}`, characterId: m.kind === 'character' ? m.entityId : undefined, validation };
+    const asset: PetStoryAsset = { id: randomUUID(), materialId, kind: m.kind, relativePath: `materials/${randomUUID()}${ext}`, characterId: m.kind === 'character' ? m.entityId : undefined, validation,
+      ...(source ? { taskId: source.taskId, runId: source.runId, downloadJobId: source.downloadJobId } : {}) };
     const file = await projectPath(this.directory(id), asset.relativePath);
     await fs.mkdir(path.dirname(file), { recursive: true }); await projectPath(this.directory(id), asset.relativePath);
     await fs.copyFile(sourcePath, file, 1);
     if ((await mediaDigest(file)).sha256 !== validation.sha256) throw new Error('基础图片复制校验失败，原绑定保留');
-    asset.imageReview = { state: 'candidate', target: { materialId }, basisHash: imageTargetBasis(p, { materialId }) };
+    asset.imageReview = { state: 'candidate', target: { materialId }, basisHash: imageTargetBasis(p, { materialId }), ...(source ? { sourceReply: source.sourceReply } : {}) };
     p.assets.push(asset);
     return this.write(p);
   }
-  async addShotImage(id: string, revision: number, shotId: string, kind: 'firstFrame' | 'lastFrame', sourcePath: string): Promise<PetStoryProject> {
+  async addShotImage(id: string, revision: number, shotId: string, kind: 'firstFrame' | 'lastFrame', sourcePath: string, source?: PetStoryImageImportSource): Promise<PetStoryProject> {
     const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
     const target: PetStoryImageTarget = { shotId, kind };
     const basisHash = imageTargetBasis(p, target);
@@ -405,7 +413,8 @@ export class PetStoryProjects {
     if (!info.isFile() || info.isSymbolicLink() || info.size > 20 * 1024 * 1024 || !['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) throw new Error('图片格式或大小无效');
     const validation = await validatePetStoryMedia(sourcePath, 'image');
     const asset: PetStoryAsset = { id: randomUUID(), kind: kind === 'lastFrame' ? 'plannedEndImage' : 'firstFrame', shotId,
-      relativePath: `shots/${shotId}/${randomUUID()}${ext}`, validation, imageReview: { state: 'candidate', target, basisHash } };
+      relativePath: `shots/${shotId}/${randomUUID()}${ext}`, validation, imageReview: { state: 'candidate', target, basisHash, ...(source ? { sourceReply: source.sourceReply } : {}) },
+      ...(source ? { taskId: source.taskId, runId: source.runId, downloadJobId: source.downloadJobId } : {}) };
     const file = await projectPath(this.directory(id), asset.relativePath);
     await fs.mkdir(path.dirname(file), { recursive: true }); await projectPath(this.directory(id), asset.relativePath);
     await fs.copyFile(sourcePath, file, 1);
@@ -426,7 +435,7 @@ export class PetStoryProjects {
     asset.validation = validation;
     const oldId = material?.selectedAssetId || (target.shotId && target.kind ? selectedShotImageId(p, target.shotId, target.kind) : undefined);
     const adoptedAt = new Date().toISOString();
-    asset.imageReview = { state: 'adopted', target, basisHash, adoptedAt, sha256: validation.sha256 };
+    asset.imageReview = { state: 'adopted', target, basisHash, adoptedAt, sha256: validation.sha256, ...(asset.imageReview?.sourceReply ? { sourceReply: asset.imageReview.sourceReply } : {}) };
     asset.needsReview = undefined;
     this.applyImageSelection(p, target, asset, oldId, adoptedAt, validation.sha256);
   }

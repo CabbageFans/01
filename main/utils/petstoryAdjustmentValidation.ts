@@ -14,7 +14,7 @@ function validateAdjustment(p: PetStoryProject, a: PetStoryChatAdjustment): void
   const keys = new Set<string>();
   for (const reply of a.replies) {
     validateReply(reply);
-    const key = createHash('sha256').update(JSON.stringify({ text: reply.text, precedingUserText: reply.precedingUserText, turnId: reply.turnId || '', messageId: reply.messageId || '' })).digest('hex');
+    const key = createHash('sha256').update(JSON.stringify({ text: reply.text, precedingUserText: reply.precedingUserText, turnId: reply.turnId || '', messageId: reply.messageId || '', ...(reply.imageUrls?.length ? { imageUrls: reply.imageUrls } : {}) })).digest('hex');
     if (reply.key !== key || keys.has(key)) throw new Error('豆包回复归属不明确，未覆盖当前内容');
     keys.add(key);
   }
@@ -28,7 +28,9 @@ function validateAdjustmentTarget(a: PetStoryChatAdjustment): void {
     || target.promptKind && !target.shotId) throw new Error('豆包调整目标无效');
 }
 function validateReply(reply: PetStoryConversationReply): void {
-    if (!reply || typeof reply.text !== 'string' || !reply.text.trim() || reply.text.length > 250_000 || typeof reply.precedingUserText !== 'string' || reply.precedingUserText.length > 250_000
+    if (!reply || typeof reply.text !== 'string' || !reply.text.trim() && !reply.imageUrls?.length || reply.text.length > 250_000 || typeof reply.precedingUserText !== 'string' || reply.precedingUserText.length > 250_000
+      || reply.imageUrls !== undefined && (!Array.isArray(reply.imageUrls) || !reply.imageUrls.length || reply.imageUrls.length > 20 || new Set(reply.imageUrls).size !== reply.imageUrls.length
+        || reply.imageUrls.some((url: unknown): boolean => typeof url !== 'string' || url.length > 8192 || !/^https:\/\//i.test(url)))
       || !validDate(reply.capturedAt) || reply.turnId !== undefined && (typeof reply.turnId !== 'string' || reply.turnId.length > 256)
       || reply.messageId !== undefined && (typeof reply.messageId !== 'string' || reply.messageId.length > 256)) throw new Error('豆包回复快照无效');
 }

@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PetStoryChatAdjustment, PetStoryChatJob, PetStoryConversationReply, PetStoryPlan, PetStoryProject, Task, TaskAddParams, TaskRunSnapshot } from '@doubao-studio/contracts';
+import type { DownloadJob, PetStoryChatAdjustment, PetStoryChatJob, PetStoryConversationReply, PetStoryPlan, PetStoryProject, Task, TaskAddParams, TaskDownloadOutputsParams, TaskDownloadOutputsResult, TaskRunSnapshot } from '@doubao-studio/contracts';
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
 import { PetStoryChatService } from '../../main/utils/petstoryChat';
 import { PetStoryAdjustmentService, adjustmentConversationUrl, conversationReplyKey } from '../../main/utils/petstoryAdjustment';
@@ -11,6 +11,7 @@ import { claimConversationGuard, hasConversationGuard, releaseConversationGuard 
 import { TaskService } from '../../main/core/TaskService';
 import { syncMaterials } from '../../main/utils/petstoryMaterials';
 import snapshot from '../fixtures/storyboard-five-shots.json';
+import { mediaCommand } from '../../main/utils/petstoryMedia';
 
 let directory: string; let projects: PetStoryProjects; let project: PetStoryProject; let core: TaskService; let chats: PetStoryChatService; let service: PetStoryAdjustmentService; let stored: Task[]; let source: PetStoryChatJob;
 const url = 'https://www.doubao.com/chat/TEST-original-conversation';
@@ -70,6 +71,77 @@ afterEach(async (): Promise<void> => {
 });
 
 describe('具体回复与目标保护', (): void => {
+  it('选择具体纯图片回复后沿原账号下载并保存候选，未确认前保留旧图；重收取不重复下载', async (): Promise<void> => {
+    project = await projects.confirmStory(project.id, project.revision);
+    const file = path.join(directory, 'TEST-reply.png'); await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=green:s=64x96', '-frames:v', '1', '-y', file]);
+    project = await projects.addShotImage(project.id, project.revision, target.shotId, target.promptKind, file); const old = project.assets.at(-1)!;
+    project = await projects.adoptImage(project.id, project.revision, { shotId: target.shotId, kind: target.promptKind }, old.id);
+    const adjustment = await begin(); const jobs: DownloadJob[] = []; const beforeTasks = structuredClone(stored);
+    const download = vi.fn(async (params: TaskDownloadOutputsParams): Promise<TaskDownloadOutputsResult> => {
+      const item = params.outputs[0]; const job: DownloadJob = { id: `TEST-download-${jobs.length}`, taskId: item.taskId, accountId: item.accountId, mode: 'image', url: item.outputs[0], status: 'done', filePath: file, attempts: 1, saveDir: directory, createdAt: project.updatedAt, updatedAt: project.updatedAt };
+      jobs.push(job); return { success: true, count: 1, failed: 0, jobIds: [job.id] };
+    });
+    const images = new PetStoryAdjustmentService(projects, { list: (): Task[] => stored, create: (): never => { throw new Error('不可新增生成任务'); } }, chats, { downloads: (): DownloadJob[] => jobs, download });
+    const content = { ...reply('', 7), imageUrls: ['https://p3.byteimg.com/TEST-chosen.png', 'https://p3.byteimg.com/TEST-chosen-2.png'] }; content.key = conversationReplyKey(content);
+    project = (await images.capture(project.id, adjustment.id, url, [content])).project!;
+    const result = await images.importImages(project.id, project.revision, adjustment.id, content.key); expect(result.success).toBe(true); project = result.project!;
+    expect(project.adoptedImages?.[target.shotId]?.firstFrameId).toBe(old.id); expect(project.assets).toHaveLength(3);
+    const candidate = project.assets.at(-1)!; expect(candidate.imageReview).toMatchObject({ state: 'candidate', target: { shotId: target.shotId, kind: target.promptKind }, sourceReply: { adjustmentId: adjustment.id, replyKey: content.key } });
+    expect(download).toHaveBeenCalledTimes(2); expect(download.mock.calls[0][0].outputs[0]).toMatchObject({ taskId: source.taskId, accountId: project.accountId, mode: 'image', outputs: [content.imageUrls[0]] });
+    project = (await images.importImages(project.id, project.revision, adjustment.id, content.key)).project!;
+    expect(download).toHaveBeenCalledTimes(2); expect(project.assets).toHaveLength(3); expect(stored).toEqual(beforeTasks);
+    project = await projects.adoptImage(project.id, project.revision, { shotId: target.shotId, kind: target.promptKind }, candidate.id);
+    expect(project.adoptedImages?.[target.shotId]?.firstFrameId).toBe(candidate.id); expect(project.assets.find((asset): boolean => asset.id === old.id)).toBeDefined();
+    expect(project.assets.find((asset): boolean => asset.id === candidate.id)?.imageReview?.sourceReply?.replyKey).toBe(content.key);
+  });
+
+  it('图片回复没有本次稳定核对、key不符或来源不明时不会下载或改变正式图片', async (): Promise<void> => {
+    project = await projects.confirmStory(project.id, project.revision); const adjustment = await begin();
+    const download = vi.fn(async (): Promise<TaskDownloadOutputsResult> => ({ success: false, count: 0, failed: 1 }));
+    const images = new PetStoryAdjustmentService(projects, { list: (): Task[] => stored, create: (): never => { throw new Error('不可新增生成任务'); } }, chats, { downloads: (): DownloadJob[] => [], download });
+    const content = { ...reply('', 8), imageUrls: ['https://unrelated.invalid/TEST.png'] }; content.key = conversationReplyKey(content);
+    await expect(images.importImages(project.id, project.revision, adjustment.id, content.key)).rejects.toThrow('核对');
+    await expect(images.capture(project.id, adjustment.id, url, [{ ...content, imageUrls: ['https://p3.byteimg.com/TEST.png'] }])).rejects.toThrow('读取期间发生变化');
+    project = (await images.capture(project.id, adjustment.id, url, [content])).project!;
+    const result = await images.importImages(project.id, project.revision, adjustment.id, content.key);
+    expect(result.success).toBe(false); expect(result.error).toMatch(/不是可核对的豆包图片来源/); expect(download).not.toHaveBeenCalled(); expect(result.project?.assets).toEqual(project.assets);
+  });
+  it('图片候选及回复来源一次原子保存；写入失败再试不会遗留无来源候选或重复图片', async (): Promise<void> => {
+    project = await projects.confirmStory(project.id, project.revision); const adjustment = await begin();
+    const file = path.join(directory, 'TEST-atomic.png'); await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=red:s=64x96', '-frames:v', '1', '-y', file]);
+    const imageUrl = 'https://p3.byteimg.com/TEST-atomic.png'; const job: DownloadJob = { id: 'TEST-atomic-download', taskId: source.taskId, accountId: project.accountId, mode: 'image', url: imageUrl, status: 'done', filePath: file, attempts: 1, saveDir: directory, createdAt: project.updatedAt, updatedAt: project.updatedAt };
+    const download = vi.fn(async (): Promise<TaskDownloadOutputsResult> => { throw new Error('已下载原图不重复请求'); });
+    const images = new PetStoryAdjustmentService(projects, { list: (): Task[] => stored, create: (): never => { throw new Error('不可新增生成任务'); } }, chats, { downloads: (): DownloadJob[] => [job], download });
+    const content = { ...reply('', 10), imageUrls: [imageUrl] }; content.key = conversationReplyKey(content); project = (await images.capture(project.id, adjustment.id, url, [content])).project!;
+    const before = await fs.readFile(path.join(directory, 'project.json'), 'utf8');
+    const failedWrite = vi.spyOn(projects, 'write').mockRejectedValueOnce(new Error('TEST 原子保存失败'));
+    const failure = await images.importImages(project.id, project.revision, adjustment.id, content.key);
+    expect(failedWrite).toHaveBeenCalledOnce(); expect(failedWrite.mock.calls[0][0].assets[0].imageReview?.sourceReply).toMatchObject({ adjustmentId: adjustment.id, replyKey: content.key });
+    expect(failure.success).toBe(false); expect(failure.project?.assets).toEqual([]); expect(await fs.readFile(path.join(directory, 'project.json'), 'utf8')).toBe(before);
+    failedWrite.mockRestore(); project = (await images.importImages(project.id, project.revision, adjustment.id, content.key)).project!;
+    expect(project.assets).toHaveLength(1); expect(project.assets[0].imageReview?.sourceReply?.replyKey).toBe(content.key); expect(download).not.toHaveBeenCalled();
+  });
+  it('回复多图的后续下载失败保住先取得的候选，明确重试只补原回复缺图', async (): Promise<void> => {
+    project = await projects.confirmStory(project.id, project.revision); const adjustment = await begin();
+    const file = path.join(directory, 'TEST-retry.png'); await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=blue:s=64x96', '-frames:v', '1', '-y', file]);
+    const jobs: DownloadJob[] = []; let failSecond = true;
+    const download = vi.fn(async (params: TaskDownloadOutputsParams): Promise<TaskDownloadOutputsResult> => {
+      const item = params.outputs[0]; const selectedUrl = item.outputs[0];
+      if (failSecond && selectedUrl.endsWith('second.png')) return { success: false, count: 0, failed: 1 };
+      const job: DownloadJob = { id: `TEST-retry-${jobs.length}`, taskId: item.taskId, accountId: item.accountId, mode: 'image', url: selectedUrl, status: 'done', filePath: file, attempts: 1, saveDir: directory, createdAt: project.updatedAt, updatedAt: project.updatedAt };
+      jobs.push(job); return { success: true, count: 1, failed: 0, jobIds: [job.id] };
+    });
+    const images = new PetStoryAdjustmentService(projects, { list: (): Task[] => stored, create: (): never => { throw new Error('不可新增生成任务'); } }, chats, { downloads: (): DownloadJob[] => jobs, download });
+    const content = { ...reply('', 9), imageUrls: ['https://p3.byteimg.com/TEST-first.png', 'https://p3.byteimg.com/TEST-second.png'] }; content.key = conversationReplyKey(content);
+    project = (await images.capture(project.id, adjustment.id, url, [content])).project!;
+    const partial = await images.importImages(project.id, project.revision, adjustment.id, content.key); project = partial.project!;
+    expect(partial.success).toBe(false); expect(project.assets).toHaveLength(1); expect(project.assets[0].imageReview?.state).toBe('candidate'); expect(project.adoptedImages).toBeUndefined();
+    failSecond = false; project = (await images.capture(project.id, adjustment.id, url, [content])).project!;
+    const completed = await images.importImages(project.id, project.revision, adjustment.id, content.key); project = completed.project!;
+    expect(completed.success).toBe(true); expect(project.assets).toHaveLength(2);
+    expect(download.mock.calls.map(([params]): string => params.outputs[0].outputs[0])).toEqual([content.imageUrls[0], content.imageUrls[1], content.imageUrls[1]]);
+    expect(stored).toHaveLength(1); expect(project.adoptedImages).toBeUndefined();
+  });
   it('尚无正式方案时可从未采用repair方案候选进入自由聊，不提前采用候选或创建任务', async (): Promise<void> => {
     project.plan = undefined; project.materials = undefined; project.storyApproval = undefined; project = await projects.write(project);
     project = (await chats.prepareRuntime(project.id, project.revision, 'analysis')).project!;

@@ -29,6 +29,7 @@ beforeEach((): void => {
   project = {
     schemaVersion: 1, id: 'TEST-project', studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 1, updatedAt: now,
     source: { kind: 'script', url: '', status: 'review_required' }, assets: [],
+    storyApproval: { hash: 'TEST', at: now },
     materials: [{ id: 'scene:location', entityId: 'location', kind: 'scene', name: 'TEST场景', designHash: 'TEST', prompt: structuredClone(prompt) }],
     plan: { sourceSummary: 'TEST', adaptedStory: 'TEST', characters: [], props: [], scenes: [], shots: [{ id: 'shot', order: 1, scene: 'TEST', action: 'TEST', startState: 'TEST', endState: 'TEST', characterIds: [], durationSeconds: 5, transition: 'cut', requestedMode: 'first_frame', prompts: { firstFrame: structuredClone(prompt), video: structuredClone(prompt) } }] },
     jobs: [{ id: 'TEST-review', kind: 'review', taskId: 'TEST-task', inputHash: 'TEST', sourceUrl: '', status: 'applied', requestId: 'TEST-request', resultStatus: 'candidate', reviewInputFinals: { 'scene:location': 'TEST', 'shot:firstFrame': 'TEST', 'shot:video': 'TEST' }, parsedResult: { issues: [issue('material-error', 'scene:location', 'error'), issue('material-suggestion', 'scene:location', 'suggestion'), issue('frame-suggestion', 'shot:firstFrame', 'suggestion'), issue('video-error', 'shot:video', 'error')] } }],

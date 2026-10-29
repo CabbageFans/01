@@ -1,0 +1,23 @@
+.petstory-materials-panel .ant-card-head-title { white-space: normal; }
+.petstory-material-plan-required,
+.petstory-material-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; width: 100%; }
+.petstory-material-settings-links { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 16px; }
+.petstory-material-settings-links > details[open] { flex-basis: 100%; max-width: 100%; }
+.petstory-material-settings-links > details > .ant-space { margin-top: 12px; }
+.petstory-material-filters .ant-btn[aria-pressed="true"] { background: #e8f5f2; color: #087365; }
+.petstory-material-card .ant-card-head-title > .ant-space { gap: 6px !important; }
+.petstory-material-card .ant-card-head-title .ant-tag { margin-inline-end: 0; font-size: 11px; }
+.petstory-material-card .ant-card-body { min-width: 0; }
+.petstory-material-card .ant-collapse { background: #fff; }
+.petstory-material-card .ant-collapse-header { font-size: 12px; }
+.petstory-material-card .ant-btn { min-height: 30px; }
+.petstory-material-card .prompt-readonly { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.petstory-material-reason { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 2px 6px; font-size: 12px; line-height: 1.6; color: #895608; }
+.petstory-material-reason > span { flex: 1 1 180px; }
+.petstory-material-reason .ant-btn { height: auto; min-height: 24px; padding: 0; line-height: 1.6; }
+.petstory-material-more > .ant-space { margin-top: 10px; }
+.petstory-material-more summary { font-size: 12px; }
+@media (max-width: 1300px) {
+  .petstory-material-settings-links { width: 100%; }
+  .petstory-materials-panel .petstory-material-grid { grid-template-columns: repeat(auto-fit, minmax(min(265px, 100%), 1fr)); }
+}

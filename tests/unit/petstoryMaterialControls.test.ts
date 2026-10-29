@@ -40,6 +40,7 @@ beforeEach((): void => {
   project = {
     schemaVersion: 1, id: 'TEST-project', studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 1,
     source: { kind: 'script', url: '', status: 'review_required' }, updatedAt: now, assets: [],
+    storyApproval: { hash: 'TEST', at: now },
     plan: { sourceSummary: 'TEST', adaptedStory: 'TEST', characters: [], props: [], scenes: [], shots: [] },
     materials: [{ id: 'scene:location', kind: 'scene', entityId: 'location', name: 'TEST场景', designHash: 'TEST', prompt: { original: 'TEST原文', optimized: 'TEST候选', final: 'TEST原文', edited: false, rulesVersion: 'TEST', candidateJobId: 'TEST-job' } }],
     jobs: [{ id: 'TEST-job', kind: 'materialPrompt', materialId: 'scene:location', taskId: 'TEST-task', inputHash: 'TEST', sourceUrl: '', status: 'applied', createdAt: now, requestId: 'TEST-request', resultStatus: 'candidate', rawText: JSON.stringify({ optimized: 'TEST候选' }) }],
@@ -62,13 +63,19 @@ describe('素材文字与媒体独立门禁', (): void => {
       project.promptModel = model; expect(petStoryWritingModel(project)).toBe(promptWritingTarget(project, {}).model);
     }
   });
-  it('剧本未确认时单项生成、审查、编辑和候选采用可用，图片操作全部禁用', (): void => {
+  it('剧本未确认只保留回到方案审阅的单一操作，不投影素材和入口设置', (): void => {
+    delete project.storyApproval;
+    const html = render();
+    expect(button(html, '查看并确认方案')).not.toContain('disabled');
+    expect(html.match(/<button\b/g)).toHaveLength(1);
+    for (const label of ['重新生成提示词', '检查正文', '采用此候选', '上传图片', '生成图片', '入口检查', '批量准备', '基础图最终提示词']) expect(html).not.toContain(label);
+  });
+  it('方案已确认后素材文字编辑与候选采用保留，未展开不触发请求', (): void => {
     const html = render();
     for (const label of ['重新生成提示词', '检查正文', '采用此候选']) expect(button(html, label)).not.toContain('disabled');
     expect(editor(html)).not.toContain('disabled');
-    for (const label of ['上传图片', '生成图片']) expect(button(html, label)).toContain('disabled');
-    expect(html).not.toContain('scene:location选择已有图片'); // 选择历史不再直接改正式采用关系。
-    expect(html).not.toContain('采用这张'); // 没有图片预览时不存在采用动作。
+    expect(html).not.toContain('scene:location选择已有图片');
+    expect(html).not.toContain('采用这张');
   });
   it('锁定仍阻止编辑与采用，免费Chat未核对或有待处理请求时禁止新的文字请求', (): void => {
     const locked = render(true);
@@ -88,6 +95,16 @@ describe('素材文字与媒体独立门禁', (): void => {
     usePetStoryStore.setState({ capability });
     expect(button(render(), '生成图片')).not.toContain('disabled');
     expect(button(render(), '上传图片')).not.toContain('disabled');
+  });
+  it('待采用的真实提示词回复可直接审阅，历史已采用或过期正文不冒充新候选', (): void => {
+    project.materials![0].prompt.final = '';
+    usePetStoryStore.setState({ freeChatConfirmed: false, capability: null, capabilityCheckedInSession: false });
+    expect(button(render(), '查看并采用提示词')).not.toContain('disabled');
+    for (const resultStatus of ['adopted', 'stale'] as const) {
+      project.jobs[0].resultStatus = resultStatus;
+      expect(render()).not.toContain('查看并采用提示词');
+      expect(button(render(), '生成提示词')).toContain('disabled');
+    }
   });
   it('结束等待保留原bound记录，素材重生与编辑计划恢复；无关待收取素材不锁本项', (): void => {
     const job = project.jobs[0]; job.status = 'bound'; job.endedWaitingAt = now;

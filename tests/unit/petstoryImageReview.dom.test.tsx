@@ -21,6 +21,32 @@ beforeEach((): void => {
 afterEach((): void => { usePetStoryStore.setState(original); vi.restoreAllMocks(); });
 
 describe('图片候选预览与明确采用', (): void => {
+  it('没有提示词时只突出生成提示词，入口尚未检查不会阻断文字准备', (): void => {
+    project.assets = []; const prepare = vi.fn(async (): Promise<void> => undefined); const generate = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" disabled={false} generationDisabled promptReady={false} onPreparePrompt={prepare} onGenerate={generate} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    const action = screen.getByRole('button', { name: '生成提示词' });
+    expect(action.classList.contains('ant-btn-primary')).toBe(true); expect(action.hasAttribute('disabled')).toBe(false);
+    expect(screen.queryByRole('button', { name: '生成图片' })).toBeNull(); expect(screen.getByRole('button', { name: '上传图片' })).toBeDefined();
+    fireEvent.click(action); expect(prepare).toHaveBeenCalledOnce(); expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('新候选到来时保留已采用缩略图，只突出查看并采用', (): void => {
+    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    expect(screen.getByRole('button', { name: '查看镜头 3 · 首帧已采用图片' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: '查看图片' })).toBeNull();
+    expect(screen.getAllByRole('button').filter((button): boolean => button.classList.contains('ant-btn-primary'))).toEqual([screen.getByRole('button', { name: '查看并采用' })]);
+  });
+
+  it.each([false, true])('当前旧图需复核时可预览并明确继续采用（外部确认失效=%s）', async (external): Promise<void> => {
+    project.assets = [image('old', 'adopted')]; project.assets[0].needsReview = !external;
+    const adopt = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" currentNeedsReview={external} disabled={false} onUpload={async (): Promise<void> => undefined} onAdopt={adopt} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看并复核' })); const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('需要复核')).toBeDefined();
+    const confirm = within(dialog).getByRole('button', { name: '确认继续使用' }); await waitFor((): void => expect(confirm.hasAttribute('disabled')).toBe(false));
+    expect(adopt).not.toHaveBeenCalled(); fireEvent.click(confirm); await waitFor((): void => expect(adopt).toHaveBeenCalledExactlyOnceWith('old'));
+  });
+
   it('预览、切换和关闭不写入，采用仅传入用户选中的那张', async (): Promise<void> => {
     const adopt = vi.fn(async (): Promise<void> => undefined);
     render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onUpload={async (): Promise<void> => undefined} onAdopt={adopt} />);

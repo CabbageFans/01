@@ -49,7 +49,7 @@ export function journeyShotAsset(project: PetStoryProject, shot: PetStoryShot, k
 export function journeyAssetMatchesPrompt(asset: PetStoryAsset | undefined, prompt: PetStoryPrompt | undefined): boolean {
   if (!asset?.validation?.decoded || asset.needsReview) return false;
   // 上传图片的采用事实独立于模型提示词；缺少生成正文不代表图片未确认。
-  if (asset.imageReview?.state === 'adopted' && !asset.taskId) return true;
+  if (asset.imageReview?.state === 'adopted' && (!asset.taskId || !!asset.imageReview.sourceReply)) return true;
   return !!prompt?.final.trim() && !prompt.needsReview && asset.generationFinal === prompt.final;
 }
 
@@ -66,9 +66,10 @@ function requiresLastFrame(project: PetStoryProject, shot: PetStoryShot): boolea
   return resolved === 'first_last_frame' || !resolved && !!shot.prompts.lastFrame;
 }
 
-function materialConfirmationMatches(project: PetStoryProject, material: PetStoryMaterial): boolean {
+export function journeyMaterialImageApproved(project: PetStoryProject, material: PetStoryMaterial): boolean {
   const asset = project.assets.find((item): boolean => item.id === material.selectedAssetId && item.kind === material.kind);
-  if (!asset?.validation?.decoded || !material.approved || material.approved.assetId !== asset.id || material.approved.sha256 !== asset.validation.sha256) return false;
+  if (!asset?.validation?.decoded || asset.needsReview || asset.imageReview?.state === 'candidate' || !material.approved || material.approved.assetId !== asset.id || material.approved.sha256 !== asset.validation.sha256) return false;
+  if (asset.imageReview?.state === 'adopted' && (asset.imageReview.sha256 !== asset.validation.sha256 || !asset.imageReview.adoptedAt)) return false;
   if (material.kind !== 'character') return true;
   const character = project.plan?.characters.find((item): boolean => item.id === material.entityId);
   return !!character && material.approved.identity?.assetId === asset.id && material.approved.identity.description === character.description
@@ -98,7 +99,7 @@ export function selectPetStoryJourney(project: PetStoryProject, tasks: Task[] = 
     materials: {
       total: materials.length,
       selected: materials.filter((material): boolean => project.assets.some((asset): boolean => asset.id === material.selectedAssetId && asset.kind === material.kind)).length,
-      confirmed: materials.filter((material): boolean => materialConfirmationMatches(project, material)).length,
+      confirmed: materials.filter((material): boolean => journeyMaterialImageApproved(project, material)).length,
       promptsSaved: materials.filter((material): boolean => !!material.prompt.final.trim()).length,
     },
     prompts: { total: prompts.length, saved: prompts.filter(({ prompt }): boolean => !!prompt.final.trim()).length, candidates: prompts.filter((item): boolean => hasNewCandidate(project, item)).length, needsReview: prompts.filter(({ prompt }): boolean => !!prompt.needsReview).length },

@@ -4,6 +4,7 @@ import type { PetStoryChatJob, PetStoryProject, Task } from '@doubao-studio/cont
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
+import { selectPlanReview } from '../utils/petstoryPlanReview';
 import { canStartBoundChat } from '../utils/petstoryCandidate';
 import { revealBrowser } from '../utils/workspace';
 import { canvasPromptNames } from './petStoryCanvasShared';
@@ -71,7 +72,7 @@ function openOriginalTask(task: Task): void {
 }
 
 /** 与原恢复服务共用，读结果和结束等待不受无关编辑草稿阻断。 */
-export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; job: PetStoryChatJob; task?: Task }> = ({ project, job, task }): React.ReactElement => {
+export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; job: PetStoryChatJob; task?: Task; compact?: boolean }> = ({ project, job, task, compact = false }): React.ReactElement => {
   const state = usePetStoryStore();
   const taskState = useTaskStore();
   const pending = !job.endedWaitingAt && ['bound', 'captured'].includes(job.status);
@@ -80,7 +81,7 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
   const conversation = resolveTaskConversationTarget(task);
   const localFormatFix = hasCutBindingIssue(job);
   const canRepair = !localFormatFix && job.status === 'invalid' && !['repair', 'revise'].includes(job.kind) && !!job.requestId && !project.jobs.some((item): boolean => item.kind === 'repair' && item.parentJobId === job.id);
-  return <><Space wrap className="mt-2" aria-label={`${petStoryJobTargetName(project, job)}处理操作`}>
+  const controls = <><Space wrap className="mt-2" aria-label={`${petStoryJobTargetName(project, job)}处理操作`}>
     {task && <Button size="small" onClick={(): void => openOriginalTask(task)}>{conversation.ok ? '打开对应豆包会话' : '打开执行账号豆包'}</Button>}
     {job.status !== 'applied' && <Button size="small" type={localFormatFix ? 'primary' : 'default'} disabled={state.busy || !task?.runtime?.chatResponse?.text && job.status !== 'captured'} onClick={(): void => { void state.collect(job.id); }}>{localFormatFix ? '读取原回复并整理分镜结构' : '重新保存回复'}</Button>}
     {canReconcile && <Button size="small" disabled={state.busy} onClick={(): void => { void state.recoverChat(job.id); }}>检查原回复（不重复发送）</Button>}
@@ -90,6 +91,26 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
     {!task && <Button size="small" disabled={state.busy} onClick={(): void => { void taskState.loadTasks(); }}>刷新任务记录</Button>}
     {(canStart || canRepair) && !state.freeChatConfirmed && <Checkbox onChange={(event): void => state.setFreeChatConfirmed(event.target.checked)}>本人已核对绑定账号普通 Chat 免费可用（继续此文字任务）</Checkbox>}
   </Space>{canReconcile && !conversation.ok && conversation.reason === 'CONVERSATION_URL_MISSING' && <p className="mt-2 text-amber-600" role="status">原任务未保存可直接打开的会话地址。请在右侧该账号的历史对话中找到原请求，再点击“检查原回复”；只有唯一匹配才会保存，不会重复发送。</p>}</>;
+  if (!compact) return controls;
+  let label = conversation.ok ? '核对原回复' : '打开执行账号豆包';
+  let action = (): void => { if (task) openOriginalTask(task); };
+  let requiresFree = false;
+  if (localFormatFix || job.status === 'captured' || job.status === 'bound' && task?.runtime?.chatResponse?.text) {
+    label = localFormatFix ? '读取原回复并整理分镜结构' : '重新保存回复';
+    action = (): void => { void state.collect(job.id); };
+  } else if (canReconcile) {
+    label = '检查原回复（不重复发送）'; action = (): void => { void state.recoverChat(job.id); };
+  } else if (canStart) {
+    label = '继续原文字任务（尚未发送）'; action = (): void => { void state.startBoundChat(job.id); }; requiresFree = true;
+  } else if (canRepair) {
+    label = '按具体缺项修订一次'; action = (): void => { void state.correctOnce(job.id); }; requiresFree = true;
+  } else if (!task) {
+    label = '刷新任务记录'; action = (): void => { void taskState.loadTasks(); };
+  }
+  return <><Button type="primary" disabled={state.busy || requiresFree && !state.freeChatConfirmed} onClick={action}>{label}</Button>
+    {requiresFree && !state.freeChatConfirmed && <Checkbox onChange={(event): void => state.setFreeChatConfirmed(event.target.checked)}>本人已核对绑定账号普通 Chat 免费可用（继续此文字任务）</Checkbox>}
+    <details className="petstory-secondary-tools"><summary>其他处理方式</summary>{controls}</details></>;
+
 };
 
 function currentJobs(project: PetStoryProject): PetStoryChatJob[] {
@@ -99,7 +120,7 @@ function currentJobs(project: PetStoryProject): PetStoryChatJob[] {
     const ancestors = jobRepairAncestors(project, job); const root = ancestors.at(-1) || job;
     const key = job.materialId || root.materialId || `${job.shotId || root.shotId || 'project'}:${job.promptKind || root.promptKind || root.kind}`;
     const latest = !latestTargets.has(key); latestTargets.add(key);
-    return !job.endedWaitingAt && (['bound', 'captured'].includes(job.status) || latest && (job.status === 'invalid' || job.status === 'applied' && ancestors.some((parent): boolean => parent.status === 'invalid')));
+    return !job.endedWaitingAt && (['bound', 'captured'].includes(job.status) || latest && job.status === 'invalid');
   });
 }
 
@@ -128,12 +149,14 @@ const PetStoryProductionRecovery: React.FC<{ project: PetStoryProject }> = ({ pr
 };
 
 /** 始终位于画布缩放之外；恢复入口直接可见，任务标识和原始记录留在诊断内。 */
-export const PetStoryCurrentTasks: React.FC<{ project: PetStoryProject; onContinue?: () => void }> = ({ project, onContinue }): React.ReactElement => {
+export const PetStoryCurrentTasks: React.FC<{ project: PetStoryProject; onContinue?: () => void; hidePlanRequests?: boolean }> = ({ project, onContinue, hidePlanRequests = false }): React.ReactElement => {
   const tasks = useTaskStore((store) => store.tasks);
-  const jobs = currentJobs(project);
+  const mergedPlanIds = new Set(hidePlanRequests ? selectPlanReview(project).family.map((job): string => job.id) : []);
+  const jobs = currentJobs(project).filter((job): boolean => !mergedPlanIds.has(job.id));
   const ended = project.jobs.filter((job): boolean => !!job.endedWaitingAt).length;
   const production = project.production;
   if (!jobs.length && (!production || production.state === 'complete') && !ended) return <></>;
+  if (!jobs.length && (!production || production.state === 'complete')) return <details className="petstory-secondary-tools"><summary>历史等待记录 · {ended} 条</summary><p>已结束等待的请求仍保留原记录；平台任务未被取消，迟到回复不会自动采用。</p>{onContinue && <Button size="small" onClick={onContinue}>继续其他可制作项</Button>}</details>;
   return <Card size="small" className="petstory-current-tasks" title="待处理事项">
     {!jobs.length && (!production || production.state === 'complete') && <p role="status">当前没有正在等待的任务。请按当前阶段的推荐操作继续。</p>}
     {jobs.map((job): React.ReactNode => {

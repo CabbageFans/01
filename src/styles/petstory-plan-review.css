@@ -1,0 +1,15 @@
+.petstory-plan-review { background: #fff; border: 1px solid #e3e8eb; border-radius: 12px; padding: 22px; color: #202a35; }
+.petstory-plan-review header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.petstory-plan-review h3 { margin: 0; font-size: 19px; font-weight: 600; }
+.petstory-plan-counts { color: #697584; font-size: 13px; margin: 16px 0 10px; }
+.petstory-plan-summary { line-height: 1.85; max-width: 960px; margin-bottom: 16px; overflow-wrap: anywhere; }
+.petstory-plan-attention { font-size: 13px; color: #895608; line-height: 1.7; }
+.petstory-plan-review ul { padding-left: 20px; font-size: 13px; color: #697584; }
+.petstory-plan-actions { margin: 4px 0 12px; }
+.petstory-plan-actions .ant-btn { height: 36px; }
+.petstory-plan-full { margin-top: 8px; }
+.petstory-plan-full > summary, .petstory-plan-diagnostics > summary { cursor: pointer; padding: 8px 0; font-size: 13px; }
+.petstory-plan-full > summary { color: #087f72; }
+.petstory-plan-scroll { max-height: min(560px, 65vh); overflow: auto; overscroll-behavior: contain; padding: 12px; background: #f8fafb; border: 1px solid #e3e8eb; border-radius: 8px; }
+.petstory-plan-diagnostics { border-top: 1px solid #e3e8eb; margin-top: 12px; padding-top: 4px; color: #697584; }
+@media (max-width: 1300px) { .petstory-plan-review { padding: 20px; } }

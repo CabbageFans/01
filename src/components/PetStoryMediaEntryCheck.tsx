@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, Button, Checkbox, Space, Typography } from 'antd';
+import { Button, Checkbox, Space, Typography } from 'antd';
 import type { PetStoryProject } from '@doubao-studio/contracts';
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { useAccountStore } from '../store/useAccountStore';
@@ -26,7 +26,7 @@ export const PetStoryMediaEntryCheck: React.FC<{ project: PetStoryProject; kind:
   useEffect((): void => { setFreeConfirmed(false); setExpanded(false); setOpenMessage(''); }, [project.id, kind]);
   const capability = state.capabilityCheckedInSession ? state.capability : null;
   const mediaName = kind === 'image' ? '图片' : '视频';
-  const showCheck = !compact || !capability || expanded;
+  const showCheck = !compact || expanded;
   const inspect = async (): Promise<void> => {
     setChecking(true);
     try { await state.inspectCapability(freeConfirmed, kind); }
@@ -39,18 +39,20 @@ export const PetStoryMediaEntryCheck: React.FC<{ project: PetStoryProject; kind:
   return <div className="petstory-entry-check" aria-label={`${mediaName}入口检查`}>
     <Space direction="vertical" className="w-full" size="small">
       <Typography.Text strong>{mediaName}入口 · {account?.name || '项目绑定账号'}</Typography.Text>
-      {capability ? <Typography.Text type="secondary">{kind === 'image' ? `图片：${entryState(capability.image.state, capability.image.free)}` : `视频规格：${capability.videoConfig ? `${capability.videoConfig.model} · ${capability.videoConfig.aspectRatio}` : '等待核对'}`} · 检查于 {new Date(capability.checkedAt).toLocaleTimeString('zh-CN')}</Typography.Text> : <Alert type="info" showIcon message={`本次会话还未核对${mediaName}入口。可直接在这里检查，检查不会上传或生成。`} />}
-      {kind === 'image' && <Typography.Text type="secondary">基础图和关键帧只使用图片能力；视频模式未就绪不影响图片检查。文字提示词无需先检查媒体入口。</Typography.Text>}
+      <Typography.Text type="secondary">{capability ? kind === 'image' ? entryState(capability.image.state, capability.image.free) : capability.videoConfig ? `${capability.videoConfig.model} · ${capability.videoConfig.aspectRatio}` : '视频规格等待核对' : `本次尚未检查${mediaName}入口`}</Typography.Text>
       {showCheck && <>
         <Checkbox checked={freeConfirmed} disabled={disabled || checking} onChange={(event): void => setFreeConfirmed(event.target.checked)}>本人已核对该账号当前{mediaName}入口和所选规格免费可用</Checkbox>
         <Space wrap><Button loading={checking} disabled={disabled || state.busy || project.production?.state === 'running'} onClick={(): void => { void inspect(); }}>检查豆包{mediaName}入口</Button><Button onClick={openBrowser}>打开绑定账号豆包</Button></Space>
-        <Typography.Text type="secondary">页面无法确认免费权益时保持待处理；勾选仅记录本人核对结果，不代表官方剩余额度。</Typography.Text>
+        <Typography.Text type="secondary">检查不会生成内容。免费权益不明时暂停；勾选仅记录本人的核对结果。</Typography.Text>
       </>}
       {openMessage && <Typography.Text role="status" type="warning">{openMessage}</Typography.Text>}
-      {compact && capability && <Button size="small" onClick={(): void => setExpanded(!expanded)}>{expanded ? '收起入口检查' : `重新检查${mediaName}入口`}</Button>}
+      {compact && <Button size="small" onClick={(): void => setExpanded(!expanded)}>{expanded ? '收起入口检查' : capability ? `重新检查${mediaName}入口` : `检查${mediaName}入口`}</Button>}
       {showCheck && capability && <>
-        {kind === 'video' && Object.entries(capability.modes).map(([mode, entry]): React.ReactNode => <Typography.Text key={mode} type="secondary">{petStoryModeNames[mode as keyof typeof petStoryModeNames]}：{entryState(entry.state, entry.free)} · {entry.reason}</Typography.Text>)}
-        <Checkbox checked={!!capability.allowPlainReferences} disabled={disabled || state.busy || project.production?.state === 'running'} onChange={(event): void => state.setPlainReferences(event.target.checked)}>仅当此入口没有 @ 素材引用：本人同意按逐图核对的中文用途映射提交</Checkbox>
+        <details className="petstory-secondary-tools"><summary>高级引用与检查详情</summary><Space direction="vertical" className="w-full">
+          {kind === 'video' && Object.entries(capability.modes).map(([mode, entry]): React.ReactNode => <Typography.Text key={mode} type="secondary">{petStoryModeNames[mode as keyof typeof petStoryModeNames]}：{entryState(entry.state, entry.free)} · {entry.reason}</Typography.Text>)}
+          <Checkbox checked={!!capability.allowPlainReferences} disabled={disabled || state.busy || project.production?.state === 'running'} onChange={(event): void => state.setPlainReferences(event.target.checked)}>此入口不支持 @ 素材引用时，同意逐图核对用途后提交</Checkbox>
+          <Typography.Text type="secondary">检查时间：{new Date(capability.checkedAt).toLocaleString('zh-CN')}</Typography.Text>
+        </Space></details>
       </>}
     </Space>
   </div>;

@@ -121,3 +121,39 @@ The system SHALL bind an adjustment to one creation object and its current basis
 #### Scenario: A reply needs structured preparation
 - **WHEN** the chosen reply cannot satisfy the bound creation object
 - **THEN** the UI permits continuing discussion or requesting Doubao preparation and does not generate creative content in program code
+
+### Requirement: A story analysis and its corrections have one review projection
+
+The system SHALL present one plan review card for the current analysis request family, with a mutually exclusive status, concise counts and understanding, a single primary action, collapsed full structured content and collapsed generation diagnostics. A valid correction SHALL supersede its invalid parent in the ordinary review projection without erasing either record.
+
+#### Scenario: A correction produces a usable candidate
+- **WHEN** a saved correction contains the valid candidate for its original analysis
+- **THEN** the page shows one candidate card with confirm-and-adopt and object-bound adjustment, and the invalid parent remains only in generation history
+
+#### Scenario: A captured reply is reopened
+- **WHEN** a plan reply needs collection, task restoration or continuation after restart
+- **THEN** its review card exposes the corresponding original-task recovery action without sending a replacement request or hiding legacy task records
+
+#### Scenario: A new plan candidate arrives
+- **WHEN** a project already has an adopted plan and outcomes
+- **THEN** they remain current until explicit adoption, and adoption retains existing files and unrelated prompt content while marking only actually affected downstream objects for review
+
+### Requirement: Material actions follow the adopted plan and current object state
+
+The system SHALL show only a plan-confirmation entry before story approval, and SHALL expose one primary action per material after approval, according to prompt, candidate image, adopted image and review facts. Generation settings and batch or diagnostic functions SHALL be secondary.
+
+#### Scenario: An image candidate is ready to review
+- **WHEN** a material or frame has a saved candidate waiting for explicit adoption
+- **THEN** the primary action opens image review and a missing generation entrance check does not appear as a blocker to that review
+
+### Requirement: Free-chat image replies use the shared candidate workflow
+
+The system SHALL let the user select a concrete assistant reply containing images, verify that reply in its original conversation, download supported source images through the bound account, and save target-bound candidates before adoption.
+
+#### Scenario: Capture images from one chosen reply
+- **WHEN** the user selects an image reply for a concrete material or frame
+- **THEN** collection does not generate media or change the current image, and explicit adoption through the shared preview is required before downstream use
+
+#### Scenario: Image ownership or source cannot be confirmed
+- **WHEN** a reply lacks a unique image target, stable identity or supported source
+- **THEN** collection fails closed and the interface offers continuing the discussion or uploading a saved image at the concrete object

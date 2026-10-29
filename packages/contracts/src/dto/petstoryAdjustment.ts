@@ -7,6 +7,8 @@ export interface PetStoryConversationReply {
   precedingUserText: string;
   turnId?: string;
   messageId?: string;
+  /** 当前具体助手回复中的可辨认图片；与正文一同参与来源核对。 */
+  imageUrls?: string[];
   capturedAt: string;
 }
 export interface PetStoryChatAdjustment {

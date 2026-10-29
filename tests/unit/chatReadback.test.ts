@@ -249,6 +249,7 @@ describe('ordinary Chat message-scoped readback', (): void => {
     const messageNode = (role: string, text: string): object => ({
       getAttribute: (name: string): string | null => name === 'data-testid' ? role : null,
       querySelector: (): object => ({ textContent: text }),
+      querySelectorAll: (): object[] => [],
     });
     const doc = {
       body: { innerText: 'sidebar history script prompt fake answer' },
@@ -273,7 +274,7 @@ describe('ordinary Chat message-scoped readback', (): void => {
     const photo = { getAttribute: (): string => 'send_message', querySelector: (selector: string): object | null => selector === 'img' ? {} : null,
       closest: (): object | null => sameTurn ? turn : null };
     const user = { getAttribute: (): string => 'send_message', querySelector: (): object => text, closest: (): object => turn };
-    const reply = { getAttribute: (): string => 'receive_message', querySelector: (): object => ({ textContent: answer.text }) };
+    const reply = { getAttribute: (): string => 'receive_message', querySelector: (): object => ({ textContent: answer.text }), querySelectorAll: (): object[] => [] };
     const doc = { querySelectorAll: (selector: string): object[] => selector.startsWith('[data-testid="send_message"]') ? [photo, user, reply] : [] };
     const snapshot = await getChatPageSnapshot({ executeJavaScript: async (script: string): Promise<ChatPageSnapshot> => runInNewContext(script, { document: doc }) as ChatPageSnapshot,
       getURL: (): string => '', loadURL: (): void => {} });
@@ -286,7 +287,7 @@ describe('ordinary Chat message-scoped readback', (): void => {
       closest: (): object => ({ getAttribute: (): string => 'TEST-turn-1' }) };
     const user = { getAttribute: (): string => 'send_message', querySelector: (): object => ({ textContent: prompt }),
       closest: (): object => ({ getAttribute: (): string => sameId ? 'TEST-turn-1' : 'TEST-turn-2' }) };
-    const reply = { getAttribute: (): string => 'receive_message', querySelector: (): object => ({ textContent: answer.text }) };
+    const reply = { getAttribute: (): string => 'receive_message', querySelector: (): object => ({ textContent: answer.text }), querySelectorAll: (): object[] => [] };
     const doc = { querySelectorAll: (selector: string): object[] => selector.startsWith('[data-testid="send_message"]') ? [photo, user, reply] : [] };
     const snapshot = await getChatPageSnapshot({ executeJavaScript: async (script: string): Promise<ChatPageSnapshot> => runInNewContext(script, { document: doc }) as ChatPageSnapshot,
       getURL: (): string => '', loadURL: (): void => {} });
@@ -301,7 +302,7 @@ describe('ordinary Chat message-scoped readback', (): void => {
     const pre = { tagName: 'PRE', querySelector: (): object => code, textContent: codeText };
     const content = { tagName: 'DIV', textContent: '测试正文' + codeText,
       childNodes: [{ tagName: 'P', childNodes: [textNode('测试正文')] }, pre], querySelectorAll: (selector: string): object[] => selector === 'code' ? [code] : selector.includes('pre') ? [pre] : [] };
-    const message = { getAttribute: (): string => 'receive_message', querySelector: (): object => content };
+    const message = { getAttribute: (): string => 'receive_message', querySelector: (): object => content, querySelectorAll: (): object[] => [] };
     const document = { querySelectorAll: (selector: string): object[] => selector.startsWith('[data-testid="send_message"]') ? [message] : [] };
     const snapshot = await getChatPageSnapshot({ executeJavaScript: async (script: string): Promise<ChatPageSnapshot> => runInNewContext(script, { document }) as ChatPageSnapshot,
       getURL: (): string => '', loadURL: (): void => {} });

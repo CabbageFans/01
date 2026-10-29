@@ -392,7 +392,7 @@ const TASK_IPC_CHANNELS = [
 ] as const;
 
 /** PetStory 与原 IPC 共用同一 Session 下载、作业登记及文件校验链。 */
-export async function downloadTaskOutputs(params: TaskDownloadOutputsParams): Promise<import('@doubao-studio/contracts').TaskDownloadOutputsResult> {
+export async function downloadTaskOutputs(params: TaskDownloadOutputsParams, policy?: { redirect: 'error' }): Promise<import('@doubao-studio/contracts').TaskDownloadOutputsResult> {
       try {
         const fs = require('fs');
         const path = require('path');
@@ -449,6 +449,7 @@ export async function downloadTaskOutputs(params: TaskDownloadOutputsParams): Pr
               const controller = new AbortController();
               const timeout = setTimeout(() => controller.abort(), 60000);
               const response = await accountSession.fetch(url, {
+                ...(policy ? { redirect: policy.redirect } : {}),
                 headers: {
                   Referer: 'https://www.doubao.com/',
                   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',

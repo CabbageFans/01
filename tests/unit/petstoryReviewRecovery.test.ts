@@ -28,6 +28,8 @@ beforeEach(async (): Promise<void> => {
   project = await projects.saveMobileStory(project.id, project.revision, 'TEST 当前确认原文');
   project.plan = { sourceSummary: 'TEST来源', adaptedStory: 'TEST 当前确认原文', characters: [], props: [], scenes: [{ id: 'location', name: 'TEST地点', location: 'TEST地点', time: '待确认', lighting: '待确认', layout: 'TEST布局', view: 'TEST视角', designOrigin: 'proposed' }], shots: [{ id: 'shot-0', order: 1, characterIds: [], propIds: [], sceneId: 'location', scene: 'TEST地点', action: 'TEST动作', startState: 'TEST起点', endState: 'TEST终点', durationSeconds: 5, transition: 'cut', requestedMode: 'reference', prompts: { firstFrame: prompt(), video: prompt() } }] };
   project.materials = syncMaterials(project); project = await projects.write(project);
+  // 素材审查界面属于确认方案之后，使用正式服务建立该前置事实。
+  project = await projects.confirmStory(project.id, project.revision);
   let stored: Task[] = []; let sequence = 0;
   list = (): Task[] => structuredClone(stored);
   core = new TaskService({ store: { read: list, replace: (tasks: Task[]): boolean => { stored = structuredClone(tasks); return true; } }, defaultProjectId: (): string => 'TEST-studio', id: (): string => `TEST-task-${++sequence}` });

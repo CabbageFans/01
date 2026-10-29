@@ -15,6 +15,7 @@ interface PetStoryState {
   openChatAdjustment: (target: PetStoryRuntimeTarget) => Promise<void>;
   captureChatReplies: (adjustmentId: string, conversationUrl: string, replies: PetStoryConversationReply[]) => Promise<void>;
   adoptChatReply: (replyKey: string) => Promise<void>;
+  importChatImages: (replyKey: string) => Promise<void>;
   endChatAdjustment: () => Promise<void>;
   chatReadbackError: string;
   uploadShotImage: (shotId: string, kind: 'firstFrame' | 'lastFrame') => Promise<void>;
@@ -87,6 +88,14 @@ interface PetStoryState {
   draftFinal: (shotId: string) => Promise<void>;
 }
 function isChatAdjusting(p: PetStoryProject | null): boolean { return p?.chatAdjustment?.status === 'active'; }
+/** 文字采用与图片收取都重新核对选定回复；过程不发送、导航或修改网页输入框。 */
+async function verifyAdjustmentReply(adjustmentId: string, replyKey: string): Promise<void> {
+  await new Promise<void>((resolve, reject): void => {
+    const timeout = setTimeout((): void => reject(new Error('关联会话未能及时核对，请保持豆包页面打开')), 6000);
+    window.dispatchEvent(new CustomEvent('petstory-verify-adjustment-reply', { detail: { adjustmentId, replyKey,
+      resolve: (): void => { clearTimeout(timeout); resolve(); }, reject: (error: Error): void => { clearTimeout(timeout); reject(error); } } }));
+  });
+}
 const liveJobs = new Set<string>();
 type PromptBatchTarget = { shotId: string; kind: PetStoryPromptKind; materialId?: never } | { materialId: string; shotId?: never; kind?: never };
 function promptTargetKey(target: PromptBatchTarget): string {
@@ -429,14 +438,22 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (!p || a?.status !== 'active') throw new Error('请重新打开当前对象的豆包调整');
       if (pendingPetStoryDrafts(p.id).length) throw new Error('请先保存或放弃尚未保存的修改，再采用豆包回复');
       // 应用前只读回查具体回复；不会发送、导航或改变输入框。
-      await new Promise<void>((resolve, reject): void => {
-        const timeout = setTimeout((): void => reject(new Error('关联会话未能及时核对，请保持豆包页面打开')), 6000);
-        window.dispatchEvent(new CustomEvent('petstory-verify-adjustment-reply', { detail: { adjustmentId: a.id, replyKey,
-          resolve: (): void => { clearTimeout(timeout); resolve(); }, reject: (error: Error): void => { clearTimeout(timeout); reject(error); } } }));
-      });
+      await verifyAdjustmentReply(a.id, replyKey);
       const latest = get().project;
       if (!latest || latest.chatAdjustment?.id !== a.id) throw new Error('当前调整已变化，未采用回复');
       accept(await window.electronAPI.petstory.adoptAdjustmentReply(latest.id, latest.revision, a.id, replyKey)); await refreshTasks();
+    }),
+    importChatImages: async (replyKey: string): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project; const a = p?.chatAdjustment;
+      if (!p || a?.status !== 'active') throw new Error('请重新打开当前图片对象的豆包调整');
+      if (pendingPetStoryDrafts(p.id).length) throw new Error('请先保存或放弃尚未保存的修改，再收取图片');
+      await verifyAdjustmentReply(a.id, replyKey);
+      const latest = get().project;
+      if (!latest || latest.chatAdjustment?.id !== a.id) throw new Error('当前调整已变化，未收取图片');
+      const result = await window.electronAPI.petstory.importAdjustmentImages(latest.id, latest.revision, a.id, replyKey);
+      accept(result);
+      // 服务在部分下载失败时也返回已保存候选；重试只补原图下载。
+      set({ productionCounts: null });
     }),
     endChatAdjustment: async (): Promise<void> => run(async (): Promise<void> => {
       const p = get().project; const a = p?.chatAdjustment;

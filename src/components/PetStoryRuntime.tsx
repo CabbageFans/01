@@ -3,7 +3,8 @@ import { Alert, Button, Input, Select, Space, Tag } from 'antd';
 import type { PetStoryChatJob, PetStoryProject, PetStoryReviewIssue, PetStoryRuntimeTarget } from '@doubao-studio/contracts';
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
-import { PetStoryPlanPreview } from './PetStoryPlanPreview';
+import { PetStoryPlanReview } from './PetStoryPlanReview';
+import { planRequestRoot } from '../utils/petstoryPlanReview';
 import { PromptProvenance } from './PetStoryCanvasPrompt';
 import { canvasPromptNames } from './petStoryCanvasShared';
 import { ReviewIssueSelection } from './PetStoryReviewIssues';
@@ -60,9 +61,9 @@ export const PetStoryRuntime: React.FC<{ project: PetStoryProject; disabled: boo
   const trimmedReviewFocus = reviewFocus.trim();
   const pending = project.jobs.some((job): boolean => !job.endedWaitingAt && ['bound', 'captured'].includes(job.status));
   const generationDisabled = disabled || pending || !state.freeChatConfirmed;
-  const jobs = project.jobs.filter((job): boolean => !!job.requestId && ['analysis', 'assets', 'review', 'revise', 'repair'].includes(job.kind) && (showPlanCandidates || !job.parsedResult?.plan && !job.parsedResult?.assets));
+  const jobs = project.jobs.filter((job): boolean => !!job.requestId && ['analysis', 'assets', 'review', 'revise', 'repair'].includes(job.kind) && !planRequestRoot(project, job) && (showPlanCandidates || !job.parsedResult?.assets));
   return <div className="canvas-runtime" aria-label="剧本理解与创作候选">
-    <details className="petstory-secondary-tools"><summary>方案与提示词操作</summary><Space wrap><span>创作目标模型</span><Select aria-label="文字创作目标模型" value={petStoryWritingModel(project)} disabled={disabled || pending} style={{ width: 210 }} options={[
+    <details className="petstory-secondary-tools"><summary>更多操作</summary><Space wrap><span>创作目标模型</span><Select aria-label="文字创作目标模型" value={petStoryWritingModel(project)} disabled={disabled || pending} style={{ width: 210 }} options={[
       { value: 'generic', label: '通用计划（模型未定）' }, { value: 'seedance-2.0-fast', label: 'Seedance 2.0 Fast' }, { value: 'seedance-2.0', label: 'Seedance 2.0' }, { value: 'seedance-2.0-mini', label: 'Seedance 2.0 Mini' }, { value: 'seedance-2.5', label: 'Seedance 2.5' },
     ]} onChange={(value: string): void => { void state.savePromptModel(value as PetStoryProject['promptModel']); }} /></Space>
     <p className="canvas-hint">请选择后续制作使用的模型；实际可用性仍需在豆包中核对。</p>
@@ -71,17 +72,9 @@ export const PetStoryRuntime: React.FC<{ project: PetStoryProject; disabled: boo
     <p className="canvas-hint">只填写希望核对的疑点，豆包仍须以来源和实际正文判断；不会直接替换正文</p>
     <p className="canvas-hint">重新拆镜保存为候选。采用资产清单保留当前镜头；图片仍须逐张确认。</p>
     </details>
-    {(project.plan?.understanding || project.plan?.sceneDesign) && <details className="canvas-shot-context"><summary>当前剧本理解与全场空间连续性</summary>{project.plan.understanding && <p className="whitespace-pre-wrap">{project.plan.understanding}</p>}{project.plan.sceneDesign && <p className="whitespace-pre-wrap">{project.plan.sceneDesign}</p>}</details>}
-    {jobs.length > 0 && <details className="canvas-runtime-results" open><summary>理解、分镜候选与内容问题 · {jobs.length} 次</summary>{[...jobs].reverse().map((job): React.ReactNode => <article key={job.id} className="canvas-runtime-result"><strong>{stageNames[job.kind]}</strong><Tag>{job.resultStatus === 'adopted' ? '已采用' : job.resultStatus === 'stale' ? '过期候选' : job.status === 'applied' ? '已保存候选' : job.status === 'invalid' ? '待核对' : '等待原任务'}</Tag>
+    {showPlanCandidates && <PetStoryPlanReview project={project} disabled={disabled} />}
+    {jobs.length > 0 && <details className="canvas-runtime-results"><summary>其他候选与内容问题 · {jobs.length} 次</summary>{[...jobs].reverse().map((job): React.ReactNode => <article key={job.id} className="canvas-runtime-result"><strong>{stageNames[job.kind]}</strong><Tag>{job.resultStatus === 'adopted' ? '已采用' : job.resultStatus === 'stale' ? '过期候选' : job.status === 'applied' ? '已保存候选' : job.status === 'invalid' ? '待核对' : '等待原任务'}</Tag>
       {job.resultStatus === 'stale' && <Alert type="warning" message={job.staleReason || '当前内容已更新，请核对这条历史回复。'} />}
-      {job.parsedResult?.plan && <>
-        <p>{job.parsedResult.plan.characters.length} 人物 · {job.parsedResult.plan.props?.length || 0} 道具 · {job.parsedResult.plan.scenes?.length || 0} 场景 · {job.parsedResult.plan.shots.length} 镜头 · 总请求时长 {job.parsedResult.plan.shots.reduce((sum, shot): number => sum + shot.durationSeconds, 0)} 秒</p>
-        {job.parsedResult.plan.understanding && <p>{job.parsedResult.plan.understanding.slice(0, 240)}{job.parsedResult.plan.understanding.length > 240 ? '…' : ''}</p>}
-        {job.parsedResult.plan.characters.length > 0 && <p>人物：{job.parsedResult.plan.characters.map((character): string => character.name).join('、')}</p>}
-        <p className="canvas-hint">采用会更新当前镜头方案；先核对故事理解和人物对应，再确认用于制作。已有成果仍保留供查看。</p>
-        <Space wrap><Button type="primary" size="small" disabled={disabled || !isValidatedCandidate(job)} onClick={(): void => { void state.adoptPlanCandidate(job.id); }}>采用此方案</Button><Button size="small" disabled={disabled || pending || !isValidatedCandidate(job)} onClick={(): void => { void state.openChatAdjustment({ parentJobId: job.id }); }}>在豆包中调整</Button></Space>
-        <details><summary>查看故事理解与分镜方案</summary><PetStoryPlanPreview plan={job.parsedResult.plan} contentBasis={job.parsedResult.contentBasis} /></details>
-      </>}
       {job.parsedResult?.assets && <><p>素材清单候选：{job.parsedResult.assets.characters.length} 人物 · {job.parsedResult.assets.props.length} 道具 · {job.parsedResult.assets.scenes.length} 场景</p><details><summary>查看素材与镜头关联</summary><p className="whitespace-pre-wrap">{job.parsedResult.assets.understanding}</p><p className="whitespace-pre-wrap">{job.parsedResult.assets.sceneDesign}</p><p>人物：{job.parsedResult.assets.characters.map((item): string => item.name).join('、')}</p><p>道具：{job.parsedResult.assets.props.map((item): string => item.name).join('、') || '无必要道具'}</p><p>场景：{job.parsedResult.assets.scenes.map((item): string => item.name).join('、')}</p>{job.parsedResult.assets.shotBindings.map((binding): React.ReactNode => <p key={binding.shotId}>镜头 {project.plan?.shots.find((shot): boolean => shot.id === binding.shotId)?.order || '待对应'} · {job.parsedResult?.assets?.scenes.find((scene): boolean => scene.id === binding.sceneId)?.name || '场景待对应'} · 人物 {binding.characterIds.map((id): string => job.parsedResult?.assets?.characters.find((character): boolean => character.id === id)?.name || '待对应人物').join('、')} · 道具 {binding.propIds.map((id): string => job.parsedResult?.assets?.props.find((prop): boolean => prop.id === id)?.name || '待对应道具').join('、') || '无'}</p>)}</details><Button size="small" disabled={disabled || !isValidatedCandidate(job)} onClick={(): void => { void state.adoptAssetsCandidate(job.id); }}>采用素材清单与关联（保留当前镜头）</Button></>}
       {job.kind === 'revise' && job.parsedResult?.optimized && <details open={job.resultStatus === 'candidate'}><summary>查看本次定点修订正文</summary><pre className="prompt-readonly">{job.parsedResult.optimized}</pre><Button size="small" disabled={disabled || !isValidatedCandidate(job)} onClick={(): void => { void state.adoptPromptCandidate(job.id); }}>采用本次修订</Button></details>}
       <RuntimeReview project={project} job={job} disabled={generationDisabled} /><PromptProvenance job={job} task={tasks.find((task): boolean => task.id === job.taskId)} />

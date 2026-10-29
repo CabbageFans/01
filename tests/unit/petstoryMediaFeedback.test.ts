@@ -52,6 +52,19 @@ describe('媒体前置处理反馈', (): void => {
     character.description += 'TEST变更';
     expect(isPetStoryMaterialImageApproved(p, m)).toBe(false);
   });
+  it('候选、待复核或采用摘要不一致的素材不能计入已采用数量', (): void => {
+    const p = project(); const m = material('scene', 'location'); p.materials = [m];
+    p.assets = [{ id: 'TEST-image', kind: 'scene', materialId: m.id, relativePath: 'TEST.png', validation, needsReview: true }];
+    m.approved = { assetId: 'TEST-image', sha256: validation.sha256, at: validation.checkedAt };
+    expect(isPetStoryMaterialImageApproved(p, m)).toBe(false);
+    p.assets[0].needsReview = false;
+    p.assets[0].imageReview = { state: 'candidate', target: { materialId: m.id }, basisHash: 'TEST' };
+    expect(isPetStoryMaterialImageApproved(p, m)).toBe(false);
+    p.assets[0].imageReview = { ...p.assets[0].imageReview, state: 'adopted', adoptedAt: validation.checkedAt, sha256: 'TEST-other' };
+    expect(isPetStoryMaterialImageApproved(p, m)).toBe(false);
+    p.assets[0].imageReview.sha256 = validation.sha256;
+    expect(isPetStoryMaterialImageApproved(p, m)).toBe(true);
+  });
   it('历史镜头产物可显示，但不会把尾帧或其他镜头图片当本镜首帧', (): void => {
     const p = project(); const shot = p.plan!.shots[0];
     p.assets = [

@@ -34,13 +34,16 @@ const ReviewImage: React.FC<ReviewImageProps> = ({ projectId, asset, name, onRea
 };
 
 interface PetStoryImageReviewProps {
-  project: PetStoryProject; target: PetStoryImageTarget; title: string; currentAssetId?: string;
+  project: PetStoryProject; target: PetStoryImageTarget; title: string; currentAssetId?: string; currentNeedsReview?: boolean; previewAssetId?: string;
   disabled: boolean; generationDisabled?: boolean; generating?: boolean; identity?: string;
+  promptReady?: boolean; preparePromptLabel?: string; preparePromptDisabled?: boolean; preparingPrompt?: boolean; onPreparePrompt?: () => Promise<void>;
+  externalError?: string; onRetry?: () => Promise<void>;
   onUpload: () => Promise<void>; onGenerate?: () => Promise<void>; onAdopt: (assetId: string) => Promise<void>;
   onAdjust?: () => Promise<void>; onBatchSelection?: (assetId: string, checked: boolean) => void; batchSelectedId?: string;
 }
 
-function adoptionNote(reviewingCurrent: boolean, replacing: boolean): string {
+function adoptionNote(reviewingCurrent: boolean, replacing: boolean, needsReview: boolean): string {
+  if (reviewingCurrent && needsReview) return '请核对变化后的参考内容；确认继续使用后，才可作为后续制作依据。';
   if (reviewingCurrent) return '当前采用图片；查看不会改变素材。';
   return replacing ? '采用后替换当前图片；旧图和已有成果保留，相关镜头需要复核。' : '确认采用后，图片才会进入正式节点。';
 }
@@ -48,18 +51,31 @@ function reviewOptions(history: boolean, current: PetStoryAsset | undefined, his
   if (!history) return candidates;
   return current ? [current, ...historical] : historical;
 }
+function imageReviewSelection(current: PetStoryAsset | undefined, selected: PetStoryAsset | undefined, currentAssetId: string | undefined, currentNeedsReview: boolean | undefined): { reviewingCurrent: boolean; needsReview: boolean; confirmingCurrent: boolean; canConfirm: boolean } {
+  const reviewingCurrent = !!selected && selected.id === currentAssetId;
+  const needsReview = !!(currentNeedsReview || current?.needsReview);
+  const confirmingCurrent = reviewingCurrent && needsReview;
+  return { reviewingCurrent, needsReview, confirmingCurrent, canConfirm: !reviewingCurrent || confirmingCurrent };
+}
+function imageAdoptionDisabled(disabled: boolean, selected: PetStoryAsset | undefined, readable: boolean): boolean { return disabled || !selected || !readable; }
+const ImageReviewError: React.FC<{ error: string; externalError?: string; disabled: boolean; onRetry?: () => Promise<void> }> = ({ error, externalError, disabled, onRetry }): React.ReactElement | null => {
+  const visible = error || externalError;
+  return visible ? <Alert type="error" message={visible} action={externalError && onRetry ? <Button size="small" disabled={disabled} onClick={(): void => { void onRetry(); }}>重试剩余原图</Button> : undefined} /> : null;
+};
 
 interface ImageActionsProps {
-  title: string; current?: PetStoryAsset; candidateCount: number; historyCount: number;
+  title: string; current?: PetStoryAsset; currentNeedsReview: boolean; candidateCount: number; historyCount: number;
   disabled: boolean; generationDisabled?: boolean; generating?: boolean;
+  promptReady?: boolean; preparePromptLabel?: string; preparePromptDisabled?: boolean; preparingPrompt?: boolean; onPreparePrompt?: () => Promise<void>;
   show: (assetId?: string, history?: boolean) => void; upload: () => Promise<void>;
   onGenerate?: () => Promise<void>; onAdjust?: () => Promise<void>;
 }
-const ImageActions: React.FC<ImageActionsProps> = ({ title, current, candidateCount, historyCount, disabled, generationDisabled, generating, show, upload, onGenerate, onAdjust }): React.ReactElement => <>
+const ImageActions: React.FC<ImageActionsProps> = ({ title, current, currentNeedsReview, candidateCount, historyCount, disabled, generationDisabled, generating, promptReady = true, preparePromptLabel = '生成提示词', preparePromptDisabled, preparingPrompt, onPreparePrompt, show, upload, onGenerate, onAdjust }): React.ReactElement => <>
     {candidateCount > 0 && <div className="petstory-candidate-banner"><span>{candidateCount} 张图片待选择</span><Button size="small" type="primary" disabled={disabled} onClick={(): void => show()}>查看并采用</Button></div>}
     <div className="canvas-media-actions">
-      {current ? <Button size="small" onClick={(): void => show(current.id, true)}>查看图片</Button> : !candidateCount && <>
-        {onGenerate && <Button size="small" type="primary" loading={generating} disabled={disabled || generationDisabled} onClick={(): void => { void onGenerate(); }}>生成图片</Button>}
+      {current && !candidateCount ? <Button type="primary" size="small" onClick={(): void => show(current.id, true)}>{currentNeedsReview ? '查看并复核' : '查看图片'}</Button> : !current && !candidateCount && <>
+        {!promptReady && onPreparePrompt ? <Button size="small" type="primary" loading={preparingPrompt} disabled={disabled || preparePromptDisabled} onClick={(): void => { void onPreparePrompt(); }}>{preparePromptLabel}</Button>
+          : onGenerate && <Button size="small" type="primary" loading={generating} disabled={disabled || generationDisabled} onClick={(): void => { void onGenerate(); }}>生成图片</Button>}
         <Button size="small" aria-label="上传图片" icon={<UploadOutlined />} disabled={disabled} onClick={(): void => { void upload(); }}>上传图片</Button>
       </>}
       {(current || candidateCount > 0 || historyCount > 0) && <details className="petstory-more"><summary aria-label={`${title}更多操作`}><MoreOutlined /></summary><div>
@@ -71,9 +87,10 @@ const ImageActions: React.FC<ImageActionsProps> = ({ title, current, candidateCo
     </div>
 </>;
 
-export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ project, target, title, currentAssetId, disabled, generationDisabled, generating, identity, onUpload, onGenerate, onAdopt, onAdjust, onBatchSelection, batchSelectedId }): React.ReactElement => {
+export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ project, target, title, currentAssetId, currentNeedsReview, previewAssetId, disabled, generationDisabled, generating, identity, promptReady, preparePromptLabel, preparePromptDisabled, preparingPrompt, onPreparePrompt, externalError, onRetry, onUpload, onGenerate, onAdopt, onAdjust, onBatchSelection, batchSelectedId }): React.ReactElement => {
   const [open, setOpen] = useState(false); const [history, setHistory] = useState(false);
   const [selectedId, setSelectedId] = useState<string>(); const [readable, setReadable] = useState(false); const [error, setError] = useState('');
+  useEffect((): void => { if (previewAssetId) { setSelectedId(previewAssetId); setReadable(false); setHistory(false); setOpen(true); } }, [previewAssetId]);
   const state = usePetStoryStore();
   const images = project.assets.filter((asset): boolean => imageBelongsToTarget(project, asset, target));
   const current = images.find((asset): boolean => asset.id === currentAssetId);
@@ -81,8 +98,12 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
   const historical = images.filter((asset): boolean => asset.id !== currentAssetId && asset.imageReview?.state === 'adopted');
   const visible = reviewOptions(history, current, historical, candidates);
   const selected = images.find((asset): boolean => asset.id === selectedId);
-  const reviewingCurrent = !!selected && selected.id === currentAssetId;
-  const show = (assetId?: string, showHistory = false): void => { setHistory(showHistory); setSelectedId(assetId || (showHistory ? current?.id || historical[0]?.id : candidates[0]?.id)); setError(''); setOpen(true); };
+  const { reviewingCurrent, needsReview, confirmingCurrent, canConfirm } = imageReviewSelection(current, selected, currentAssetId, currentNeedsReview);
+  const show = (assetId?: string, showHistory = false): void => {
+    const nextId = assetId || (showHistory ? current?.id || historical[0]?.id : candidates[0]?.id);
+    if (nextId !== selectedId) setReadable(false);
+    setHistory(showHistory); setSelectedId(nextId); setError(''); setOpen(true);
+  };
   const upload = async (): Promise<void> => {
     setError('');
     const previousIds = new Set(images.map((asset): string => asset.id));
@@ -104,19 +125,19 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
   return <div className="petstory-image-review" data-image-target={title}>
     {current ? <button type="button" className="petstory-current-image" onClick={(): void => show(current.id, true)} aria-label={`查看${title}已采用图片`}><ReviewImage projectId={project.id} asset={current} name={`${title} · 当前采用`} /></button>
       : <div className="petstory-image-empty"><PictureOutlined /><span>尚未采用图片</span></div>}
-    {current?.needsReview && <p className="canvas-error">参考内容已更新，请复核这张图片。</p>}
-    <ImageActions title={title} current={current} candidateCount={candidates.length} historyCount={historical.length} disabled={disabled} generationDisabled={generationDisabled} generating={generating} show={show} upload={upload} onGenerate={onGenerate} onAdjust={onAdjust} />
-    {error && !open && <Alert type="error" message={error} />}
+    {current && needsReview && <p className="canvas-error">参考内容已更新，请复核这张图片。</p>}
+    <ImageActions title={title} current={current} currentNeedsReview={needsReview} candidateCount={candidates.length} historyCount={historical.length} disabled={disabled} generationDisabled={generationDisabled} generating={generating} promptReady={promptReady} preparePromptLabel={preparePromptLabel} preparePromptDisabled={preparePromptDisabled} preparingPrompt={preparingPrompt} onPreparePrompt={onPreparePrompt} show={show} upload={upload} onGenerate={onGenerate} onAdjust={onAdjust} />
+    {!open && <ImageReviewError error={error} externalError={externalError} onRetry={onRetry} disabled={disabled} />}
     <Modal className="petstory-image-modal" title={history ? `${title} · 图片与历史` : `${title} · 选择图片`} open={open} width={1000} onCancel={(): void => setOpen(false)} footer={<>
-      <span className="petstory-adoption-note">{adoptionNote(reviewingCurrent, !!current)}</span>
+      <span className="petstory-adoption-note">{adoptionNote(reviewingCurrent, !!current, confirmingCurrent)}</span>
       <Button onClick={(): void => setOpen(false)}>{reviewingCurrent ? '返回' : '暂不采用'}</Button>
-      {!reviewingCurrent && <Button type="primary" disabled={disabled || !selected || !readable} loading={state.busy} onClick={(): void => { void adopt(); }}>采用这张</Button>}
+      {canConfirm && <Button type="primary" disabled={imageAdoptionDisabled(disabled, selected, readable)} loading={state.busy} onClick={(): void => { void adopt(); }}>{confirmingCurrent ? '确认继续使用' : '采用这张'}</Button>}
     </>}>
-      {error && <Alert type="error" message={error} />}
+      <ImageReviewError error={error} externalError={externalError} onRetry={onRetry} disabled={disabled} />
       <div className="petstory-image-preview-layout"><div>
         {selected ? <div className="petstory-large-image"><ReviewImage projectId={project.id} asset={selected} name={`${title} · ${reviewingCurrent ? '当前采用' : '待确认图片'}`} onReadable={setReadable} /></div> : <p>当前没有可预览的图片。</p>}
-        <div className="petstory-image-options">{visible.map((asset, index): React.ReactNode => <button type="button" key={asset.id} className={selectedId === asset.id ? 'selected' : ''} aria-label={`${history ? '查看历史图片' : '选择候选图片'} ${index + 1}`} onClick={(): void => { setSelectedId(asset.id); setError(''); }}><ReviewImage projectId={project.id} asset={asset} name={`${title} · ${index + 1}`} /><span>{asset.id === currentAssetId ? '当前采用' : history ? `历史图片 ${index + 1}` : `候选 ${index + 1}`}</span></button>)}</div>
-      </div><aside><h3>图片用途</h3><p>{title}</p><Tag>{reviewingCurrent ? '已采用' : '待确认'}</Tag>
+        <div className="petstory-image-options">{visible.map((asset, index): React.ReactNode => <button type="button" key={asset.id} className={selectedId === asset.id ? 'selected' : ''} aria-label={`${history ? '查看历史图片' : '选择候选图片'} ${index + 1}`} onClick={(): void => { if (selectedId !== asset.id) setReadable(false); setSelectedId(asset.id); setError(''); }}><ReviewImage projectId={project.id} asset={asset} name={`${title} · ${index + 1}`} /><span>{asset.id === currentAssetId ? '当前采用' : history ? `历史图片 ${index + 1}` : `候选 ${index + 1}`}</span></button>)}</div>
+      </div><aside><h3>图片用途</h3><p>{title}</p><Tag>{confirmingCurrent ? '需要复核' : reviewingCurrent ? '已采用' : '待确认'}</Tag>
         {selected && <dl><dt>来源</dt><dd>{selected.taskId ? '豆包图片' : '本地上传'}</dd><dt>文件检查</dt><dd>{selected.validation?.decoded ? `${selected.validation.width} × ${selected.validation.height} · 文件校验通过` : '尚无文件校验记录'}</dd></dl>}
         {identity && <p>请同时核对人物外观：{identity}</p>}
         {current && !reviewingCurrent && <div className="petstory-current-comparison"><strong>当前采用图片</strong><ReviewImage projectId={project.id} asset={current} name={`${title} · 替换前`} /><p>新图片采用前，当前图片保持不变。</p></div>}

@@ -1,12 +1,17 @@
 import React from 'react';
 import type { PetStoryPlan, PetStoryProject, PetStoryPrompt, PetStoryPromptReference, PetStoryShot } from '@doubao-studio/contracts';
+import { planDisplayText } from '../utils/petstoryPlanReview';
 
 export interface PetStoryPlanPreviewProps {
   plan: PetStoryPlan;
   contentBasis?: PetStoryProject['contentBasis'];
 }
 interface PreviewFieldProps { label: string; value?: string }
-const PreviewField: React.FC<PreviewFieldProps> = ({ label, value }): React.ReactElement => <div className="petstory-plan-field"><dt>{label}</dt><dd>{value?.trim() ? value : '未填写'}</dd></div>;
+const PreviewPlanContext = React.createContext<PetStoryPlan | undefined>(undefined);
+const PreviewField: React.FC<PreviewFieldProps> = ({ label, value }): React.ReactElement => {
+  const plan = React.useContext(PreviewPlanContext);
+  return <div className="petstory-plan-field"><dt>{label}</dt><dd>{value?.trim() ? planDisplayText(plan, value) : '未填写'}</dd></div>;
+};
 
 function entityName(items: { id: string; name: string }[] | undefined, id: string | undefined, missing: string): string {
   if (!id) return missing;
@@ -67,7 +72,7 @@ const ShotPreview: React.FC<{ plan: PetStoryPlan; shot: PetStoryShot }> = ({ pla
   </article>;
 };
 
-export const PetStoryPlanPreview: React.FC<PetStoryPlanPreviewProps> = ({ plan, contentBasis }): React.ReactElement => <div className="petstory-plan-preview" aria-label="完整方案预览">
+export const PetStoryPlanPreview: React.FC<PetStoryPlanPreviewProps> = ({ plan, contentBasis }): React.ReactElement => <PreviewPlanContext.Provider value={plan}><div className="petstory-plan-preview" aria-label="完整方案预览">
   <section><h3>故事理解与内容安排</h3><dl><PreviewField label="故事梗概" value={plan.sourceSummary} /><PreviewField label="故事理解" value={plan.understanding} /><PreviewField label="本次故事" value={plan.adaptedStory} /><PreviewField label="全场空间与连续性" value={plan.sceneDesign} />
     {contentBasis && <><PreviewField label="起始事件" value={contentBasis.beginning} /><PreviewField label="发展过程" value={contentBasis.middle} /><PreviewField label="结尾结果" value={contentBasis.ending} /></>}
   </dl></section>
@@ -75,4 +80,4 @@ export const PetStoryPlanPreview: React.FC<PetStoryPlanPreviewProps> = ({ plan, 
   <section><h3>道具 · {plan.props?.length || 0} 项</h3>{plan.props?.map((prop): React.ReactNode => <article key={prop.id}><h4>{prop.name || '未命名道具'}</h4><dl><PreviewField label="来源称谓" value={prop.aliases.join('、')} /><PreviewField label="外观描述" value={prop.description} /><PreviewField label="关键状态" value={prop.keyStates} /><PreviewField label="尺寸与比例" value={prop.scale} /><PreviewField label="基础图静态状态" value={prop.appearanceState} /><PreviewField label="设计来源" value={designSource(prop.designOrigin)} /></dl></article>)}</section>
   <section><h3>场景 · {plan.scenes?.length || 0} 处</h3>{plan.scenes?.map((scene): React.ReactNode => <article key={scene.id}><h4>{scene.name || '未命名场景'}</h4><dl><PreviewField label="地点" value={scene.location} /><PreviewField label="时间" value={scene.time} /><PreviewField label="光线" value={scene.lighting} /><PreviewField label="空间布局" value={scene.layout} /><PreviewField label="场景视角" value={scene.view} /><PreviewField label="关联主场景" value={scene.parentSceneId ? entityName(plan.scenes, scene.parentSceneId, '未对应主场景') : '独立场景'} /><PreviewField label="设计来源" value={designSource(scene.designOrigin)} /></dl></article>)}</section>
   <section><h3>动态分镜 · {plan.shots.length} 个镜头</h3>{plan.shots.map((shot): React.ReactNode => <ShotPreview key={shot.id} plan={plan} shot={shot} />)}</section>
-</div>;
+</div></PreviewPlanContext.Provider>;

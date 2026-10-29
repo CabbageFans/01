@@ -11,6 +11,14 @@ beforeEach((): void => { vi.stubGlobal('crypto', webcrypto); });
 afterEach((): void => { vi.unstubAllGlobals(); });
 
 describe('明确回复标识与原文', (): void => {
+  it('图片属于具体助手回复，纯图片回复可选择；图片变化也改变前后端一致的回复标识', async (): Promise<void> => {
+    const user = message('user', 'TEST 请调整当前首帧', 'u');
+    const answer = { ...message('assistant', '', 'a'), imageUrls: ['https://p3.byteimg.com/TEST-frame.png'] };
+    const result = await readPetStoryConversationReplies(snapshot([user, answer]));
+    expect(result).toHaveLength(1); expect(result[0].imageUrls).toEqual(answer.imageUrls); expect(result[0].key).toBe(conversationReplyKey(result[0]));
+    const changed = await readPetStoryConversationReplies(snapshot([user, { ...answer, imageUrls: ['https://p3.byteimg.com/TEST-other.png'] }]));
+    expect(changed[0].key).not.toBe(result[0].key);
+  });
   it('完整段落、围栏、原始标点和前一用户正文原样保留，前后端hash一致', async (): Promise<void> => {
     const text = '  方案正文\n\n```json\n{"optimized":"保持原台词：ＡＢＣ！"}\n```\n  ';
     const input = snapshot([message('user', '  TEST 指定本镜\n保留原台词。', 'user'), message('assistant', text, 'answer')]);

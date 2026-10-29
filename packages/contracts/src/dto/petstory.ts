@@ -175,6 +175,7 @@ export interface PetStoryImageReview {
   basisHash: string;
   adoptedAt?: string;
   sha256?: string;
+  sourceReply?: { adjustmentId: string; replyKey: string; urlHash: string };
 }
 export interface PetStoryAsset {
   id: string;
@@ -462,6 +463,7 @@ export interface PetStoryAPI {
   previewAdjustmentReply: (projectId: string, revision: number, adjustmentId: string, replyKey: string) => Promise<PetStoryAdjustmentPreviewResult>;
   beginAdjustment: (projectId: string, revision: number, target: PetStoryRuntimeTarget) => Promise<PetStoryAdjustmentResult>;
   captureAdjustmentReplies: (projectId: string, adjustmentId: string, conversationUrl: string, replies: PetStoryConversationReply[]) => Promise<PetStoryAdjustmentResult>;
+  importAdjustmentImages: (projectId: string, revision: number, adjustmentId: string, replyKey: string) => Promise<PetStoryAdjustmentResult>;
   adoptAdjustmentReply: (projectId: string, revision: number, adjustmentId: string, replyKey: string) => Promise<PetStoryAdjustmentResult>;
   endAdjustment: (projectId: string, revision: number, adjustmentId: string) => Promise<PetStoryAdjustmentResult>;
   addShotImage: (projectId: string, revision: number, shotId: string, kind: 'firstFrame' | 'lastFrame') => Promise<PetStoryResult>;

@@ -244,10 +244,12 @@ describe('产品运行时按钮到主进程请求', (): void => {
     project.plan!.understanding = 'TEST 当前剧本理解'; project.plan!.sceneDesign = 'TEST 全场空间连续性';
     project.jobs.push({ id: 'candidate-reply', taskId: 'candidate-task', kind: 'analysis', status: 'applied', inputHash: 'TEST', sourceUrl: '', sourceStoryId: project.mobileStory!.id, requestId: 'candidate-request', rulesVersion: 'TEST-runtime', ruleFiles: ['TEST/storyboard.md'], resultStatus: 'candidate', parsedResult: { plan: structuredClone(project.plan) }, rawText: 'TEST 原回复记录' });
     const html = renderToStaticMarkup(React.createElement(PetStoryRuntime, { project, disabled: false }));
-    expect(html).toContain('重新分析，生成新方案候选'); expect(html).toContain('补齐人物／道具／场景'); expect(html).toContain('采用此方案');
+    expect(html).toContain('重新分析，生成新方案候选'); expect(html).toContain('补齐人物／道具／场景'); expect(html).toContain('确认并采用方案');
     expect(html).toContain('TEST 当前剧本理解'); expect(html).toContain('TEST 全场空间连续性');
     const promptHtml = renderToStaticMarkup(React.createElement(CanvasPromptEditor, { project, shot: project.plan!.shots[0], kind: 'video', disabled: false, generationBlocked: false, dirtyChanged: (): void => undefined }));
-    expect(promptHtml).toContain('审查本项正文'); expect(promptHtml).toContain('基础图片尚未全部采用');
+    expect(promptHtml).toContain('审查本项正文');
+    // 媒体节点按本镜资格显示缺项，提示词不重复整项目的素材阻断。
+    expect(promptHtml).not.toContain('基础图片尚未全部采用');
     expect(prepareRuntime).not.toHaveBeenCalled(); expect(tasks).toHaveLength(0);
   });
   it('当前文字模型选择与有界编辑意图沿原 materialPrompt 入口传递，不触发媒体', async (): Promise<void> => {

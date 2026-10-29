@@ -49,6 +49,14 @@ function readyMediaJourney(shotCount: number, materialCount: number): void {
   window.electronAPI.petstory.inspectGeneration = vi.fn(async (): Promise<PetStoryGenerationEligibilityResult> => ({ success: true, eligibility: { ready: true, blockers: [] } }));
   usePetStoryStore.setState({ project: p, freeChatConfirmed: true, capability, capabilityCheckedInSession: true });
 }
+async function openMaterialBatchAction(label: string): Promise<HTMLElement> {
+  const details = document.querySelector<HTMLDetailsElement>('details[aria-label="批量提示词操作"]');
+  const summary = details?.querySelector('summary');
+  if (!details || !summary) throw new Error('素材阶段批量提示词入口缺失');
+  if (!details.open) fireEvent.click(summary);
+  expect(details.open).toBe(true);
+  return screen.findByRole('button', { name: label });
+}
 beforeEach((): void => {
   p = { schemaVersion: 1, id: 'TEST-project', studioProjectId: 'TEST-studio', accountId: account.id, revision: 1, source: { kind: 'script', url: '', status: 'review_required' }, assets: [], jobs: [], updatedAt: now };
   window.electronAPI = { petstory: {
@@ -71,16 +79,22 @@ afterEach((): void => {
 });
 
 describe('正常可见的六阶段与直接剧本入口', (): void => {
-  it.each(['applied', 'invalid'] as const)('完整方案候选为%s时，采用和调整操作同时核对校验状态', (status: 'applied' | 'invalid'): void => {
+  it.each(['applied', 'invalid'] as const)('完整方案候选为%s时只对有效候选开放采用和调整', (status: 'applied' | 'invalid'): void => {
     p.jobs = [{ id: 'TEST-status-candidate', taskId: 'TEST-status-task', kind: 'analysis', status, resultStatus: 'candidate', requestId: 'TEST-request', inputHash: 'TEST', sourceUrl: '', parsedResult: { plan: storedPlan() } }];
     const adopt = vi.fn(async (): Promise<void> => undefined); const adjust = vi.fn(async (): Promise<void> => undefined);
     usePetStoryStore.setState({ project: p, adoptPlanCandidate: adopt, openChatAdjustment: adjust });
     render(<PetStoryRuntime project={p} disabled={false} />);
-    const adoptButton = screen.getByRole('button', { name: '采用此方案' }); const adjustButton = screen.getByRole('button', { name: '在豆包中调整' });
-    expect(adoptButton.hasAttribute('disabled')).toBe(status !== 'applied'); expect(adjustButton.hasAttribute('disabled')).toBe(status !== 'applied');
-    fireEvent.click(adoptButton); fireEvent.click(adjustButton);
-    if (status === 'applied') { expect(adopt).toHaveBeenCalledWith('TEST-status-candidate'); expect(adjust).toHaveBeenCalledWith({ parentJobId: 'TEST-status-candidate' }); }
-    else { expect(adopt).not.toHaveBeenCalled(); expect(adjust).not.toHaveBeenCalled(); }
+    if (status === 'applied') {
+      const adoptButton = screen.getByRole('button', { name: '确认并采用方案' });
+      expect(adoptButton.hasAttribute('disabled')).toBe(false);
+      fireEvent.click(adoptButton); fireEvent.click(screen.getByRole('button', { name: '在豆包中调整' }));
+      expect(adopt).toHaveBeenCalledWith('TEST-status-candidate'); expect(adjust).toHaveBeenCalledWith({ parentJobId: 'TEST-status-candidate' });
+    } else {
+      expect(screen.queryByRole('button', { name: '确认并采用方案' })).toBeNull();
+      expect(screen.queryByRole('button', { name: '在豆包中调整' })).toBeNull();
+      expect(screen.getByText('分镜方案需要复核')).toBeDefined();
+      expect(adopt).not.toHaveBeenCalled(); expect(adjust).not.toHaveBeenCalled();
+    }
   });
   it('默认显示原文框和六步导航，可选链接与演员高级字段保持折叠，不在打开时发送', async (): Promise<void> => {
     const analyze = usePetStoryStore.getState().analyze; render(<PetStoryPanel />);
@@ -135,12 +149,14 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     fireEvent.click(screen.getByRole('button', { name: '分析剧本' }));
     await waitFor((): void => expect(screen.getByText('当前：确认方案')).toBeDefined());
     expect(analyze).toHaveBeenCalledOnce(); expect(confirm).not.toHaveBeenCalled();
-    expect(screen.getByText('当前采用方案')).toBeDefined();
-    fireEvent.click(screen.getByRole('button', { name: '确认方案并准备素材' }));
+    expect(screen.getByText('当前方案待确认')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: '确认并采用方案' }));
+    await waitFor((): void => expect(screen.getByText('方案已采用')).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: '准备基础素材' }));
     await waitFor((): void => expect(screen.getByText('当前：准备基础素材')).toBeDefined());
     expect(confirm).toHaveBeenCalledOnce(); expect(usePetStoryStore.getState().project?.assets).toEqual([]);
   });
-  it('首次分析只展示候选，用户采用后才允许确认制作依据', async (): Promise<void> => {
+  it('首次分析只展示候选，明确确认并采用后才形成制作依据', async (): Promise<void> => {
     const analyze = vi.fn(async (): Promise<void> => updateProject((project): void => {
       project.jobs.push({ id: 'TEST-first-candidate', taskId: 'TEST-first-task', kind: 'analysis', status: 'applied', resultStatus: 'candidate', requestId: 'TEST-first-request', inputHash: 'TEST', sourceUrl: '', parsedResult: { plan: storedPlan() } });
     }));
@@ -152,10 +168,10 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     fireEvent.click(screen.getByRole('button', { name: '分析剧本' }));
     await waitFor((): void => expect(screen.getByText('当前：确认方案')).toBeDefined());
     expect(usePetStoryStore.getState().project?.plan).toBeUndefined();
-    expect(screen.getByRole('button', { name: '确认方案并准备素材' }).hasAttribute('disabled')).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: '采用此方案' }));
+    expect(usePetStoryStore.getState().confirmStory).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '确认并采用方案' }));
     await waitFor((): void => expect(adopt).toHaveBeenCalledWith('TEST-first-candidate'));
-    await waitFor((): void => expect(screen.getByRole('button', { name: '确认方案并准备素材' }).hasAttribute('disabled')).toBe(false));
+    await waitFor((): void => expect(screen.getByText('方案已采用')).toBeDefined());
     expect(usePetStoryStore.getState().project?.assets).toEqual([]);
   });
   it('本次重新分析失败时不把历史已采用方案误报为本次成功', async (): Promise<void> => {
@@ -186,7 +202,9 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     const button = await screen.findByRole('button', { name: '去补充素材提示词' });
     expect(screen.getByText('基础素材文字尚有缺项，请先进入素材准备补齐。')).toBeDefined(); fireEvent.click(button);
     expect(screen.getByText('当前：准备基础素材')).toBeDefined(); expect(continueStage).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: '生成缺失提示词' })).toBeDefined();
+    expect(document.querySelector<HTMLDetailsElement>('details[aria-label="批量提示词操作"]')?.open).toBe(false);
+    expect(await openMaterialBatchAction('生成缺失提示词')).toBeDefined();
+    expect(continueStage).not.toHaveBeenCalled();
   });
   it.each(['制作关键帧', '制作镜头视频'])('%s返回素材只是导航，不被未确认文字授权或素材草稿锁住，执行型动作仍保持授权条件', async (stageName: string): Promise<void> => {
     readyMediaJourney(1, 1); const material = p.materials![0];
@@ -202,7 +220,7 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     const returnButton = await screen.findByRole('button', { name: '去补充素材提示词' }); expect(returnButton.hasAttribute('disabled')).toBe(false); fireEvent.click(returnButton);
     expect(screen.getByText('当前：准备基础素材')).toBeDefined();
     expect((within(materialCard).getByRole('textbox', { name: `${material.id}基础图最终提示词` }) as HTMLTextAreaElement).value).toBe(draft);
-    const executeButton = screen.getByRole('button', { name: '生成缺失提示词' }); expect(executeButton.hasAttribute('disabled')).toBe(true);
+    const executeButton = await openMaterialBatchAction('生成缺失提示词'); expect(executeButton.hasAttribute('disabled')).toBe(true);
     fireEvent.click(within(materialCard).getByRole('button', { name: '放弃修改' }));
     await waitFor((): void => expect(screen.queryByText(`人物「${material.name}」的提示词`)).toBeNull());
     expect(executeButton.hasAttribute('disabled')).toBe(true); // 草稿解除后，文字授权仍独立生效。
@@ -241,7 +259,7 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     window.electronAPI.petstory.promptStageTargets = vi.fn(async (): Promise<import('@doubao-studio/contracts').PetStoryResult> => ({ success: true, promptTargets: [{ materialId: 'TEST-missing-material' }] }));
     const continueStage = vi.fn(async (): Promise<void> => { usePetStoryStore.setState({ error: 'TEST 原服务仍保留账号与依赖资格核对' }); });
     usePetStoryStore.setState({ project: p, freeChatConfirmed: true, continuePromptStage: continueStage }); render(<PetStoryPanel />);
-    const button = await screen.findByRole('button', { name: '生成缺失提示词' });
+    const button = await openMaterialBatchAction('生成缺失提示词');
     expect(button.hasAttribute('disabled')).toBe(false);
     fireEvent.click(button);
     await waitFor((): void => expect(continueStage).toHaveBeenCalledOnce());
@@ -254,7 +272,7 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     window.electronAPI.petstory.promptStageTargets = vi.fn(async (): Promise<import('@doubao-studio/contracts').PetStoryResult> => ({ success: true, promptTargets: [{ shotId: p.plan!.shots[0].id, kind: 'firstFrame' }, { shotId: p.plan!.shots[0].id, kind: 'video' }] }));
     const continueStage = vi.fn(async (): Promise<void> => undefined);
     usePetStoryStore.setState({ project: p, freeChatConfirmed: true, continuePromptStage: continueStage }); render(<PetStoryPanel />);
-    const button = await screen.findByRole('button', { name: '继续提示词制作' });
+    const button = await openMaterialBatchAction('继续提示词制作');
     await act(async (): Promise<void> => undefined); // 等待只读最新缺项返回后，仍应显示已保存批次的实际范围。
     expect(screen.queryByRole('button', { name: /生成缺失提示词（关键帧/ })).toBeNull();
     fireEvent.click(button); await waitFor((): void => expect(continueStage).toHaveBeenCalledOnce());
@@ -266,23 +284,25 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     const adopt = vi.fn(async (): Promise<void> => updateProject((project): void => { project.plan = structuredClone(candidate.parsedResult!.plan); project.jobs[0].resultStatus = 'adopted'; }));
     usePetStoryStore.setState({ project: p, adoptPlanCandidate: adopt }); const confirm = usePetStoryStore.getState().confirmStory;
     render(<PetStoryPanel />);
-    await waitFor((): void => expect(screen.getByRole('button', { name: '采用此方案' })).toBeDefined());
-    const adoptButton = screen.getByRole('button', { name: '采用此方案' });
+    await waitFor((): void => expect(screen.getByRole('button', { name: '确认并采用方案' })).toBeDefined());
+    const adoptButton = screen.getByRole('button', { name: '确认并采用方案' });
     const candidateArticle = adoptButton.closest('article')!;
-    const previewSummary = within(candidateArticle).getByText('查看故事理解与分镜方案');
+    const previewSummary = within(candidateArticle).getByText('查看完整方案');
     const fullPreview = previewSummary.closest('details')!;
     expect(fullPreview.open).toBe(false);
     expect(adoptButton.classList.contains('ant-btn-primary')).toBe(true);
     expect(adoptButton.compareDocumentPosition(fullPreview) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-    expect(within(candidateArticle).getAllByRole('button', { name: '采用此方案' })).toHaveLength(1);
+    expect(within(candidateArticle).getAllByRole('button', { name: '确认并采用方案' })).toHaveLength(1);
     expect(within(candidateArticle).getAllByRole('button', { name: '在豆包中调整' })).toHaveLength(1);
-    expect(within(candidateArticle).getByText(`人物：${candidate.parsedResult!.plan!.characters.map((character): string => character.name).join('、')}`, { exact: true }).closest('details')).not.toBe(fullPreview);
+    expect(within(candidateArticle).getByText(/个镜头 · .*人物 \/ .*道具/).closest('details')).toBeNull();
+    expect(candidateArticle.querySelector('.petstory-plan-diagnostics')?.hasAttribute('open')).toBe(false);
     fireEvent.click(previewSummary); // 展开完整字段仍只是查看，不触发采用或确认。
-    expect(screen.getByRole('button', { name: '确认方案并准备素材' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: '确认并采用方案' }).hasAttribute('disabled')).toBe(false);
     expect(adopt).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: '采用此方案' }));
-    await waitFor((): void => expect(screen.getByRole('button', { name: '确认方案并准备素材' }).hasAttribute('disabled')).toBe(false));
-    expect(adopt).toHaveBeenCalledOnce(); expect(confirm).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '确认并采用方案' }));
+    await waitFor((): void => expect(screen.getByText('方案已采用')).toBeDefined());
+    expect(adopt).toHaveBeenCalledOnce(); expect(confirm).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('button', { name: '确认并采用方案' })).toBeNull();
   });
   it('可选链接草稿不会阻止返回直接剧本模式保存并分析', async (): Promise<void> => {
     const analyze = usePetStoryStore.getState().analyze; const saveLink = usePetStoryStore.getState().saveSource;
@@ -314,7 +334,8 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     fireEvent.click(screen.getByText('默认角色与共同风格（可编辑）'));
     fireEvent.change(screen.getByRole('textbox', { name: 'luluidentity预设' }), { target: { value: 'TEST未保存人物身份' } });
     fireEvent.click(within(navigation).getByRole('button', { name: /确认方案/ }));
-    fireEvent.click(screen.getByRole('button', { name: '编辑方案' }));
+    fireEvent.click(screen.getByText('生成记录／诊断详情'));
+    fireEvent.click(within(screen.getByRole('article', { name: '方案审阅' })).getByRole('button', { name: '编辑故事与镜头' }));
     fireEvent.change(screen.getByRole('textbox', { name: '原片梗概' }), { target: { value: 'TEST未保存方案' } });
     await waitFor((): void => expect(pendingPetStoryDrafts(p.id)).toEqual(expect.arrayContaining(['原剧本 · 输入剧本', '可选抖音链接 · 输入剧本', '制作演员与共同风格 · 输入剧本', '故事、角色与镜头设定 · 高级编辑'])));
     expect(pendingPetStoryDrafts(`${p.id}-other`)).toEqual([]);
@@ -343,7 +364,7 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     expect(screen.getByRole('button', { name: '去制作本镜首帧' })).toBeDefined();
     expect(analyze).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled(); expect(generate).not.toHaveBeenCalled();
   });
-  it('素材阶段直接显示图片入口检查，后端返回的具体阻断有可点击处理按钮', async (): Promise<void> => {
+  it('素材入口设置默认收起，具体阻断就地显示并可打开对应提示词，展开检查不生成', async (): Promise<void> => {
     p.mobileStory = { id: 'TEST-story', text: snapshot.mobileStory, importedAt: now }; p.plan = storedPlan(); p.storyApproval = { hash: 'TEST', at: now };
     const character = p.plan.characters[0];
     p.materials = [{ id: `character:${character.id}`, kind: 'character', entityId: character.id, name: character.name, designHash: 'TEST', prompt: structuredClone(p.plan.shots[0].prompts.firstFrame) }];
@@ -351,13 +372,52 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     window.electronAPI.petstory.inspectGeneration = vi.fn(async (): Promise<import('@doubao-studio/contracts').PetStoryGenerationEligibilityResult> => ({ success: true, eligibility: { ready: false, blockers: [{ code: 'prompt', message: 'TEST 当前素材提示词需要先核对' }] } }));
     usePetStoryStore.setState({ project: p, inspectCapability: inspect }); render(<PetStoryPanel />);
     await waitFor((): void => expect(screen.getByText('当前：准备基础素材')).toBeDefined());
+    const entryDetails = document.getElementById('petstory-material-entry') as HTMLDetailsElement;
+    expect(entryDetails.open).toBe(false);
+    fireEvent.click(within(entryDetails).getByText('生成设置／入口检查', { exact: true }));
+    expect(entryDetails.open).toBe(true);
+    expect(inspect).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '检查豆包图片入口' }));
     await waitFor((): void => expect(inspect).toHaveBeenCalledWith(false, 'image'));
     const card = document.getElementById(`material-${p.materials[0].id}`); if (!card) throw new Error('当前素材卡缺失');
     expect(within(card).getByText('TEST 当前素材提示词需要先核对')).toBeDefined();
     fireEvent.click(within(card).getByRole('button', { name: '查看本项提示词' }));
     await waitFor((): void => expect(screen.getByRole('textbox', { name: `${p.materials![0].id}基础图最终提示词` })).toBeDefined());
-    expect(within(card).getByRole('button', { name: /生成图片/ }).hasAttribute('disabled')).toBe(true);
+    expect(within(card).queryByRole('button', { name: '生成图片' })).toBeNull();
+    expect(within(card).getByRole('button', { name: /^(?:loading )?生成提示词$/ }).hasAttribute('disabled')).toBe(true);
+  });
+  it('未确认方案进入素材阶段只呈一个确认入口，返回方案不调用采用或生成', async (): Promise<void> => {
+    readyMediaJourney(1, 1); delete p.storyApproval;
+    const generate = vi.fn(async (): Promise<void> => undefined);
+    const prepare = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ project: p, generateMaterials: generate, regenerateMaterialPrompt: prepare });
+    const confirm = usePetStoryStore.getState().confirmStory;
+    render(<PetStoryPanel />);
+    fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: /准备基础素材/ }));
+    const materials = document.querySelector<HTMLElement>('.petstory-materials-panel'); if (!materials) throw new Error('素材阶段缺失');
+    expect(within(materials).getAllByRole('button')).toHaveLength(1);
+    const review = within(materials).getByRole('button', { name: '查看并确认方案' });
+    expect(review.classList.contains('ant-btn-primary')).toBe(true);
+    expect(within(materials).queryByText('生成设置／入口检查')).toBeNull();
+    expect(document.querySelector('details[aria-label="批量提示词操作"]')).toBeNull();
+    fireEvent.click(review);
+    expect(screen.getByText('当前：确认方案')).toBeDefined();
+    expect(confirm).not.toHaveBeenCalled(); expect(generate).not.toHaveBeenCalled(); expect(prepare).not.toHaveBeenCalled();
+  });
+  it('素材缺提示词时主操作只准备文字，上传仍可用且无需媒体入口检查', async (): Promise<void> => {
+    readyMediaJourney(1, 1); const material = p.materials![0];
+    material.prompt = { original: 'TEST设计摘要', final: '', optimized: '', edited: false, rulesVersion: 'TEST' };
+    const prepare = vi.fn(async (): Promise<void> => undefined); const generate = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ project: p, capability: null, capabilityCheckedInSession: false, regenerateMaterialPrompt: prepare, generateMaterials: generate });
+    render(<PetStoryPanel />);
+    await waitFor((): void => expect(screen.getByText('当前：准备基础素材')).toBeDefined());
+    const card = document.getElementById(`material-${material.id}`); if (!card) throw new Error('素材卡缺失');
+    const action = within(card).getByRole('button', { name: '生成提示词' });
+    expect(action.classList.contains('ant-btn-primary')).toBe(true); expect(action.hasAttribute('disabled')).toBe(false);
+    expect(within(card).queryByRole('button', { name: '生成图片' })).toBeNull();
+    expect(within(card).getByRole('button', { name: '上传图片' }).hasAttribute('disabled')).toBe(false);
+    fireEvent.click(action); await waitFor((): void => expect(prepare).toHaveBeenCalledExactlyOnceWith(material.id));
+    expect(generate).not.toHaveBeenCalled(); expect(usePetStoryStore.getState().project?.assets).toEqual([]);
   });
 });
 
@@ -432,8 +492,8 @@ describe('默认可见的任务恢复与新建账号处理', (): void => {
     expect(collect).not.toHaveBeenCalled(); fireEvent.click(button);
     await waitFor((): void => expect(collect).toHaveBeenCalledExactlyOnceWith(repair.id));
     rerender(<PetStoryCurrentTasks project={usePetStoryStore.getState().project!} />);
-    expect(screen.getByText('已整理分镜结构')).toBeDefined();
-    expect(screen.getByText('镜头 2：保留正常切镜，移除了多余的前镜头绑定。')).toBeDefined();
+    expect(usePetStoryStore.getState().project?.jobs.at(-1)?.formatCorrections).toEqual(['镜头 2：保留正常切镜，移除了多余的前镜头绑定。']);
+    expect(screen.queryByText('待处理事项')).toBeNull();
     expect(screen.queryByText('分镜结构待整理')).toBeNull();
     expect(correctOnce).not.toHaveBeenCalled(); expect(startBoundChat).not.toHaveBeenCalled();
     expect(usePetStoryStore.getState().analyze).not.toHaveBeenCalled();
@@ -445,9 +505,10 @@ describe('默认可见的任务恢复与新建账号处理', (): void => {
     const repair: PetStoryChatJob = { ...root, id: 'TEST-valid-repair', taskId: 'TEST-repair-task', kind: 'repair', parentJobId: root.id, status: 'applied', resultStatus: 'adopted', error: undefined, rawText: 'TEST 已保存的修订回复' };
     p.jobs = [root, repair]; const before = structuredClone(p); usePetStoryStore.setState({ project: p });
     render(<PetStoryCurrentTasks project={p} />);
-    expect(screen.getByText('回复已保存')).toBeDefined(); expect(screen.queryByText('内容需要处理')).toBeNull();
+    expect(screen.queryByText('待处理事项')).toBeNull(); expect(screen.queryByText('内容需要处理')).toBeNull();
     expect(screen.queryByRole('button', { name: '按具体缺项修订一次' })).toBeNull();
-    expect(screen.getByText('TEST 已保存的原始失败回复').closest('details')?.open).toBe(false);
+    expect(p.jobs[0].rawText).toBe('TEST 已保存的原始失败回复');
+    expect(p.jobs[1].rawText).toBe('TEST 已保存的修订回复');
     expect(p).toEqual(before);
   });
   it.each(['done', 'submitted'] as const)('原媒体任务%s时未核对本会话入口也能显式只读收取，不把旧规格当新生成授权', async (status): Promise<void> => {
@@ -546,6 +607,20 @@ describe('本会话媒体授权与后台只读资格缺一不可', (): void => {
     await waitFor((): void => expect(generate).toHaveBeenCalledWith([second.id])); expect(generate).toHaveBeenCalledOnce();
     expect(p.materials![0].prompt.final).toBe(first.prompt.final);
   });
+  it.each(['candidate', 'adopted'] as const)('首帧%s时当前动作是查看或复核，生成入口阻断收进设置不抢主操作', async (state): Promise<void> => {
+    p.plan = storedPlan(); p.storyApproval = { hash: 'TEST', at: now }; const shot = p.plan.shots[0];
+    p.assets = [{ id: 'TEST-frame', kind: 'firstFrame', shotId: shot.id, relativePath: 'TEST-frame.png', needsReview: state === 'adopted', imageReview: { state, target: { shotId: shot.id, kind: 'firstFrame' }, basisHash: 'TEST', adoptedAt: state === 'adopted' ? now : undefined } }];
+    if (state === 'adopted') p.adoptedImages = { [shot.id]: { firstFrameId: p.assets[0].id } };
+    window.electronAPI.petstory.inspectGeneration = vi.fn(async (): Promise<PetStoryGenerationEligibilityResult> => ({ success: true, eligibility: { ready: false, blockers: [{ code: 'capability', message: 'TEST 本会话尚未检查豆包图片入口' }] } }));
+    usePetStoryStore.setState({ project: p, capability: null, capabilityCheckedInSession: false });
+    render(<CanvasMediaNode project={p} shot={shot} kind="firstFrame" disabled={false} />);
+    const blocker = await screen.findByText('TEST 本会话尚未检查豆包图片入口'); const settings = blocker.closest('details');
+    expect(settings?.id).toBe(`shot-entry-${shot.id}-firstFrame`); expect(settings?.open).toBe(false);
+    // happy-dom 不计算原生 details 的可见性；核对真实默认关闭关系，未强制展开内容。
+    expect(screen.getByRole('button', { name: '查看入口检查' }).closest('details')).toBe(settings);
+    expect(screen.getByRole('button', { name: state === 'candidate' ? '查看并采用' : '查看并复核' })).toBeDefined();
+    fireEvent.click(screen.getByText('生成设置／入口检查')); expect(settings?.open).toBe(true); expect(screen.getByRole('button', { name: '查看入口检查' })).toBeDefined();
+  });
   it.each(['firstFrame', 'video'] as const)('%s恢复的规格不授权，当前检查后仍须后台就绪才允许点击生成', async (kind): Promise<void> => {
     p.plan = storedPlan(); p.storyApproval = { hash: 'TEST', at: now };
     const shot = p.plan.shots[0]; const mediaKind = kind === 'video' ? 'video' : 'image';
@@ -562,6 +637,9 @@ describe('本会话媒体授权与后台只读资格缺一不可', (): void => {
     await waitFor((): void => expect(inspectGeneration).toHaveBeenCalled());
     expect(inspectGeneration.mock.calls[0][3]).toBeUndefined();
     expect(button.hasAttribute('disabled')).toBe(true); expect(generate).not.toHaveBeenCalled();
+    const entrySettings = screen.getByText('生成设置／入口检查').closest('details');
+    expect(entrySettings?.open).toBe(false); fireEvent.click(screen.getByText('生成设置／入口检查'));
+    expect(entrySettings?.open).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: `检查豆包${kind === 'video' ? '视频' : '图片'}入口` }));
     await waitFor((): void => expect(inspectEntry).toHaveBeenCalledWith(false, mediaKind));
     await waitFor((): void => expect(screen.getByText('TEST 后台要求先核对当前正文')).toBeDefined());
