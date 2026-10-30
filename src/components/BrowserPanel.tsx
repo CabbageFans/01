@@ -1669,7 +1669,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
                 ready: false, failureStage: 'mode_entry', attempts: 1, elapsedMs: modeEntryElapsedMs,
               });
             }
-            throw new Error(`${modeLabel}模式入口未就绪，已在提交前停止`);
+            // 此时尚未上传或写入提交意图；使用可恢复的控件错误，不能归为未知提交失败。
+            throw new PetStoryControlError(`${modeLabel}模式入口未就绪，已在提交前停止`);
           }
           if (mode === 'video') await persistVideoReadiness('video_entry');
           await pause(1500); // 等待 Tab 切换动画
@@ -1830,7 +1831,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           const snapshot = await readPetStoryComposer(webview);
           if (!snapshot.present || !snapshot.generic || snapshot.pending || snapshot.count !== (attachments?.length || 0)) throw new PetStoryControlError('图片输入区或参考图回读不符，未提交');
         }
-        if (strictPrompt && !await verifyPromptReadyForSubmission(webview, prompt, true)) throw new SubmissionSafetyPauseError('最终全文或段落回读不一致，未提交');
+        // 此处尚未持久化提交意图，也未点击发送；保留为可恢复的输入检查失败。
+        if (strictPrompt && !await verifyPromptReadyForSubmission(webview, prompt, true)) throw new PetStoryControlError('最终全文或段落回读不一致，未提交');
         const currentRuntime = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime;
         if (!canAttemptSubmission(expectedRunId, currentRuntime?.runId, currentRuntime?.submittedAt)) {
           throw new SubmissionSafetyPauseError('本次运行已存在发送记录或运行身份已变化；系统已停止，未再次发送');

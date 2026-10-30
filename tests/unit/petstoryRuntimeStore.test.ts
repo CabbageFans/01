@@ -280,13 +280,13 @@ describe('产品运行时按钮到主进程请求', (): void => {
     await usePetStoryStore.getState().optimize(project.plan!.shots[0].id, 'video');
     expect(prepareRuntime.mock.calls[0][3]?.capability).toEqual(project.promptCapability);
   });
-  it('按路径打开复用同一正常打开与画布恢复入口，打开本身不调用文字或媒体', async (): Promise<void> => {
+  it('保留项目路径恢复能力，界面仅展示正常打开入口，打开本身不调用文字或媒体', async (): Promise<void> => {
     const entered = '/OFFLINE/原五镜头/project.json';
     await usePetStoryStore.getState().openProject(entered);
     expect(openProject).toHaveBeenCalledWith(entered); expect(usePetStoryStore.getState().project?.id).toBe(project.id);
 
     const html = renderToStaticMarkup(React.createElement(PetStoryOpenProject));
-    expect(html).toContain('打开项目'); expect(html).toContain('按路径打开');
+    expect(html).toContain('打开项目'); expect(html).not.toContain('其他打开方式'); expect(html).not.toContain('按路径打开');
     expect(prepareRuntime).not.toHaveBeenCalled(); expect(generateMaterials).not.toHaveBeenCalled(); expect(tasks).toHaveLength(0);
   });
   it.each([undefined, 'https://www.doubao.com/chat/', 'https://www.doubao.com/chat', 'https://www.doubao.com/chat/local_OFFLINE-temporary', 'https://www.doubao.com/chat/OFFLINE-original'])('原运行只读恢复按具体会话定位而非字符串非空判断：%s', async (url?: string): Promise<void> => {

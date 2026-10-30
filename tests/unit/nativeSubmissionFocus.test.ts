@@ -1,7 +1,7 @@
 /** 离线序列化探针回归，不点击真实页面。 */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runInNewContext } from 'node:vm';
-import { findSendButtonTarget, prepareNativeSubmission, submitPromptWithNativeClick } from '../../src/utils/doubaoBridge';
+import { findSendButtonTarget, prepareNativeSubmission, submitPromptWithNativeClick, verifyPromptReadyForSubmission } from '../../src/utils/doubaoBridge';
 import type { WebviewHandle } from '../../src/utils/doubaoBridge';
 import type { SubmissionDispatchSafety } from '../../src/utils/doubaoBridge';
 
@@ -18,6 +18,7 @@ class ProbeNode {
   moving = false;
   failEvent = '';
   eventOptions: { type: string; buttons?: number }[] = [];
+  focusOptions: FocusOptions[] = [];
   focusAction: () => void = (): void => undefined;
   constructor(public tagName: string, public bounds: Rect, readonly events: string[]) {}
   getBoundingClientRect(): Rect { if (this.moving) this.bounds = rect(this.bounds.left + 3, this.bounds.top, this.bounds.width, this.bounds.height); return this.bounds; }
@@ -25,12 +26,12 @@ class ProbeNode {
   contains(node: unknown): boolean { return node === this || this.children.some((child): boolean => child.contains(node)); }
   querySelectorAll(): ProbeNode[] { return this.children.flatMap((child): ProbeNode[] => [child, ...child.querySelectorAll()]); }
   matches(): boolean { return this.tagName === 'BUTTON' || !!this.attributes['data-testid']; }
-  focus(): void { this.focusAction(); }
+  focus(options: FocusOptions = {}): void { this.focusOptions.push(options); this.focusAction(); }
   dispatchEvent(event: { type: string; options?: { buttons?: number } }): boolean { this.events.push(event.type); this.eventOptions.push({ type: event.type, buttons: event.options?.buttons }); if (event.type === this.failEvent) throw new Error('TEST partial event'); return true; }
 }
 class ProbeEvent { constructor(readonly type: string, readonly options: unknown) {} }
 interface ProbeOptions { exact?: boolean; icon?: boolean; occluded?: boolean; outside?: boolean; focused?: boolean; moving?: boolean; hostOutside?: boolean; hostButtonOccluded?: boolean; parked?: boolean; inert?: boolean }
-function fixture(options: ProbeOptions = {}): { webview: WebviewHandle; native: ReturnType<typeof vi.fn>; events: string[]; button: ProbeNode; setOccluded: (value: boolean) => void; setHostButtonOccluded: (value: boolean) => void; setHostBounds: (value: Rect) => void; setFocused: (value: boolean) => void } {
+function fixture(options: ProbeOptions = {}): { webview: WebviewHandle; native: ReturnType<typeof vi.fn>; events: string[]; editor: ProbeNode; button: ProbeNode; setOccluded: (value: boolean) => void; setHostButtonOccluded: (value: boolean) => void; setHostBounds: (value: Rect) => void; setFocused: (value: boolean) => void } {
   const events: string[] = []; let occluded = !!options.occluded; let hostButtonOccluded = !!options.hostButtonOccluded;
   let focused = options.focused !== false; let hostBounds = rect(options.hostOutside ? 2000 : 100, 80, 800, 600);
   const body = new ProbeNode('BODY', rect(0, 0, 800, 600), events);
@@ -55,7 +56,7 @@ function fixture(options: ProbeOptions = {}): { webview: WebviewHandle; native: 
     const sendY = hostBounds.top + (button.bounds.top + button.bounds.height / 2) * hostBounds.height / pageWindow.innerHeight;
     return hostButtonOccluded && Math.abs(x - sendX) < 1 && Math.abs(y - sendY) < 1 ? overlay : webview;
   } });
-  return { webview, native, events, button, setOccluded: (value: boolean): void => { occluded = value; }, setHostButtonOccluded: (value: boolean): void => { hostButtonOccluded = value; },
+  return { webview, native, events, editor, button, setOccluded: (value: boolean): void => { occluded = value; }, setHostButtonOccluded: (value: boolean): void => { hostButtonOccluded = value; },
     setHostBounds: (value: Rect): void => { hostBounds = value; }, setFocused: (value: boolean): void => { focused = value; } };
 }
 
@@ -75,6 +76,28 @@ describe('single verified submission requires focus and a stable visible compose
   });
   it('prepares two stable frames without any submission event', async (): Promise<void> => {
     const test = fixture({ icon: true }); expect(await prepareNativeSubmission(test.webview)).toMatchObject({ ok: true, method: 'exact-id', focused: true, geometry: '310,210,40,40,800,600' });
+    expect(test.native).not.toHaveBeenCalled(); expect(test.events).toEqual([]);
+  });
+  it('keeps the exact prompt readable through focus preparation without scrolling the composer', async (): Promise<void> => {
+    const test = fixture(); const prompt = '完整第一段。\n\n第二段“台词”。'; test.editor.innerText = prompt;
+    const originalBounds = { ...test.editor.bounds }; const focusAction = test.editor.focusAction;
+    test.editor.focusAction = (): void => {
+      focusAction();
+      if (test.editor.focusOptions.at(-1)?.preventScroll !== true) test.editor.bounds = rect(50, -20, 300, 110);
+    };
+    expect(await verifyPromptReadyForSubmission(test.webview, prompt, true)).toBe(true);
+    expect((await prepareNativeSubmission(test.webview)).ok).toBe(true);
+    expect(test.editor.focusOptions).toEqual([{ preventScroll: true }]); expect(test.editor.bounds).toEqual(originalBounds);
+    expect(await verifyPromptReadyForSubmission(test.webview, prompt, true)).toBe(true);
+    expect(test.native).not.toHaveBeenCalled(); expect(test.events).toEqual([]);
+  });
+  it('preparation and final exact readback agree on a partially visible composer and still reject changed text', async (): Promise<void> => {
+    const test = fixture(); const prompt = '图片任务原文。\n\n保留两段。'; test.editor.innerText = prompt;
+    test.editor.bounds = rect(50, -20, 300, 110);
+    expect((await prepareNativeSubmission(test.webview)).ok).toBe(true);
+    expect(await verifyPromptReadyForSubmission(test.webview, prompt, true)).toBe(true);
+    test.editor.innerText = prompt.replace(/\n+/g, ' ');
+    expect(await verifyPromptReadyForSubmission(test.webview, prompt, true)).toBe(false);
     expect(test.native).not.toHaveBeenCalled(); expect(test.events).toEqual([]);
   });
   it('uses the actual serialized accent regex and accepts a verified child-icon hit', async (): Promise<void> => {

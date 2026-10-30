@@ -324,7 +324,9 @@ export async function verifyPromptReadyForSubmission(
           if (style && (style.visibility === 'hidden' || style.display === 'none')) continue;
           if (editor.closest && editor.closest('[aria-hidden="true"]')) continue;
           var rect = editor.getBoundingClientRect();
-          if (rect.width < 50 || rect.height < 20 || rect.top < 0 || rect.top > window.innerHeight) continue;
+          // 长输入区可部分越过视口；只排除完全屏外，不能把布局位移误报为正文变化。
+          if (!(rect.width >= 50 && rect.height >= 20 && rect.right > 0 && rect.bottom > 0
+            && rect.left < window.innerWidth && rect.top < window.innerHeight)) continue;
           eligibleCount++;
           var actual = ${strictParagraphs} ? readExactText(editor) : editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT'
             ? editor.value : (editor.innerText || editor.textContent || '');
@@ -2205,7 +2207,7 @@ export async function prepareNativeSubmission(webview: WebviewHandle, safety?: S
             rect.left < window.innerWidth && rect.top < window.innerHeight;
         });
         if (!editor) return false;
-        editor.focus();
+        editor.focus({ preventScroll: true });
         await new Promise(function(resolve) { requestAnimationFrame(resolve); });
         return document.hasFocus() && (document.activeElement === editor || editor.contains(document.activeElement));
       })()
@@ -3053,6 +3055,23 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           }
           return false;
         }
+        async function waitForImageModeEntry(timeoutMs) {
+          var deadline = Date.now() + timeoutMs;
+          var openedMore = false;
+          while (Date.now() < deadline) {
+            // 新对话编辑器会先于技能栏挂载；只轮询真实入口，不能在 1.5 秒后把正常重建判为失败。
+            if (await waitForModeEntry(Math.min(250, deadline - Date.now()))) return true;
+            composerRoot = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface');
+            if (!openedMore) {
+              var more = composerRoot && Array.from(composerRoot.querySelectorAll('button,[role="button"]')).find(function(el) {
+                return isVisible(el) && (el.innerText || '').trim() === '更多';
+              });
+              // 菜单只展开一次；后续仅回读，绝不反复点击关闭菜单或触发生成。
+              if (activate(more)) openedMore = true;
+            }
+          }
+          return false;
+        }
         async function findVisibleModeMenuOption(timeoutMs) {
           var deadline = Date.now() + timeoutMs;
           while (Date.now() < deadline) {
@@ -3090,12 +3109,15 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           var optionRect = option.getBoundingClientRect();
           return { ok: true, method: initialMethod + '-menu-confirmed', tag: option.tagName, pos: Math.round(optionRect.left) + ',' + Math.round(optionRect.top) };
         }
+        function findSelectedSkill() {
+          composerRoot = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface');
+          return composerRoot && Array.from(composerRoot.querySelectorAll('[data-testid="skill_input_exit_button"]')).find(function(el) {
+            var parentSkill = el.parentElement && el.parentElement.closest('[data-testid="skill_input_exit_button"]');
+            return !parentSkill && isVisible(el) && /^(图像生成|视频生成)$/.test((el.innerText || '').trim());
+          });
+        }
         // 两种创作技能共用输入区。已选目标技能时保持原位，切换时只退出一次，避免把目标标签当入口再次关闭。
-        var selectedSkill = composerRoot && Array.from(composerRoot.querySelectorAll('[data-testid="skill_input_exit_button"]')).find(function(el) {
-          var parentSkill = el.parentElement && el.parentElement.closest('[data-testid="skill_input_exit_button"]');
-          var r = el.getBoundingClientRect();
-          return !parentSkill && isVisible(el) && /^(图像生成|视频生成)$/.test((el.innerText || '').trim());
-        });
+        var selectedSkill = findSelectedSkill();
         if (selectedSkill && (selectedSkill.innerText || '').trim() === '${tabLabel}') {
           if ('${mode}' === 'video' && !await waitForVideoControls(15000)) return { ok: false, error: '已选视频技能的参数控件未就绪' };
           return { ok: true, method: 'already-selected-skill', tag: selectedSkill.tagName };
@@ -3105,7 +3127,17 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           await sleep(250);
           composerRoot = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface');
         }
-        if (!await waitForModeEntry(1500)) {
+        if ('${mode}' === 'image' && !await waitForImageModeEntry(10000)) {
+          return { ok: false, error: '${tabLabel}模式入口未在等待窗口内挂载' };
+        }
+        if ('${mode}' === 'image') {
+          // 重建期间可能恢复上次已选技能；等待后重新确认，不能把退出按钮当作入口点击。
+          var readyImageSkill = findSelectedSkill();
+          if (readyImageSkill && (readyImageSkill.innerText || '').trim() === '${tabLabel}') {
+            return { ok: true, method: 'image-skill-ready-after-wait', tag: readyImageSkill.tagName };
+          }
+        }
+        if ('${mode}' !== 'image' && !await waitForModeEntry(1500)) {
           // 当前普通对话将图像入口收在可见的“更多”菜单中，只展开一次，不查询隐藏接口。
           var more = composerRoot && Array.from(composerRoot.querySelectorAll('button,[role="button"]')).find(function(el) {
             var r = el.getBoundingClientRect();

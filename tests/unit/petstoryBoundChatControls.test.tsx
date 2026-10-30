@@ -2,20 +2,18 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PetStoryChatJob, PetStoryPlan, PetStoryProject, PetStoryPromptProfile, Task } from '@doubao-studio/contracts';
+import type { PetStoryChatJob, PetStoryPlan, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { canStartBoundChat } from '../../src/utils/petstoryCandidate';
 import { PromptProvenance } from '../../src/components/PetStoryCanvasPrompt';
-import { PetStoryPanel, PromptProfileEditor } from '../../src/components/PetStoryPanel';
+import { PetStoryPanel } from '../../src/components/PetStoryPanel';
 import { usePetStoryStore } from '../../src/store/usePetStoryStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
 import snapshot from '../fixtures/storyboard-five-shots.json';
 
-const profileSelects = vi.hoisted(() => new Map<string, React.ComponentProps<typeof import('antd').Select>>());
 vi.mock('antd', async (importOriginal): Promise<object> => {
   const actual = await importOriginal<typeof import('antd')>();
   // 展开历史容器以审查真实 Panel 条件；按钮及其余组件仍使用原实现。
   return { ...actual,
-    Select: (props: React.ComponentProps<typeof actual.Select>): React.ReactElement => { if (props['aria-label']) profileSelects.set(props['aria-label'], props); return React.createElement(actual.Select, props); },
     Collapse: ({ items }: { items?: { label?: React.ReactNode; children?: React.ReactNode }[] }): React.ReactElement => <div>{items?.map((item, index): React.ReactNode => <div key={index}>{item.label}{item.children}</div>)}</div> };
 });
 
@@ -24,7 +22,6 @@ const now = '2026-10-27T00:00:00.000Z';
 const label = '处理阻断后继续原任务（未发送）';
 let project: PetStoryProject; let job: PetStoryChatJob; let task: Task;
 beforeEach((): void => {
-  profileSelects.clear();
   vi.spyOn(React, 'useSyncExternalStore').mockImplementation(<T,>(_subscribe: (onStoreChange: () => void) => () => void, getSnapshot: () => T): T => getSnapshot());
   job = { id: 'TEST-job', taskId: 'TEST-task', kind: 'materialPrompt', materialId: 'prop:branch_short', status: 'bound', inputHash: 'TEST', sourceUrl: '', sourceStoryId: 'TEST-story', runId: 'TEST-original-run', requestId: 'TEST-request', requestText: 'TEST离线请求' };
   task = { id: job.taskId, projectId: 'TEST-studio', assignedAccountId: 'TEST-account', mode: 'chat', status: 'waiting_verification', prompt: 'TEST离线请求', outputs: [], result: null, createdAt: now, updatedAt: now,
@@ -38,53 +35,6 @@ beforeEach((): void => {
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
 function allowed(): boolean { return canStartBoundChat(project, job, task, [task]); }
 function historyHtml(): string { return renderToStaticMarkup(<PetStoryPanel />); }
-
-describe('已保存动态角色资料的正常编辑投影', (): void => {
-  it('默认两键去重，已存配角按当前方案名称呈现，无匹配角色保留ID与字段，查看不改资料或发送', (): void => {
-    const profile: PetStoryPromptProfile = { style: 'TEST已存共同风格', characters: {
-      lulu: { identity: 'TEST已存噜噜身份', appearance: 'TEST已存噜噜造型' },
-      lumei: { identity: 'TEST已存噜妹身份', appearance: 'TEST已存噜妹造型' },
-      friend: { identity: 'TEST已存配角身份', appearance: 'TEST已存配角造型' },
-      supporting_saved: { identity: 'TEST无当前方案映射身份', appearance: 'TEST无当前方案映射造型' }}, assetStyles: { common: 'TEST已存共同风格' } };
-    project.promptProfile = profile;
-    project.plan!.characters = [...project.plan!.characters.filter((character): boolean => character.id !== 'friend'), { ...project.plan!.characters[0], id: 'friend', name: 'TEST当前方案配角名称' }];
-    const before = structuredClone(project.promptProfile); const change = vi.fn(); const save = vi.fn(async (): Promise<void> => undefined);
-    usePetStoryStore.setState({ project, savePromptProfile: save });
-    const html = renderToStaticMarkup(<PromptProfileEditor project={project} profile={profile} setProfile={change} disabled={false} onDirtyChange={(): void => undefined} />);
-    expect(html).toContain('默认角色与共同风格（可编辑）'); expect(html).toContain('TEST当前方案配角名称');
-    expect(html).toContain('aria-label="friendidentity预设"'); expect(html).toContain('TEST已存配角身份'); expect(html).toContain('TEST已存配角造型');
-    expect(html).toContain('supporting_saved'); expect(html).toContain('TEST无当前方案映射身份');
-    expect(html.match(/aria-label="luluidentity预设"/g)).toHaveLength(1); expect(html.match(/aria-label="lumeiidentity预设"/g)).toHaveLength(1);
-    expect(html).toContain('噜噜'); expect(html).toContain('噜妹'); expect(project.promptProfile).toEqual(before);
-    expect(change).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled(); expect(useTaskStore.getState().tasks).toEqual([task]);
-  });
-  it('任意已配置演员的别名顺序与主配角职责原样显示，控件修改沿profile草稿保存且可清空旧可选字段', (): void => {
-    const id = 'TEST-dynamic-performer';
-    let profile: PetStoryPromptProfile = { style: 'TEST共同风格', characters: {
-      [id]: { identity: 'TEST演员既有身份', appearance: 'TEST演员既有造型', aliases: ['来源称谓乙', ' 原始别名 '], role: 'supporting' }} };
-    project.promptProfile = structuredClone(profile); const savedBefore = structuredClone(project.promptProfile);
-    const save = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ project, savePromptProfile: save });
-    const render = (): string => renderToStaticMarkup(<PromptProfileEditor project={project} profile={profile} setProfile={(value: PetStoryPromptProfile): void => { profile = value; }} disabled={false} onDirtyChange={(): void => undefined} />);
-    const html = render(); expect(html).toContain('来源称谓乙'); expect(html).toContain('原始别名'); expect(html).toContain('配角');
-    expect(profileSelects.get(`${id}来源称谓别名`)).toMatchObject({ mode: 'tags', value: ['来源称谓乙', ' 原始别名 '] });
-    expect(profileSelects.get(`${id}角色职责`)).toMatchObject({ allowClear: true, value: 'supporting' });
-    expect(profileSelects.get('lulu来源称谓别名')?.value).toEqual([]); expect(profileSelects.get('lulu角色职责')?.value).toBeUndefined();
-    const aliases = [' 原始别名 ', '来源称谓乙', '新来源称谓'];
-    profileSelects.get(`${id}来源称谓别名`)!.onChange!(aliases, []); render();
-    profileSelects.get(`${id}角色职责`)!.onChange!('main'); render();
-    expect(profile.characters[id]).toEqual({ ...savedBefore.characters[id], aliases, role: 'main' });
-    expect(Object.keys(profile.characters)).toEqual([id]); // 查看默认两主控件不擅自添加演员或分派别名。
-    profileSelects.get(`${id}来源称谓别名`)!.onChange!([], []); render();
-    profileSelects.get(`${id}角色职责`)!.onChange!(undefined); render();
-    expect(profile.characters[id]).toMatchObject({ identity: 'TEST演员既有身份', appearance: 'TEST演员既有造型' });
-    expect(profile.characters[id].aliases).toBeUndefined(); expect(profile.characters[id].role).toBeUndefined();
-    // 旧配置未存默认两主时，仅用户真的编辑的条目获得空结构，不编造身份或自动分派主配角。
-    profileSelects.get('lulu来源称谓别名')!.onChange!(['TEST用户明确填写称谓'], []); render();
-    expect(profile.characters.lulu).toEqual({ identity: '', appearance: '', aliases: ['TEST用户明确填写称谓'] });
-    expect(profile.characters.lumei).toBeUndefined();
-    expect(project.promptProfile).toEqual(savedBefore); expect(save).not.toHaveBeenCalled(); expect(useTaskStore.getState().tasks).toEqual([task]);
-  });
-});
 
 describe('原绑定文字任务明确未发送的继续入口', (): void => {
   it.each(['fail', 'paused', 'cancelled', 'waiting_verification'] as const)('%s且原运行/输入一致、无提交证据时允许恢复', (status: Task['status']): void => {

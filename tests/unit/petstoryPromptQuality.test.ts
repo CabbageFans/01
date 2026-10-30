@@ -262,7 +262,7 @@ describe('发送前真实序列化回读脚本', (): void => {
     const text = `噜妹：“我不吃香菜。”\n\n${'完整表演。'.repeat(1000)}\n结尾`;
     const verify = async (actual: string, strict: boolean, count: number = 1, hiddenDuplicate: boolean = false): Promise<boolean> => {
       const webview = { executeJavaScript: async (code: string): Promise<unknown> => vm.runInNewContext(code, { document: { querySelectorAll: (): object[] => Array.from({ length: count }, (_unused, index): object => ({ hidden: hiddenDuplicate && index > 0, offsetParent: {}, disabled: false, getAttribute: (): null => null,
-        getBoundingClientRect: (): object => ({ width: 600, height: 200, top: 10 }), tagName: 'TEXTAREA', value: actual })) }, window: { innerHeight: 900, getComputedStyle: (e: { hidden: boolean }): object => ({ visibility: e.hidden ? 'hidden' : 'visible', display: 'block' }) } }),
+        getBoundingClientRect: (): object => ({ left: 20, top: 10, right: 620, bottom: 210, width: 600, height: 200 }), tagName: 'TEXTAREA', value: actual })) }, window: { innerWidth: 1200, innerHeight: 900, getComputedStyle: (e: { hidden: boolean }): object => ({ visibility: e.hidden ? 'hidden' : 'visible', display: 'block' }) } }),
         loadURL: (): void => {}, getURL: (): string => 'https://www.doubao.com/chat/' } as WebviewHandle;
       return verifyPromptReadyForSubmission(webview, text, strict);
     };
@@ -276,6 +276,24 @@ describe('发送前真实序列化回读脚本', (): void => {
     expect(await verify(text.slice(0, -3), true)).toBe(false);
     expect(await verify(text.replace(/\n+/g, ' '), false)).toBe(true);
   });
+  it.each([
+    { name: '输入区顶部部分越界', left: 20, top: -40, expected: true },
+    { name: '输入区左侧部分越界', left: -40, top: 20, expected: true },
+    { name: '输入区完全位于上方', left: 20, top: -200, expected: false },
+    { name: '输入区完全位于下方', left: 20, top: 900, expected: false },
+    { name: '输入区完全位于左侧', left: -600, top: 20, expected: false },
+    { name: '输入区完全位于右侧', left: 1200, top: 20, expected: false },
+  ])('$name：只按视口相交定位，仍逐字核对全文', async ({ left, top, expected }): Promise<void> => {
+    const text = '第一段。\n\n第二段“原台词”。'; let actual = text;
+    const editor = { offsetParent: {}, disabled: false, tagName: 'TEXTAREA', get value(): string { return actual; }, getAttribute: (): null => null,
+      getBoundingClientRect: (): object => ({ left, top, right: left + 600, bottom: top + 200, width: 600, height: 200 }) };
+    const webview = { executeJavaScript: async (code: string): Promise<unknown> => vm.runInNewContext(code, { document: { querySelectorAll: (): object[] => [editor] },
+      window: { innerWidth: 1200, innerHeight: 900, getComputedStyle: (): object => ({ display: 'block', visibility: 'visible' }) } }),
+      loadURL: (): void => {}, getURL: (): string => '' } as WebviewHandle;
+    expect(await verifyPromptReadyForSubmission(webview, text, true)).toBe(expected);
+    actual = text.replace('原台词', '改台词');
+    expect(await verifyPromptReadyForSubmission(webview, text, true)).toBe(false);
+  });
   it('首次请求包含完整专用预设及必要规则，不伪称看过原视频', (): void => {
     const p = fixture(); p.plan = undefined; p.assets = [];
     const input = analysisPrompt(p);
@@ -288,17 +306,37 @@ describe('原生多段落输入的真实序列化探针', (): void => {
     const { insertExactComposerText } = await import('../../src/utils/exactComposer');
     const value = '中文“台词”。\n\n第二段\n末段'; let selected = false; const commands: unknown[][] = [];
     const editor = { tagName: tag, offsetParent: {}, disabled: false, getAttribute: (): null => null, closest: (): null => null,
-      getBoundingClientRect: (): object => ({ width: 500, height: 200, top: 20 }), focus: (): void => {}, select: (): void => { selected = true; }, hidden: false };
+      getBoundingClientRect: (): object => ({ left: 20, top: 20, right: 520, bottom: 220, width: 500, height: 200 }), focus: (): void => {}, select: (): void => { selected = true; }, hidden: false };
     const doc = { querySelectorAll: (): object[] => [{ ...editor, hidden: true }, editor],
       createRange: (): object => ({ selectNodeContents: (): void => { selected = true; } }),
       execCommand: (...args: unknown[]): boolean => { commands.push(args); return true; } };
-    const view = { innerHeight: 900, getComputedStyle: (e: { hidden: boolean }): object => ({ display: 'block', visibility: e.hidden ? 'hidden' : 'visible' }),
+    const view = { innerWidth: 1200, innerHeight: 900, getComputedStyle: (e: { hidden: boolean }): object => ({ display: 'block', visibility: e.hidden ? 'hidden' : 'visible' }),
       getSelection: (): object => ({ removeAllRanges: (): void => {}, addRange: (): void => {} }) };
     expect(vm.runInNewContext(`(${insertExactComposerText.toString()})(${JSON.stringify(value)})`, { document: doc, window: view })).toBe(true);
     expect(selected).toBe(true); expect(commands).toEqual([['insertText', false, value]]);
     doc.querySelectorAll = (): object[] => [editor, editor]; commands.length = 0;
     expect(vm.runInNewContext(`(${insertExactComposerText.toString()})(${JSON.stringify(value)})`, { document: doc, window: view })).toBe(false);
     expect(commands).toEqual([]);
+  });
+  it.each(['insert', 'append'] as const)('%s 接受部分可见输入区且聚焦不滚动，屏外或多个输入区不能写入', async (operation): Promise<void> => {
+    const { insertExactComposerText, appendExactComposerText } = await import('../../src/utils/exactComposer');
+    const probe = operation === 'insert' ? insertExactComposerText : appendExactComposerText;
+    const commands: unknown[][] = []; const focusOptions: FocusOptions[] = [];
+    let top = -40; let left = 20; let duplicate = false;
+    const editor = { tagName: 'TEXTAREA', value: '已有正文', offsetParent: {}, disabled: false, getAttribute: (): null => null, closest: (): null => null,
+      getBoundingClientRect: (): object => ({ left, top, right: left + 500, bottom: top + 200, width: 500, height: 200 }),
+      focus: (options: FocusOptions): void => { focusOptions.push(options); }, select: (): void => {}, setSelectionRange: (): void => {} };
+    const doc = { querySelectorAll: (): object[] => duplicate ? [editor, editor] : [editor], execCommand: (...args: unknown[]): boolean => { commands.push(args); return true; } };
+    const view = { innerWidth: 1200, innerHeight: 900, getComputedStyle: (): object => ({ display: 'block', visibility: 'visible' }) };
+    const run = (): boolean => vm.runInNewContext(`(${probe.toString()})("正文\\n段落")`, { document: doc, window: view }) as boolean;
+    expect(run()).toBe(true); expect(focusOptions).toEqual([{ preventScroll: true }]);
+    expect(commands).toEqual([['insertText', false, '正文\n段落']]);
+    commands.length = 0;
+    for (const bounds of [{ top: -200, left: 20 }, { top: 900, left: 20 }, { top: 20, left: -500 }, { top: 20, left: 1200 }]) {
+      ({ top, left } = bounds); expect(run()).toBe(false);
+    }
+    top = -40; left = 20; duplicate = true;
+    expect(run()).toBe(false); expect(commands).toEqual([]); expect(focusOptions).toHaveLength(1);
   });
 });
 
