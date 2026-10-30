@@ -85,7 +85,7 @@ describe('图片候选与明确采用', (): void => {
     expect(isPetStoryImageAdopted(p, p.assets[0])).toBe(true);
     p = await f.projects.addShotImage(p.id, p.revision, 'shot-1', 'firstFrame', red); const frame = p.assets.at(-1)!; delete frame.imageReview;
     p = await f.projects.write(p);
-    expect(await f.projects.referenceFile(p.id, frame.id)).toContain(frame.relativePath);
+    expect(await f.projects.referenceFile(p.id, frame.id)).toBe(path.join(f.projects.directory(p.id), frame.relativePath));
     expect(isPetStoryImageAdopted(p, p.assets.at(-1)!)).toBe(false);
     p = await f.projects.adoptImage(p.id, p.revision, { shotId: 'shot-1', kind: 'firstFrame' }, frame.id);
     expect(selectedShotImageId(p, 'shot-1', 'firstFrame')).toBe(frame.id);
@@ -106,7 +106,7 @@ describe('图片候选与明确采用', (): void => {
     const revised = structuredClone(p.plan!); revised.shots = [{ ...revised.shots[1], order: 1 }];
     p = await f.projects.savePlan(p.id, p.revision, revised);
     expect(p.adoptedImages?.['shot-1']).toBeUndefined(); expect(p.assets.find((item): boolean => item.id === asset.id)?.needsReview).toBe(true);
-    expect(await f.projects.referenceFile(p.id, asset.id)).toContain(asset.relativePath);
+    expect(await f.projects.referenceFile(p.id, asset.id)).toBe(path.join(f.projects.directory(p.id), asset.relativePath));
     expect((await f.projects.open(f.projects.directory(p.id))).plan?.shots).toHaveLength(1);
   });
   it('批量采用任一目标无效时整个采用保存失败，不留下部分正式指针', async (): Promise<void> => {
