@@ -187,7 +187,7 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     p.mobileStory = { id: 'TEST-story', text: snapshot.mobileStory, importedAt: now }; p.plan = storedPlan(); p.storyApproval = { hash: 'TEST', at: now };
     window.electronAPI.petstory.promptStageTargets = vi.fn(async (): Promise<import('@doubao-studio/contracts').PetStoryResult> => ({ success: true, promptTargets: [{ materialId: 'TEST-missing-material' }] }));
     const continueStage = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ project: p, continuePromptStage: continueStage }); render(<PetStoryPanel />);
-    fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: new RegExp(stageName) }));
+    await act(async (): Promise<void> => { fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: new RegExp(stageName) })); });
     const button = await screen.findByRole('button', { name: '去补充素材提示词' });
     expect(screen.getByText('基础素材文字尚有缺项，请先进入素材准备补齐。')).toBeDefined(); fireEvent.click(button);
     expect(screen.getByText('当前：准备基础素材')).toBeDefined(); expect(continueStage).not.toHaveBeenCalled();
@@ -199,7 +199,8 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     readyMediaJourney(1, 1); const material = p.materials![0]; material.prompt.edited = true;
     window.electronAPI.petstory.promptStageTargets = vi.fn(async (): Promise<import('@doubao-studio/contracts').PetStoryResult> => ({ success: true, promptTargets: [{ materialId: material.id }] }));
     const generate = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ generateMaterialImage: generate }); render(<PetStoryPanel />);
-    const navigation = screen.getByRole('navigation', { name: '短剧制作阶段' }); fireEvent.click(within(navigation).getByRole('button', { name: new RegExp(stageName) }));
+    const navigation = screen.getByRole('navigation', { name: '短剧制作阶段' });
+    await act(async (): Promise<void> => { fireEvent.click(within(navigation).getByRole('button', { name: new RegExp(stageName) })); });
     const returnButton = await screen.findByRole('button', { name: '去补充素材提示词' }); fireEvent.click(returnButton);
     expect(screen.getByText('当前：准备基础素材')).toBeDefined();
     const materialCard = document.getElementById(`material-${material.id}`); if (!materialCard) throw new Error('实际素材卡缺失');

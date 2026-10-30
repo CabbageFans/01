@@ -254,7 +254,8 @@ describe('P4 顺序素材接力与持久化', (): void => {
     }
     expect(reopened.assets.filter((a): boolean => a.kind === 'video').every((a): boolean => a.validation?.decoded === true && a.validation.durationSeconds === 6 && a.validation.width === 64)).toBe(true);
     expect(createdInputs.filter((i): boolean => i.mode === 'video').every((i): boolean => i.prompts.length === 1 && i.prompts[0].includes('TEST final'))).toBe(true);
-  });
+    // 四镜头完整接力包含多次真实 FFmpeg 解码与写盘，独立设置集成用例时限。
+  }, 30_000);
   it('adopts the existing P3 hold draft rather than creating another first-frame task', async (): Promise<void> => {
     const reduced = p.plan as PetStoryPlan; reduced.shots = [reduced.shots[3]]; reduced.shots[0].order = 1;
     p.plan = reduced; p = await projects.write(p);
