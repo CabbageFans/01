@@ -25,6 +25,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install media test tools
+        run: choco install ffmpeg --yes --no-progress
+      - name: Verify media test tools
+        run: |
+          ffmpeg -version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ffprobe -version
+          exit $LASTEXITCODE
       - uses: pnpm/action-setup@v4
         with:
           version: 11

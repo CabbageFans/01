@@ -122,7 +122,8 @@ describe('原五镜头画布持久化与操作边界', (): void => {
       usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); useAccountStore.setState(initial.accounts); useProjectStore.setState(initial.projects);
       vi.unstubAllGlobals();
     }
-  });
+    // 本用例串行执行 13 次真实文件持久化，Windows CI 的磁盘延迟高于本机。
+  }, 15_000);
   it('merges a stale-revision single final save while retaining the latest Chat candidate and other shots', async (): Promise<void> => {
     const shot = p.plan!.shots[1]; const oldRevision = p.revision;
     const prepared = await chats.prepare(p.id, optimizationPrompt(p, shot.id, 'firstFrame'), 'optimize', undefined, shot.id, 'firstFrame');
