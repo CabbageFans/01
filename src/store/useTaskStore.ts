@@ -425,7 +425,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         );
         set({ tasks });
 
-        // 重试后统一由调度器决定是否启动，避免绕过依赖检查、账号健康/额度检查和防重复处理
+        // 重试后统一由调度器决定是否启动，避免绕过依赖检查、账号健康检查和防重复处理
         setTimeout(() => get().processQueue(), 0);
 
         return true;
@@ -599,7 +599,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
     const accountId = task.assignedAccountId;
     const assignedAccount = useAccountStore.getState().accounts.find((account) => account.id === accountId);
-    const accountBlockReason = getAssignedAccountBlockReason(assignedAccount, task);
+    const accountBlockReason = getAssignedAccountBlockReason(assignedAccount);
     if (accountBlockReason) {
       console.warn('[TaskStore] 账号不可调度:', accountBlockReason, accountId);
       set({ error: accountBlockReason });
@@ -1173,7 +1173,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         }
         availabilityRetryAttempts.delete(accountId);
 
-        if (getAssignedAccountBlockReason(account, latestTask)) {
+        if (getAssignedAccountBlockReason(account)) {
           continue;
         }
         if (!get().accountBusy[accountId]) {

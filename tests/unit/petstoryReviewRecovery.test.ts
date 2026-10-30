@@ -52,7 +52,7 @@ async function finish(job: PetStoryChatJob, body: Record<string, unknown> | stri
 }
 function clientRender(): void {
   vi.spyOn(React, 'useSyncExternalStore').mockImplementation(<T,>(_subscribe: (onStoreChange: () => void) => () => void, getSnapshot: () => T): T => getSnapshot());
-  usePetStoryStore.setState({ project, busy: false, freeChatConfirmed: true }); useTaskStore.setState({ tasks: list() });
+  usePetStoryStore.setState({ project, busy: false}); useTaskStore.setState({ tasks: list() });
 }
 
 describe('素材实际图片与格式纠正后的内容审查', (): void => {
@@ -68,7 +68,7 @@ describe('素材实际图片与格式纠正后的内容审查', (): void => {
       project.materials![0].approved = approved ? { assetId: 'TEST-selected', sha256, at: now } : undefined;
       const request = buildDramaRequest(project, { kind: 'review', requestId: 'TEST-review', materialId: 'scene:location' });
       const block = request.prompt.split('【当前事实与本次附件】\n')[1].split('\n\n【结果约定】')[0];
-      const fenced = block.match(/^(`{3,})json\n([\s\S]*)\n\1$/);
+      const fenced = block.match(/^(`{3})json\n([\s\S]*)\n\1$/);
       const facts = JSON.parse(fenced?.[2] || block) as { attachmentList: { version: string; logicalId: string; approved: boolean }[] };
       expect(request.assets.map((asset): string => asset.id)).toEqual(['TEST-selected']); expect(request.expectedIds).toEqual(['scene:location']);
       expect(facts.attachmentList).toMatchObject([{ version: 'TEST-selected', logicalId: 'scene:location', approved }]);

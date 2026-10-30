@@ -1,10 +1,10 @@
 schema: spec-driven
 
 context: |
-  - 唯一业务需求以 docs/PRODUCT_REQUIREMENTS.md 的 PetStory Studio v1.5 与 docs/DRAMA_SKILLS_RUNTIME_TASK.md（用户本轮指令优先，旧条款作历史背景） 为准。
+  - 当前业务需求以 docs/PRODUCT_REQUIREMENTS.md 顶部有效版本与 docs/REMOVE_FREE_GATES_CODEX.md 为准；2026-10-30 已取消免费确认、人工入口检查和素材引用免责声明，旧冲突条款作历史背景。
   - 支持直接剧本及抖音链接记录、手机豆包提取提示词和用户故事回填，桌面不再通过链接读取视频；不导入本地原视频。
   - 基于现有 Mac doubao-studio 工作区增量开发，复用当前可运行环境。
-  - 运行时 AI 只使用豆包普通对话及实际开放的创作入口。
+  - 运行时 AI 只使用豆包普通对话及实际开放的创作入口；开始即进入对应任务，模型、参数、模式和素材控件在实际执行中读取，不能以免费未知或缺少检查记录提前阻断。
   - 基础素材先行确认；动态人物、道具、场景和分镜；噜噜、噜妹为可编辑默认主演，内置 Seedream/Seedance 提示词优化。
   - 保持一个业务页、project.json 和 FFmpeg 的最小实现。
   - 真实账号和视频内容由用户手动验收。

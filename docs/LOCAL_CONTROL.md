@@ -75,9 +75,9 @@
 
 `GET .../artifacts` 只返回稳定产物 ID、类型、发现时间、验证状态和是否可下载，不返回远程地址、会话地址或本地路径。
 
-写命令会在主进程和 Renderer 各自重新校验项目、批次、任务归属，然后调用应用现有的依赖、账号健康、额度、任务锁和防重复调度链。控制面不会直接写 `tasks.json`。
+写命令会在主进程和 Renderer 各自重新校验项目、批次、任务归属，然后调用应用现有的依赖、真实登录／验证状态、任务锁和防重复调度链。本地额度预测、历史免费标签、会员猜测和缺少人工入口检查记录不得拒绝启动；平台本次明确返回的额度／会员限制仍如实记录。控制面不会直接写 `tasks.json`。
 
-`GET /v1/health` 的 `ready` / `rendererReady` 只有在 Renderer 已注册调度桥时才为 `true`。HTTP 存活但 `ready=false` 时不得发送写命令。命令被调度门禁拒绝时返回稳定机器码，例如 `SCHEDULER_PAUSED`、`ACCOUNT_REQUIRED`、`DEPENDENCY_NOT_READY`、`QUOTA_UNAVAILABLE`、`ACCOUNT_ACTION_REQUIRED`、`ACCOUNT_BUSY`、`TASK_LOCKED` 和 `INVALID_TASK_STATUS`，不回显内部页面文案。
+`GET /v1/health` 的 `ready` / `rendererReady` 只有在 Renderer 已注册调度桥时才为 `true`。HTTP 存活但 `ready=false` 时不得发送写命令。命令被调度门禁拒绝时返回稳定机器码，例如 `SCHEDULER_PAUSED`、`ACCOUNT_REQUIRED`、`DEPENDENCY_NOT_READY`、`ACCOUNT_ACTION_REQUIRED`、`ACCOUNT_BUSY`、`TASK_LOCKED` 和 `INVALID_TASK_STATUS`，不回显内部页面文案。
 
 ## Agent 使用顺序
 
@@ -87,7 +87,7 @@
 4. 指派和启动必须是两个独立写请求：先 `assign`，确认成功后由操作者明确决定是否 `start`；不得把指派成功解释为执行授权。
 5. 每个写动作生成新的 UUID `requestId`；网络结果不确定时用同一 `requestId` 重试，不得换新 ID 盲目重发。同一 ID 跨命令复用会返回 `REQUEST_ID_CONFLICT`。
 6. 查询任务产物并选定单一稳定 `artifactId` 后才能下载；客户端不得传入网页媒体 URL 或文件目录。
-7. 遇到账号登录、人机验证、额度、会员、未知弹窗或提交状态不确定，保留任务状态并交由人工处理；不得通过 CDP 或坐标脚本绕过。
+7. 实际遇到账号登录、人机验证、平台明确的额度／会员拒绝、阻碍执行的弹窗或提交状态不确定，保留任务状态并按真实原因处理；不得通过 CDP 或坐标脚本绕过。免费未知、历史确认与本地预测不提前阻断任务，也不要求用户先检查入口。
 8. 工作结束后关闭客户端；若曾开启 CDP，退出整个应用并确认调试端口不再监听。
 
 启动后若健康端点仍为 `ready=false`，客户端应在有限时间内继续只读轮询，不得下发写命令。2.3.5 的 Renderer 会在命令监听注册后的 5 秒启动窗口内幂等重申就绪；超过该窗口仍未就绪应视为运行故障并停止，而不是改用截图坐标绕过。

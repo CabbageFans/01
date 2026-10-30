@@ -35,8 +35,8 @@ function story(which: 'music' | 'repair'): PetStoryPlan {
       prompts: { firstFrame: prompt('明确静态起点，{{ref:prop:object-a}}定义道具外形。'), lastFrame: prompt('以{{ref:first}}为基础只编辑到操作终态。'), video: prompt('从起点执行已确认的操作过程，再结束。') } })) };
 }
 function capability(): PetStoryCapability {
-  const supported = { state: 'supported' as const, free: 'free' as const, reason: 'TEST离线入口' };
-  return { allowPlainReferences: true, accountId: 'TEST-account', checkedAt: new Date().toISOString(), image: supported, modes: { first_frame: supported, first_last_frame: supported, reference: supported }, videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' }, durations: [5], freeEvidence: 'user_confirmed' };
+  const supported = { state: 'supported' as const, reason: 'TEST离线入口' };
+  return { accountId: 'TEST-account', checkedAt: new Date().toISOString(), image: supported, modes: { first_frame: supported, first_last_frame: supported, reference: supported }, videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' }, durations: [5], };
 }
 async function harness(which: 'music' | 'repair' = 'repair'): Promise<{
   projects: PetStoryProjects; project: PetStoryProject; core: TaskService; service: PetStoryProductionService;
@@ -89,12 +89,12 @@ describe('通用剧本资产与确认', (): void => {
     const original = await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8');
     const initial = await h.service.inspectGeneration(p.id, p.revision, firstTarget);
     expect(initial.eligibility?.ready).toBe(false);
-    expect(initial.eligibility?.blockers.map((item): string => item.code)).toEqual(expect.arrayContaining(['story', 'materials', 'prompt', 'capability']));
+    expect(initial.eligibility?.blockers.map((item): string => item.code)).toEqual(expect.arrayContaining(['story', 'materials', 'prompt']));
     expect(initial.eligibility?.blockers.some((item): boolean => !!item.materialId)).toBe(true);
     expect(await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8')).toBe(original); expect(h.list()).toEqual([]);
     p = await accepted(h);
     const saved = await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8');
-    const c = capability(); c.modes = { first_frame: { state: 'unknown', free: 'unknown', reason: 'TEST未检查视频' }, first_last_frame: { state: 'unknown', free: 'unknown', reason: 'TEST未检查视频' }, reference: { state: 'unknown', free: 'unknown', reason: 'TEST未检查视频' } }; c.durations = []; c.videoConfig = undefined;
+    const c = capability(); c.modes = { first_frame: { state: 'unknown', reason: 'TEST未检查视频' }, first_last_frame: { state: 'unknown', reason: 'TEST未检查视频' }, reference: { state: 'unknown', reason: 'TEST未检查视频' } }; c.durations = []; c.videoConfig = undefined;
     expect((await h.service.inspectGeneration(p.id, p.revision, firstTarget, c)).eligibility).toMatchObject({ ready: true, blockers: [] });
     const videoTarget = { shotId: firstTarget.shotId, promptKind: 'video' as const };
     const video = await h.service.inspectGeneration(p.id, p.revision, videoTarget, capability());
@@ -103,7 +103,7 @@ describe('通用剧本资产与确认', (): void => {
     await expect(h.service.inspectGeneration(p.id, p.revision - 1, firstTarget, capability())).rejects.toThrow('项目已变化');
     await expect(h.service.inspectGeneration(p.id, p.revision, { shotId: 'not-owned', promptKind: 'video' }, capability())).rejects.toThrow('不属于当前方案');
   });
-  it('只读资格与真实单节点生成一致，已完成首帧可进入视频，未知入口和未结束任务仍阻断', async (): Promise<void> => {
+  it('只读资格与真实单节点生成一致，无检查记录也可执行，未结束任务仍阻断', async (): Promise<void> => {
     const h = await harness('music'); let p = await accepted(h); const shotId = p.plan!.shots[0].id;
     const target = { shotId, promptKind: 'firstFrame' as const };
     expect((await h.service.inspectGeneration(p.id, p.revision, target, capability())).eligibility?.ready).toBe(true);
@@ -119,7 +119,8 @@ describe('通用剧本资产与确认', (): void => {
     expect(result.eligibility).toMatchObject({ ready: true, resolvedMode: 'reference', blockers: [] });
     expect(await fs.readFile(path.join(h.projects.directory(p.id), 'project.json'), 'utf8')).toBe(before); expect(h.list()).toHaveLength(1);
     const expired = capability(); expired.checkedAt = '2000-01-01T00:00:00.000Z';
-    expect((await h.service.inspectGeneration(p.id, p.revision, { shotId, promptKind: 'video' }, expired)).eligibility?.blockers).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'capability', message: expect.stringContaining('已过期') })]));
+    expect((await h.service.inspectGeneration(p.id, p.revision, { shotId, promptKind: 'video' }, expired)).eligibility).toMatchObject({ ready: true, blockers: [] });
+    expect((await h.service.inspectGeneration(p.id, p.revision, { shotId, promptKind: 'video' })).eligibility).toMatchObject({ ready: true, blockers: [] });
     p.plan!.shots[0].requestedMode = 'first_last_frame'; p = await h.projects.savePlan(p.id, p.revision, p.plan!); seedOfflinePromptContracts(p); p = await h.projects.write(p);
     expect((await h.service.inspectGeneration(p.id, p.revision, { shotId, promptKind: 'video' }, capability())).eligibility).toMatchObject({ ready: false, resolvedMode: 'first_last_frame', blockers: expect.arrayContaining([expect.objectContaining({ code: 'lastFrame', shotId, promptKind: 'lastFrame' })]) });
   });
@@ -174,7 +175,7 @@ describe('通用剧本资产与确认', (): void => {
     p.promptCapability = capability(); seedOfflinePromptContracts(p); p = await h.projects.write(p);
     await h.service.generateMaterials(p.id, p.revision, [id], capability()); const next = await h.service.advance(p.id); await h.finish(next.taskId!);
     h.setDownloadFailure(true); expect((await h.service.advance(p.id)).success).toBe(false); expect(h.list()).toHaveLength(1);
-    h.setDownloadFailure(false); const c = capability(); c.freeEvidence = 'unknown'; c.image.free = 'unknown'; await h.service.resume(p.id, c);
+    h.setDownloadFailure(false); await h.service.resume(p.id);
     expect((await h.service.advance(p.id)).success).toBe(true); await h.service.advance(p.id); p = await h.projects.read(p.id);
     expect(h.list()).toHaveLength(1); expect(p.production?.phase).toBe('materials'); expect(p.production?.state).toBe('complete');
     expect(p.materials![0].selectedAssetId).toBeUndefined(); expect(p.assets.at(-1)?.imageReview?.state).toBe('candidate'); expect(p.materials![0].approved).toBeUndefined(); expect(p.production?.shots).toEqual({});

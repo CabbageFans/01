@@ -231,7 +231,7 @@ describe('主进程当前阶段资格清单', (): void => {
 });
 
 describe('用户明确授权新的局部修订轮次', (): void => {
-  it('首轮仍失败时不自动追加修订，但用户可对未变的审查正文发起新请求并保留全部历史', async (): Promise<void> => {
+  it('首轮失败可自动纠正一次，仍失败后用户可对未变审查正文发起新轮并保留历史', async (): Promise<void> => {
     await withOriginalPlan();
     p = (await chat.prepareRuntime(p.id, p.revision, 'review', { shotId: 'shot_1', promptKind: 'firstFrame' })).project!;
     const review = p.jobs.at(-1)!;
@@ -242,14 +242,17 @@ describe('用户明确授权新的局部修订轮次', (): void => {
     p = (await chat.prepareRuntime(p.id, p.revision, 'revise', target)).project!; const first = p.jobs.at(-1)!;
     const raw = '{ TEST离线不合格原回复'; await recordRun(first, raw);
     const failed = await chat.collect(p.id, first.id); p = failed.project!;
-    expect(failed.needsRepair).toBe(false); await expect(chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: first.id })).rejects.toThrow('已使用一次内容修订');
+    expect(failed.needsRepair).toBe(true);
+    p = (await chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: first.id, repairMode: 'automatic' })).project!; const auto = p.jobs.at(-1)!;
+    await recordRun(auto, raw); const stillFailed = await chat.collect(p.id, auto.id); p = stillFailed.project!;
+    expect(stillFailed.needsRepair).toBe(false); await expect(chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: auto.id })).rejects.toThrow('自动修订已使用一次');
     p = (await chat.prepareRuntime(p.id, p.revision, 'revise', target)).project!; const second = p.jobs.at(-1)!;
     expect(second.requestId).not.toBe(first.requestId); expect(second.parentJobId).toBe(review.id);
     await recordRun(second, response(second, snapshot.plan.shots[0].prompts.firstFrame.optimized));
     p = (await chat.collect(p.id, second.id)).project!;
     expect(p.jobs.find((job): boolean => job.id === first.id)?.rawText).toBe(raw);
     expect(p.jobs.at(-1)?.resultStatus).toBe('candidate'); expect(p.plan!.shots[0].prompts.firstFrame.final).toBe(snapshot.plan.shots[0].prompts.firstFrame.final);
-    expect(stored).toHaveLength(3); expect((await new PetStoryProjects().open(directory)).jobs).toEqual(p.jobs);
+    expect(stored).toHaveLength(4); expect((await new PetStoryProjects().open(directory)).jobs).toEqual(p.jobs);
   });
 });
 

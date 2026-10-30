@@ -28,11 +28,11 @@ function create(params: TaskAddParams, accountId: string): Task {
   return assigned.data;
 }
 function capability(imageOnly = false): PetStoryCapability {
-  const supported = { state: 'supported' as const, free: 'free' as const, reason: 'TEST 离线控件核验替身' };
-  const unknown = { state: 'unknown' as const, free: 'unknown' as const, reason: '尚未核对视频入口' };
+  const supported = { state: 'supported' as const, reason: 'TEST 离线控件核验替身' };
+  const unknown = { state: 'unknown' as const, reason: '尚未核对视频入口' };
   return { accountId: p.accountId, checkedAt: new Date().toISOString(), image: supported,
     modes: { first_frame: imageOnly ? unknown : supported, first_last_frame: imageOnly ? unknown : supported, reference: imageOnly ? unknown : supported },
-    durations: imageOnly ? [] : [5, 6, 7, 8, 9, 10], videoConfig: imageOnly ? undefined : { model: 'seedance-2.0-fast', duration: '6s', aspectRatio: '9:16' }, freeEvidence: 'user_confirmed' };
+    durations: imageOnly ? [] : [5, 6, 7, 8, 9, 10], videoConfig: imageOnly ? undefined : { model: 'seedance-2.0-fast', duration: '6s', aspectRatio: '9:16' }, };
 }
 async function runtime(task: Task, chatText?: string): Promise<void> {
   const now = new Date().toISOString();
@@ -85,6 +85,7 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     const now = new Date().toISOString();
     const account: Account = { id: p.accountId, name: 'TEST 原账号替身', platform: 'doubao', avatar: '', partition: 'TEST-only', status: 'idle', pinned: false, createdAt: now, updatedAt: now };
     vi.stubGlobal('window', { electronAPI: { petstory: { prepareRuntime: chats.prepareRuntime.bind(chats), bindRun: chats.bindRun.bind(chats), collectChat: chats.collect.bind(chats),
+      adoptPromptCandidate: chats.adoptPromptCandidate.bind(chats),
       savePromptBatch: async (...args: Parameters<PetStoryProjects['savePromptBatch']>): Promise<{ success: true; project: PetStoryProject }> => ({ success: true, project: await projects.savePromptBatch(...args) }) }, tasks: { list: async (): Promise<Task[]> => list() } } });
     useAccountStore.setState({ accounts: [account] });
     useProjectStore.setState({ projects: [{ id: p.studioProjectId, name: 'TEST 原五镜头容器', description: '', color: '#fff', archived: false, createdAt: now, updatedAt: now }] });
@@ -92,7 +93,7 @@ describe('原五镜头画布持久化与操作边界', (): void => {
       const task = list().find((t): boolean => t.id === taskId)!; await runtime(task);
       if (beforeDispatch) await beforeDispatch(list().find((t): boolean => t.id === taskId)!); return true;
     } });
-    usePetStoryStore.setState({ project: p, busy: false, freeChatConfirmed: true, error: '' });
+    usePetStoryStore.setState({ project: p, busy: false, error: '' });
     try {
       await usePetStoryStore.getState().regenerateAllPrompts();
       expect(tasks).toHaveLength(1);
@@ -104,6 +105,13 @@ describe('原五镜头画布持久化与操作边界', (): void => {
         await runtime(task, JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, optimized: source.optimized }));
         await usePetStoryStore.getState().collect(job.id);
         expect(usePetStoryStore.getState().error).toBe('');
+        if (usePetStoryStore.getState().project!.jobs.find((entry): boolean => entry.id === job.id)?.resultStatus === 'candidate') {
+          // 手改保护所要求的采用点保持可见；未采用时不能把下一项的依赖算作完成。
+          expect(usePetStoryStore.getState().promptBatch).toMatchObject({ completed: index, status: 'paused' });
+          expect(tasks).toHaveLength(index + 1);
+          await usePetStoryStore.getState().adoptPromptCandidate(job.id);
+          expect(usePetStoryStore.getState().error).toBe('');
+        }
         expect(tasks).toHaveLength(Math.min(13, index + 2));
       }
       expect(usePetStoryStore.getState().promptBatch).toEqual({ total: 13, completed: 13, status: 'complete' });

@@ -31,7 +31,7 @@ beforeEach((): void => {
   const setFocus: React.Dispatch<React.SetStateAction<string>> = (value): void => { focus = typeof value === 'function' ? value(focus) : value; };
   vi.spyOn(React, 'useState').mockImplementation(((): [string, typeof setFocus] => [focus, setFocus]) as typeof React.useState);
   project = { schemaVersion: 1, id: 'TEST-project', studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 1, updatedAt: '2026-10-26T00:00:00.000Z', source: { kind: 'script', url: '', status: 'review_required' }, assets: [], jobs: [], plan: { sourceSummary: 'TEST', adaptedStory: 'TEST', characters: [], props: [], scenes: [], shots: [] } };
-  usePetStoryStore.setState({ project, busy: false, freeChatConfirmed: true, reviewContent: review }); useTaskStore.setState({ tasks: [] });
+  usePetStoryStore.setState({ project, busy: false, reviewContent: review }); useTaskStore.setState({ tasks: [] });
 });
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
 
@@ -42,10 +42,9 @@ describe('用户可选内容审查关注点', (): void => {
     expect(review).toHaveBeenLastCalledWith({ reviewFocus: 'TEST 需要核对的疑点' });
     focusInput().onChange({ target: { value: ' \n ' } }); reviewButton().onClick(); expect(review).toHaveBeenLastCalledWith(undefined);
   });
-  it('有原请求未收取或未核对免费Chat时，关注点与审查按钮同步禁用', (): void => {
+  it('有原请求未收取时同步禁用，空闲时无需额外确认', (): void => {
     project.jobs.push({ id: 'TEST-pending', taskId: 'TEST-task', kind: 'review', status: 'bound', sourceUrl: '', inputHash: 'TEST' });
     expect(focusInput().disabled).toBe(true); expect(reviewButton().disabled).toBe(true);
-    project.jobs = []; usePetStoryStore.setState({ freeChatConfirmed: false });
-    expect(focusInput().disabled).toBe(true); expect(reviewButton().disabled).toBe(true); expect(review).not.toHaveBeenCalled();
+    project.jobs = []; expect(focusInput().disabled).toBe(false); expect(reviewButton().disabled).toBe(false); expect(review).not.toHaveBeenCalled();
   });
 });

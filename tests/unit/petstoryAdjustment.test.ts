@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DownloadJob, PetStoryChatAdjustment, PetStoryChatJob, PetStoryConversationReply, PetStoryPlan, PetStoryProject, Task, TaskAddParams, TaskDownloadOutputsParams, TaskDownloadOutputsResult, TaskRunSnapshot } from '@doubao-studio/contracts';
+import type { DownloadJob, PetStoryChatAdjustment, PetStoryChatJob, PetStoryConversationReply, PetStoryPlan, PetStoryProject, PetStoryResult, Task, TaskAddParams, TaskDownloadOutputsParams, TaskDownloadOutputsResult, TaskRunSnapshot } from '@doubao-studio/contracts';
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
 import { PetStoryChatService } from '../../main/utils/petstoryChat';
 import { PetStoryAdjustmentService, adjustmentConversationUrl, conversationReplyKey } from '../../main/utils/petstoryAdjustment';
@@ -46,6 +46,14 @@ async function collectPlanJob(job: PetStoryChatJob, valid: boolean, invalidDurat
   project = (await chats.bindRun(project.id, job.id, runtime.runId)).project!;
   const collected = await chats.collect(project.id, job.id); project = collected.project!; expect(collected.success).toBe(valid);
 }
+async function receive(job: PetStoryChatJob, answer: Record<string, unknown>): Promise<PetStoryResult> {
+  const task = stored.find((item): boolean => item.id === job.taskId)!; const now = new Date().toISOString();
+  const runtime: TaskRunSnapshot = { runId: `TEST-repair-${job.id}`, attempt: 1, stage: 'completed', message: 'TEST 离线同目标修订结果', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
+    conversationUrl: `${url}-${job.kind}`, input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] }, chatResponse: { text: JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, ...answer }), capturedAt: now } };
+  const completed = core.updateRuntime({ taskId: task.id, status: 'done', runtime }); if (!completed.success) throw new Error(completed.error);
+  project = (await chats.bindRun(project.id, job.id, runtime.runId)).project!;
+  const collected = await chats.collect(project.id, job.id); project = collected.project!; return collected;
+}
 beforeEach(async (): Promise<void> => {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'TEST-petstory-adjustment-'));
   projects = new PetStoryProjects(); project = await projects.create(directory, 'TEST-studio', 'TEST-adjustment-account');
@@ -53,7 +61,7 @@ beforeEach(async (): Promise<void> => {
   project.plan = plan(); project.materials = syncMaterials(project); project = await projects.write(project);
   stored = []; let sequence = 0;
   core = new TaskService({ store: { read: (): Task[] => structuredClone(stored), replace: (items: Task[]): boolean => { stored = structuredClone(items); return true; } }, defaultProjectId: (): string => project.studioProjectId, id: (): string => `TEST-adjustment-task-${++sequence}` });
-  const port = { setConversationGuard: (taskId: string, projectId: string, adjustmentId: string, active: boolean): void => core.setConversationGuard(taskId, projectId, adjustmentId, active), list: (): Task[] => structuredClone(stored), create: (params: TaskAddParams, accountId: string): Task => { const made = core.create(params); if (!made.success) throw new Error(made.error); const assigned = core.assign({ taskId: made.data[0].id, accountId }); if (!assigned.success) throw new Error(assigned.error); return assigned.data; } };
+  const port = { setConversationGuard: (taskId: string, projectId: string, adjustmentId: string, active: boolean, allowedTaskId?: string): void => core.setConversationGuard(taskId, projectId, adjustmentId, active, allowedTaskId), list: (): Task[] => structuredClone(stored), create: (params: TaskAddParams, accountId: string): Task => { const made = core.create(params); if (!made.success) throw new Error(made.error); const assigned = core.assign({ taskId: made.data[0].id, accountId }); if (!assigned.success) throw new Error(assigned.error); return assigned.data; } };
   chats = new PetStoryChatService(projects, port); service = new PetStoryAdjustmentService(projects, port, chats);
   const prepared = await chats.prepareRuntime(project.id, project.revision, 'optimize', target); project = prepared.project!; source = project.jobs.at(-1)!;
   const task = stored[0]; const now = new Date().toISOString();
@@ -71,6 +79,140 @@ afterEach(async (): Promise<void> => {
 });
 
 describe('具体回复与目标保护', (): void => {
+  it('候选采用发现正文缺项会归入内容校验，但旧上下文不会自动发起修订或覆盖final', async (): Promise<void> => {
+    project = (await chats.prepareRuntime(project.id, project.revision, 'optimize', { shotId: target.shotId, promptKind: 'video' })).project!;
+    const job = project.jobs.at(-1)!; const body = `${snapshot.plan.shots[0].prompts.video.optimized}。全程无字幕、无对白文字叠加。`;
+    expect((await receive(job, { optimized: body })).success).toBe(true);
+    const final = project.plan!.shots[0].prompts.video.final;
+    // 仅隔离夹具增加原故事已经出现的确认台词，模拟候选返回后用户改变创作依据。
+    expect(project.mobileStory?.text).toContain('踩到屎了');
+    project.plan!.shots[0].dialogue = [{ speakerId: 'lumei', text: '踩到屎了', tone: '', pace: '' }]; project = await projects.write(project);
+    const count = stored.length; const rejected = await chats.adoptPromptCandidate(project.id, project.revision, job.id); project = rejected.project!;
+    expect(rejected).toMatchObject({ success: false, needsRepair: false, repairSourceJobId: job.id });
+    expect(project.jobs.find((item): boolean => item.id === job.id)?.validationDetails?.[0]).toMatchObject({ code: 'prompt_content' });
+    expect(stored).toHaveLength(count); expect(project.plan!.shots[0].prompts.video.final).toBe(final);
+  });
+  it('历史小数方案打开原值可读且零发送；显式重分析可保存新任务，方案保存仍严格整秒', async (): Promise<void> => {
+    const filename = path.join(directory, 'project.json'); const saved = JSON.parse(await fs.readFile(filename, 'utf8')) as PetStoryProject;
+    saved.plan!.shots[0].durationSeconds = 7.5; await fs.writeFile(filename, JSON.stringify(saved));
+    const raw = await fs.readFile(filename, 'utf8'); const count = stored.length;
+    project = await new PetStoryProjects().open(directory); expect(project.plan!.shots[0].durationSeconds).toBe(7.5); expect(stored).toHaveLength(count);
+    expect(await fs.readFile(filename, 'utf8')).toBe(raw);
+    const prepared = await chats.prepareRuntime(project.id, project.revision, 'analysis'); project = prepared.project!;
+    expect(project.plan!.shots[0].durationSeconds).toBe(7.5); expect(stored).toHaveLength(count + 1);
+    const edited = structuredClone(project); edited.plan!.shots[0].durationSeconds = 8.5;
+    await expect(projects.write(edited)).rejects.toThrow('整秒'); expect((await projects.read(project.id)).plan!.shots[0].durationSeconds).toBe(7.5);
+  });
+  it('原五镜头的选定坏回复预览零发送，明确应用才建立唯一关联修订并保持旧final', async (): Promise<void> => {
+    const adjustment = await begin(); const original = structuredClone(project.plan); const sourceRaw = source.rawText;
+    const chosen = reply('{{ref:missing-material}}', 81); await capture(adjustment, [reply(originalBody, 80), chosen]);
+    const count = stored.length; const before = await fs.readFile(path.join(directory, 'project.json'), 'utf8');
+    const preview = await service.preview(project.id, project.revision, adjustment.id, chosen.key);
+    expect(preview).toMatchObject({ success: false, needsRepair: true }); expect(stored).toHaveLength(count);
+    expect(await fs.readFile(path.join(directory, 'project.json'), 'utf8')).toBe(before);
+    const applied = await service.adopt(project.id, project.revision, adjustment.id, chosen.key); project = applied.project!;
+    const repair = project.jobs.find((job): boolean => job.id === applied.repairJobId)!;
+    const snapshotJob = project.jobs.find((job): boolean => job.id === repair.parentJobId)!;
+    expect(repair).toMatchObject({ kind: 'repair', originKind: 'optimize', repairMode: 'automatic', shotId: target.shotId, promptKind: target.promptKind, repairReplySource: { adjustmentId: adjustment.id, replyKey: chosen.key } });
+    expect(snapshotJob).toMatchObject({ status: 'invalid', rawText: chosen.text, conversationReply: { reply: { key: chosen.key, text: chosen.text } } });
+    expect(project.jobs.find((job): boolean => job.id === source.id)?.rawText).toBe(sourceRaw);
+    expect(project.plan).toEqual(original); expect(project.chatAdjustment).toMatchObject({ status: 'active', selectedReplyKey: chosen.key, repairJobId: repair.id });
+    expect(stored).toHaveLength(count + 1); expect(repair.requestText).toContain(chosen.text); expect(repair.requestText).toContain('firstFrame');
+    const duplicate = await service.adopt(project.id, project.revision, adjustment.id, chosen.key);
+    expect(duplicate.repairJobId).toBe(repair.id); expect(stored).toHaveLength(count + 1);
+    const reopened = await new PetStoryProjects().open(directory); service.restore(reopened);
+    expect(reopened.chatAdjustment?.repairJobId).toBe(repair.id); expect(stored).toHaveLength(count + 1);
+    expect(hasConversationGuard(project.accountId)).toBe(true); expect(hasConversationGuard(project.accountId, repair.taskId)).toBe(false);
+    expect(core.acquireLock({ taskId: source.taskId, ownerId: 'TEST-original-not-permitted' }).success).toBe(false);
+    expect(core.acquireLock({ taskId: repair.taskId, ownerId: 'TEST-only-selected-repair' }).success).toBe(true);
+    expect(stored.find((task): boolean => task.id === source.taskId)?.runtime?.chatAdjustmentGuard).toMatchObject({ active: true, allowedTaskId: repair.taskId });
+  });
+
+  it('结束自由回复修订保留原文并结束同一待发job；之后不再绑定新run', async (): Promise<void> => {
+    const adjustment = await begin(); const chosen = reply('{{ref:missing-material}}', 82); await capture(adjustment, [chosen]);
+    const applied = await service.adopt(project.id, project.revision, adjustment.id, chosen.key); project = applied.project!;
+    const repair = project.jobs.find((job): boolean => job.id === applied.repairJobId)!;
+    const ended = await service.end(project.id, project.revision, adjustment.id); project = ended.project!;
+    expect(project.chatAdjustment?.status).toBe('ended'); expect(project.jobs.find((job): boolean => job.id === repair.id)?.endedWaitingAt).toBeTruthy();
+    expect(hasConversationGuard(project.accountId)).toBe(false);
+    await expect(chats.bindRun(project.id, repair.id, 'TEST-new-run')).rejects.toThrow('原运行与任务绑定不符');
+    expect((await new PetStoryProjects().open(directory)).chatAdjustment?.replies[0].text).toBe(chosen.text);
+  });
+
+  it('原五镜方案选定字符串时长精确入修订，合格新回复仍为候选不代替采用', async (): Promise<void> => {
+    project = (await chats.prepareRuntime(project.id, project.revision, 'analysis')).project!;
+    const analysis = project.jobs.at(-1)!; await collectPlanJob(analysis, true);
+    const adjustment = (await service.begin(project.id, project.revision, { parentJobId: analysis.id })).adjustment!; project = await projects.read(project.id);
+    const incoming = plan(); const bad = { ...incoming, storyUsable: true, contentBasis: { beginning: incoming.shots[0].startState, middle: incoming.shots[2].action, ending: incoming.shots.at(-1)!.endState }, shots: incoming.shots.map((shot, index): object => index === 0 ? { ...shot, durationSeconds: '5' } : shot) };
+    const chosen = reply(JSON.stringify(bad), 83); project = (await service.capture(project.id, adjustment.id, `${url}-analysis`, [chosen])).project!;
+    expect((await service.preview(project.id, project.revision, adjustment.id, chosen.key)).needsRepair).toBe(true);
+    const previous = structuredClone(project.plan); const applied = await service.adopt(project.id, project.revision, adjustment.id, chosen.key); project = applied.project!;
+    const repair = project.jobs.find((job): boolean => job.id === applied.repairJobId)!;
+    expect(repair.requestText).toContain('$.shots[0].durationSeconds'); expect(repair.requestText).toContain('string');
+    expect(repair.originKind).toBe('analysis'); await collectPlanJob(repair, true);
+    expect(project.jobs.find((job): boolean => job.id === repair.id)).toMatchObject({ status: 'applied', resultStatus: 'candidate', parsedResult: { plan: { shots: expect.any(Array) } } });
+    expect(project.plan).toEqual(previous); expect(project.chatAdjustment?.status).toBe('active');
+  });
+
+  it('原五镜同条回复的分析外层、内容依据、镜头时长及缺字段一次完整进入修订请求', async (): Promise<void> => {
+    project = (await chats.prepareRuntime(project.id, project.revision, 'analysis')).project!; const sourcePlan = project.jobs.at(-1)!; await collectPlanJob(sourcePlan, true);
+    const begun = await service.begin(project.id, project.revision, { parentJobId: sourcePlan.id }); project = begun.project!; const a = begun.adjustment!;
+    const bad: Record<string, unknown> = { ...plan(), contentBasis: { beginning: '', middle: 7, ending: snapshot.plan.shots.at(-1)!.endState } };
+    delete bad.scenes; const shots = bad.shots as Record<string, unknown>[]; shots[0].durationSeconds = '4'; delete shots[1].action;
+    const chosen = reply(JSON.stringify(bad), 85); project = (await service.capture(project.id, a.id, `${url}-analysis`, [chosen])).project!;
+    const result = await service.adopt(project.id, project.revision, a.id, chosen.key); project = result.project!;
+    const repair = project.jobs.find((job): boolean => job.id === result.repairJobId)!; const snapshotJob = project.jobs.find((job): boolean => job.id === repair.parentJobId)!;
+    const paths = snapshotJob.validationDetails!.map((issue): string => issue.path);
+    expect(paths).toEqual(expect.arrayContaining(['$.storyUsable', '$.contentBasis.beginning', '$.contentBasis.middle', '$.shots[0].durationSeconds', '$.shots[1].action', '$.scenes']));
+    for (const path of ['$.storyUsable', '$.contentBasis.beginning', '$.contentBasis.middle', '$.shots[0].durationSeconds', '$.shots[1].action', '$.scenes']) expect(repair.requestText).toContain(path);
+    expect(snapshotJob.validationDetails!.find((issue): boolean => issue.path === '$.shots[0].durationSeconds')).toMatchObject({ actual: '4', actualType: 'string', repairable: true });
+    expect(snapshotJob.rawText).toBe(chosen.text);
+  });
+
+  it('一次自动修订失败保留两份原文，显式新轮次精确放行新task并回到候选确认', async (): Promise<void> => {
+    const adjustment = await begin(); const chosen = reply('{{ref:missing-material}}', 84); await capture(adjustment, [chosen]);
+    const initial = await service.adopt(project.id, project.revision, adjustment.id, chosen.key); project = initial.project!;
+    const auto = project.jobs.find((job): boolean => job.id === initial.repairJobId)!;
+    const failed = await receive(auto, { optimized: '{{ref:missing-material}}' }); expect(failed.needsRepair).toBe(false);
+    await expect(chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: auto.id, repairMode: 'automatic' })).rejects.toThrow('自动修订已使用一次');
+    const explicit = await chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: auto.id, repairMode: 'explicit' }); project = explicit.project!;
+    const next = project.jobs.find((job): boolean => job.id === explicit.repairJobId)!;
+    expect(project.chatAdjustment?.repairJobId).toBe(next.id); expect(next.originKind).toBe('optimize');
+    expect(stored.find((task): boolean => task.id === source.taskId)?.runtime?.chatAdjustmentGuard).toMatchObject({ active: true, allowedTaskId: next.taskId });
+    expect(hasConversationGuard(project.accountId, next.taskId)).toBe(false); expect(hasConversationGuard(project.accountId, auto.taskId)).toBe(true);
+    const finalBefore = project.plan!.shots[0].prompts.firstFrame.final;
+    expect((await receive(next, { optimized: originalBody })).success).toBe(true);
+    expect(project.jobs.find((job): boolean => job.id === next.id)?.resultStatus).toBe('candidate'); expect(project.plan!.shots[0].prompts.firstFrame.final).toBe(finalBefore);
+    expect(project.jobs.find((job): boolean => job.id === auto.id)?.rawText).toContain('missing-material');
+    project = (await chats.adoptPromptCandidate(project.id, project.revision, next.id)).project!;
+    expect(project.plan!.shots[0].prompts.firstFrame.sourceJobId).toBe(next.id);
+    project = (await service.end(project.id, project.revision, adjustment.id)).project!; expect(hasConversationGuard(project.accountId)).toBe(false);
+  });
+
+  it('自动修订失败后可选择新人工交流回复，旧选定回复离开可见回读仍保留来源且不阻断采用', async (): Promise<void> => {
+    const a = await begin(); const chosen = reply('{{ref:missing-material}}', 86); await capture(a, [chosen]);
+    const started = await service.adopt(project.id, project.revision, a.id, chosen.key); project = started.project!;
+    const repair = project.jobs.find((job): boolean => job.id === started.repairJobId)!;
+    await receive(repair, { optimized: '{{ref:missing-material}}' });
+    const next = reply(originalBody, 87); const count = stored.length; await capture(a, [next]);
+    expect(project.chatAdjustment?.replies.map((item): string => item.key)).toEqual([next.key, chosen.key]);
+    const result = await service.adopt(project.id, project.revision, a.id, next.key); project = result.project!;
+    expect(result.success).toBe(true); expect(project.chatAdjustment).toMatchObject({ status: 'adopted', adoptedReplyKey: next.key });
+    expect(stored).toHaveLength(count); expect(hasConversationGuard(project.accountId)).toBe(false);
+  });
+
+  it.each([false, true])('原五镜修订改变无关镜头必须明确新候选原因，否则拒绝：确认=%s', async (confirmed: boolean): Promise<void> => {
+    project = (await chats.prepareRuntime(project.id, project.revision, 'analysis')).project!; const analysis = project.jobs.at(-1)!;
+    await collectPlanJob(analysis, false, true);
+    const before = structuredClone(project.plan); const originalRaw = project.jobs.find((job): boolean => job.id === analysis.id)?.rawText;
+    const revision = project.revision; const count = stored.length;
+    const [one, two] = await Promise.all([chats.prepareRuntime(project.id, revision, 'repair', { parentJobId: analysis.id, repairMode: 'automatic' }), chats.prepareRuntime(project.id, revision, 'repair', { parentJobId: analysis.id, repairMode: 'automatic' })]);
+    expect(one.repairJobId).toBe(two.repairJobId); expect(stored).toHaveLength(count + 1); project = one.project!;
+    const repair = project.jobs.find((job): boolean => job.id === one.repairJobId)!; const incoming = plan(); incoming.shots[1].action += '（需要调整节奏并重新确认）';
+    const result = await receive(repair, { ...incoming, storyUsable: true, contentBasis: { beginning: incoming.shots[0].startState, middle: incoming.shots[2].action, ending: incoming.shots.at(-1)!.endState }, ...(confirmed ? { requiresConfirmation: true, changeReason: '原动作无法在当前镜头内完成，需要确认第二镜节奏变化' } : {}) });
+    expect(result.success).toBe(confirmed); expect(project.plan).toEqual(before); expect(project.jobs.find((job): boolean => job.id === analysis.id)?.rawText).toBe(originalRaw);
+    expect(project.jobs.find((job): boolean => job.id === repair.id)).toMatchObject(confirmed ? { status: 'applied', resultStatus: 'candidate', parsedResult: { requiresConfirmation: true, changeReason: expect.any(String) } } : { status: 'invalid', validationDetails: [{ code: 'repair_drift', repairable: false }] });
+  });
   it('选择具体纯图片回复后沿原账号下载并保存候选，未确认前保留旧图；重收取不重复下载', async (): Promise<void> => {
     project = await projects.confirmStory(project.id, project.revision);
     const file = path.join(directory, 'TEST-reply.png'); await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=green:s=64x96', '-frames:v', '1', '-y', file]);
@@ -147,7 +289,10 @@ describe('具体回复与目标保护', (): void => {
     project = (await chats.prepareRuntime(project.id, project.revision, 'analysis')).project!;
     const analysis = project.jobs.at(-1)!; await collectPlanJob(analysis, false, true);
     expect(project.jobs.find((job): boolean => job.id === analysis.id)?.status).toBe('invalid');
-    await expect(service.begin(project.id, project.revision, { parentJobId: analysis.id })).rejects.toThrow('具体方案');
+    const failedContext = await service.begin(project.id, project.revision, { parentJobId: analysis.id }); project = failedContext.project!;
+    expect(failedContext.adjustment?.sourceJobId).toBe(analysis.id); expect(project.plan).toBeUndefined();
+    expect(project.jobs.find((job): boolean => job.id === analysis.id)?.status).toBe('invalid');
+    project = (await service.end(project.id, project.revision, failedContext.adjustment!.id)).project!;
     project = (await chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: analysis.id })).project!;
     const repair = project.jobs.at(-1)!; await collectPlanJob(repair, true);
     expect(project.plan).toBeUndefined(); expect(project.jobs.find((job): boolean => job.id === repair.id)).toMatchObject({ kind: 'repair', status: 'applied', resultStatus: 'candidate', parsedResult: { plan: expect.any(Object) } });
@@ -162,7 +307,9 @@ describe('具体回复与目标保护', (): void => {
     const analysis = project.jobs.at(-1)!; await collectPlanJob(analysis, false);
     expect(project.jobs.find((job): boolean => job.id === analysis.id)).toMatchObject({ status: 'invalid', parsedResult: { plan: expect.any(Object) } });
     await expect(service.begin(project.id, project.revision, {})).rejects.toThrow('没有可定位');
-    await expect(service.begin(project.id, project.revision, { parentJobId: analysis.id })).rejects.toThrow('没有可定位');
+    const failedContext = await service.begin(project.id, project.revision, { parentJobId: analysis.id }); project = failedContext.project!;
+    expect(failedContext.adjustment?.sourceJobId).toBe(analysis.id); expect(project.jobs.find((job): boolean => job.id === analysis.id)?.status).toBe('invalid');
+    project = (await service.end(project.id, project.revision, failedContext.adjustment!.id)).project!;
     expect(hasConversationGuard(project.accountId)).toBe(false);
     project = (await chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: analysis.id })).project!;
     const repair = project.jobs.at(-1)!; await collectPlanJob(repair, true);
@@ -176,7 +323,7 @@ describe('具体回复与目标保护', (): void => {
     expect(started.adjustment).toMatchObject({ sourceJobId: repair.id, target: {}, conversationUrl: `${url}-repair` });
     expect(stored).toHaveLength(count);
     expect(stored.find((item): boolean => item.id === repair.taskId)?.runtime?.chatAdjustmentGuard?.active).toBe(true);
-    expect(stored.find((item): boolean => item.id === analysis.taskId)?.runtime?.chatAdjustmentGuard).toBeUndefined();
+    expect(stored.find((item): boolean => item.id === analysis.taskId)?.runtime?.chatAdjustmentGuard?.active).toBe(false);
   });
   it('重启前已保存的任务保护先于项目重开阻止排队提交，结束后才释放', async (): Promise<void> => {
     const adjustment = await begin();
@@ -285,6 +432,35 @@ describe('具体回复与目标保护', (): void => {
 });
 
 describe('会话归属、回复完整性与账号保护', (): void => {
+  it('原五镜分析及自动修订均失败后可明确打开失败repair原会话，不伪造成功或创建请求', async (): Promise<void> => {
+    project.plan = undefined; project.materials = undefined; project = await projects.write(project);
+    project = (await chats.prepareRuntime(project.id, project.revision, 'analysis')).project!; const analysis = project.jobs.at(-1)!; await collectPlanJob(analysis, false, true);
+    project = (await chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: analysis.id, repairMode: 'automatic' })).project!;
+    const repair = project.jobs.at(-1)!; await collectPlanJob(repair, false, true);
+    const before = structuredClone(project.jobs.find((job): boolean => job.id === repair.id)); const count = stored.length;
+    const opened = await service.begin(project.id, project.revision, { parentJobId: repair.id }); project = opened.project!;
+    expect(opened.adjustment).toMatchObject({ sourceJobId: repair.id, target: {}, conversationUrl: `${url}-repair` });
+    expect(project.jobs.find((job): boolean => job.id === repair.id)).toEqual(before); expect(project.plan).toBeUndefined(); expect(stored).toHaveLength(count);
+    expect(project.jobs.find((job): boolean => job.id === repair.id)?.status).toBe('invalid'); expect(hasConversationGuard(project.accountId)).toBe(true);
+    const reopened = await new PetStoryProjects().open(directory); service.restore(reopened); expect(stored).toHaveLength(count); expect(reopened.chatAdjustment?.sourceJobId).toBe(repair.id);
+  });
+
+  it.each(['response', 'submitted', 'run', 'account', 'project', 'stale', 'context'] as const)('失败文字的%s证据缺失或过期仍拒绝自由调整，不创建任务', async (failure): Promise<void> => {
+    project.plan = undefined; project.materials = undefined; project = await projects.write(project);
+    project = (await chats.prepareRuntime(project.id, project.revision, 'analysis')).project!; const failed = project.jobs.at(-1)!; await collectPlanJob(failed, false, true);
+    const task = stored.find((item): boolean => item.id === failed.taskId)!;
+    if (failure === 'response') task.runtime!.chatResponse!.text = '不属于已保存原回复';
+    if (failure === 'submitted') delete task.runtime!.submittedAt;
+    if (failure === 'run') task.runtime!.runId = 'TEST-other-run';
+    if (failure === 'account') task.assignedAccountId = 'TEST-other-account';
+    if (failure === 'project') task.projectId = 'TEST-other-project';
+    if (failure === 'stale') { project.jobs.find((job): boolean => job.id === failed.id)!.resultStatus = 'stale'; project = await projects.write(project); }
+    if (failure === 'context') project = await projects.savePromptModel(project.id, project.revision, 'seedance-2.0');
+    const count = stored.length; const raw = project.jobs.find((job): boolean => job.id === failed.id)?.rawText;
+    await expect(service.begin(project.id, project.revision, { parentJobId: failed.id })).rejects.toThrow();
+    expect(stored).toHaveLength(count); expect(hasConversationGuard(project.accountId)).toBe(false);
+    const after = await projects.read(project.id); expect(after.jobs.find((job): boolean => job.id === failed.id)).toMatchObject({ status: 'invalid', rawText: raw }); expect(after.plan).toBeUndefined();
+  });
   it('其他会话、无效页面和键值不匹配的回复都不能进入候选', async (): Promise<void> => {
     const adjustment = await begin(); const chosen = reply(originalBody, 1); const before = project.revision;
     await expect(service.capture(project.id, adjustment.id, 'https://www.doubao.com/chat/TEST-other', [chosen])).rejects.toThrow('不是本次调整');

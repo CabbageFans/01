@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryChatJob, PetStoryPromptBatch, PetStoryImageTarget } from '@doubao-studio/contracts';
 import { assetCharacterIds, defaultPromptProfile } from './petstoryPromptQuality';
 import { extractDouyinLink, record, validatePetStoryPlan, validatePromptTask } from './petstoryValidation';
@@ -41,7 +42,7 @@ function validateMobileStory(value: unknown): void {
     || typeof story.text !== 'string' || !story.text.trim() || story.text.length > 50_000
     || typeof story.importedAt !== 'string' || !Number.isFinite(Date.parse(story.importedAt))) throw new Error('手机豆包故事原文无效，原文件已保留');
 }
-export function validateProject(value: unknown): PetStoryProject {
+export function validateProject(value: unknown, readHistorical: boolean = false): PetStoryProject {
   const p = record(value);
   if (p.schemaVersion !== 1 || typeof p.id !== 'string' || typeof p.studioProjectId !== 'string' || typeof p.accountId !== 'string' || !Number.isInteger(p.revision)) throw new Error('项目版本或身份无效，原文件已保留');
   const source = record(p.source);
@@ -54,12 +55,12 @@ export function validateProject(value: unknown): PetStoryProject {
   if (p.promptBatch !== undefined) validatePromptBatch(p.promptBatch);
   if (!Array.isArray(p.assets) || !Array.isArray(p.jobs)) throw new Error('项目资产或任务清单无效');
   const result = structuredClone(value) as PetStoryProject;
-  if (p.plan) result.plan = validatePetStoryPlan(p.plan);
+  if (p.plan) result.plan = validatePetStoryPlan(p.plan, false, readHistorical);
   const ids = validateAssets(result);
   for (const char of result.plan?.characters || []) {
     if (char.referenceAssetId && !result.assets.some((a: PetStoryAsset): boolean => a.id === char.referenceAssetId && assetCharacterIds(a).includes(char.id))) throw new Error(`${char.name}参考图错绑`);
   }
-  validateChatJobs(result);
+  validateChatJobs(result, readHistorical);
   validatePetStoryAdjustments(result);
   for (const shot of result.plan?.shots || []) {
     if (shot.sceneReferenceAssetIds?.some((id: string): boolean => !result.assets.some((a): boolean => a.id === id && a.kind === 'scene' && (a.shotId === shot.id || !!a.materialId)))) throw new Error('场景参考图错绑');
@@ -80,10 +81,10 @@ function validateAdoptedImages(result: PetStoryProject): void {
   }
 }
 
-function validateChatJobs(result: PetStoryProject): void {
+function validateChatJobs(result: PetStoryProject, readHistorical: boolean = false): void {
   for (const job of result.jobs) {
     if (!job.id || !job.taskId || !/^[a-f0-9]{64}$/.test(job.inputHash) || !['analysis', 'repair', 'optimize', 'materialPrompt', 'assets', 'review', 'revise'].includes(job.kind)) throw new Error('项目任务绑定无效');
-    if (job.parsedResult?.plan) job.parsedResult.plan = validatePetStoryPlan(job.parsedResult.plan);
+    if (job.parsedResult?.plan) job.parsedResult.plan = validatePetStoryPlan(job.parsedResult.plan, false, readHistorical);
     if (job.requestId && (!job.expectedIds?.length || !job.rulesVersion || !job.ruleFiles?.length)) throw new Error('运行时规则或目标记录不完整');
     if (job.selectedIssueIds !== undefined && (!Array.isArray(job.selectedIssueIds) || !job.selectedIssueIds.length || job.selectedIssueIds.some((id: unknown): boolean => typeof id !== 'string' || !id.trim()) || new Set(job.selectedIssueIds).size !== job.selectedIssueIds.length)) throw new Error('保存的局部修订问题选择无效');
     if (job.reviewFocus !== undefined && (typeof job.reviewFocus !== 'string' || !job.reviewFocus.trim() || job.reviewFocus.length > 2000 || !['review', 'repair'].includes(job.kind))) throw new Error('保存的内容审查核对疑点无效');
@@ -92,6 +93,7 @@ function validateChatJobs(result: PetStoryProject): void {
   }
 }
 function validateChatRequestFacts(job: PetStoryChatJob): void {
+  validateChatRepairFacts(job);
   if (job.analysisCastBindings !== undefined) {
     if (!['analysis', 'repair'].includes(job.kind)) throw new Error('演员绑定快照仅用于分析任务');
     validateCastBindings(job.analysisCastBindings);
@@ -104,6 +106,11 @@ function validateChatRequestFacts(job: PetStoryChatJob): void {
   if (job.frameContextHash !== undefined && !/^[a-f0-9]{64}$/.test(job.frameContextHash)) throw new Error('保存的共同帧正文快照无效');
   if (job.previousBoundaryHash !== undefined && !/^[a-f0-9]{64}$/.test(job.previousBoundaryHash)) throw new Error('保存的前镜采用边界快照无效');
   if (job.promptTask) job.promptTask = validatePromptTask(job.promptTask);
+}
+function validateChatRepairFacts(job: PetStoryChatJob): void {
+  if (job.originKind !== undefined && (!['analysis', 'optimize', 'materialPrompt', 'assets', 'review', 'revise'].includes(job.originKind) || job.kind !== 'repair')) throw new Error('修订原创作职责无效');
+  if (job.repairMode !== undefined && (!['automatic', 'explicit'].includes(job.repairMode) || job.kind !== 'repair')) throw new Error('修订轮次记录无效');
+  if (job.validationDetails !== undefined && (!Array.isArray(job.validationDetails) || job.validationDetails.some((issue): boolean => !issue || typeof issue.code !== 'string' || typeof issue.path !== 'string' || typeof issue.actualType !== 'string' || typeof issue.expected !== 'string' || typeof issue.repairable !== 'boolean' || typeof issue.message !== 'string'))) throw new Error('保存的具体内容校验问题无效');
 }
 
 function validateMaterials(result: PetStoryProject): void {
@@ -192,7 +199,7 @@ export class PetStoryProjects {
     const filename = await projectPath(this.directory(id), 'project.json');
     const info = await fs.stat(filename);
     if (info.size > 8 * 1024 * 1024) throw new Error('项目文件超过 8 MiB');
-    const project = validateProject(JSON.parse(await fs.readFile(filename, 'utf8')));
+    const project = validateProject(JSON.parse(await fs.readFile(filename, 'utf8')), true);
     if (project.id !== id) throw new Error('项目身份发生变化，已停止操作');
     return project;
   }
@@ -200,7 +207,7 @@ export class PetStoryProjects {
     const real = await fs.realpath(directory);
     const filename = await projectPath(real, 'project.json');
     if ((await fs.stat(filename)).size > 8 * 1024 * 1024) throw new Error('项目文件超过 8 MiB');
-    const project = validateProject(JSON.parse(await fs.readFile(filename, 'utf8')));
+    const project = validateProject(JSON.parse(await fs.readFile(filename, 'utf8')), true);
     const old = this.directories.get(project.id);
     if (old && old !== real) throw new Error('相同项目 ID 已在其他目录打开');
     for (const asset of project.assets) await projectPath(real, asset.relativePath);
@@ -217,8 +224,14 @@ export class PetStoryProjects {
     return project;
   }
   async write(project: PetStoryProject): Promise<PetStoryProject> {
-    const checked = validateProject(project);
-    const current = await this.read(checked.id);
+    const current = await this.read(project.id);
+    // 盘上原有小数方案和历史候选逐值保留；本次新增／改变的方案必须重新严格校验。
+    const checked = validateProject(project, true);
+    if (checked.plan && !isDeepStrictEqual(project.plan, current.plan)) checked.plan = validatePetStoryPlan(project.plan);
+    for (const job of checked.jobs) {
+      const previous = current.jobs.find((item): boolean => item.id === job.id);
+      if (job.parsedResult?.plan && !isDeepStrictEqual(job.parsedResult.plan, previous?.parsedResult?.plan)) job.parsedResult.plan = validatePetStoryPlan(job.parsedResult.plan);
+    }
     if (current.revision !== checked.revision) throw new Error('项目已被修改，请重新打开后操作');
     const next = { ...checked, revision: checked.revision + 1, updatedAt: new Date().toISOString() };
     const target = await projectPath(this.directory(checked.id), 'project.json');

@@ -166,7 +166,8 @@ it('read-only generation inspection is host guarded and rejects stale project ve
   const args = { id: p.id, revision: p.revision, target: { shotId: 'door', promptKind: 'video' } };
   const before = await fs.readFile(path.join(source, 'project.json'), 'utf8');
   const response = await invoke('inspectGeneration', args) as import('@doubao-studio/contracts').PetStoryGenerationEligibilityResult;
-  expect(response).toMatchObject({ success: true, eligibility: { ready: false, blockers: expect.arrayContaining([expect.objectContaining({ code: 'capability' }), expect.objectContaining({ code: 'firstFrame', shotId: 'door' })]) } });
+  expect(response).toMatchObject({ success: true, eligibility: { ready: false, blockers: expect.arrayContaining([expect.objectContaining({ code: 'firstFrame', shotId: 'door' })]) } });
+  expect(response.eligibility?.blockers.some((blocker): boolean => blocker.code === 'capability')).toBe(false);
   expect(await invoke('inspectGeneration', { ...args, revision: p.revision - 1 })).toMatchObject({ success: false, error: expect.stringContaining('项目已变化') });
   expect(await invoke('inspectGeneration', args, { sender: event.sender, senderFrame: {} } as IpcMainInvokeEvent)).toMatchObject({ success: false, error: '仅宿主窗口可访问项目' });
   expect(await fs.readFile(path.join(source, 'project.json'), 'utf8')).toBe(before); expect(desktop.createTask).not.toHaveBeenCalled();

@@ -17,8 +17,8 @@ import { buildPetStoryPromptExport } from '../../main/utils/petstoryExport';
 
 let directory: string; let projects: PetStoryProjects; let p: PetStoryProject; let chat: PetStoryChatService; let core: TaskService; let stored: Task[];
 function capability(): PetStoryCapability {
-  const entry = { state: 'supported' as const, free: 'free' as const, reason: 'TEST离线状态' };
-  return { accountId: p.accountId, checkedAt: '2026-10-26T00:00:00.000Z', freeEvidence: 'user_confirmed', durations: [5, 6, 7, 8], image: entry,
+  const entry = { state: 'supported' as const, reason: 'TEST离线状态' };
+  return { accountId: p.accountId, checkedAt: '2026-10-26T00:00:00.000Z', durations: [5, 6, 7, 8], image: entry,
     modes: { first_frame: entry, first_last_frame: entry, reference: entry }, videoConfig: { model: 'seedance-2.0', duration: '6s', aspectRatio: '9:16' } };
 }
 beforeEach(async (): Promise<void> => {
@@ -100,8 +100,18 @@ describe('专用候选按当前创作事实收取及采用', (): void => {
   });
   it('旧合同继续使用原contextHash检查，不能借缺失designHash放过过期候选', async (): Promise<void> => {
     const job = await prepare(); await collectCandidate(job); delete p.jobs.at(-1)!.promptTask!.designHash;
-    p.promptCapability!.checkedAt = '2026-10-26T02:00:00.000Z'; p = await projects.write(p);
+    p.plan!.shots[0].startState += '\nTEST用户实际改变起点'; p = await projects.write(p);
     await expect(chat.adoptPromptCandidate(p.id, p.revision, job.id)).rejects.toThrow('当前事实已变化'); expect(stored).toHaveLength(1);
+  });
+  it('原五镜头的旧合同不因废弃入口时间变化拒绝采用，用户手改仍保护', async (): Promise<void> => {
+    const job = await prepare(); await collectCandidate(job); delete p.jobs.at(-1)!.promptTask!.designHash;
+    p.promptCapability!.checkedAt = '2000-01-01T00:00:00.000Z';
+    Object.assign(p.promptCapability!, { freeEvidence: 'unknown', freeChatConfirmed: false });
+    Object.assign(p.promptCapability!.image, { free: 'unknown' }); p = await projects.write(p);
+    const before = p.plan!.shots.map((shot): string => shot.prompts.video.final);
+    const result = await chat.adoptPromptCandidate(p.id, p.revision, job.id);
+    expect(result.success).toBe(true); expect(stored).toHaveLength(1);
+    expect(result.project?.plan?.shots.map((shot): string => shot.prompts.video.final)).toEqual(before);
   });
   it('同目标新请求和已采用边界变更仍保护旧候选，候选不自动覆盖final', async (): Promise<void> => {
     const job = await prepare(); await collectCandidate(job); await prepare();

@@ -1,21 +1,21 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import type { PetStoryChatAdjustment, PetStoryConversationReply, PetStoryAssetBindings, PetStoryCapability, PetStoryChatJob, PetStoryMaterial, PetStoryMaterialEditIntent, PetStoryPlan, PetStoryPrompt, PetStoryPromptKind, PetStoryProject, PetStoryResult, PetStoryReviewIssue, PetStoryRuntimeTarget, PetStoryShot, Task, TaskAddParams } from '@doubao-studio/contracts';
+import type { PetStoryValidationIssue, PetStoryChatAdjustment, PetStoryConversationReply, PetStoryAssetBindings, PetStoryCapability, PetStoryChatJob, PetStoryMaterial, PetStoryMaterialEditIntent, PetStoryPlan, PetStoryPrompt, PetStoryPromptKind, PetStoryProject, PetStoryResult, PetStoryReviewIssue, PetStoryRuntimeTarget, PetStoryShot, Task, TaskAddParams } from '@doubao-studio/contracts';
 import { orderedChatAssets, promptContextHashInput, PROMPT_RULES_VERSION, assetCharacterIds } from './petstoryPromptQuality';
 import { PetStoryProjects } from './petstoryProject';
 import { archiveCompletedPetStoryProduction } from './petstoryProductionLifecycle';
-import { parsePetStoryAnswer, record, validatePetStoryPlan, runtimePromptIssues, normalizeAnalysisCuts } from './petstoryValidation';
+import { parsePetStoryAnswer, record, validatePetStoryPlan, runtimePromptIssues, normalizeAnalysisCuts, PetStoryContentValidationError, planRepairPreservationIssues, collectPetStoryPlanIssues } from './petstoryValidation';
 import { confirmedCharacterIdentity, materialAsset, requiredMaterialKeys, syncMaterials } from './petstoryMaterials';
 import { pendingChatConflicts } from './petstoryPending';
 import { inspectPromptCandidate, inspectPromptEligibility, promptContractFactsCurrent, promptWritingTarget } from './petstoryEligibility';
-import { buildDramaRequest, previousAdoptedBoundary } from './petstoryRuntimeRequest';
+import { buildDramaRequest, previousAdoptedBoundary, type DramaRequest } from './petstoryRuntimeRequest';
 import { reviewedPromptFinal, reviewMatchesPrompt } from './petstoryReview';
 import { analysisCastIssues } from './petstoryCast';
 import { reconcileAdoptedImages } from './petstoryImageReview';
-import { hasConversationGuard } from './accountConversationGuard';
+import { claimConversationGuard, hasConversationGuard } from './accountConversationGuard';
 
 export interface PetStoryTaskPort {
-  setConversationGuard?: (taskId: string, projectId: string, adjustmentId: string, active: boolean) => void;
+  setConversationGuard?: (taskId: string, projectId: string, adjustmentId: string, active: boolean, allowedTaskId?: string) => void;
   list: () => Task[];
   create: (params: TaskAddParams, accountId: string) => Task;
   reviseHeldPrompt?: (taskId: string, prompt: string) => Task;
@@ -23,11 +23,21 @@ export interface PetStoryTaskPort {
 }
 const hash = (prompt: string): string => createHash('sha256').update(prompt).digest('hex');
 /** 正文结果不会改变事实版本；用户的剧本、镜头设计、图片选择会使旧请求过期。 */
-function runtimeContextHash(p: PetStoryProject): string {
+function runtimeContextHash(p: PetStoryProject, legacy: boolean = false): string {
   const shots = p.plan?.shots.map(({ prompts: _prompts, ...shot }): object => shot);
   return hash(JSON.stringify({ story: p.mobileStory, plan: p.plan ? { ...p.plan, shots } : undefined,
-    profile: p.promptProfile, promptModel: p.promptModel, promptCapability: p.promptCapability, materials: p.materials?.map((m): object => ({ id: m.id, designHash: m.designHash, selectedAssetId: m.selectedAssetId, approved: m.approved })),
+    profile: p.promptProfile, promptModel: p.promptModel, promptCapability: legacy ? p.promptCapability : creativeCapability(p.promptCapability), materials: p.materials?.map((m): object => ({ id: m.id, designHash: m.designHash, selectedAssetId: m.selectedAssetId, approved: m.approved })),
     assets: p.assets.map((a): object => ({ id: a.id, kind: a.kind, shotId: a.shotId, validation: a.validation, sourceVideo: a.sourceVideo })) }));
+}
+/** 页面检查时间和历史声明不属于创作事实；模型、比例与时长仍参与比较。 */
+function creativeCapability(capability?: PetStoryCapability): object | undefined {
+  return capability?.videoConfig ? { videoConfig: capability.videoConfig } : undefined;
+}
+function runtimeContextStillCurrent(p: PetStoryProject, job: PetStoryChatJob): boolean {
+  if (job.contextHash === runtimeContextHash(p) || job.contextHash === runtimeContextHash(p, true)) return true;
+  // 旧哈希不可逆；只用原任务自带的能力快照还原旧算法，不改写历史哈希或回复。
+  if (!isDeepStrictEqual(creativeCapability(p.promptCapability), creativeCapability(job.capability))) return false;
+  return job.contextHash === runtimeContextHash({ ...p, promptCapability: job.capability }, true);
 }
 /** 起终文字是尾帧／视频的共同设计输入，与当前目标正文分开锁定。 */
 function frameContextHash(p: PetStoryProject, target: PetStoryRuntimeTarget): string | undefined {
@@ -53,8 +63,7 @@ function issueMatchesTarget(issue: PetStoryReviewIssue, target: PetStoryRuntimeT
 function isReviewResult(p: PetStoryProject, job: PetStoryChatJob): boolean {
   if (job.kind === 'review') return true;
   if (job.kind !== 'repair') return false;
-  const original = p.jobs.find((item): boolean => item.id === job.parentJobId);
-  return original?.kind === 'review' && !!original.requestId && original.sourceStoryId === job.sourceStoryId;
+  return creativeKind(p, job) === 'review';
 }
 /** 审查只产生问题，不产生替代正文；只有后续创作会废弃同目标旧创作候选。 */
 function supersedesRuntimeJob(p: PetStoryProject, previous: PetStoryChatJob, next: PetStoryChatJob): boolean {
@@ -89,12 +98,48 @@ function checkedJobTask(p: PetStoryProject, job: PetStoryChatJob, tasks: Task[])
 }
 function isWaitingJob(job: PetStoryChatJob | undefined): job is PetStoryChatJob { return !!job && !job.endedWaitingAt; }
 function canRepair(p: PetStoryProject, job: PetStoryChatJob): boolean {
-  return !job.endedWaitingAt && (job.kind === 'analysis' || !!job.requestId && !['repair', 'revise'].includes(job.kind)) && !!p.mobileStory && job.sourceStoryId === p.mobileStory.id && p.source.status !== 'blocked' && repairInputsStillCurrent(p, job) && !p.jobs.some((j): boolean => j.kind === 'repair' && j.parentJobId === job.id);
+  return !job.endedWaitingAt && (job.kind !== 'repair' || job.repairMode === 'explicit') && (job.kind === 'analysis' || !!job.requestId)
+    && !!job.validationDetails?.length && job.validationDetails.every((issue): boolean => issue.repairable)
+    && !!p.mobileStory && job.sourceStoryId === p.mobileStory.id && p.source.status !== 'blocked' && repairInputsStillCurrent(p, job)
+    && !p.jobs.some((j): boolean => j.kind === 'repair' && j.parentJobId === job.id);
+}
+function contentError(message: string, path: string = '$', actual?: unknown, expected: string = '符合本次任务完整返回契约'): PetStoryContentValidationError {
+  return new PetStoryContentValidationError([{ code: 'content_contract', path, actual, actualType: actual === null ? 'null' : Array.isArray(actual) ? 'array' : typeof actual, expected, repairable: true, message }]);
+}
+/** 分析外层与方案字段一起反馈；只有完全不可解析的回复才先处理根结构。 */
+function storyAnswerIssues(answer: Record<string, unknown>): PetStoryValidationIssue[] {
+  const issues = collectPetStoryPlanIssues(answer);
+  if (answer.storyUsable !== true) issues.push(...contentError('缺少 storyUsable；需依据用户粘贴的故事，不能冒充桌面已读取视频', '$.storyUsable', answer.storyUsable, 'boolean true；内容不足时明确false及原因').issues);
+  let basis: Record<string, unknown> | undefined;
+  try { basis = record(answer.contentBasis); } catch { issues.push(...contentError('缺少完整故事依据', '$.contentBasis', answer.contentBasis, '包含 beginning、middle、ending 的对象').issues); }
+  if (basis) for (const field of ['beginning', 'middle', 'ending']) {
+    if (typeof basis[field] !== 'string' || !(basis[field] as string).trim()) issues.push(...contentError('缺少开头、中间变化或结局；不能把标题／封面算作完整分析', `$.contentBasis.${field}`, basis[field], '来自原故事的非空字符串').issues);
+  }
+  for (const field of ['props', 'scenes']) if (answer[field] === undefined) issues.push(...contentError('本次分析缺少动态道具／场景资产集合，请补齐结构，不允许跳过基础素材', `$.${field}`, undefined, '完整数组；确无道具时props可以为空数组').issues);
+  return issues;
+}
+/** 仅纯解析／内容校验能够触发修订；磁盘、任务归属、过期和用户决策错误保持原恢复路径。 */
+export function chatValidationDetails(error: unknown): PetStoryValidationIssue[] | undefined {
+  return error instanceof PetStoryContentValidationError ? error.issues : undefined;
+}
+function creativeKind(p: PetStoryProject, job: PetStoryChatJob): NonNullable<PetStoryChatJob['originKind']> {
+  if (job.kind !== 'repair') return job.kind;
+  if (job.originKind) return job.originKind;
+  const visited = new Set<string>(); let current: PetStoryChatJob | undefined = job;
+  while (current?.kind === 'repair' && !visited.has(current.id)) { visited.add(current.id); current = p.jobs.find((item): boolean => item.id === current?.parentJobId); }
+  if (!current || current.kind === 'repair') throw new Error('修订缺少原任务职责，不能猜测为故事分析');
+  return current.kind;
+}
+function isAdjustmentRuntimeRepair(p: PetStoryProject, kind: PetStoryChatJob['kind'], parent?: PetStoryChatJob): boolean {
+  const a = p.chatAdjustment;
+  return kind === 'repair' && a?.status === 'active' && !!parent
+    && (parent.conversationReply?.adjustmentId === a.id && a.selectedReplyKey === parent.conversationReply.reply.key
+      || parent.repairReplySource?.adjustmentId === a.id && a.repairJobId === parent.id);
 }
 /** 新合同比较创作事实；旧合同和审查仍保留原快照防线。 */
 function contextStillCurrent(p: PetStoryProject, job: PetStoryChatJob, allowMissing: boolean = false): boolean {
   if (job.promptTask?.designHash && !isReviewResult(p, job)) return promptContractFactsCurrent(p, job);
-  return allowMissing && job.contextHash === undefined || job.contextHash === runtimeContextHash(p);
+  return allowMissing && job.contextHash === undefined || runtimeContextStillCurrent(p, job);
 }
 /** 结构坏回复也必须先核对原请求依赖；不能因解析尚未进入 freshness 检查就额外发送修订。 */
 function repairInputsStillCurrent(p: PetStoryProject, job: PetStoryChatJob): boolean {
@@ -130,21 +175,19 @@ function markCurrentReviewError(p: PetStoryProject, job: PetStoryChatJob, issues
 }
 /** 只保存公开控件事实，不把 IPC 额外字段或其他账号能力带入创作上下文。 */
 function promptCapability(value: PetStoryCapability, accountId: string): PetStoryCapability {
-  if (value.accountId !== accountId || !Number.isFinite(Date.parse(value.checkedAt)) || !Array.isArray(value.durations)
-    || value.durations.some((duration: number): boolean => !Number.isFinite(duration) || duration <= 0)
-    || !['visible', 'user_confirmed', 'unknown'].includes(value.freeEvidence)) throw new Error('文字创作能力记录必须对应项目原账号及有效检查结果');
+  if (value.accountId !== accountId || !Array.isArray(value.durations)
+    || value.durations.some((duration: number): boolean => !Number.isFinite(duration) || duration <= 0)) throw new Error('生成参数必须对应项目原账号及有效时长');
   const entry = (item: PetStoryCapability['image']): PetStoryCapability['image'] => {
     if (!item || !['supported', 'unsupported', 'unknown', 'implementation_gap'].includes(item.state)
-      || !['free', 'paid', 'exhausted', 'unknown'].includes(item.free) || typeof item.reason !== 'string') throw new Error('文字创作能力记录的入口状态无效');
-    return { state: item.state, free: item.free, reason: item.reason };
+      || typeof item.reason !== 'string') throw new Error('生成参数的入口状态无效');
+    return { state: item.state, reason: item.reason };
   };
   const video = value.videoConfig;
   if (video && (!['seedance-2.5', 'seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'].includes(video.model)
     || !/^(?:[4-9]|1[0-5])s$/.test(video.duration) || !['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'].includes(video.aspectRatio))) throw new Error('文字创作的模型、画幅或时长选择无效');
-  return { accountId, checkedAt: value.checkedAt, freeEvidence: value.freeEvidence, durations: [...value.durations],
+  return { accountId, durations: [...value.durations],
     image: entry(value.image), modes: { first_frame: entry(value.modes?.first_frame), first_last_frame: entry(value.modes?.first_last_frame), reference: entry(value.modes?.reference) },
-    ...(video ? { videoConfig: { model: video.model, duration: video.duration, aspectRatio: video.aspectRatio } } : {}),
-    ...(value.allowPlainReferences === true ? { allowPlainReferences: true } : {}) };
+    ...(video ? { videoConfig: { model: video.model, duration: video.duration, aspectRatio: video.aspectRatio } } : {}) };
 }
 export interface PetStoryMaterialBinding { characterId: string; assetId: string }
 /** 只检查可确定的引用与模式，不把文字检查冒充人物／视频语义质检。 */
@@ -228,36 +271,61 @@ function reconcilePlanImageTargets(p: PetStoryProject, plan: PetStoryPlan): void
 }
 
 export class PetStoryChatService {
+  private readonly repairPreparations = new Map<string, Promise<PetStoryResult>>();
   constructor(private readonly projects: PetStoryProjects, private readonly tasks: PetStoryTaskPort) {}
+
+  /** 失败文字仍可作人工交流上下文；旧事实或新目标已取代时不再借其规则生成候选。 */
+  conversationSourceCurrent(p: PetStoryProject, job: PetStoryChatJob): boolean {
+    return job.resultStatus !== 'stale' && job.sourceStoryId === p.mobileStory?.id && repairInputsStillCurrent(p, job);
+  }
 
   /** 正常补齐入口与投产共享资格判断；手改已有匹配候选时等待采用，不反复生成。 */
   /** 仅在用户确认后应用实际选中的完整回复；原任务只作为已发送规则上下文来源。 */
   applyConversationReply(p: PetStoryProject, adjustment: PetStoryChatAdjustment, reply: PetStoryConversationReply): void {
     const source = p.jobs.find((j): boolean => j.id === adjustment.sourceJobId);
     if (!source?.requestId || !source.requestText || !source.rulesVersion || !source.promptTask && (adjustment.target.materialId || adjustment.target.shotId)) throw new Error('原会话缺少本项创作依据，请先通过豆包生成本项提示词');
+    // 明确短追问需要用户决定；先识别，不能被后面的缺引用错误误导成内容修订。
+    if (reply.text.trim().length < 100 && /[？?]\s*$/.test(reply.text)) throw new Error('这条回复包含追问，请先在豆包中回答并选择完整结果');
     const job: PetStoryChatJob = { ...structuredClone(source), id: randomUUID(), ...adjustment.target, inputFinal: adjustment.target.materialId ? p.materials?.find((m): boolean => m.id === adjustment.target.materialId)?.prompt.final : p.plan?.shots.find((s): boolean => s.id === adjustment.target.shotId)?.prompts[adjustment.target.promptKind || 'video']?.final,
       rawText: reply.text, status: 'applied', resultStatus: 'candidate', createdAt: new Date().toISOString(), endedWaitingAt: undefined,
       conversationReply: { adjustmentId: adjustment.id, conversationUrl: adjustment.conversationUrl, reply: structuredClone(reply) } };
     if (!adjustment.target.materialId && !adjustment.target.shotId) {
       let answer: Record<string, unknown>;
-      try { answer = parsePetStoryAnswer(reply.text); } catch { throw new Error('这条回复还不能形成完整方案，请在豆包中将满意内容整理为完整分镜方案后再选择'); }
+      try { answer = parsePetStoryAnswer(reply.text); } catch { throw contentError('这条回复还不能形成完整方案', '$', reply.text, '完整分镜方案 JSON'); }
       const candidate = structuredClone(p);
       this.applyStory(candidate, answer, false, job); job.parsedResult = { plan: candidate.plan, contentBasis: candidate.contentBasis };
       this.adoptPlan(p, job); p.jobs.push(job); return;
     }
     let body = reply.text;
     try { const answer = parsePetStoryAnswer(reply.text); if (typeof answer.optimized === 'string') body = answer.optimized; } catch { /* 完整自然语言正文原样保留，不用程序补写。 */ }
+    if (body.length < 100 && /[？?]\s*$/.test(body)) throw new Error('这条回复包含追问，请先在豆包中回答并选择完整结果');
     job.parsedResult = { optimized: body };
     const issues = runtimePromptIssues(p, job, body);
-    if (issues.length) throw new Error(`这条回复还需在豆包中整理：${issues[0]}`);
+    if (issues.length) throw new PetStoryContentValidationError(issues.map((message): PetStoryValidationIssue => ({ code: 'prompt_content', path: 'optimized', targetId: targetId(adjustment.target), actual: body, actualType: 'string', expected: '当前目标的完整正文、引用与已确认原台词', repairable: true, message })));
     const checked = { ...p, jobs: [...p.jobs, job] };
     const qualification = inspectPromptCandidate(checked, job);
     if (!qualification.writingReady) throw new Error(`这条回复与当前制作依据不符，请在豆包中整理：${qualification.reasons[0]}`);
-    if (body.length < 100 && /[？?]\s*$/.test(body)) throw new Error('这条回复包含追问，请在豆包中整理为完整提示词后再采用');
     const target = promptFor(p, adjustment.target);
     if (!target) throw new Error('调整对象已不存在');
     target.final = body; target.optimized = body; target.edited = false; target.needsReview = undefined; target.sourceJobId = job.id; target.candidateJobId = job.id;
     target.rulesVersion = source.rulesVersion; target.promptTask = structuredClone(source.promptTask); job.resultStatus = 'adopted'; p.jobs.push(job);
+  }
+
+  /** 选定自由回复独立留存为修订依据，不改写提供规则的旧任务原文或运行。 */
+  captureConversationFailure(p: PetStoryProject, adjustment: PetStoryChatAdjustment, reply: PetStoryConversationReply, error: unknown): PetStoryChatJob {
+    const prior = p.jobs.find((job): boolean => job.conversationReply?.adjustmentId === adjustment.id && job.conversationReply.reply.key === reply.key && job.status === 'invalid');
+    if (prior) return prior;
+    const source = p.jobs.find((job): boolean => job.id === adjustment.sourceJobId);
+    const details = chatValidationDetails(error);
+    if (!source || !details?.length || details.some((issue): boolean => !issue.repairable)) throw error;
+    const job: PetStoryChatJob = { ...structuredClone(source), id: randomUUID(), kind: creativeKind(p, source), ...adjustment.target,
+      originKind: undefined, repairMode: undefined, repairReplySource: undefined,
+      requestId: randomUUID(), runId: undefined, parentJobId: source.id, rawText: reply.text, parsedResult: undefined, status: 'invalid', resultStatus: 'candidate',
+      createdAt: new Date().toISOString(), endedWaitingAt: undefined, error: error instanceof Error ? error.message : '选定回复需修订', validationDetails: details,
+      validationIssues: details.map((issue): string => issue.message), contextHash: runtimeContextHash(p), inputFinal: promptFor(p, adjustment.target)?.final,
+      frameContextHash: frameContextHash(p, adjustment.target), previousBoundaryHash: previousBoundaryHash(p, adjustment.target),
+      conversationReply: { adjustmentId: adjustment.id, conversationUrl: adjustment.conversationUrl, reply: structuredClone(reply) } };
+    p.jobs.push(job); return job;
   }
 
   async promptStageTargets(id: string, revision: number): Promise<PetStoryResult> {
@@ -298,16 +366,27 @@ export class PetStoryChatService {
   }
 
   async prepareRuntime(id: string, revision: number, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget = {}): Promise<PetStoryResult> {
+    if (kind !== 'repair' || !target.parentJobId) return this.prepareRuntimeRequest(id, revision, kind, target);
+    const key = `${id}:${target.parentJobId}`; const existing = this.repairPreparations.get(key);
+    if (existing) return existing;
+    const pending = this.prepareRuntimeRequest(id, revision, kind, target); this.repairPreparations.set(key, pending);
+    try { return await pending; } finally { if (this.repairPreparations.get(key) === pending) this.repairPreparations.delete(key); }
+  }
+
+  private async prepareRuntimeRequest(id: string, revision: number, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget): Promise<PetStoryResult> {
     let p = await this.projects.read(id);
-    assertChatAvailable(p);
+    const parent = target.parentJobId ? p.jobs.find((j): boolean => j.id === target.parentJobId) : undefined;
+    // IPC 按项目串行；父子关联落盘后，重复回调与重开只能连接同一条修订。
+    const existing = this.existingRuntimeRepair(p, kind, parent); if (existing) return existing;
+    const adjustmentRepair = isAdjustmentRuntimeRepair(p, kind, parent);
+    if (!adjustmentRepair) assertChatAvailable(p);
     if (p.revision !== revision) throw new Error('项目版本已变化，请刷新后生成');
     if (!p.mobileStory?.text.trim()) throw new Error('请先保存当前剧本原文');
     if (!['analysis', 'assets', 'optimize', 'materialPrompt', 'review', 'revise', 'repair'].includes(kind)) throw new Error('运行时创作阶段无效');
     archiveCompletedPetStoryProduction(p);
     if (p.production) throw new Error('原制作方案仍在使用中，请先处理原任务');
-    const parent = target.parentJobId ? p.jobs.find((j): boolean => j.id === target.parentJobId) : undefined;
     this.validateRuntimeTarget(p, kind, target, parent);
-    if (kind === 'repair') this.validateRuntimeRepair(p, parent);
+    if (kind === 'repair') this.validateRuntimeRepair(p, parent, target.repairMode || 'automatic');
     const effectiveTarget = this.effectiveRuntimeTarget(kind, target, parent);
     this.assertRuntimeChatAvailable(p, kind, effectiveTarget);
     if (effectiveTarget.editIntent) effectiveTarget.editIntent = this.materialEditIntent(p, effectiveTarget);
@@ -322,20 +401,47 @@ export class PetStoryChatService {
     const attachments = await this.projects.attachments({ ...p, assets: request.assets });
     if (this.tasks.list().some((t): boolean => t.projectId === p.studioProjectId && t.mode === 'chat' && hash(t.prompt) === hash(request.prompt) && !p.jobs.some((j): boolean => j.taskId === t.id))) throw new Error('相同输入已有未绑定任务，请核对原 hold 任务');
     const task = this.tasks.create({ prompts: [request.prompt], promptReadback: 'exact', mode: 'chat', executionIntent: 'hold', attachments, projectId: p.studioProjectId }, p.accountId);
+    const job = this.runtimeJob(p, kind, target, effectiveTarget, parent, task, requestId, request);
+    p.jobs.push(job);
+    if (adjustmentRepair && p.chatAdjustment) p.chatAdjustment.repairJobId = job.id;
+    if (p.promptBatch?.status === 'running') p.promptBatch.jobId = job.id;
+    p = await this.projects.write(p);
+    this.syncAdjustmentRepairGuard(p, job);
+    return { success: true, project: p, taskId: task.id, attachments, ...(kind === 'repair' ? { repairJobId: job.id, repairSourceJobId: parent?.id } : {}) };
+  }
+
+  private existingRuntimeRepair(p: PetStoryProject, kind: PetStoryChatJob['kind'], parent?: PetStoryChatJob): PetStoryResult | undefined {
+    const existing = kind === 'repair' && parent ? p.jobs.find((job): boolean => job.kind === 'repair' && job.parentJobId === parent.id) : undefined;
+    if (!existing) return undefined;
+    this.syncAdjustmentRepairGuard(p, existing);
+    return { success: true, project: p, repairJobId: existing.id, repairSourceJobId: parent?.id,
+      ...(existing.status === 'bound' && !existing.endedWaitingAt ? { taskId: existing.taskId } : {}) };
+  }
+
+  private runtimeJob(p: PetStoryProject, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget, effectiveTarget: PetStoryRuntimeTarget, parent: PetStoryChatJob | undefined, task: Task, requestId: string, request: DramaRequest): PetStoryChatJob {
     const selected = promptFor(p, effectiveTarget);
     const reviewRepair = kind === 'repair' && parent && isReviewResult(p, parent);
-    const job: PetStoryChatJob = { id: randomUUID(), taskId: task.id, kind, status: 'bound', ...effectiveTarget,
-      inputHash: hash(task.prompt), sourceUrl: p.source.url, sourceStoryId: p.mobileStory.id, requestId,
+    return { id: randomUUID(), taskId: task.id, kind, status: 'bound', ...effectiveTarget,
+      ...(kind === 'repair' && parent ? { originKind: creativeKind(p, parent), repairMode: target.repairMode || 'automatic',
+        validationDetails: structuredClone(parent.validationDetails),
+        ...(parent.conversationReply ? { repairReplySource: { adjustmentId: parent.conversationReply.adjustmentId, replyKey: parent.conversationReply.reply.key } } : parent.repairReplySource ? { repairReplySource: parent.repairReplySource } : {}) } : {}),
+      inputHash: hash(task.prompt), sourceUrl: p.source.url, sourceStoryId: p.mobileStory?.id, requestId,
       stage: request.stage, rulesVersion: request.rulesVersion, ruleFiles: request.ruleFiles, expectedIds: request.expectedIds,
       createdAt: new Date().toISOString(), inputRevision: p.revision, contextHash: runtimeContextHash(p),
       inputEdited: reviewRepair ? parent.inputEdited : selected?.edited, inputFinal: reviewRepair ? parent.inputFinal : selected?.final, requestText: task.prompt, promptTask: request.promptTask,
       reviewInputFinals: request.reviewInputFinals,
       analysisCastBindings: request.analysisCastBindings,
       frameContextHash: frameContextHash(p, effectiveTarget), previousBoundaryHash: previousBoundaryHash(p, effectiveTarget) };
-    p.jobs.push(job);
-    if (p.promptBatch?.status === 'running') p.promptBatch.jobId = job.id;
-    p = await this.projects.write(p);
-    return { success: true, project: p, taskId: task.id, attachments };
+  }
+
+  private syncAdjustmentRepairGuard(p: PetStoryProject, job: PetStoryChatJob): void {
+    const a = p.chatAdjustment;
+    if (a?.status !== 'active' || a.repairJobId !== job.id || job.repairReplySource?.adjustmentId !== a.id) return;
+    const source = p.jobs.find((item): boolean => item.id === a.sourceJobId);
+    if (!source) throw new Error('选定回复缺少原会话保护记录，不发送修订');
+    const allowedTaskId = job.status === 'bound' && !job.endedWaitingAt ? job.taskId : undefined;
+    this.tasks.setConversationGuard?.(source.taskId, p.id, a.id, true, allowedTaskId);
+    claimConversationGuard(p.accountId, p.id, a.id, allowedTaskId);
   }
 
   private assertRuntimeChatAvailable(p: PetStoryProject, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget): void {
@@ -362,6 +468,7 @@ export class PetStoryChatService {
   }
 
   private validateRuntimeTarget(p: PetStoryProject, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget, parent?: PetStoryChatJob): void {
+    if (target.repairMode && (kind !== 'repair' || !['automatic', 'explicit'].includes(target.repairMode))) throw new Error('修订轮次无效');
     if (target.editIntent && kind !== 'materialPrompt') throw new Error('变体／局部编辑计划只能用于选中基础素材的文字创作');
     if (target.selectedIssueIds !== undefined && kind !== 'revise') throw new Error('问题选择只能用于本次明确的局部修订');
     if (target.reviewFocus !== undefined && kind !== 'review') throw new Error('核对疑点只能用于内容审查，不能作为创作或修订指令');
@@ -372,7 +479,7 @@ export class PetStoryChatService {
       const reviewedFinal = reviewedPromptFinal(parent, key);
       if (reviewedFinal === undefined) throw new Error('原审查缺少本目标的逐项正文快照，仅保留历史；请重新审查当前采用正文');
       if (reviewedFinal !== promptFor(p, target)?.final) throw new Error('审查所对应正文已经变化，请先审查当前采用正文，再选择新一轮修订');
-      if (parent.contextHash !== runtimeContextHash(p)) throw new Error('审查依赖的确认事实已经变化，请重新审查当前状态');
+      if (!runtimeContextStillCurrent(p, parent)) throw new Error('审查依赖的确认事实已经变化，请重新审查当前状态');
     }
     if ((kind === 'optimize' || kind === 'materialPrompt' || kind === 'revise') && !promptFor(p, target)) throw new Error('创作目标不存在');
   }
@@ -407,9 +514,10 @@ export class PetStoryChatService {
     return { baseAssetId: base.id, changes: intent.changes, preserve: intent.preserve, validity: intent.validity };
   }
 
-  private validateRuntimeRepair(p: PetStoryProject, parent?: PetStoryChatJob): void {
-    if (parent?.kind === 'revise') throw new Error('本目标已使用一次内容修订；保留失败候选与原因，不再追加自动格式或内容修订');
-    if (!parent?.requestId || parent.kind === 'repair' || parent.status !== 'invalid' || !parent.rawText || parent.sourceStoryId !== p.mobileStory?.id) throw new Error('仅允许对本次原回复的具体缺项修订一次');
+  private validateRuntimeRepair(p: PetStoryProject, parent?: PetStoryChatJob, mode: 'automatic' | 'explicit' = 'automatic'): void {
+    if (!parent?.requestId || parent.status !== 'invalid' || !parent.rawText || parent.sourceStoryId !== p.mobileStory?.id) throw new Error('仅允许对本次原回复的具体缺项修订一次');
+    if (mode === 'automatic' && parent.kind === 'repair' && parent.repairMode !== 'explicit') throw new Error('自动修订已使用一次；你可以继续在豆包中调整');
+    if (parent.validationDetails?.some((issue): boolean => !issue.repairable)) throw new Error('该问题需要恢复原任务或确认当前依据，不能交给豆包改写内容');
     if (p.jobs.some((j): boolean => j.kind === 'repair' && j.parentJobId === parent.id)) throw new Error('自动修订已使用一次');
     if (!boundaryStillCurrent(p, parent)) throw new Error('前镜已采用边界发生变化，请基于当前共同状态重新生成，不能修订旧请求');
     if (!repairInputsStillCurrent(p, parent)) throw new Error('原请求依赖的剧本、镜头、已采用帧或正文已变化；保留原回复，请按当前状态重新生成，不能修订旧请求');
@@ -506,6 +614,9 @@ export class PetStoryChatService {
     let p = await this.projects.read(id);
     let job = p.jobs.find((j): boolean => j.id === jobId);
     if (!job) throw new Error('任务未绑定到当前项目');
+    const repair = p.jobs.find((item): boolean => item.kind === 'repair' && item.parentJobId === jobId);
+    if (job.status === 'invalid' && repair) return { success: false, project: p, error: job.error, needsRepair: true, repairJobId: repair.id, repairSourceJobId: job.id };
+    if (job.conversationReply) return { success: false, project: p, error: job.error, needsRepair: canRepair(p, job), repairSourceJobId: job.id };
     if (job.status === 'applied') return { success: true, project: p };
     const task = checkedJobTask(p, job, this.tasks.list());
     if (!task.runtime?.submittedAt || !task.runtime.chatResponse?.text || task.runtime.input.prompt !== task.prompt) throw new Error('原任务尚无已保存的最终正文；保留原会话，不得重发');
@@ -518,7 +629,27 @@ export class PetStoryChatService {
     job = p.jobs.find((j): boolean => j.id === jobId);
     if (!job?.rawText) throw new Error('已保存原文回读缺失，停止且不重发');
     try {
-      const answer = parsePetStoryAnswer(job.rawText);
+      let answer: Record<string, unknown>;
+      try { answer = parsePetStoryAnswer(job.rawText); } catch (error: unknown) { throw contentError(error instanceof Error ? error.message : '回复结构不能解析', '$', job.rawText, '本次完整 JSON 返回契约'); }
+      this.applyCapturedAnswer(p, job, answer);
+      job.status = 'applied';
+      job.error = undefined;
+      job.validationIssues = undefined;
+      job.validationDetails = undefined;
+    } catch (error: unknown) {
+      job.status = 'invalid';
+      job.error = error instanceof Error ? error.message : '解析失败';
+      job.validationDetails = chatValidationDetails(error);
+      job.validationIssues = job.validationIssues?.length ? job.validationIssues : [job.error];
+      markUnresolvedRevision(p, job);
+      const needsRepair = canRepair(p, job);
+      return { success: false, project: await this.projects.write(p), error: job.error, needsRepair, repairSourceJobId: needsRepair ? job.id : undefined };
+    }
+    // 保存失败属于程序／磁盘问题，不能混进内容校验 catch 触发模型修订。
+    return { success: true, project: await this.projects.write(p) };
+  }
+
+  private applyCapturedAnswer(p: PetStoryProject, job: PetStoryChatJob, answer: Record<string, unknown>): void {
       if (job.requestId && typeof answer.optimized === 'string') job.parsedResult = { optimized: answer.optimized };
       if (job.requestId) this.applyRuntime(p, job, answer);
       else if (job.endedWaitingAt) { job.parsedResult = typeof answer.optimized === 'string' ? { optimized: answer.optimized } : undefined; job.resultStatus = 'candidate'; }
@@ -526,49 +657,49 @@ export class PetStoryChatService {
       else if (job.kind === 'materialPrompt') this.applyMaterialPrompt(p, job, answer);
       else if (job.kind === 'optimize') this.applyOptimization(p, job, answer);
       else { if (answer.storyUsable === false) p.source = { ...p.source, status: 'blocked', reason: typeof answer.reason === 'string' ? answer.reason : '故事内容不足，请补充剧情后重新分析' }; const candidate = structuredClone(p); this.applyStory(candidate, answer, true, job); job.parsedResult = { plan: candidate.plan, contentBasis: candidate.contentBasis }; job.resultStatus = 'candidate'; }
-      job.status = 'applied';
-      job.error = undefined;
-      job.validationIssues = undefined;
-      return { success: true, project: await this.projects.write(p) };
-    } catch (error: unknown) {
-      job.status = 'invalid';
-      job.error = error instanceof Error ? error.message : '解析失败';
-      job.validationIssues = job.validationIssues?.length ? job.validationIssues : [job.error];
-      markUnresolvedRevision(p, job);
-      const needsRepair = canRepair(p, job);
-      return { success: false, project: await this.projects.write(p), error: job.error, needsRepair };
-    }
   }
 
   private applyRuntime(p: PetStoryProject, job: PetStoryChatJob, answer: Record<string, unknown>): void {
-    if (answer.requestId !== job.requestId || !Array.isArray(answer.targetIds) || answer.targetIds.some((v: unknown): boolean => typeof v !== 'string')
-      || new Set(answer.targetIds).size !== answer.targetIds.length || [...answer.targetIds].sort().join('\n') !== [...(job.expectedIds || [])].sort().join('\n')) throw new Error('本次回复 requestId 或目标 ID 集合不符；不使用旧正文补齐');
+    if (typeof answer.requestId !== 'string') throw contentError('本次完整回复缺少正确类型的 requestId', '$.requestId', answer.requestId, `字符串 ${job.requestId}`);
+    if (!Array.isArray(answer.targetIds) || answer.targetIds.some((v: unknown): boolean => typeof v !== 'string')) throw contentError('本次完整回复缺少正确类型的 targetIds', '$.targetIds', answer.targetIds, `字符串数组 ${JSON.stringify(job.expectedIds)}`);
+    if (answer.requestId !== job.requestId || new Set(answer.targetIds).size !== answer.targetIds.length
+      || [...answer.targetIds].sort().join('\n') !== [...(job.expectedIds || [])].sort().join('\n')) throw new Error('本次回复 requestId 或目标 ID 集合不符；不使用旧正文补齐');
     const parent = job.kind === 'repair' ? p.jobs.find((j): boolean => j.id === job.parentJobId) : undefined;
-    const kind = parent?.kind || job.kind;
+    const kind = creativeKind(p, job);
     const current = this.markRuntimeFreshness(p, job);
-    if (kind === 'analysis') {
-      if (current && answer.storyUsable === false) p.source = { ...p.source, status: 'blocked', reason: typeof answer.reason === 'string' ? answer.reason : '故事内容不足，请补充剧情后重新分析' };
-      const candidateProject = structuredClone(p);
-      this.applyStory(candidateProject, answer, false, job);
-      job.parsedResult = { plan: candidateProject.plan, contentBasis: candidateProject.contentBasis };
-      const issues = job.analysisCastBindings && candidateProject.plan ? analysisCastIssues(candidateProject.plan, job.analysisCastBindings) : [];
-      if (issues.length) { job.validationIssues = issues; throw new Error(issues[0]); }
-      // 分析结果先展示为方案候选，采用和制作确认由用户分别决定。
-      return;
-    }
+    if (kind === 'analysis') { this.applyRuntimeAnalysis(p, job, answer, parent, current); return; }
     if (kind === 'assets') {
-      const assets = this.readAssetBindings(p, answer);
+      if (!p.plan) throw new Error('当前镜头已不存在，不能修订旧资产回复');
+      let assets: PetStoryAssetBindings;
+      try { assets = this.readAssetBindings(p, answer); } catch (error: unknown) { if (error instanceof PetStoryContentValidationError) throw error; throw contentError(error instanceof Error ? error.message : '资产结构无效', '$.shotBindings', answer.shotBindings, '原镜头对应的完整人物、道具、场景与引用集合'); }
       job.parsedResult = { assets };
       // 资产关系调整先保存为候选，不覆盖当前已采用方案。
       return;
     }
     if (kind === 'review') {
-      job.parsedResult = { issues: this.readReviewIssues(p, job, answer.issues) };
+      try { job.parsedResult = { issues: this.readReviewIssues(p, job, answer.issues) }; } catch (error: unknown) { throw contentError(error instanceof Error ? error.message : '审查结构无效', '$.issues', answer.issues, '本次目标及实际证据对应的完整审查数组'); }
       if (!job.endedWaitingAt) markCurrentReviewError(p, job, job.parsedResult.issues || [], current);
       return;
     }
     if (!['optimize', 'materialPrompt', 'revise'].includes(kind)) throw new Error('本次回复阶段无效');
     this.applyRuntimePrompt(p, job, answer);
+  }
+
+  private applyRuntimeAnalysis(p: PetStoryProject, job: PetStoryChatJob, answer: Record<string, unknown>, parent: PetStoryChatJob | undefined, current: boolean): void {
+      if (current && answer.storyUsable === false) p.source = { ...p.source, status: 'blocked', reason: typeof answer.reason === 'string' ? answer.reason : '故事内容不足，请补充剧情后重新分析' };
+      const candidateProject = structuredClone(p);
+      this.applyStory(candidateProject, answer, false, job);
+      if (parent?.rawText && candidateProject.plan) {
+        let original: Record<string, unknown> | undefined;
+        try { original = parsePetStoryAnswer(parent.rawText); } catch { /* 无法解析的原文没有可比较字段，仍保留原文与当前源约束。 */ }
+        const drift = planRepairPreservationIssues(original, candidateProject.plan, parent.validationDetails || []);
+        if (drift.length && !(answer.requiresConfirmation === true && typeof answer.changeReason === 'string' && answer.changeReason.trim())) throw new PetStoryContentValidationError(drift.map((message): PetStoryValidationIssue => ({ code: 'repair_drift', path: '$', actualType: 'object', expected: '保留无关剧情、角色、镜头与原台词；必要改动须明确原因并交用户确认', repairable: false, message })));
+      }
+      job.parsedResult = { plan: candidateProject.plan, contentBasis: candidateProject.contentBasis,
+        ...(answer.requiresConfirmation === true && typeof answer.changeReason === 'string' && answer.changeReason.trim() ? { requiresConfirmation: true, changeReason: answer.changeReason } : {}) };
+      const issues = job.analysisCastBindings && candidateProject.plan ? analysisCastIssues(candidateProject.plan, job.analysisCastBindings) : [];
+      if (issues.length) { job.validationIssues = issues; throw new PetStoryContentValidationError(issues.map((message): PetStoryValidationIssue => ({ code: 'cast_binding', path: '$.characters', actual: answer.characters, actualType: 'array', expected: '当前已确认制作演员与来源称谓', repairable: true, message }))); }
+      // 分析结果先展示为方案候选，采用和制作确认由用户分别决定。
   }
 
   private markRuntimeFreshness(p: PetStoryProject, job: PetStoryChatJob): boolean {
@@ -585,13 +716,13 @@ export class PetStoryChatService {
   }
 
   private applyRuntimePrompt(p: PetStoryProject, job: PetStoryChatJob, answer: Record<string, unknown>): void {
-    if (typeof answer.optimized !== 'string' || !answer.optimized.trim()) throw new Error('本次回复缺少完整创作正文');
+    if (typeof answer.optimized !== 'string' || !answer.optimized.trim()) throw contentError('本次回复缺少完整创作正文', '$.optimized', answer.optimized, '非空完整正文字符串');
     // 候选先完整留存；校验失败不能丢弃模型正文，也不能覆盖当前 final。
     job.parsedResult = { optimized: answer.optimized };
     // 过期回复不再按已经变化的当前台词／素材判错，也不据此自动发起新创作。
     if (job.resultStatus === 'stale') return;
     const issues = runtimePromptIssues(p, job, answer.optimized);
-    if (issues.length) { job.validationIssues = issues; throw new Error(issues.join('\n')); }
+    if (issues.length) { job.validationIssues = issues; throw new PetStoryContentValidationError(issues.map((message): PetStoryValidationIssue => ({ code: 'prompt_content', path: '$.optimized', targetId: targetId(job), actual: answer.optimized, actualType: 'string', expected: '本目标完整正文、素材引用、模式、原台词和声音约定', repairable: true, message }))); }
     const target = promptFor(p, job);
     if (!target) { job.resultStatus = 'stale'; job.staleReason = '目标已删除，仅保留候选'; }
     if (job.resultStatus === 'stale' || !target) return;
@@ -672,7 +803,7 @@ export class PetStoryChatService {
   private adoptPlan(p: PetStoryProject, job: PetStoryChatJob): void {
     const candidate = job.parsedResult?.plan;
     if (!candidate) throw new Error('该回复没有可采用的分镜候选');
-    const plan = structuredClone(candidate); this.preserveIdentities(p, plan);
+    const plan = validatePetStoryPlan(structuredClone(candidate)); this.preserveIdentities(p, plan);
     for (const shot of plan.shots) for (const kind of ['firstFrame', 'lastFrame', 'video'] as const) {
       const prompt = shot.prompts[kind];
       if (prompt) { prompt.sourceJobId = undefined; prompt.candidateJobId = undefined; prompt.promptTask = undefined; }
@@ -744,30 +875,41 @@ export class PetStoryChatService {
 
   async adoptPlanCandidate(id: string, revision: number, jobId: string): Promise<PetStoryResult> {
     const { p, job } = await this.candidateProject(id, revision, jobId);
-    if (job.contextHash !== runtimeContextHash(p)) throw new Error('剧本或镜头已变化，分镜候选已过期');
-    this.adoptPlan(p, job); return { success: true, project: await this.projects.write(p) };
+    if (!runtimeContextStillCurrent(p, job)) throw new Error('剧本或镜头已变化，分镜候选已过期');
+    try { this.adoptPlan(p, job); } catch (error: unknown) { return this.candidateValidationFailure(p, job, error); }
+    return { success: true, project: await this.projects.write(p) };
   }
 
   async adoptAssetsCandidate(id: string, revision: number, jobId: string): Promise<PetStoryResult> {
     const { p, job } = await this.candidateProject(id, revision, jobId);
-    if (job.contextHash !== runtimeContextHash(p)) throw new Error('剧本或镜头已变化，资产候选已过期');
-    this.adoptAssets(p, job); return { success: true, project: await this.projects.write(p) };
+    if (!runtimeContextStillCurrent(p, job)) throw new Error('剧本或镜头已变化，资产候选已过期');
+    try { this.adoptAssets(p, job); } catch (error: unknown) { return this.candidateValidationFailure(p, job, error); }
+    return { success: true, project: await this.projects.write(p) };
   }
 
   async adoptPromptCandidate(id: string, revision: number, jobId: string): Promise<PetStoryResult> {
     const { p, job } = await this.candidateProject(id, revision, jobId);
-    if (job.promptTask?.designHash) {
-      const qualification = inspectPromptCandidate(p, job);
-      if (!qualification.writingReady) throw new Error(`当前候选需按当前事实修订：${qualification.reasons.join('；')}`);
-    } else if (job.contextHash !== runtimeContextHash(p)) throw new Error('当前事实已变化，请重新生成本项候选');
     if (job.frameContextHash !== undefined && job.frameContextHash !== frameContextHash(p, job)) throw new Error('已采用首帧或尾帧正文已变化，请按当前共同状态重新生成候选');
     if (!boundaryStillCurrent(p, job)) throw new Error('前镜已采用边界发生变化，请按当前连续状态重新生成候选');
     const target = promptFor(p, job); const body = job.parsedResult?.optimized;
     if (!target || !body?.trim()) throw new Error('该回复没有可采用的正文');
+    // 先分出明确正文缺项；结构合法而内容不合格的候选不能被资格错误直接短路。
+    const issues = runtimePromptIssues(p, job, body);
+    if (issues.length) return this.candidateValidationFailure(p, job, new PetStoryContentValidationError(issues.map((message): PetStoryValidationIssue => ({ code: 'prompt_content', path: '$.optimized', targetId: targetId(job), actual: body, actualType: 'string', expected: '当前目标完整正文与已确认引用、原台词约束', repairable: true, message }))));
+    if (job.promptTask?.designHash) {
+      const qualification = inspectPromptCandidate(p, job);
+      if (!qualification.writingReady) throw new Error(`当前候选需按当前事实修订：${qualification.reasons.join('；')}`);
+    } else if (!runtimeContextStillCurrent(p, job)) throw new Error('当前事实已变化，请重新生成本项候选');
     target.final = body; target.optimized = body; target.edited = false; target.sourceJobId = job.id; target.candidateJobId = job.id;
     target.rulesVersion = job.rulesVersion || PROMPT_RULES_VERSION; target.needsReview = undefined; target.editIntent = job.editIntent ? structuredClone(job.editIntent) : undefined; job.resultStatus = 'adopted';
     target.promptTask = job.promptTask ? structuredClone(job.promptTask) : undefined;
     return { success: true, project: await this.projects.write(p) };
+  }
+
+  private async candidateValidationFailure(p: PetStoryProject, job: PetStoryChatJob, error: unknown): Promise<PetStoryResult> {
+    const details = chatValidationDetails(error); if (!details) throw error;
+    job.status = 'invalid'; job.error = error instanceof Error ? error.message : '候选需修订'; job.validationDetails = details; job.validationIssues = details.map((issue): string => issue.message);
+    return { success: false, project: await this.projects.write(p), error: job.error, needsRepair: canRepair(p, job), repairSourceJobId: job.id };
   }
 
   private applyMaterialPrompt(p: PetStoryProject, job: PetStoryChatJob, answer: Record<string, unknown>): void {
@@ -796,15 +938,13 @@ export class PetStoryChatService {
       // 已有方案及手改 final 保留；不足的回复不能清空用户成果。
       throw new Error('故事内容不足：请补充手机豆包故事原文，未创建后续媒体任务');
     }
-    if (answer.storyUsable !== true) throw new Error('缺少 storyUsable；需依据用户粘贴的故事，不能冒充桌面已读取视频');
-    const basis = record(answer.contentBasis);
-    for (const field of ['beginning', 'middle', 'ending']) {
-      if (typeof basis[field] !== 'string' || !(basis[field] as string).trim()) throw new Error('缺少开头、中间变化或结局；不能把标题／封面算作完整分析');
-    }
     const normalized = normalizeAnalysisCuts(answer);
     if (job) job.formatCorrections = normalized.corrections.length ? normalized.corrections : undefined;
+    const issues = storyAnswerIssues(normalized.answer);
+    if (issues.length) throw new PetStoryContentValidationError(issues);
+    const basis = record(answer.contentBasis);
     const plan = validatePetStoryPlan(normalized.answer, true);
-    if (!plan.props || !plan.scenes) throw new Error('本次分析缺少动态道具／场景资产集合，请补齐结构，不允许跳过基础素材');
+    if (!plan.props || !plan.scenes) throw contentError('本次分析缺少动态道具／场景资产集合，请补齐结构，不允许跳过基础素材', '$', normalized.answer, '完整props、scenes数组');
     this.preserveIdentities(p, plan);
     if (preserveManual) this.preserveManualPrompts(p, plan);
     p.plan = plan;

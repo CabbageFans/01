@@ -32,12 +32,11 @@ import {
 
 const FIXED_NOW = new Date('2026-07-14T12:00:00.000Z').getTime();
 
-function makeBaseInput(overrides: Partial<VideoCapabilityInput> = {}): VideoCapabilityInput {
+function makeBaseInput(overrides: Partial<VideoCapabilityInput> & Record<string, unknown> = {}): VideoCapabilityInput {
   return {
     model: 'seedance-2.0',
     duration: '10s',
     aspectRatio: '16:9',
-    manual15sEnabled: false,
     accountStatus: 'idle',
     now: FIXED_NOW,
     ...overrides,
@@ -72,27 +71,12 @@ const healthyAccountStatus: AccountStatus = 'idle';
 // ==================== 测试用例 ====================
 
 describe('evaluateVideoCapability', () => {
-  // ---- 测试 1: 本地额度耗尽时阻止视频提交 ----
-  describe('额度耗尽阻止提交', () => {
-    it('seedanceQuota.exhausted = true 时返回 blocked', () => {
-      const input = makeBaseInput({
-        seedanceQuota: { ...healthySeedanceQuota, usedUnits: 10, exhausted: true },
-      });
-      const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('blocked');
-      expect(result.canSubmit).toBe(false);
-      expect(result.issues.some(i => i.code === 'quota_exhausted' && i.blocking)).toBe(true);
-      expect(result.userMessage).toContain('额度已耗尽');
-    });
-
-    it('10s 需要 2 单位，剩余 1 单位时在提交前阻止', () => {
+  describe('本地额度记录不阻止任务启动', () => {
+    it.each([0, 5, 10])('本地 usedUnits=%s 仍进入页面执行', (usedUnits: number): void => {
       const result = evaluateVideoCapability(makeBaseInput({
-        duration: '10s',
-        seedanceQuota: { ...healthySeedanceQuota, usedUnits: 5, estimatedTotalUnits: 6, exhausted: false },
+        seedanceQuota: { ...healthySeedanceQuota, usedUnits, exhausted: usedUnits >= 6 },
       }));
-      expect(result.canSubmit).toBe(false);
-      expect(result.userMessage).toContain('需 2 单位');
-      expect(result.userMessage).toContain('剩余 1 单位');
+      expect(result).toMatchObject({ state: 'allowed', canSubmit: true, issues: [] });
     });
   });
 
@@ -161,59 +145,11 @@ describe('evaluateVideoCapability', () => {
     });
   });
 
-  describe('11–15s 页面实时能力门禁', () => {
-    it('15s + seedance-2.0-fast 缺少实时证据时 fail-closed', () => {
-      const input = makeBaseInput({
-        model: 'seedance-2.0-fast',
-        duration: '15s',
-        seedanceQuota: healthySeedanceQuota,
-        health: healthyHealth,
-        scheduling: healthyScheduling,
-        accountStatus: healthyAccountStatus,
-      });
-      const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('blocked');
-      expect(result.canSubmit).toBe(false);
-      expect(result.issues.some(i => i.code === 'membership_required' && i.blocking)).toBe(true);
-    });
-
-    it('15s + seedance-2.0-fast 提供建议配置但不改变原始配置', () => {
-      const input = makeBaseInput({
-        model: 'seedance-2.0-fast',
-        duration: '15s',
-        seedanceQuota: healthySeedanceQuota,
-        health: healthyHealth,
-        scheduling: healthyScheduling,
-        accountStatus: healthyAccountStatus,
-      });
-      const result = evaluateVideoCapability(input);
-      expect(result.suggestion).toBeDefined();
-      expect(result.suggestion!.model).toBe('seedance-2.0-fast');
-      expect(result.suggestion!.duration).toBe('10s');
-      // 原始输入不被修改
-      expect(input.model).toBe('seedance-2.0-fast');
+  describe('参数在执行中按真实页面设置', () => {
+    it.each(['unknown', 'membership_required', undefined])('不根据遗留会员标志 %s 预阻断', (platformAvailability): void => {
+      const input = makeBaseInput({ duration: '15s', platformAvailability });
+      expect(evaluateVideoCapability(input)).toMatchObject({ state: 'allowed', canSubmit: true });
       expect(input.duration).toBe('15s');
-    });
-
-    it('页面明确出现会员动作时返回 blocked', () => {
-      const input = makeBaseInput({
-        model: 'seedance-2.0',
-        duration: '15s',
-        seedanceQuota: healthySeedanceQuota,
-        health: healthyHealth,
-        scheduling: healthyScheduling,
-        accountStatus: healthyAccountStatus,
-        platformAvailability: 'membership_required',
-      });
-      const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('blocked');
-      expect(result.canSubmit).toBe(false);
-    });
-
-    it('只有页面实时确认 selectable 时允许 11s', () => {
-      const result = evaluateVideoCapability(makeBaseInput({ duration: '11s', platformAvailability: 'selectable' }));
-      expect(result.state).toBe('allowed');
-      expect(result.canSubmit).toBe(true);
     });
   });
 
@@ -279,7 +215,7 @@ describe('evaluateVideoCapability', () => {
   describe('额度扣减安全', () => {
     it('blocked 状态下 canSubmit = false，不会进入提交流程', () => {
       const input = makeBaseInput({
-        seedanceQuota: { ...healthySeedanceQuota, usedUnits: 10, exhausted: true },
+        health: { ...healthyHealth, loginState: 'expired' },
       });
       const result = evaluateVideoCapability(input);
       // canSubmit 为 false 意味着不会进入提交流程，因此不会调用 recordSeedanceUsage
@@ -303,14 +239,14 @@ describe('evaluateVideoCapability', () => {
       expect(suggestion).toBeDefined();
       expect(suggestion!.model).toBe('seedance-2.0-fast');
       expect(suggestion!.duration).toBe('10s');
-      expect(suggestion!.reason).toContain('实时能力证据');
+      expect(suggestion!.reason).toContain('实际页面配置');
     });
 
     it('15s + 其他模型返回建议配置', () => {
       const suggestion = suggestCompatibleVideoConfig('seedance-2.0', '15s');
       expect(suggestion).toBeDefined();
       expect(suggestion!.duration).toBe('10s');
-      expect(suggestion!.reason).toContain('实时能力证据');
+      expect(suggestion!.reason).toContain('实际页面配置');
     });
 
     it('非 15s 配置不返回建议', () => {
@@ -334,63 +270,11 @@ describe('evaluateVideoCapability', () => {
     });
   });
 
-  describe('旧补丁标记不能绕过会员门禁', () => {
-    it('manual15sEnabled = true 时 15s 仍 blocked', () => {
-      const input = makeBaseInput({
-        model: 'seedance-2.0-fast',
-        duration: '15s',
-        manual15sEnabled: true,
-        seedanceQuota: healthySeedanceQuota,
-        health: healthyHealth,
-        scheduling: healthyScheduling,
-        accountStatus: healthyAccountStatus,
-      });
-      const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('blocked');
-      expect(result.canSubmit).toBe(false);
-    });
-
-    it('manual15sEnabled = false 时 15s 也 blocked', () => {
-      const input = makeBaseInput({
-        model: 'seedance-2.0-fast',
-        duration: '15s',
-        manual15sEnabled: false,
-        seedanceQuota: healthySeedanceQuota,
-        health: healthyHealth,
-        scheduling: healthyScheduling,
-        accountStatus: healthyAccountStatus,
-      });
-      const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('blocked');
-      expect(result.canSubmit).toBe(false);
-    });
-
-    it('manual15sEnabled = true 时额度耗尽仍返回 blocked', () => {
-      const input = makeBaseInput({
-        model: 'seedance-2.0-fast',
-        duration: '15s',
-        manual15sEnabled: true,
-        seedanceQuota: { ...healthySeedanceQuota, usedUnits: 10, exhausted: true },
-      });
-      const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('blocked');
-      expect(result.canSubmit).toBe(false);
-    });
-
-    it('manual15sEnabled 不影响 allowed 状态', () => {
-      const input = makeBaseInput({
-        model: 'seedance-2.0',
-        duration: '10s',
-        manual15sEnabled: true,
-        seedanceQuota: healthySeedanceQuota,
-        health: healthyHealth,
-        scheduling: healthyScheduling,
-        accountStatus: healthyAccountStatus,
-      });
-      const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('allowed');
-      expect(result.canSubmit).toBe(true);
-      expect(result.issues).toHaveLength(0);
+  describe('废弃补丁标记不参与资格判断', () => {
+    it.each([false, undefined])('旧 manual15sEnabled=%s 不改变启动或原参数', (manual15sEnabled): void => {
+      const input = makeBaseInput({ duration: '15s', manual15sEnabled });
+      expect(evaluateVideoCapability(input).canSubmit).toBe(true);
+      expect(input.duration).toBe('15s');
     });
   });
 
@@ -429,7 +313,7 @@ describe('evaluateVideoCapability', () => {
 
   // ---- 额外测试: 多个阻塞条件同时存在 ----
   describe('多阻塞条件', () => {
-    it('登录失效 + 额度耗尽同时存在时返回 blocked', () => {
+    it('登录失效仍阻断，历史额度不追加猜测错误', () => {
       const input = makeBaseInput({
         health: { ...healthyHealth, loginState: 'expired', consecutiveFailures: 5 },
         seedanceQuota: { ...healthySeedanceQuota, usedUnits: 10, exhausted: true },
@@ -437,7 +321,7 @@ describe('evaluateVideoCapability', () => {
       const result = evaluateVideoCapability(input);
       expect(result.state).toBe('blocked');
       expect(result.canSubmit).toBe(false);
-      expect(result.issues.length).toBeGreaterThanOrEqual(2);
+      expect(result.issues.map((issue): string => issue.code)).toEqual(['login_expired']);
     });
   });
 
@@ -517,9 +401,9 @@ describe('豆包新 UI 只读能力快照与 dry-run', () => {
   });
 
   it.each([
-    ['unknown', false, 'membership_required'],
+    ['unknown', true, 'ready'],
     ['selectable', true, 'ready'],
-  ] as const)('11 秒 availability=%s 时按实时证据门禁', (availability, ok, code) => {
+  ] as const)('11 秒 availability=%s 不要求额外会员证明', (availability, ok, code) => {
     const snapshot = buildDoubaoCapabilitySnapshot({ pageUrl: 'https://www.doubao.com/', bodyText: pageText });
     snapshot.membership.availability = availability;
     expect(evaluateDryRunSelection(snapshot, { model: 'Seedance 2.5', duration: 11, aspectRatio: '16:9' }))

@@ -54,11 +54,11 @@ describe('getAccountSchedulingScore', () => {
     expect(getAccountSchedulingScore(acc, 0, 'chat', NOW)).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it('video 模式 + 额度耗尽 → Infinity', () => {
+  it('video 模式 + 历史额度耗尽 → 仍进入执行', () => {
     const acc = makeAccount({
       seedanceQuota: { date: '2025-01-01', usedUnits: 10, estimatedTotalUnits: 10, exhausted: true, updatedAt: '2025-01-01T00:00:00.000Z' },
     });
-    expect(getAccountSchedulingScore(acc, 0, 'video', NOW)).toBe(Number.POSITIVE_INFINITY);
+    expect(Number.isFinite(getAccountSchedulingScore(acc, 0, 'video', NOW))).toBe(true);
   });
 
   it('video 模式 + 额度未耗尽 → 有限分数', () => {
@@ -124,14 +124,14 @@ describe('getAccountSchedulingScore', () => {
     expect(getAccountSchedulingScore(accW2, 2, 'chat', NOW)).toBeLessThan(getAccountSchedulingScore(accW1, 2, 'chat', NOW));
   });
 
-  it('video 模式剩余额度更多时获得 quotaBonus（分数更低）', () => {
+  it('video 模式不因本地预测额度改变评分', () => {
     const accLowQuota = makeAccount({
       seedanceQuota: { date: '2025-01-01', usedUnits: 5, estimatedTotalUnits: 6, exhausted: false, updatedAt: '2025-01-01T00:00:00.000Z' },
     });
     const accWithQuota = makeAccount({
       seedanceQuota: { date: '2025-01-01', usedUnits: 0, estimatedTotalUnits: 6, exhausted: false, updatedAt: '2025-01-01T00:00:00.000Z' },
     });
-    expect(getAccountSchedulingScore(accWithQuota, 0, 'video', NOW)).toBeLessThan(getAccountSchedulingScore(accLowQuota, 0, 'video', NOW));
+    expect(getAccountSchedulingScore(accWithQuota, 0, 'video', NOW)).toBe(getAccountSchedulingScore(accLowQuota, 0, 'video', NOW));
   });
 
   it.each(['unknown', 'action_required', 'login_required', 'unavailable'] as const)(
@@ -157,11 +157,11 @@ describe('getAccountSchedulingScore', () => {
     expect(getAccountSchedulingScore(acc, 0, 'chat', NOW)).not.toBe(Number.POSITIVE_INFINITY);
   });
 
-  it('10 秒任务需要 2 单位，剩余 1 单位时不可自动指派', () => {
+  it('本地预测仅剩 1 单位也可自动指派 10 秒任务', () => {
     const acc = makeAccount({
       seedanceQuota: { date: '2025-01-01', usedUnits: 5, estimatedTotalUnits: 6, exhausted: false, updatedAt: '2025-01-01T00:00:00.000Z' },
     });
-    expect(getAccountSchedulingScore(acc, 0, 'video', NOW, 2)).toBe(Number.POSITIVE_INFINITY);
+    expect(Number.isFinite(getAccountSchedulingScore(acc, 0, 'video', NOW))).toBe(true);
   });
 
   it('chat 模式不获得 quotaBonus', () => {

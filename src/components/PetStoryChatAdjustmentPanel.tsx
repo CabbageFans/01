@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Modal, Radio } from 'antd';
 import { MessageOutlined } from '@ant-design/icons';
-import type { PetStoryProject, PetStoryRuntimeTarget, PetStoryImageTarget, PetStoryAdjustmentPreview } from '@doubao-studio/contracts';
+import type { PetStoryChatJob, PetStoryProject, PetStoryRuntimeTarget, PetStoryImageTarget, PetStoryAdjustmentPreview } from '@doubao-studio/contracts';
 import { useTaskStore } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
 import { usePetStoryStore } from '../store/usePetStoryStore';
@@ -9,6 +9,7 @@ import { PetStoryPlanPreview } from './PetStoryPlanPreview';
 import { pendingPetStoryDrafts } from '../utils/petstoryDraftPresence';
 import { PetStoryImageReview } from './PetStoryImageReview';
 import { journeyShotAsset } from '../utils/petstoryJourney';
+import { petStoryJobStatus } from './PetStoryTaskRecovery';
 import '../styles/petstory-chat-adjustment.css';
 
 function targetName(p: PetStoryProject, target: PetStoryRuntimeTarget): string {
@@ -20,6 +21,11 @@ function imageTarget(target: PetStoryRuntimeTarget): PetStoryImageTarget | undef
   if (target.materialId) return { materialId: target.materialId };
   if (target.shotId && (target.promptKind === 'firstFrame' || target.promptKind === 'lastFrame')) return { shotId: target.shotId, kind: target.promptKind };
   return undefined;
+}
+function repairedPreview(project: PetStoryProject, job: PetStoryChatJob): PetStoryAdjustmentPreview | null {
+  const adjustment = project.chatAdjustment;
+  if (!adjustment || !job.parsedResult) return null;
+  return { target: adjustment.target, ...(job.parsedResult.plan ? { plan: job.parsedResult.plan, previousPlan: project.plan, contentBasis: job.parsedResult.contentBasis, previousContentBasis: project.contentBasis } : { body: job.parsedResult.optimized, previousBody: adjustment.previousText }) };
 }
 
 const AdjustmentImageReview: React.FC<{ project: PetStoryProject; target: PetStoryImageTarget; previewAssetId: string; importError: string; onRetry: () => Promise<void> }> = ({ project, target, previewAssetId, importError, onRetry }): React.ReactElement => {
@@ -95,6 +101,16 @@ const PetStoryChatAdjustmentPanel: React.FC = (): React.ReactElement | null => {
   const [imageImportError, setImageImportError] = useState('');
   const [choosing, setChoosing] = useState(false); const [selectedKey, setSelectedKey] = useState<string>(); const [preview, setPreview] = useState(false);
   useEffect((): void => { setSelectedKey(undefined); setChoosing(false); setPreview(false); setApplication(null); setImagePreviewId(undefined); setImageImportError(''); }, [a?.id]);
+  const repair = p?.jobs.find((job): boolean => job.id === a?.repairJobId);
+  const repairCandidate = repair?.status === 'applied' && repair.resultStatus === 'candidate';
+  const shownRepairId = useRef<string>();
+  useEffect((): void => {
+    if (!repairCandidate || !repair?.parsedResult || !a || !p || shownRepairId.current === repair.id) return;
+    shownRepairId.current = repair.id;
+    setSelectedKey(a.selectedReplyKey);
+    setApplication(repairedPreview(p, repair));
+    setChoosing(false); setPreview(true);
+  }, [repairCandidate, repair, a, p]); // 候选到达只展示完整预览，用户确认前不采用。
   const selected = a?.replies.find((reply): boolean => reply.key === selectedKey);
   const draftLabels = p ? pendingPetStoryDrafts(p.id) : [];
   if (!p || a?.status !== 'active') return <AdjustmentRestoreNotice />;
@@ -104,13 +120,24 @@ const PetStoryChatAdjustmentPanel: React.FC = (): React.ReactElement | null => {
   const question = !!body && body.length < 100 && /[？?]\s*$/.test(body);
   const openPreview = async (): Promise<void> => {
     if (!selected) return;
+    if (repairCandidate && repair?.repairReplySource?.replyKey === selected.key) {
+      setApplication(repairedPreview(p, repair)); setPreview(true); return;
+    }
     setPreviewLoading(true);
-    try { const value = await state.previewChatReply(selected.key); if (value) { setApplication(value); setPreview(true); } }
+    try { const value = await state.applyChatReply(selected.key); if (value) { setApplication(value); setPreview(true); } }
     catch (error: unknown) { usePetStoryStore.setState({ error: error instanceof Error ? error.message : '回复预览未准备好' }); }
     finally { setPreviewLoading(false); }
   };
   const apply = async (): Promise<void> => {
     if (!selected) return;
+    if (repairCandidate && repair && repair.repairReplySource?.replyKey === selected.key) {
+      if (repair.parsedResult?.plan) await state.adoptPlanCandidate(repair.id);
+      else await state.adoptPromptCandidate(repair.id);
+      const current = usePetStoryStore.getState();
+      if (current.project?.jobs.find((job): boolean => job.id === repair.id)?.resultStatus === 'adopted') await current.endChatAdjustment();
+      if (!usePetStoryStore.getState().error) { setPreview(false); setChoosing(false); }
+      return;
+    }
     await state.adoptChatReply(selected.key);
     if (usePetStoryStore.getState().project?.chatAdjustment?.status === 'adopted') { setPreview(false); setChoosing(false); }
   };
@@ -126,10 +153,12 @@ const PetStoryChatAdjustmentPanel: React.FC = (): React.ReactElement | null => {
   return <section className="petstory-adjustment" aria-label="当前创作的豆包调整">
     <div className="adjustment-target"><MessageOutlined /><div><small>正在调整</small><strong>{target}</strong></div><Button type="text" size="small" disabled={state.busy} onClick={(): void => { void state.endChatAdjustment(); }}>结束调整</Button></div>
     <p>在豆包中自由交流，选中满意的具体回复后应用。</p>
+    {repair && <p role="status">{repairCandidate ? '已修正，请确认完整内容。' : petStoryJobStatus(repair, useTaskStore.getState().tasks.find((task): boolean => task.id === repair.taskId)).instruction}</p>}
     {state.chatReadbackError && <p role="status" className="adjustment-readback">{state.chatReadbackError}</p>}
     <div className="adjustment-actions"><Button size="small" onClick={(): void => { window.dispatchEvent(new CustomEvent('petstory-open-adjustment')); }}>打开关联会话</Button><Button type="primary" size="small" disabled={!a.replies.length || state.busy} onClick={(): void => setChoosing(true)}>选择回复{a.replies.length ? ` · ${a.replies.length}` : ''}</Button></div>
     <Modal title={`选择用于「${target}」的回复`} open={choosing && !preview} width={680} onCancel={(): void => setChoosing(false)} footer={<><Button onClick={(): void => setChoosing(false)}>返回对话</Button><Button type={selected?.imageUrls?.length && pictureTarget ? 'default' : 'primary'} loading={previewLoading} disabled={!selected?.text.trim() || state.busy} onClick={(): void => { void openPreview(); }}>应用到当前创作</Button>{!!selected?.imageUrls?.length && pictureTarget && <Button type="primary" loading={state.busy} disabled={!!draftLabels.length} onClick={(): void => { void importImages(); }}>查看并采用图片</Button>}</>}>
-      <p className="adjustment-note">选择完整的助手回复。网页只读取当前会话中可辨认的回复；找不到时，请在豆包中滚动到该回复。</p>
+      <p className="adjustment-note">选择完整的助手回复。应用时若有明确格式或内容问题，会请豆包修订一次，再供你确认。</p>
+      {repair && <p role="status">{petStoryJobStatus(repair, useTaskStore.getState().tasks.find((task): boolean => task.id === repair.taskId)).instruction}</p>}
       {state.error && <Alert type="error" showIcon message={state.error} />}
       <Radio.Group className="adjustment-replies" value={selectedKey} onChange={(event): void => setSelectedKey(event.target.value as string)}>
         {a.replies.map((reply, index): React.ReactElement => <label key={reply.key} className={`adjustment-reply ${selectedKey === reply.key ? 'is-selected' : ''}`}><Radio value={reply.key}>豆包回复 {index + 1}</Radio>{!!reply.imageUrls?.length && <p>{reply.imageUrls.length} 张回复图片 · 选择后下载并预览，不会直接替换当前图片</p>}{!!reply.text.trim() && <p>{replyContent(reply.text)}</p>}</label>)}
@@ -139,6 +168,7 @@ const PetStoryChatAdjustmentPanel: React.FC = (): React.ReactElement | null => {
     {pictureTarget && imagePreviewId && <AdjustmentImageReview project={p} target={pictureTarget} previewAssetId={imagePreviewId} importError={imageImportError} onRetry={importImages} />}
     <Modal title="确认应用这条回复" open={preview} width={880} onCancel={(): void => setPreview(false)} footer={<><Button onClick={(): void => setPreview(false)}>重新选择</Button><Button type="primary" loading={state.busy} disabled={!selected || !!draftLabels.length || question} onClick={(): void => { void apply(); }}>确认采用此回复</Button></>}>
       <div className="adjustment-apply-target">应用到：<strong>{target}</strong></div>
+      {repairCandidate && repair?.repairReplySource?.replyKey === selected?.key && repair?.parsedResult?.requiresConfirmation && <p role="status">需要你确认的变化：{repair.parsedResult.changeReason}</p>}
       <div className="adjustment-comparison"><section><h3>当前采用</h3>{application?.previousPlan ? <PetStoryPlanPreview plan={application.previousPlan} contentBasis={application.previousContentBasis} /> : <pre>{application?.previousBody || a.previousText || '尚无采用正文'}</pre>}</section><section><h3>选中的豆包回复</h3>{application?.plan ? <PetStoryPlanPreview plan={application.plan} contentBasis={application.contentBasis} /> : <pre>{body}</pre>}</section></div>
       {question && <Alert type="warning" showIcon message="这条回复包含追问，请在豆包中整理为完整方案或提示词后再采用" />}
       {!!draftLabels.length && <Alert type="warning" showIcon message="还有未保存的修改，请先保存或放弃，再采用回复" description={draftLabels.join('、')} />}

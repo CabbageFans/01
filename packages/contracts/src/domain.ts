@@ -125,7 +125,7 @@ export interface TaskErrorInfo {
 /** 当前或最近一次执行的可恢复快照 */
 export interface TaskRunSnapshot {
   /** 自由创作对话的持久账号保护；独立于运行状态，重启后仍阻止同账号自动注入。 */
-  chatAdjustmentGuard?: { projectId: string; adjustmentId: string; active: boolean };
+  chatAdjustmentGuard?: { projectId: string; adjustmentId: string; active: boolean; allowedTaskId?: string };
   runId: string;
   attempt: number;
   stage: TaskStage;

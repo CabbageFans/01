@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { DownloadJob, PetStoryImageTarget, PetStoryChatAdjustment, PetStoryChatJob, PetStoryConversationReply, PetStoryProject, PetStoryRuntimeTarget, PetStoryAdjustmentResult, PetStoryAdjustmentPreviewResult, Task, TaskDownloadOutputsParams, TaskDownloadOutputsResult } from '@doubao-studio/contracts';
 import type { PetStoryProjects } from './petstoryProject';
-import type { PetStoryChatService, PetStoryTaskPort } from './petstoryChat';
+import { chatValidationDetails, type PetStoryChatService, type PetStoryTaskPort } from './petstoryChat';
 import { archiveCompletedPetStoryProduction } from './petstoryProductionLifecycle';
 import { claimConversationGuard, releaseConversationGuard } from './accountConversationGuard';
 
@@ -28,7 +28,7 @@ export function adjustmentTarget(p: PetStoryProject, target: PetStoryRuntimeTarg
   if (target.materialId && !target.shotId && !target.promptKind && p.materials?.some((m): boolean => m.id === target.materialId)) return { materialId: target.materialId };
   const kind = target.promptKind;
   if (!target.materialId && target.shotId && kind && p.plan?.shots.some((s): boolean => s.id === target.shotId && !!s.prompts[kind])) return { shotId: target.shotId, promptKind: target.promptKind };
-  if (!target.materialId && !target.shotId && !target.promptKind && (p.plan || p.jobs.some((job): boolean => (!target.parentJobId || job.id === target.parentJobId) && isPlanConversationJob(job) && job.status === 'applied' && job.resultStatus === 'candidate'))) return {};
+  if (!target.materialId && !target.shotId && !target.promptKind && (p.plan || p.jobs.some((job): boolean => (!target.parentJobId || job.id === target.parentJobId) && isPlanConversationJob(p, job) && (job.status === 'invalid' || job.status === 'applied' && job.resultStatus === 'candidate')))) return {};
   throw new Error('请从具体方案、素材提示词或镜头提示词打开豆包调整');
 }
 export function adjustmentText(p: PetStoryProject, target: PetStoryRuntimeTarget): string {
@@ -49,8 +49,12 @@ function taskConversation(task: Task): string | undefined {
   return urls.length === 1 ? urls[0] : undefined;
 }
 /** 一次纠正后的完整方案仍属于其真实回复，不能退回未通过的原分析会话。 */
-function isPlanConversationJob(job: PetStoryChatJob): boolean {
-  return !!job.parsedResult?.plan && (job.kind === 'analysis' || job.kind === 'repair');
+function isPlanConversationJob(p: PetStoryProject, job: PetStoryChatJob): boolean {
+  if (!!job.parsedResult?.plan && (job.kind === 'analysis' || job.kind === 'repair')) return true;
+  if (job.status !== 'invalid' || !job.rawText) return false;
+  const seen = new Set<string>(); let source: PetStoryChatJob | undefined = job;
+  while (source?.kind === 'repair' && !source.originKind && !seen.has(source.id)) { seen.add(source.id); source = p.jobs.find((item): boolean => item.id === source?.parentJobId); }
+  return source?.kind === 'analysis' || source?.originKind === 'analysis';
 }
 /** 自由聊天复用已有规则会话；不创建平台请求，也不把最后一条回复当作默认答案。 */
 export class PetStoryAdjustmentService {
@@ -65,16 +69,16 @@ export class PetStoryAdjustmentService {
       if (JSON.stringify(p.chatAdjustment.target) !== JSON.stringify(target)) throw new Error('请先采用当前对话的回复，或明确结束当前调整，再调整其他对象');
       if (supplied.parentJobId && supplied.parentJobId !== p.chatAdjustment.sourceJobId) throw new Error('当前正在调整另一版候选，请先结束当前调整，再打开这版候选');
       this.persistGuard(p, p.chatAdjustment, true);
-      claimConversationGuard(p.accountId, p.id, p.chatAdjustment.id);
+      claimConversationGuard(p.accountId, p.id, p.chatAdjustment.id, this.allowedRepairTask(p, p.chatAdjustment));
       return { success: true, project: p, adjustment: p.chatAdjustment };
     }
     const tasks = this.tasks.list();
     if (tasks.some((t): boolean => t.assignedAccountId === p.accountId && (['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(t.status)
       || !!t.lock && Date.parse(t.lock.expiresAt) > Date.now() || t.status === 'paused' && t.errorInfo?.code === 'submission_uncertain'))) throw new Error('这个账号还有未完成或待核对的任务，请先处理原任务再自由调整');
     if (p.production?.state === 'running' || p.production?.steps.some((step): boolean => step.status !== 'complete')) throw new Error('请先收取或处理当前制作任务，再调整创作内容');
-    const preferredId = supplied.parentJobId || (target.materialId ? p.materials?.find((material): boolean => material.id === target.materialId)?.prompt.sourceJobId : target.shotId ? p.plan?.shots.find((shot): boolean => shot.id === target.shotId)?.prompts[target.promptKind || 'video']?.sourceJobId : [...p.jobs].reverse().find((job): boolean => isPlanConversationJob(job) && job.status === 'applied' && job.resultStatus === 'adopted')?.id);
-    const source = [...p.jobs].reverse().find((j): boolean => (!preferredId || j.id === preferredId) && !!j.rawText && !!j.requestText && j.status === 'applied'
-      && (target.materialId ? j.materialId === target.materialId : target.shotId ? j.shotId === target.shotId && j.promptKind === target.promptKind : isPlanConversationJob(j))
+    const preferredId = supplied.parentJobId || (target.materialId ? p.materials?.find((material): boolean => material.id === target.materialId)?.prompt.sourceJobId : target.shotId ? p.plan?.shots.find((shot): boolean => shot.id === target.shotId)?.prompts[target.promptKind || 'video']?.sourceJobId : [...p.jobs].reverse().find((job): boolean => isPlanConversationJob(p, job) && job.status === 'applied' && job.resultStatus === 'adopted')?.id);
+    const source = [...p.jobs].reverse().find((j): boolean => (!preferredId || j.id === preferredId) && !!j.rawText && !!j.requestText && (j.status === 'applied' || supplied.parentJobId === j.id && this.recoverableInvalidSource(p, j, tasks))
+      && (target.materialId ? j.materialId === target.materialId : target.shotId ? j.shotId === target.shotId && j.promptKind === target.promptKind : isPlanConversationJob(p, j))
       && tasks.some((t): boolean => t.id === j.taskId && t.assignedAccountId === p.accountId && !!j.runId && t.runtime?.runId === j.runId && t.prompt === j.requestText && j.sourceStoryId === p.mobileStory?.id && !!taskConversation(t)));
     if (!source) throw new Error('这项内容还没有可定位的豆包会话。请先生成本项提示词或检查原会话，再打开调整');
     const task = tasks.find((t): boolean => t.id === source.taskId);
@@ -88,6 +92,14 @@ export class PetStoryAdjustmentService {
     p.chatAdjustment = adjustment;
     try { claimConversationGuard(p.accountId, p.id, adjustment.id); return { success: true, project: await this.projects.write(p), adjustment }; }
     catch (error: unknown) { this.persistGuard(p, adjustment, false); releaseConversationGuard(p.accountId, adjustment.id); throw error; }
+  }
+
+  private recoverableInvalidSource(p: PetStoryProject, job: PetStoryChatJob, tasks: Task[]): boolean {
+    if (job.status !== 'invalid' || !job.requestId || !job.rawText || !this.chats.conversationSourceCurrent(p, job)) return false;
+    const task = tasks.find((item): boolean => item.id === job.taskId);
+    return task?.status === 'done' && task.mode === 'chat' && task.projectId === p.studioProjectId && task.assignedAccountId === p.accountId
+      && job.sourceUrl === p.source.url && digest(task.prompt) === job.inputHash && !!task.runtime?.submittedAt
+      && task.runtime.chatResponse?.text === job.rawText && task.runtime.input.prompt === task.prompt;
   }
 
   async capture(id: string, adjustmentId: string, url: string, replies: PetStoryConversationReply[]): Promise<PetStoryAdjustmentResult> {
@@ -104,6 +116,9 @@ export class PetStoryAdjustmentService {
       return { key, text: r.text, precedingUserText: r.precedingUserText, turnId: r.turnId, messageId: r.messageId, ...(r.imageUrls?.length ? { imageUrls: r.imageUrls } : {}), capturedAt: a.replies.find((old): boolean => old.key === key)?.capturedAt || now };
     });
     if (new Set(checked.map((r): string => r.key)).size !== checked.length) throw new Error('网页中的回复不能唯一识别，请在豆包中定位具体回复');
+    const selected = a.selectedReplyKey && a.replies.find((r): boolean => r.key === a.selectedReplyKey);
+    if (selected && !checked.some((r): boolean => r.key === selected.key)) checked.push(selected);
+    if (checked.length > 100) throw new Error('本次可核对回复过多，请缩小到当前调整结果后再读取');
     const keys = JSON.stringify(checked.map((r): string => r.key));
     this.observations.set(a.id, { keys, at: Date.now() });
     if (JSON.stringify(a.replies.map((r): string => r.key)) === keys) return { success: true, project: p, adjustment: a };
@@ -153,7 +168,8 @@ export class PetStoryAdjustmentService {
     const reply = a.replies.find((r): boolean => r.key === replyKey);
     if (!reply) throw new Error('请重新选择一条具体回复');
     const candidate = structuredClone(p);
-    this.chats.applyConversationReply(candidate, a, reply);
+    try { this.chats.applyConversationReply(candidate, a, reply); }
+    catch (error: unknown) { const details = chatValidationDetails(error); if (!details) throw error; return { success: false, error: error instanceof Error ? error.message : '这条回复需要整理', needsRepair: details.every((issue): boolean => issue.repairable) }; }
     const planTarget = !a.target.materialId && !a.target.shotId;
     return { success: true, preview: { target: a.target, ...(planTarget ? { previousPlan: p.plan, plan: candidate.plan, previousContentBasis: p.contentBasis, contentBasis: candidate.contentBasis } : { previousBody: adjustmentText(p, a.target), body: adjustmentText(candidate, a.target) }) } };
   }
@@ -162,13 +178,28 @@ export class PetStoryAdjustmentService {
     const p = await this.projects.read(id);
     if (p.chatAdjustment?.id === adjustmentId && p.chatAdjustment.status === 'adopted' && p.chatAdjustment.adoptedReplyKey === replyKey) { this.restore(p); return { success: true, project: p, adjustment: p.chatAdjustment }; }
     const a = this.active(p, adjustmentId);
+    if (a.repairJobId && a.selectedReplyKey === replyKey) {
+      const repair = p.jobs.find((job): boolean => job.id === a.repairJobId);
+      if (repair) { this.persistGuard(p, a, true); return { success: true, project: p, adjustment: a, repairJobId: repair.id, repairSourceJobId: repair.parentJobId, ...(repair.status === 'bound' && !repair.endedWaitingAt ? { taskId: repair.taskId } : {}) }; }
+    }
     if (p.revision !== revision || a.basisHash !== adjustmentBasis(p, a.target)) throw new Error('当前内容或素材已更新，请重新核对选定回复，不覆盖新版本');
     const observed = this.observations.get(a.id);
     if (!observed || Date.now() - observed.at > 8000 || observed.keys !== JSON.stringify(a.replies.map((r): string => r.key))) throw new Error('关联会话尚未完成本次核对，请等待回复读取稳定');
     const reply = a.replies.find((r): boolean => r.key === replyKey);
     if (!reply) throw new Error('请重新选择一条具体回复');
     if (p.production?.state === 'running' || p.production?.steps.some((step): boolean => step.status !== 'complete')) throw new Error('当前制作尚未收取完成，请先处理原任务，再采用回复');
-    this.chats.applyConversationReply(p, a, reply);
+    try { this.chats.applyConversationReply(p, a, reply); }
+    catch (error: unknown) {
+      const details = chatValidationDetails(error); if (!details?.length || details.some((issue): boolean => !issue.repairable)) throw error;
+      const source = this.chats.captureConversationFailure(p, a, reply, error);
+      a.selectedReplyKey = reply.key;
+      const snapshot = await this.projects.write(p);
+      const repaired = await this.chats.prepareRuntime(id, snapshot.revision, 'repair', { parentJobId: source.id, repairMode: 'automatic' });
+      if (!repaired.project?.chatAdjustment) throw new Error('修订记录未回读，保留原回复且不发送');
+      this.persistGuard(repaired.project, repaired.project.chatAdjustment, true);
+      claimConversationGuard(p.accountId, p.id, a.id, this.allowedRepairTask(repaired.project, repaired.project.chatAdjustment));
+      return { ...repaired, adjustment: repaired.project.chatAdjustment };
+    }
     a.status = 'adopted'; a.adoptedReplyKey = reply.key;
     const project = await this.projects.write(p);
     this.persistGuard(p, a, false); releaseConversationGuard(p.accountId, a.id); this.observations.delete(a.id);
@@ -180,6 +211,8 @@ export class PetStoryAdjustmentService {
     if (p.chatAdjustment?.id === adjustmentId && p.chatAdjustment.status !== 'active') { this.restore(p); return { success: true, project: p, adjustment: p.chatAdjustment }; }
     const a = this.active(p, adjustmentId);
     if (p.revision !== revision) throw new Error('项目已更新，请刷新后结束调整');
+    const repair = p.jobs.find((job): boolean => job.id === a.repairJobId && ['bound', 'captured'].includes(job.status));
+    if (repair) repair.endedWaitingAt ||= new Date().toISOString();
     a.status = 'ended'; const project = await this.projects.write(p);
     this.persistGuard(p, a, false); releaseConversationGuard(p.accountId, a.id); this.observations.delete(a.id);
     return { success: true, project, adjustment: a };
@@ -196,17 +229,21 @@ export class PetStoryAdjustmentService {
       }
     }
     if (!a) return;
-    if (a.status === 'active') { this.persistGuard(p, a, true); claimConversationGuard(p.accountId, p.id, a.id); }
+    if (a.status === 'active') { this.persistGuard(p, a, true); claimConversationGuard(p.accountId, p.id, a.id, this.allowedRepairTask(p, a)); }
     else releaseConversationGuard(p.accountId, a.id);
   }
 
   private persistGuard(p: PetStoryProject, a: PetStoryChatAdjustment, active: boolean): void {
     const source = p.jobs.find((job): boolean => job.id === a.sourceJobId);
     if (!source) throw new Error('豆包调整的原任务记录缺失，保护状态保持不变');
-    this.tasks.setConversationGuard?.(source.taskId, p.id, a.id, active);
+    this.tasks.setConversationGuard?.(source.taskId, p.id, a.id, active, active ? this.allowedRepairTask(p, a) : undefined);
+  }
+  private allowedRepairTask(p: PetStoryProject, a: PetStoryChatAdjustment): string | undefined {
+    const repair = p.jobs.find((job): boolean => job.id === a.repairJobId && job.repairReplySource?.adjustmentId === a.id && job.repairReplySource.replyKey === a.selectedReplyKey);
+    return repair?.status === 'bound' && !repair.endedWaitingAt ? repair.taskId : undefined;
   }
   private active(p: PetStoryProject, id: string): PetStoryChatAdjustment {
     if (!p.chatAdjustment || p.chatAdjustment.id !== id || p.chatAdjustment.status !== 'active') throw new Error('这次调整已结束或不属于当前项目');
-    claimConversationGuard(p.accountId, p.id, id); return p.chatAdjustment;
+    claimConversationGuard(p.accountId, p.id, id, this.allowedRepairTask(p, p.chatAdjustment)); return p.chatAdjustment;
   }
 }

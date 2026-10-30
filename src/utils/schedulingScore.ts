@@ -4,14 +4,10 @@
  */
 
 import type { Account, GenerationMode } from '../types';
-import { getVideoQuotaRemaining } from './videoQuota';
 import { getAvailabilityBlockReason } from './accountAvailability';
 
 export function getAutomaticSchedulingBlockReason(
   account: Account,
-  mode: GenerationMode,
-  requiredVideoUnits: number = 1,
-  reservedVideoUnits: number = 0,
   now: number = Date.now(),
 ): string | null {
   const health = account.health;
@@ -23,12 +19,6 @@ export function getAutomaticSchedulingBlockReason(
   if (health?.verificationRequired) return '等待人工验证';
   if (account.scheduling?.enabled === false) return '自动调度已暂停';
   if (account.scheduling?.manualCooldownUntil && new Date(account.scheduling.manualCooldownUntil).getTime() > now) return '手动冷却中';
-  if (mode === 'video') {
-    const remaining = getVideoQuotaRemaining(account.seedanceQuota) - Math.max(0, reservedVideoUnits);
-    if (account.seedanceQuota?.exhausted || remaining < requiredVideoUnits) {
-      return `额度不足（需 ${requiredVideoUnits}，可用 ${Math.max(0, remaining)}）`;
-    }
-  }
   return null;
 }
 
@@ -46,17 +36,13 @@ export function getAccountSchedulingScore(
   load: number,
   mode: GenerationMode,
   now: number = Date.now(),
-  requiredVideoUnits: number = 1,
-  reservedVideoUnits: number = 0,
 ): number {
-  if (getAutomaticSchedulingBlockReason(account, mode, requiredVideoUnits, reservedVideoUnits, now)) {
+  if (getAutomaticSchedulingBlockReason(account, now)) {
     return Number.POSITIVE_INFINITY;
   }
 
-  const quotaRemaining = getVideoQuotaRemaining(account.seedanceQuota) - Math.max(0, reservedVideoUnits);
   const failurePenalty = (account.health?.consecutiveFailures || 0) * 4;
-  const quotaBonus = mode === 'video' ? Math.min(quotaRemaining, 10) * 0.25 : 0;
   const preferenceBonus = account.scheduling?.preferredModes.includes(mode) ? 2 : 0;
   const weight = account.scheduling?.weight || 1;
-  return (load * 10 + failurePenalty - quotaBonus - preferenceBonus - (account.pinned ? 0.5 : 0)) / weight;
+  return (load * 10 + failurePenalty - preferenceBonus - (account.pinned ? 0.5 : 0)) / weight;
 }

@@ -66,8 +66,8 @@ function fixture(native: boolean): { view: { executeJavaScript: ReturnType<typeo
   return { surface, first, last, portal, view: { executeJavaScript, loadURL: vi.fn(), getURL: (): string => 'https://www.doubao.com/chat/TEST' } };
 }
 function guard(mode: PetStoryExecutionGuard['mode'] = 'reference', count = 1): PetStoryExecutionGuard {
-  const supported = { state: 'supported' as const, free: 'free' as const, reason: 'TEST' };
-  const capability: PetStoryCapability = { accountId: 'TEST', checkedAt: new Date().toISOString(), image: supported, modes: { first_frame: supported, first_last_frame: supported, reference: supported }, durations: [5], videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' }, freeEvidence: 'user_confirmed' };
+  const supported = { state: 'supported' as const, reason: 'TEST' };
+  const capability: PetStoryCapability = { accountId: 'TEST', checkedAt: new Date().toISOString(), image: supported, modes: { first_frame: supported, first_last_frame: supported, reference: supported }, durations: [5], videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' }, };
   return { capability, mode, durationSeconds: 5, attachmentAssetIds: Array.from({ length: count }, (_, i): string => `TEST-asset-${i}`) };
 }
 const materials = ['TEST-first.png', 'TEST-last.png'].map((name): { name: string; base64: string; mime: string } => ({ name, base64: 'VEVTVA==', mime: 'image/png' }));
@@ -156,23 +156,17 @@ describe('P4 current composer and actual slot readback', (): void => {
       await expect(verifyPetStoryReferenceBindings(test.view, bindings)).rejects.toThrow('素材丢失');
     } finally { vi.useRealTimers(); }
   });
-  it.each(['duration', 'model', 'paid', 'unknown'] as const)('blocks %s before any submission', async (failure): Promise<void> => {
+  it.each(['duration', 'model'] as const)('blocks real %s mismatch before submission', async (failure): Promise<void> => {
     const test = fixture(false); const current = await readPetStoryComposer(test.view); const expected = guard();
     if (failure === 'duration') current.duration = 10;
     if (failure === 'model') current.model = 'TEST wrong';
-    if (failure === 'paid') current.free = 'paid';
-    if (failure === 'unknown') expected.capability.freeEvidence = 'unknown';
-    expect((): void => checkPetStoryPageGuard(current, expected, true)).toThrow();
+    expect((): void => checkPetStoryPageGuard(current, expected, true)).toThrow('模型／时长／比例');
     expect(test.first.received).toEqual([]);
   });
-  it('visible paid current parameters override the owner free confirmation and block submission', async (): Promise<void> => {
-    const test = fixture(false);
-    const config = test.surface.querySelector('[data-creation-params-panel-id]');
-    if (!config) throw new Error('TEST config missing');
-    config.text = '9:16 · 5s 会员专享';
-    const snapshot = await readPetStoryComposer(test.view);
-    expect(snapshot.free).toBe('paid');
-    expect((): void => checkPetStoryPageGuard(snapshot, guard(), true)).toThrow('付费');
+  it.each(['unknown', 'paid', false, undefined])('legacy free=%s is ignored when actual parameters and slots match', async (free): Promise<void> => {
+    const test = fixture(false); const current = { ...await readPetStoryComposer(test.view), free };
+    expect((): void => checkPetStoryPageGuard(current, guard(), true)).not.toThrow();
+    expect(test.first.received).toEqual([]);
   });
   it('counts two rendered img nodes in one actual upload card once', async (): Promise<void> => {
     const test = fixture(false);

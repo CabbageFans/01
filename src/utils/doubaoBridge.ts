@@ -5244,6 +5244,14 @@ function readyChatDocument(webview: WebviewHandle, chatRoot: string, state: Chat
     && !webview.isLoadingMainFrame?.();
 }
 
+async function inspectRepairNavigationInput(webview: WebviewHandle, ownedRepairDraft?: string): Promise<NewConversationResult & { ownedDraft?: boolean }> {
+  const current = await getChatPageSnapshot(webview);
+  if (!current.editorPresent) return { ok: false, reason: 'EDITOR_NOT_FOUND' };
+  if (current.generating) return { ok: false, reason: 'GENERATION_IN_PROGRESS' };
+  if (current.editorText.trim()) return ownedRepairDraft && current.editorText === ownedRepairDraft ? { ok: true, ownedDraft: true } : { ok: false, reason: 'USER_DRAFT_PRESENT' };
+  return { ok: true };
+}
+
 /** loadURL 不会同步替换旧 DOM；有导航时必须先看到另一个真正加载到根页的文档。 */
 async function waitForFreshChatDocument(webview: WebviewHandle, chatRoot: string, previousTimeOrigin: number | undefined, deadline: number): Promise<ChatDocumentState | null> {
   while (Date.now() < deadline) {
@@ -5270,6 +5278,8 @@ export async function startNewConversation(
   webview: WebviewHandle,
   readinessTimeoutMs: number = 20000,
   reuseEmptyChatRoot: boolean = false,
+  preserveCurrentInput: boolean = false,
+  ownedRepairDraft?: string,
 ): Promise<NewConversationResult> {
   try {
     const deadline = Date.now() + Math.max(0, readinessTimeoutMs);
@@ -5277,11 +5287,21 @@ export async function startNewConversation(
     if (!chatRoot) return { ok: false, reason: 'PLATFORM_UNRECOGNIZED' };
     const before = await readChatDocumentState(webview, deadline);
     if (!before) return { ok: false, reason: 'PAGE_NOT_READY' };
+    // 选定自由回复的修订可能在初始化队列中等待；真正导航前重新读取，
+    // 不使用“应用”按钮点击时的旧快照覆盖用户后来输入的草稿或正在进行的交流。
+    let hasOwnedDraft = false;
+    if (preserveCurrentInput) {
+      const current = await inspectRepairNavigationInput(webview, ownedRepairDraft);
+      if (!current.ok) return current;
+      hasOwnedDraft = current.ownedDraft === true;
+    }
     // 普通 Chat 已在官方空根页时，重复导航会重新等待慢子资源，反而失去已就绪状态。
     // 只在精确根地址、可见编辑器、零消息且零草稿全部回读通过时复用。
     const sameRoot = matchesChatRoot(webview.getURL(), chatRoot) && matchesChatRoot(before.href, chatRoot);
+    // 自有草稿也不在原页直接发送；回到正常新文档与空消息基线验证。
+    const reuseCurrentDocument = reuseEmptyChatRoot && sameRoot && !hasOwnedDraft;
     let documentState = before;
-    if (reuseEmptyChatRoot && sameRoot) {
+    if (reuseCurrentDocument) {
       if (before.readyState === 'loading' || webview.isLoadingMainFrame?.()) return { ok: false, reason: 'PAGE_NOT_READY' };
       const snapshot = await getChatPageSnapshot(webview);
       if (!snapshot.editorPresent) return { ok: false, reason: 'EDITOR_NOT_FOUND' };
@@ -5301,7 +5321,7 @@ export async function startNewConversation(
 
     const inspectEmptyDocument = async (): Promise<NewConversationResult> => {
       let previousKey: string | undefined;
-      const originalDocument = reuseEmptyChatRoot && sameRoot ? undefined : before.timeOrigin;
+      const originalDocument = reuseCurrentDocument ? undefined : before.timeOrigin;
       // 空会话依赖可核对 DOM 事实，不依赖后台 WebView 可能暂停的绘制帧。
       // 轮询间隔只是重新采样的节拍；只有两次相同文档／编辑器几何且空态均通过才可继续。
       while (Date.now() < deadline) {
@@ -6558,53 +6578,12 @@ export async function manualResolveVideoArtifact(
   });
 }
 
-// PetStory 只增加原执行器的素材角色与免费门禁分支，不新增网页执行系统。
+// PetStory 复用原执行器，在任务执行中回读实际素材槽位和生成参数。
 export async function readPetStoryComposer(webview: WebviewHandle, operation: import('./petstoryControls').PetStoryComposerOperation = {}): Promise<import('./petstoryControls').PetStoryComposerSnapshot> {
   return safeExecuteJS(webview, `(${petStoryComposerProbe.toString()})(${JSON.stringify(operation)})`, 5000, 'petstory_visible_controls');
 }
-export async function inspectPetStoryCapability(webview: WebviewHandle, accountId: string, freeConfirmed: boolean, kind?: 'image' | 'video'): Promise<import('@doubao-studio/contracts').PetStoryCapability> {
-  // 生图／视频技能切换会重置页面参数，核对入口时保留此前已实际回读的有效规格。
-  const initial = await readPetStoryComposer(webview);
-  const initialModel = Object.keys(VIDEO_MODEL_UI_LABELS).find((key): boolean => VIDEO_MODEL_UI_LABELS[key] === initial.model);
-  const previousConfig = initialModel && ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'].includes(initial.aspectRatio) && initial.duration >= 5 && initial.duration <= 10
-    ? { model: initialModel, duration: `${initial.duration}s`, aspectRatio: initial.aspectRatio } : undefined;
-  switchMode(webview, 'image');
-  if (!await clickAITab(webview, 'image')) throw new Error('图片创作入口未就绪，未上传或提交');
-  await sleep(500);
-  const image = await readPetStoryComposer(webview);
-  const free = (state: import('@doubao-studio/contracts').PetStoryFreeState): import('@doubao-studio/contracts').PetStoryFreeState => state === 'unknown' && freeConfirmed ? 'free' : state;
-  // 第一张基础图只核对图片入口，不切换或要求视频模式／时长控件。
-  if (kind === 'image') {
-    const unknown = { state: 'unknown' as const, free: 'unknown' as const, reason: '本次只检查图片入口，视频模式尚未核对' };
-    return { accountId, checkedAt: new Date().toISOString(), image: { state: image.present && image.generic ? 'supported' : 'unknown', free: free(image.free), reason: '普通图片创作输入区检查' },
-      modes: { first_frame: unknown, first_last_frame: unknown, reference: unknown }, durations: [], freeEvidence: freeConfirmed ? 'user_confirmed' : image.free === 'free' ? 'visible' : 'unknown' };
-  }
-  if (!await clickAITab(webview, 'video')) throw new Error('视频创作入口未就绪，未上传或提交');
-  await sleep(500);
-  if (previousConfig) await configureVideoOptions(webview, previousConfig);
-  await readPetStoryComposer(webview, { openDurations: true });
-  await sleep(200);
-  const video = await readPetStoryComposer(webview);
-  await readPetStoryComposer(webview, { openDurations: true });
-  const variants = {} as Record<import('@doubao-studio/contracts').PetStoryResolvedMode, import('./petstoryControls').PetStoryComposerSnapshot>;
-  for (const mode of ['first_last_frame', 'first_frame', 'reference'] as const) {
-    await readPetStoryComposer(webview, { selectMode: mode });
-    await sleep(200);
-    variants[mode] = await readPetStoryComposer(webview);
-  }
-  const entry = (supported: boolean, label: boolean, snapshot: import('./petstoryControls').PetStoryComposerSnapshot): import('@doubao-studio/contracts').PetStoryEntryCapability => ({
-    state: supported ? 'supported' : label ? 'implementation_gap' : 'unknown', free: free(snapshot.free),
-    reason: supported ? '当前可见输入槽已识别' : label ? '平台有模式标识但当前槽位结构尚未适配' : '当前未观察到明确模式槽位，不能据此断言平台不支持',
-  });
-  const model = Object.keys(VIDEO_MODEL_UI_LABELS).find((key): boolean => VIDEO_MODEL_UI_LABELS[key] === video.model) as import('@doubao-studio/contracts').VideoModel | undefined;
-  const ratio = video.aspectRatio as import('@doubao-studio/contracts').VideoAspectRatio;
-  return { accountId, checkedAt: new Date().toISOString(), image: { state: image.present && image.generic ? 'supported' : 'unknown', free: free(image.free), reason: '普通图片创作输入区检查' },
-    modes: { first_frame: entry(variants.first_frame.first && !variants.first_frame.last, video.firstLabel, variants.first_frame), first_last_frame: entry(variants.first_last_frame.first && variants.first_last_frame.last, video.nativeLabel, variants.first_last_frame), reference: entry(variants.reference.generic, false, variants.reference) },
-    videoConfig: model && ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'].includes(ratio) && video.duration >= 5 && video.duration <= 10 ? { model, duration: `${video.duration}s` as import('@doubao-studio/contracts').VideoDuration, aspectRatio: ratio } : undefined,
-    durations: video.durations.filter((seconds): boolean => seconds >= 5 && seconds <= 10), freeEvidence: freeConfirmed ? 'user_confirmed' : image.free === 'free' && video.free === 'free' ? 'visible' : 'unknown' };
-}
 export function checkPetStoryPageGuard(snapshot: import('./petstoryControls').PetStoryComposerSnapshot, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, video: boolean): void {
-  if (!snapshot.present || ['paid', 'exhausted'].includes(snapshot.free) || (snapshot.free === 'unknown' && guard.capability.freeEvidence !== 'user_confirmed')) throw new PetStoryControlError('当前免费入口未知、要求付费或额度不足，P4 已停止');
+  if (!snapshot.present) throw new PetStoryControlError(video ? '当前页面没有找到视频生成输入区' : '当前页面没有找到图片生成输入区');
   if (!video) { if (!snapshot.generic) throw new PetStoryControlError('图片参考输入区尚未适配'); return; }
   const mode = guard.mode;
   if (mode === 'first_last_frame' ? !snapshot.first || !snapshot.last : mode === 'first_frame' ? !snapshot.first || snapshot.last : !snapshot.generic) throw new PetStoryControlError('当前实际模式槽位与批准模式不符，未上传或提交');
@@ -6690,10 +6669,9 @@ function validatePetStoryUploadReceipts(compiled: import('@doubao-studio/contrac
 }
 
 /** 依据逐文件上传回执绑定；每一个 @ 都必须由当前菜单创建真实节点。 */
-export async function bindPetStoryReferences(webview: WebviewHandle, compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt, receipts: PetStoryUploadReceipt[], signal: AbortSignal, allowPlain = false): Promise<{ compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt; bindings: import('@doubao-studio/contracts').PetStoryPageBinding[] }> {
+export async function bindPetStoryReferences(webview: WebviewHandle, compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt, receipts: PetStoryUploadReceipt[], signal: AbortSignal): Promise<{ compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt; bindings: import('@doubao-studio/contracts').PetStoryPageBinding[] }> {
   validatePetStoryUploadReceipts(compiled, receipts);
   const menuKeys = await resolvePetStoryReferenceMenu(webview, receipts);
-  if (!allowPlain && receipts.some((r): boolean => r.reference === 'plain')) throw new PetStoryControlError('当前素材引用方式尚未核对；确实不支持 @ 时请本人批准中文用途映射');
   const bindings: import('@doubao-studio/contracts').PetStoryPageBinding[] = [];
   for (const receipt of receipts) {
     const snapshot = await readPetStoryComposer(webview, { slot: receipt.slot });

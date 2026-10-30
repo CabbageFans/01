@@ -32,9 +32,10 @@ interface ReviewState {
   title: string; status: string;
 }
 function reviewLabel(view: Omit<ReviewState, 'title' | 'status'>, uncertain: boolean): { title: string; status: string } {
+  if (view.pending && !uncertain && view.job?.kind === 'repair') return { title: '正在请豆包修正分镜方案…', status: '正在修订' };
   if (view.pending && !uncertain) return { title: '分镜方案正在生成', status: '正在生成' };
   if (view.problem) return { title: '分镜方案需要复核', status: uncertain ? recoveryStatus(view.job, view.task) : '需要复核' };
-  if (view.candidate) return view.newCandidate ? { title: '分镜方案已更新', status: '有新候选' } : { title: '分镜方案待确认', status: '候选待确认' };
+  if (view.candidate) return view.job?.kind === 'repair' ? { title: '已修正，请确认分镜方案。', status: '候选待确认' } : view.newCandidate ? { title: '分镜方案已更新', status: '有新候选' } : { title: '分镜方案待确认', status: '候选待确认' };
   if (view.adopted) return { title: '方案已采用', status: '已采用' };
   return view.plan ? { title: '当前方案待确认', status: '待确认' } : { title: '等待分镜方案', status: '尚未开始' };
 }
@@ -57,7 +58,7 @@ function reviewState(project: PetStoryProject, job: PetStoryChatJob | undefined,
 const PlanRecovery: React.FC<{ project: PetStoryProject; view: ReviewState }> = ({ project, view }): React.ReactElement | null => {
   if (view.pending && !view.problem) return <><Progress percent={view.task?.runtime?.submittedAt ? 65 : 20} showInfo={false} status="active" /><p role="status">{view.job ? petStoryJobStatus(view.job, view.task).instruction : '正在等待豆包回复。'}</p></>;
   if (!view.problem) return null;
-  return <div className="petstory-plan-attention" role="status"><p>{view.job?.staleReason || view.job?.error || view.task?.errorInfo?.message || (view.job ? petStoryJobStatus(view.job, view.task).instruction : '原回复尚未确认归属，请先核对原会话。')}</p><p>受影响对象：本轮分镜方案。当前采用方案和已有成果保留。</p>{view.job && <PetStoryChatRecoveryActions project={project} job={view.job} task={view.task} compact />}</div>;
+  return <div className="petstory-plan-attention" role="status"><p>{view.job?.kind === 'repair' && view.job.status === 'invalid' ? petStoryJobStatus(view.job, view.task).instruction : view.job?.staleReason || view.job?.error || view.task?.errorInfo?.message || (view.job ? petStoryJobStatus(view.job, view.task).instruction : '原回复尚未确认归属，请先核对原会话。')}</p><p>受影响对象：本轮分镜方案。当前采用方案和已有成果保留。</p>{view.job && <PetStoryChatRecoveryActions project={project} job={view.job} task={view.task} compact />}</div>;
 };
 const PlanActions: React.FC<{ project: PetStoryProject; view: ReviewState; disabled: boolean; onMaterials?: () => void }> = ({ project, view, disabled, onMaterials }): React.ReactElement | null => {
   const state = usePetStoryStore();
@@ -81,6 +82,7 @@ const PlanContents: React.FC<{ project: PetStoryProject; view: ReviewState; disa
   if (!plan) return !view.pending && !view.problem ? <p>先在“输入剧本”中分析剧本，回复会保存在这里供你确认。</p> : null;
   const differences = view.newCandidate ? changes(project.plan, plan) : [];
   return <><p className="petstory-plan-counts">{counts(plan)}</p><p className="petstory-plan-summary">{summary(plan)}</p>
+    {view.job?.parsedResult?.requiresConfirmation && <p className="petstory-plan-attention" role="status">需要你确认的变化：{view.job.parsedResult.changeReason}</p>}
     {view.newCandidate && <><p className="petstory-plan-attention">与当前方案不同。确认前继续保留当前方案和已有图片、视频。</p>{differences.length > 0 && <ul>{differences.map((change): React.ReactNode => <li key={change}>{change}</li>)}</ul>}</>}
     <PlanActions project={project} view={view} disabled={disabled} onMaterials={onMaterials} />
     <details className="petstory-plan-full"><summary>查看完整方案</summary><div className="petstory-plan-scroll"><PetStoryPlanPreview plan={plan} contentBasis={view.candidate ? view.job?.parsedResult?.contentBasis : project.contentBasis} /></div></details>

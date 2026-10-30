@@ -4,6 +4,7 @@ import { runtimePromptIssues } from './petstoryValidation';
 import { compileReferencedText, materialPromptReferences, plannedReferenceMap, promptReferences } from './petstoryPromptQuality';
 import { isStoryApproved } from './petstoryMaterials';
 import { isPetStoryImageAdopted } from './petstoryImageReview';
+import { plannedPetStoryMode } from './petstoryModes';
 
 export interface PromptEligibilityTarget {
   materialId?: string;
@@ -106,7 +107,8 @@ export function promptWritingTarget(p: PetStoryProject, target: PetStoryRuntimeT
   const shot = p.plan?.shots.find((item): boolean => item.id === target.shotId);
   const capability = suppliedCapability || p.promptCapability || p.production?.capability || [...(p.productionHistory || [])].reverse().find((item): boolean => !!item.capability)?.capability;
   return { materialId: target.materialId, shotId: target.shotId, promptKind: target.promptKind,
-    mode: shot?.requestedMode !== 'auto' ? shot?.requestedMode : p.production?.shots[target.shotId || '']?.resolvedMode,
+    mode: shot ? plannedPetStoryMode(shot, p.production?.shots[shot.id]?.resolvedMode
+      || [...(p.productionHistory || [])].reverse().find((item): boolean => !!item.shots[shot.id])?.shots[shot.id].resolvedMode) : undefined,
     model: p.promptModel || capability?.videoConfig?.model || 'generic' };
 }
 function currentReferencePlan(p: PetStoryProject, prompt: PetStoryPrompt, target: PromptEligibilityTarget): PetStoryPromptReference[] {

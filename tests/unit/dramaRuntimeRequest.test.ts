@@ -37,7 +37,7 @@ function withFrames(p: PetStoryProject): void {
   p.assets.push({ id: 'TEST-first', kind: 'firstFrame', shotId: 'shot_2', relativePath: 'TEST/first.png', validation }, { id: 'TEST-last', kind: 'plannedEndImage', shotId: 'shot_2', relativePath: 'TEST/last.png', validation });
 }
 function production(model: NonNullable<PetStoryCapability['videoConfig']>['model']): PetStoryProduction {
-  const cap: PetStoryCapability = { accountId: 'TEST-account', checkedAt: 'TEST', freeEvidence: 'unknown', durations: [], image: { state: 'unknown', free: 'unknown', reason: 'TEST' }, modes: { first_frame: { state: 'unknown', free: 'unknown', reason: 'TEST' }, first_last_frame: { state: 'unknown', free: 'unknown', reason: 'TEST' }, reference: { state: 'unknown', free: 'unknown', reason: 'TEST' } }, videoConfig: { model, duration: '6s', aspectRatio: '9:16' } };
+  const cap: PetStoryCapability = { accountId: 'TEST-account', checkedAt: 'TEST', durations: [], image: { state: 'unknown', reason: 'TEST' }, modes: { first_frame: { state: 'unknown', reason: 'TEST' }, first_last_frame: { state: 'unknown', reason: 'TEST' }, reference: { state: 'unknown', reason: 'TEST' } }, videoConfig: { model, duration: '6s', aspectRatio: '9:16' } };
   return { state: 'paused', planHash: 'TEST', approvedAt: 'TEST', capability: cap, fallbacks: {}, shots: {}, steps: [], message: 'TEST' };
 }
 
@@ -82,7 +82,7 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     delete parent.analysisCastBindings;
     expect(buildDramaRequest(p, { kind: 'repair', requestId: 'TEST-legacy-cast-repair', parentJob: parent }).analysisCastBindings).toBeUndefined();
   });
-  it.each(['missing', 'stale', 'approved'] as const)('完整分析及其纠正对%s剧本确认只保留获批故事，不携带旧推导答案', (approval): void => {
+  it.each(['missing', 'stale', 'approved'] as const)('完整分析对%s确认省略旧推导，修订则携带明确标注确认状态的当前方案对照', (approval): void => {
     const p = enriched(); p.assets = []; p.promptProfile = { style: '', characters: { current_actor: { identity: 'TEST当前选定演员资料', appearance: '' } } };
     Object.assign(p.plan!, { adaptedStory: 'TEST旧改编稿', sourceSummary: 'TEST旧方案摘要', understanding: 'TEST旧理解', sceneDesign: 'TEST旧空间设计' });
     p.plan!.characters[0].description = 'TEST旧未确认人物设计'; p.plan!.shots[0].action = 'TEST旧整组镜头答案';
@@ -93,12 +93,16 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     for (const kind of ['analysis', 'repair'] as const) {
       const request = buildDramaRequest(p, { kind, requestId: 'TEST-analysis-omits-' + kind, ...(kind === 'repair' ? { parentJob: parent } : {}) }); const data = facts(request.prompt);
       expect(data.source).toEqual({ originalText: p.mobileStory!.text, originalPreserved: true, ...(approval === 'approved' ? { adoptedStory: p.plan!.adaptedStory, storyApproved: true } : {}) });
-      expect(data).not.toHaveProperty('currentPlan'); expect(data.currentPlanStatus).toMatchObject({ storyApproved: approval === 'approved', role: expect.stringContaining('已省略既有镜头与未确认设计') });
       expect(data.productionCast).toMatchObject({ characters: p.promptProfile.characters });
-      for (const omitted of ['TEST旧方案摘要', 'TEST旧理解', 'TEST旧空间设计', 'TEST旧未确认人物设计', 'TEST旧整组镜头答案']) expect(request.prompt).not.toContain(omitted);
-      if (approval !== 'approved') expect(request.prompt).not.toContain('TEST旧改编稿');
-      if (kind === 'repair') {
-        expect(data.parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: parent.rawText, rawForFormatRepairOnly: parent.rawText });
+      if (kind === 'analysis') {
+        expect(data).not.toHaveProperty('currentPlan'); expect(data.currentPlanStatus).toMatchObject({ storyApproved: approval === 'approved', role: expect.stringContaining('已省略既有镜头与未确认设计') });
+        for (const omitted of ['TEST旧方案摘要', 'TEST旧理解', 'TEST旧空间设计', 'TEST旧未确认人物设计', 'TEST旧整组镜头答案']) expect(request.prompt).not.toContain(omitted);
+        if (approval !== 'approved') expect(request.prompt).not.toContain('TEST旧改编稿');
+      } else {
+        expect(data.currentPlan).toMatchObject({ status: approval === 'approved' ? 'confirmed_current_plan' : 'saved_unconfirmed_not_locked', storyApproval: { current: approval === 'approved' }, characters: p.plan!.characters, shots: p.plan!.shots.map((shot): object => ({ id: shot.id, action: shot.action })) });
+        expect(data.currentPlanStatus).toMatchObject({ storyApproved: approval === 'approved', role: expect.stringContaining('不将旧未确认设计当成锁定事实') });
+        expect(data.parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: parent.rawText });
+        expect(data.parentResult).not.toHaveProperty('rawForFormatRepairOnly');
         expect(request.prompt).toContain('其原请求与原回复是待纠正材料，不是当前演员权威');
       }
     }
@@ -257,7 +261,7 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     const built = buildDramaRequest(p, { kind: 'repair', requestId: 'TEST-repair-content', shotId: parent.shotId, promptKind: parent.promptKind, parentJob: parent });
     expect(built.promptTask).toEqual(parent.promptTask);
     expect(facts(built.prompt).parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: parent.rawText, validationIssues: parent.validationIssues });
-    expect(built.prompt).toContain('重新返回该目标完整正文');
+    expect(built.prompt).toContain('重新返回该目标完整结果（方案为完整方案、提示词为该项完整正文）');
   });
   it('优化不注入错误旧正文，审查和定点修订保留原候选作为被检查数据', (): void => {
     const p = project(); const options = { requestId: 'TEST-review', shotId: 'shot_1', promptKind: 'video' as const };
@@ -269,7 +273,7 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     const p = enriched(); const raw = JSON.stringify({ optimized: 'TEST-多段\n引号"长正文' }).slice(0, -1);
     const parent = { id: 'TEST-parent', taskId: 'TEST', kind: 'materialPrompt', status: 'invalid', materialId: 'prop:branch', rawText: raw, inputHash: 'TEST', sourceUrl: '' } satisfies PetStoryChatJob;
     const built = buildDramaRequest(p, { kind: 'repair', requestId: 'TEST-repair', materialId: parent.materialId, parentJob: parent });
-    expect(built.stage).toBe('imageProp'); expect(built.expectedIds).toEqual(['prop:branch']); expect(facts(built.prompt).parentResult).toMatchObject({ rawForFormatRepairOnly: raw });
+    expect(built.stage).toBe('imageProp'); expect(built.expectedIds).toEqual(['prop:branch']); expect(facts(built.prompt).parentResult).toMatchObject({ originalReply: raw });
   });
   it('结构化事实与修订原文用足够长代码围栏无损展示，内容内围栏不能提前闭合', (): void => {
     const p = enriched();

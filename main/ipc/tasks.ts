@@ -94,8 +94,8 @@ export function retryPetStoryTask(taskId: string): Task {
   return result.data;
 }
 /** 同进程短剧对话保护接线，复用正式 Repository 并在失败时停止。 */
-export function setPetStoryConversationGuard(taskId: string, projectId: string, adjustmentId: string, active: boolean): void {
-  taskService.setConversationGuard(taskId, projectId, adjustmentId, active);
+export function setPetStoryConversationGuard(taskId: string, projectId: string, adjustmentId: string, active: boolean, allowedTaskId?: string): void {
+  taskService.setConversationGuard(taskId, projectId, adjustmentId, active, allowedTaskId);
 }
 
 /** 仅供同进程本机控制面只读使用；返回脱敏由控制面负责。 */

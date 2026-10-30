@@ -42,8 +42,8 @@ beforeEach(async (): Promise<void> => {
   projects = new PetStoryProjects(); p = await projects.create(directory, 'TEST-studio', 'TEST-plan-account');
   p = await projects.saveMobileStory(p.id, p.revision, snapshot.mobileStory); p.plan = existingPlan(); p.materials = syncMaterials(p);
   seedOfflinePromptContracts(p); await saveHistoricalFrames();
-  const entry = { state: 'unknown' as const, free: 'unknown' as const, reason: 'TEST 仅保留历史' };
-  p.productionHistory = [{ state: 'complete', planHash: 'b'.repeat(64), approvedAt: now, capability: { accountId: p.accountId, checkedAt: now, freeEvidence: 'unknown', durations: [], image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry } }, fallbacks: {}, shots: {}, steps: [], message: 'TEST 原批次历史' }];
+  const entry = { state: 'unknown' as const, reason: 'TEST 仅保留历史' };
+  p.productionHistory = [{ state: 'complete', planHash: 'b'.repeat(64), approvedAt: now, capability: { accountId: p.accountId, checkedAt: now, durations: [], image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry } }, fallbacks: {}, shots: {}, steps: [], message: 'TEST 原批次历史' }];
   p = await projects.write(p); tasks = []; let sequence = 0;
   core = new TaskService({ store: { read: (): Task[] => structuredClone(tasks), replace: (items: Task[]): boolean => { tasks = structuredClone(items); return true; } }, defaultProjectId: (): string => p.studioProjectId, id: (): string => `TEST-plan-${++sequence}` });
   const port = { list: (): Task[] => structuredClone(tasks), create: (params: TaskAddParams, accountId: string): Task => { const made = core.create(params); if (!made.success) throw new Error(made.error); const assigned = core.assign({ taskId: made.data[0].id, accountId }); if (!assigned.success) throw new Error(assigned.error); return assigned.data; } };

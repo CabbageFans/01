@@ -19,6 +19,11 @@ function validateAdjustment(p: PetStoryProject, a: PetStoryChatAdjustment): void
     keys.add(key);
   }
   if (a.status === 'adopted' && (!a.adoptedReplyKey || !keys.has(a.adoptedReplyKey))) throw new Error('已采用回复缺少具体来源');
+  validateAdjustmentRepair(p, a, keys);
+}
+function validateAdjustmentRepair(p: PetStoryProject, a: PetStoryChatAdjustment, keys: Set<string>): void {
+  if (a.selectedReplyKey !== undefined && (typeof a.selectedReplyKey !== 'string' || !keys.has(a.selectedReplyKey))) throw new Error('修订依据缺少选定回复');
+  if (a.repairJobId !== undefined && !p.jobs.some((job): boolean => job.id === a.repairJobId && job.kind === 'repair' && job.repairReplySource?.adjustmentId === a.id && job.repairReplySource.replyKey === a.selectedReplyKey)) throw new Error('自由回复修订关联无效');
 }
 function validateAdjustmentTarget(a: PetStoryChatAdjustment): void {
   const target = a.target;
@@ -44,5 +49,11 @@ export function validatePetStoryAdjustments(p: PetStoryProject): void {
     const evidence = job.conversationReply;
     const adjustment = [p.chatAdjustment, ...(p.chatAdjustmentHistory || [])].find((a): boolean => a?.id === evidence.adjustmentId);
     if (!adjustment || evidence.conversationUrl !== adjustment.conversationUrl || job.rawText !== evidence.reply.text || !adjustment.replies.some((r): boolean => r.key === evidence.reply.key && r.text === evidence.reply.text)) throw new Error('采用正文缺少具体豆包回复来源');
+  }
+  for (const job of p.jobs) if (job.repairReplySource) {
+    const source = job.repairReplySource;
+    const adjustment = [p.chatAdjustment, ...(p.chatAdjustmentHistory || [])].find((a): boolean => a?.id === source.adjustmentId);
+    if (job.kind !== 'repair' || !adjustment?.replies.some((reply): boolean => reply.key === source.replyKey)
+      || !p.jobs.some((parent): boolean => parent.id === job.parentJobId && (parent.conversationReply?.adjustmentId === source.adjustmentId && parent.conversationReply.reply.key === source.replyKey || parent.repairReplySource?.adjustmentId === source.adjustmentId && parent.repairReplySource.replyKey === source.replyKey))) throw new Error('修订任务缺少选定豆包回复父链');
   }
 }

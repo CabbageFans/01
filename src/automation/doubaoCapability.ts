@@ -48,7 +48,7 @@ export function buildDoubaoCapabilitySnapshot(observation: CapabilityObservation
   const dialogText = observation.membershipDialogText || '';
   const durationMatches = Array.from(bodyText.matchAll(/(?:^|\D)(1[0-5]|[4-9])\s*(?:秒|s)(?=$|\D)/gi));
   const durations = [...new Set(durationMatches.map((match) => Number(match[1])))].sort((a, b) => a - b);
-  const membershipEvidence = [dialogText, bodyText]
+  const membershipEvidence = [dialogText]
     .filter((text) => MEMBERSHIP_PATTERN.test(text))
     .map((text) => text.match(MEMBERSHIP_PATTERN)?.[0] || '会员动作');
   const entries = visibleLabels(bodyText, ENTRY_LABELS);
@@ -78,7 +78,7 @@ export function evaluateDryRunSelection(
   snapshot: DoubaoCapabilitySnapshot,
   requested: { model: string; duration: number; aspectRatio: string },
 ): { ok: boolean; code: 'ready' | 'membership_required' | 'ui_unsupported'; finalSubmit: false } {
-  if (requested.duration >= 11 && snapshot.membership.availability !== 'selectable') {
+  if (snapshot.membership.availability === 'action_required') {
     return { ok: false, code: 'membership_required', finalSubmit: false };
   }
   const known = snapshot.video.models.includes(requested.model)

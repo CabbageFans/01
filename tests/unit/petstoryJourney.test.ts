@@ -10,8 +10,8 @@ function project(): PetStoryProject {
     mobileStory: { id: 'TEST-story', text: snapshot.mobileStory, importedAt: now }, plan: structuredClone(snapshot.plan) as PetStoryPlan };
 }
 function production(): PetStoryProduction {
-  const entry = { state: 'unknown' as const, free: 'unknown' as const, reason: 'TEST 离线事实' };
-  const capability: PetStoryCapability = { accountId: 'TEST-account', checkedAt: now, image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, durations: [], freeEvidence: 'unknown' };
+  const entry = { state: 'unknown' as const, reason: 'TEST 离线事实' };
+  const capability: PetStoryCapability = { accountId: 'TEST-account', checkedAt: now, image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, durations: [], };
   return { state: 'complete', phase: 'materials', materialIds: ['TEST-one'], planHash: 'TEST-hash', approvedAt: now, capability, fallbacks: {}, shots: {}, steps: [], message: 'TEST 单项完成' };
 }
 function asset(p: PetStoryProject, shotIndex: number, kind: PetStoryPromptKind): PetStoryAsset {

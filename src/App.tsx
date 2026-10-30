@@ -62,7 +62,6 @@ const App: React.FC = (): React.ReactElement => {
     // 原会话／人工处理仍由 BrowserPanel 执行；这里仅展开可见区域。
     window.addEventListener('open-task-conversation', reveal);
     window.addEventListener('reconcile-task-submission', reveal);
-    window.addEventListener('petstory-inspect-capability', revealWide);
     window.addEventListener('adapter-self-check', revealWide);
     window.addEventListener('keydown', escape);
     return (): void => {
@@ -70,7 +69,6 @@ const App: React.FC = (): React.ReactElement => {
       window.removeEventListener('reveal-workspace-browser', reveal);
       window.removeEventListener('open-task-conversation', reveal);
       window.removeEventListener('reconcile-task-submission', reveal);
-      window.removeEventListener('petstory-inspect-capability', revealWide);
       window.removeEventListener('adapter-self-check', revealWide);
       window.removeEventListener('keydown', escape);
     };

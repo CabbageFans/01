@@ -169,15 +169,11 @@ export const AccountList: React.FC = (): React.ReactElement => {
         b.health?.loginState === 'expired' || !!b.health?.verificationRequired ||
         (!!b.health?.cooldownUntil && new Date(b.health.cooldownUntil).getTime() > now);
       if (aUnavailable !== bUnavailable) return aUnavailable ? 1 : -1;
-      // 3. Seedance 今日额度用尽的账号统一沉底
-      const aExhausted = !!a.seedanceQuota?.exhausted;
-      const bExhausted = !!b.seedanceQuota?.exhausted;
-      if (aExhausted !== bExhausted) return aExhausted ? 1 : -1;
-      // 4. 置顶优先
+      // 3. 置顶优先
       if (a.pinned !== b.pinned) {
         return a.pinned ? -1 : 1;
       }
-      // 5. 空闲 vs 忙碌
+      // 4. 空闲 vs 忙碌
       const aBusy = accountBusy[a.id] || false;
       const bBusy = accountBusy[b.id] || false;
       if (aBusy !== bBusy) {
@@ -435,7 +431,7 @@ export const AccountList: React.FC = (): React.ReactElement => {
                       <div
                         className="text-2xs mt-0.5 truncate"
                         style={{ color: account.seedanceQuota.exhausted ? '#B42318' : '#697584' }}
-                        title="仅为本地使用记录预测，不是豆包官方剩余额度；当前免费权益仍需本人核对"
+                        title="仅为本地使用记录预测，不是豆包官方剩余额度；不影响任务启动"
                       >
                         {account.seedanceQuota.exhausted
                           ? '本地记录：额度已用尽'

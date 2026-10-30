@@ -60,13 +60,13 @@ export const PetStoryRuntime: React.FC<{ project: PetStoryProject; disabled: boo
   const [reviewFocus, setReviewFocus] = React.useState('');
   const trimmedReviewFocus = reviewFocus.trim();
   const pending = project.jobs.some((job): boolean => !job.endedWaitingAt && ['bound', 'captured'].includes(job.status));
-  const generationDisabled = disabled || pending || !state.freeChatConfirmed;
+  const generationDisabled = disabled || pending;
   const jobs = project.jobs.filter((job): boolean => !!job.requestId && ['analysis', 'assets', 'review', 'revise', 'repair'].includes(job.kind) && !planRequestRoot(project, job) && (showPlanCandidates || !job.parsedResult?.assets));
   return <div className="canvas-runtime" aria-label="剧本理解与创作候选">
     <details className="petstory-secondary-tools"><summary>更多操作</summary><Space wrap><span>创作目标模型</span><Select aria-label="文字创作目标模型" value={petStoryWritingModel(project)} disabled={disabled || pending} style={{ width: 210 }} options={[
       { value: 'generic', label: '通用计划（模型未定）' }, { value: 'seedance-2.0-fast', label: 'Seedance 2.0 Fast' }, { value: 'seedance-2.0', label: 'Seedance 2.0' }, { value: 'seedance-2.0-mini', label: 'Seedance 2.0 Mini' }, { value: 'seedance-2.5', label: 'Seedance 2.5' },
     ]} onChange={(value: string): void => { void state.savePromptModel(value as PetStoryProject['promptModel']); }} /></Space>
-    <p className="canvas-hint">请选择后续制作使用的模型；实际可用性仍需在豆包中核对。</p>
+    <p className="canvas-hint">请选择后续制作使用的模型；开始任务后会自动设置并读取页面参数。</p>
     <Space wrap><Button size="small" disabled={generationDisabled || !project.mobileStory} onClick={(): void => { void state.analyze(); }}>{project.plan ? '重新分析，生成新方案候选' : '分析剧本并生成方案'}</Button><Button size="small" disabled={generationDisabled || !project.plan} onClick={(): void => { void state.extractAssets(); }}>补齐人物／道具／场景</Button><Button size="small" disabled={generationDisabled || !project.plan} onClick={(): void => { void state.reviewContent(trimmedReviewFocus ? { reviewFocus: trimmedReviewFocus } : undefined); }}>审查当前方案与提示词</Button></Space>
     <Input.TextArea aria-label="内容审查关注点" placeholder="可选：希望重点核对的疑点" maxLength={2000} rows={2} value={reviewFocus} disabled={generationDisabled} onChange={(event): void => setReviewFocus(event.target.value)} />
     <p className="canvas-hint">只填写希望核对的疑点，豆包仍须以来源和实际正文判断；不会直接替换正文</p>

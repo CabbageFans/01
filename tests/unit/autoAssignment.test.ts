@@ -19,10 +19,10 @@ function task(id: string, duration: NonNullable<Task['videoConfig']>['duration']
 }
 
 describe('批量自动指派计划', () => {
-  it('会预留批内额度，不把三个 10 秒任务都塞给剩余 6 单位的同一账号', () => {
+  it('批次不按本地额度预算预先拒绝第四个任务', () => {
     const plan = buildAutoAssignmentPlan([task('t1'), task('t2'), task('t3'), task('t4')], [], [account('a1', 0)]);
-    expect(plan.assignments.map((item) => item.taskId)).toEqual(['t1', 't2', 't3']);
-    expect(plan.unassignedTaskIds).toEqual(['t4']);
+    expect(plan.assignments.map((item) => item.taskId)).toEqual(['t1', 't2', 't3', 't4']);
+    expect(plan.unassignedTaskIds).toEqual([]);
   });
 
   it('自动冷却账号不参与自动指派，但任务不会被伪装成已指派', () => {

@@ -40,7 +40,7 @@ function fixture(): PetStoryProject {
 }
 function attachMedia(p: PetStoryProject): void {
   for (const asset of p.assets.filter((item): boolean => ['firstFrame', 'plannedEndImage'].includes(item.kind))) { asset.validation = { decoded: true, sha256: 'a'.repeat(64), bytes: 1, width: 64, height: 96, checkedAt: p.updatedAt }; asset.imageReview = { state: 'adopted', target: { shotId: asset.shotId!, kind: asset.kind === 'firstFrame' ? 'firstFrame' : 'lastFrame' }, basisHash: 'a'.repeat(64), adoptedAt: p.updatedAt, sha256: 'a'.repeat(64) }; }
-  p.production = { state: 'paused', planHash: 'a'.repeat(64), approvedAt: new Date().toISOString(), capability: {} as NonNullable<PetStoryProject['production']>['capability'],
+  p.production = { state: 'paused', planHash: 'a'.repeat(64), approvedAt: new Date().toISOString(), capability: { accountId: p.accountId, durations: [], image: { state: 'unknown', reason: '' }, modes: { first_frame: { state: 'unknown', reason: '' }, first_last_frame: { state: 'unknown', reason: '' }, reference: { state: 'unknown', reason: '' } } },
     fallbacks: {}, steps: [], message: 'TEST', shots: { s1: { requestedMode: 'first_last_frame', resolvedMode: 'first_last_frame', reason: 'TEST', firstFrameId: 'first', plannedEndImageId: 'last' } } };
 }
 

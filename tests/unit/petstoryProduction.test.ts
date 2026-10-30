@@ -5,8 +5,9 @@ import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DownloadJob, PetStoryCapability, PetStoryPlan, PetStoryProductionResult, PetStoryProject, Task, TaskAddParams } from '@doubao-studio/contracts';
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
-import { PetStoryProductionService, productionCounts, checkProductionReferences } from '../../main/utils/petstoryProduction';
+import { PetStoryProductionService, productionCounts, checkProductionReferences, productionPlanHash } from '../../main/utils/petstoryProduction';
 import { resolvePetStoryMode } from '../../main/utils/petstoryModes';
+import { productionCapability } from '../../main/utils/petstoryCapability';
 import { extractActualEndFrame, mediaCommand, validatePetStoryMedia } from '../../main/utils/petstoryMedia';
 import { TaskService } from '../../main/core/TaskService';
 import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
@@ -26,10 +27,10 @@ let downloadFailure = false;
 const download = vi.fn();
 const createdInputs: TaskAddParams[] = [];
 function capability(): PetStoryCapability {
-  const supported = { state: 'supported' as const, free: 'free' as const, reason: 'TEST 可见槽位' };
+  const supported = { state: 'supported' as const, reason: 'TEST 可见槽位' };
   return { accountId: 'TEST-account', checkedAt: new Date().toISOString(), image: supported,
     modes: { first_frame: supported, first_last_frame: supported, reference: supported },
-    videoConfig: { model: 'seedance-2.0', duration: '6s', aspectRatio: '9:16' }, durations: [5, 6, 7, 8, 9, 10], freeEvidence: 'user_confirmed' };
+    videoConfig: { model: 'seedance-2.0', duration: '6s', aspectRatio: '9:16' }, durations: [5, 6, 7, 8, 9, 10], };
 }
 function plan(): PetStoryPlan {
   const prompt = (label: string): PetStoryPlan['shots'][number]['prompts']['video'] => ({ original: `TEST original ${label}`, optimized: `TEST optimized ${label}`, final: `TEST final ${label} %%%%%%%%%% 保留单个任务`, edited: true, rulesVersion: 'petstory-r11-v1' });
@@ -147,7 +148,7 @@ describe('P4 实际入口和请求模式', (): void => {
   });
   it('strict native mode never uses two generic images as first/last; explicit fallback retains requested mode', (): void => {
     const c = capability(); const shot = plan().shots[2];
-    c.modes.first_last_frame = { state: 'unsupported', free: 'free', reason: 'TEST 平台无槽' };
+    c.modes.first_last_frame = { state: 'unsupported', reason: 'TEST 平台无槽' };
     expect((): unknown => resolvePetStoryMode(shot, c)).toThrow('平台不支持');
     expect(resolvePetStoryMode(shot, c, 'reference')).toMatchObject({ requestedMode: 'first_last_frame', resolvedMode: 'reference' });
     c.modes.first_last_frame.state = 'implementation_gap';
@@ -157,14 +158,30 @@ describe('P4 实际入口和请求模式', (): void => {
     const shot = plan().shots[0]; shot.durationSeconds = duration;
     expect((): unknown => resolvePetStoryMode(shot, capability())).toThrow('时长');
   });
-  it('no free interval, unknown, paid and exhausted entries create zero tasks', async (): Promise<void> => {
-    for (const free of ['unknown', 'paid', 'exhausted'] as const) {
-      const c = capability(); c.modes.first_frame.free = free;
-      await expect(service.approve(p.id, p.revision, c, {})).rejects.toThrow();
-    }
-    const c = capability(); c.durations = [4, 11];
-    await expect(service.approve(p.id, p.revision, c, {})).rejects.toThrow('不可选');
+  it('重开旧auto批次沿用已选reference模式，不从未知入口改成首尾帧或要求检查', async (): Promise<void> => {
+    await approve(); p = await projects.read(p.id);
+    const shot = p.plan!.shots.find((item): boolean => !!item.prompts.lastFrame)!;
+    shot.requestedMode = 'auto';
+    Object.assign(p.production!.shots[shot.id], { requestedMode: 'auto', resolvedMode: 'reference' });
+    seedOfflinePromptContracts(p); p = await projects.write(p);
+    p.production!.planHash = productionPlanHash(p.plan!); p = await projects.write(p);
+    expect(resolvePetStoryMode(shot, productionCapability(p)).resolvedMode).toBe('reference');
+    await service.pause(p.id); const reopenedProjects = new PetStoryProjects(); await reopenedProjects.open(projects.directory(p.id)); service = makeService(reopenedProjects);
+    const reopened = await service.resume(p.id);
+    expect(reopened.success).toBe(true); expect(reopened.project?.production?.shots[shot.id].resolvedMode).toBe('reference');
     expect(tasks).toHaveLength(0);
+  });
+  it.each([false, 'unknown', undefined])('legacy free state %s does not block a real task with selected parameters', async (legacy): Promise<void> => {
+    const c = capability(); delete c.checkedAt;
+    Object.assign(c, { freeEvidence: legacy, freeChatConfirmed: legacy });
+    Object.assign(c.image, { free: legacy }); Object.assign(c.modes.first_frame, { free: legacy });
+    await approve(c);
+    const result = await service.advance(p.id);
+    expect(result.action).toBe('start'); expect(tasks).toHaveLength(1);
+    expect(result.project?.production?.capability).toMatchObject({ accountId: p.accountId, videoConfig: c.videoConfig, durations: [], image: { state: 'unknown' } });
+    expect(result.project?.production?.capability).not.toHaveProperty('freeEvidence');
+    expect(result.project?.production?.capability.image).not.toHaveProperty('free');
+    expect(result.project?.production?.capability).not.toHaveProperty('checkedAt');
   });
 });
 
@@ -278,10 +295,9 @@ describe('P4 顺序素材接力与持久化', (): void => {
     expect(continued.taskId).toBe(original.id); expect(continued.action).toBe('start');
     expect(tasks).toHaveLength(1); expect(tasks[0].executionIntent).toBe('hold'); expect(tasks[0].runtime?.submittedAt).toBeUndefined();
   });
-  it('already generated assets download even when the current free state is unknown', async (): Promise<void> => {
+  it('already generated assets download without any page inspection record', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); await complete(next.taskId || ''); await service.pause(p.id);
-    const unknown = capability(); unknown.freeEvidence = 'unknown'; unknown.image.free = 'unknown';
-    await service.resume(p.id, unknown);
+    await service.resume(p.id);
     expect((await service.advance(p.id)).success).toBe(true); expect(download).toHaveBeenCalledTimes(1); expect(tasks).toHaveLength(1);
     expect((await service.advance(p.id)).project?.production?.state).toBe('paused'); expect(tasks).toHaveLength(1);
   });

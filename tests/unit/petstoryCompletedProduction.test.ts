@@ -15,8 +15,8 @@ import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts'
 let directory: string; let projects: PetStoryProjects; let p: PetStoryProject; let chat: PetStoryChatService; let stored: Task[];
 const now = '2026-10-26T00:00:00.000Z';
 function production(): PetStoryProduction {
-  const entry = { state: 'supported' as const, free: 'free' as const, reason: 'TEST离线记录' };
-  const capability: PetStoryCapability = { accountId: p.accountId, checkedAt: now, freeEvidence: 'user_confirmed', durations: [5, 6, 7, 8], image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, videoConfig: { model: 'seedance-2.0', duration: '6s', aspectRatio: '9:16' } };
+  const entry = { state: 'supported' as const, reason: 'TEST离线记录' };
+  const capability: PetStoryCapability = { accountId: p.accountId, checkedAt: now, durations: [5, 6, 7, 8], image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, videoConfig: { model: 'seedance-2.0', duration: '6s', aspectRatio: '9:16' } };
   return { phase: 'shots', state: 'complete', planHash: productionPlanHash(p.plan!), approvedAt: now, capability, fallbacks: {}, message: 'TEST完整批次已完成',
     shots: Object.fromEntries(p.plan!.shots.map((shot): [string, PetStoryProduction['shots'][string]] => [shot.id, { requestedMode: shot.requestedMode, resolvedMode: shot.requestedMode === 'auto' ? 'reference' : shot.requestedMode, reason: 'TEST', ...(shot.id === p.plan!.shots[0].id ? { firstFrameId: 'TEST-frame' } : {}) }])),
     steps: [{ id: 'TEST-completed-step', kind: 'firstFrame', shotId: p.plan!.shots[0].id, taskId: 'TEST-prior-task', runId: 'TEST-prior-run', assetId: 'TEST-frame', status: 'complete', attachmentAssetIds: [], inputHash: 'a'.repeat(64) }] };

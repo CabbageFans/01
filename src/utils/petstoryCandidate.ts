@@ -45,9 +45,23 @@ export function petStoryWritingModel(project: PetStoryProject): NonNullable<PetS
 
 /** 素材卡只投影原素材／全局等待及真实账号占用；最终依赖和租约仍由主进程核对。 */
 export function isMaterialPromptBlocked(project: PetStoryProject, materialId: string, tasks: Task[]): boolean {
+  if (petStoryMaterialPromptBlock(project, materialId, tasks)) return true;
   if (tasks.some((task): boolean => task.assignedAccountId === project.accountId && ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(task.status))) return true;
   return project.jobs.some((job): boolean => !job.endedWaitingAt && ['bound', 'captured'].includes(job.status)
     && (job.materialId === materialId || !job.materialId && !job.shotId));
+}
+
+export interface PetStoryMaterialPromptBlock {
+  message: string;
+  adjustmentProjectId?: string;
+  adjustmentId?: string;
+}
+/** 对话保护独立于任务是否 done，其他项目在同一账号上的自由调整也必须显示在当前卡。 */
+export function petStoryMaterialPromptBlock(project: PetStoryProject, _materialId: string, tasks: Task[]): PetStoryMaterialPromptBlock | undefined {
+  const guard = tasks.find((task): boolean => task.assignedAccountId === project.accountId && task.runtime?.chatAdjustmentGuard?.active === true)?.runtime?.chatAdjustmentGuard;
+  if (guard) return { message: '这个账号还有未结束的豆包调整，请先采用回复或结束调整，再生成提示词。', adjustmentProjectId: guard.projectId, adjustmentId: guard.adjustmentId };
+  if (project.chatAdjustment?.status === 'active') return { message: '当前豆包调整尚未结束，请先采用回复或结束调整，再生成提示词。', adjustmentProjectId: project.id, adjustmentId: project.chatAdjustment.id };
+  return undefined;
 }
 
 /** 格式纠正后的审查保留职责；界面与局部修订均使用实际保存 issues 的回复 ID。 */

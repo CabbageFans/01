@@ -7,7 +7,7 @@ import type { PetStoryComposerSnapshot } from '../../src/utils/petstoryControls'
 
 function fixture(mention = true): { view: WebviewHandle; snapshot: PetStoryComposerSnapshot; receipts: PetStoryUploadReceipt[]; compiled: PetStoryCompiledPrompt; actions: string[]; breakNode: () => void } {
   let text = ''; let broken = false; const actions: string[] = [];
-  const snapshot: PetStoryComposerSnapshot = { present: true, generic: true, first: false, last: false, nativeLabel: false, firstLabel: false, free: 'free', model: '', duration: 0, durations: [], aspectRatio: '', count: 2, pending: false,
+  const snapshot: PetStoryComposerSnapshot = { present: true, generic: true, first: false, last: false, nativeLabel: false, firstLabel: false, model: '', duration: 0, durations: [], aspectRatio: '', count: 2, pending: false,
     referenceSyntax: mention ? 'mention' : 'plain', previews: [{ key: 'key-b', label: mention ? '@图片2' : '第 1 张图', nodeId: 'asset-b' }, { key: 'key-a', label: mention ? '@图片1' : '第 2 张图', nodeId: 'asset-a' }],
     referenceOptions: mention ? [{ label: '@图片2', key: 'key-b', nodeId: 'asset-b' }, { label: '@图片1', key: 'key-a', nodeId: 'asset-a' }] : [], referenceNodes: [] };
   const view: WebviewHandle = { getURL: (): string => '', loadURL: (): void => {}, executeJavaScript: async (code: string): Promise<unknown> => {
@@ -46,17 +46,16 @@ describe('实际素材引用与节点', (): void => {
   });
   it('支持@但菜单无法对应文件时阻断，不降级为文本或漏素材', async (): Promise<void> => {
     const test = fixture(); test.snapshot.referenceOptions = [];
-    await expect(fast((): ReturnType<typeof bindPetStoryReferences> => bindPetStoryReferences(test.view, test.compiled, test.receipts, new AbortController().signal, true))).rejects.toThrow('菜单与实际文件');
+    await expect(fast((): ReturnType<typeof bindPetStoryReferences> => bindPetStoryReferences(test.view, test.compiled, test.receipts, new AbortController().signal))).rejects.toThrow('菜单与实际文件');
     expect(test.actions).toEqual([]);
   });
   it('不能以同名但错绑节点冒充实际素材', async (): Promise<void> => {
     const test = fixture(); test.breakNode();
     await expect(fast((): ReturnType<typeof bindPetStoryReferences> => bindPetStoryReferences(test.view, test.compiled, test.receipts, new AbortController().signal))).rejects.toThrow('节点与本次文件');
   });
-  it('不支持@的入口需要明确批准中文映射；上传预览变化后仍阻断', async (): Promise<void> => {
+  it('不支持@的入口自动使用真实文件中文映射；上传预览变化后仍阻断', async (): Promise<void> => {
     const test = fixture(false);
-    await expect(fast((): ReturnType<typeof bindPetStoryReferences> => bindPetStoryReferences(test.view, test.compiled, test.receipts, new AbortController().signal))).rejects.toThrow('本人批准');
-    const bound = await fast((): ReturnType<typeof bindPetStoryReferences> => bindPetStoryReferences(test.view, test.compiled, test.receipts, new AbortController().signal, true));
+    const bound = await fast((): ReturnType<typeof bindPetStoryReferences> => bindPetStoryReferences(test.view, test.compiled, test.receipts, new AbortController().signal));
     expect(bound.compiled.text.startsWith('第 2 张图提供人物身份')).toBe(true); expect(test.actions).toEqual([]);
     test.snapshot.previews![1].key = 'different-file'; await expect(verifyPetStoryReferenceBindings(test.view, bound.bindings)).rejects.toThrow('素材丢失');
   });

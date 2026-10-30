@@ -6,7 +6,6 @@ export interface PetStoryComposerSnapshot {
   last: boolean;
   nativeLabel: boolean;
   firstLabel: boolean;
-  free: 'free' | 'paid' | 'exhausted' | 'unknown';
   model: string;
   duration: number;
   aspectRatio: string;
@@ -49,7 +48,7 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
       if (candidate.querySelector('input[type="file"]')) { root = candidate; break; }
     }
   }
-  const empty: PetStoryComposerSnapshot = { present: false, generic: false, first: false, last: false, nativeLabel: false, firstLabel: false, free: 'unknown', model: '', duration: 0, aspectRatio: '', durations: [], count: 0, pending: false };
+  const empty: PetStoryComposerSnapshot = { present: false, generic: false, first: false, last: false, nativeLabel: false, firstLabel: false, model: '', duration: 0, aspectRatio: '', durations: [], count: 0, pending: false };
   if (!root || !visible(root)) return empty;
   // 平台上传预览使用 lazy；后台／重新布局时可一直不解码。仅唤醒当前输入区的原预览，
   // 不改 src、不把占位图计为就绪，后续仍检查真实 naturalWidth／complete。
@@ -131,22 +130,18 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
   }
     return { previews, referenceSyntax, referenceNodes, referenceOptions, selectedReference };
   };
-  const readParameters = (): Pick<PetStoryComposerSnapshot, 'free' | 'model' | 'duration' | 'aspectRatio' | 'durations' | 'nativeLabel' | 'firstLabel'> => {
+  const readParameters = (): Pick<PetStoryComposerSnapshot, 'model' | 'duration' | 'aspectRatio' | 'durations' | 'nativeLabel' | 'firstLabel'> => {
     const composite = Array.from(document.querySelectorAll('[data-creation-params-panel-id]')).find(visible);
   if (operation.openDurations && composite && visible(composite)) (composite as HTMLElement).click();
   const model = Array.from(document.querySelectorAll('[data-input-engine-actionbar-control-key="video-model"]')).find(visible);
   const compositeMatch = composite && visible(composite) ? text(composite).match(/^(自动|[0-9]+:[0-9]+)\s*·\s*([0-9]+)s$/) : null;
   const visibleText = Array.from(root.querySelectorAll('button,[role="button"],[role="tab"],label,span')).filter(visible).map(text).join(' ');
-  const alerts = Array.from(document.querySelectorAll('[role="dialog"],[role="alert"],[class*="toast"],iframe')).filter(visible).map((el): string => `${text(el)} ${el.getAttribute('title') || ''}`).join(' ');
-  const selectedPaid = Array.from(root.querySelectorAll('[aria-selected="true"],[aria-checked="true"],[data-state="checked"],[data-state="active"],[data-input-engine-actionbar-control-key="video-model"],[data-creation-params-panel-id]')).filter(visible).some((el): boolean => /会员专享|升级会员|开通会员|付费|购买|订阅/.test(text(el)));
-  const free = /额度不足|积分不足|余额不足|次数已用完|今日次数用尽|免费次数不足|免费次数.*(?:0|零)/.test(`${visibleText} ${alerts}`) ? 'exhausted'
-    : (selectedPaid || /升级会员|开通会员|会员专享|购买|订阅|付费/.test(alerts)) ? 'paid' : /(?:本次|当前|生成|剩余).*免费|免费生成/.test(visibleText) ? 'free' : 'unknown';
   const durationNodes = Array.from(document.querySelectorAll('[role="option"],[role="menuitem"],[data-state],button')).filter(visible);
   const durations = [...new Set([...(compositeMatch ? [Number(compositeMatch[2])] : []), ...durationNodes.flatMap((el): number[] => {
     const match = text(el).match(/^(\d+)\s*(?:s|秒)$/);
-    return match && !/会员|付费/.test(text(el.parentElement || el)) && el.getAttribute('aria-disabled') !== 'true' ? [Number(match[1])] : [];
+    return match && el.getAttribute('aria-disabled') !== 'true' ? [Number(match[1])] : [];
   })])];
-    return { free, model: model && visible(model) ? text(model).replace(/^模型\s*/, '') : '', duration: compositeMatch ? Number(compositeMatch[2]) : 0, aspectRatio: compositeMatch?.[1] || '', durations, nativeLabel: /首尾帧/.test(visibleText), firstLabel: /首帧/.test(visibleText) };
+    return { model: model && visible(model) ? text(model).replace(/^模型\s*/, '') : '', duration: compositeMatch ? Number(compositeMatch[2]) : 0, aspectRatio: compositeMatch?.[1] || '', durations, nativeLabel: /首尾帧/.test(visibleText), firstLabel: /首帧/.test(visibleText) };
   };
   const uploadFile = (): Pick<PetStoryComposerSnapshot, 'uploaded' | 'uploadedFile'> => {
   let uploaded = false; let uploadedFile: PetStoryComposerSnapshot['uploadedFile'];

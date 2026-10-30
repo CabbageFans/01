@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { Account, Task } from '../../src/types';
 import { decideCsvDrop } from '../../src/utils/csvDrop';
 import { isUploadSnapshotReady, nextStableUploadCount } from '../../src/utils/uploadReadiness';
-import { selectQuotaFallbackAccount } from '../../src/utils/quotaRecovery';
+import { classifyTaskError } from '../../src/utils/errorClassification';
 import { applyVideoQuotaAction, localDateKey } from '../../main/utils/videoQuota';
 import { createWritableFileTaskStore, runCli } from '../../main/cli/doubaoCliEntry';
 import { millisecondsUntilNextLocalMidnight } from '../../src/utils/dailyReset';
@@ -131,15 +131,6 @@ function account(id: string, usedUnits: number, exhausted = false): Account {
   } as Account;
 }
 
-function videoTask(): Task {
-  return {
-    id: 'task-1', prompt: 'video', assignedAccountId: 'exhausted', status: 'fail', mode: 'video',
-    videoConfig: { model: 'seedance-2.0-fast', duration: '5s', aspectRatio: '9:16' },
-    result: null, outputs: [], artifacts: [], runHistory: [], source: 'csv', dependsOnTaskIds: [],
-    projectId: 'default-project', createdAt: '2026-08-27T00:00:00.000Z', updatedAt: '2026-08-27T00:00:00.000Z',
-  };
-}
-
 describe('额度耗尽恢复与每日零点刷新', () => {
   it('耗尽动作立即把预计剩余额度归零', () => {
     const quota = applyVideoQuotaAction(account('a', 1).seedanceQuota!, 'exhausted', undefined, '2026-08-27T01:00:00.000Z');
@@ -148,10 +139,8 @@ describe('额度耗尽恢复与每日零点刷新', () => {
     expect(quota.exhausted).toBe(true);
   });
 
-  it('重新调度排除耗尽账号并选择有额度账号；无替代时返回 null', () => {
-    const task = videoTask();
-    expect(selectQuotaFallbackAccount(task, [task], [account('exhausted', 6, true), account('ready', 0)], 'exhausted')).toBe('ready');
-    expect(selectQuotaFallbackAccount(task, [task], [account('exhausted', 6, true)], 'exhausted')).toBeNull();
+  it('平台实际额度拒绝保留失败事实且不自动重试', (): void => {
+    expect(classifyTaskError('今日视频生成免费次数已用完')).toMatchObject({ code: 'quota_exhausted', recoverable: false });
   });
 
   it('本机自然日从 23:59 到 00:00 日期键变化', () => {

@@ -10,6 +10,7 @@ import type { PetStoryPageBinding, PetStoryRuntimeTarget, PetStoryGenerationBloc
 import { finalTaskInput } from './petstoryChat';
 import { validatePetStoryPlan } from './petstoryValidation';
 import { resolvePetStoryMode } from './petstoryModes';
+import { productionCapability } from './petstoryCapability';
 import { extractActualEndFrame, mediaDigest, validatePetStoryMedia } from './petstoryMedia';
 import { requirePromptEligibility, promptWritingTarget } from './petstoryEligibility';
 import { pendingChatConflicts } from './petstoryPending';
@@ -116,20 +117,17 @@ export class PetStoryProductionService {
     const pending = pendingChatConflicts(p, target);
     for (const job of pending) blockers.push({ code: 'task', message: '本目标或其依赖仍在等待原豆包回复，请检查原回复或明确结束等待；不会重复发送。', jobId: job.id, materialId: job.materialId, shotId: job.shotId, promptKind: job.promptKind });
     if (p.production && p.production.state !== 'complete') add('task', '已有制作任务尚未结束，请先查看并处理当前任务。');
-    // 即便没有本会话入口核对，也独立反馈正文和素材缺项；历史能力不能冒充当前核对。
-    if (!capability) add('capability', '本次会话尚未检查豆包入口，请在当前位置检查后继续。');
-    else if (!pending.length) await check('capability', (): void => this.checkCapability(p, capability, target));
+    capability = productionCapability(p, capability);
     await check('story', (): void => requireMaterialInventory(p));
     const resolution = target.materialId
-      ? await this.inspectMaterialGeneration(p, target.materialId, capability, check, add)
+      ? await this.inspectMaterialGeneration(p, target.materialId, check)
       : await this.inspectShotGeneration(p, target, capability, fallbacks, check, add);
     if ((await this.projects.read(id)).revision !== p.revision) throw new Error('检查期间项目已变化，请刷新当前操作的前置条件');
     return { success: true, eligibility: { ready: !blockers.length, blockers, resolvedMode: resolution?.resolvedMode, modeReason: resolution?.reason } };
   }
-  private async inspectMaterialGeneration(p: PetStoryProject, materialId: string, capability: PetStoryCapability | undefined, check: GenerationCheck, add: GenerationAdd): Promise<undefined> {
+  private async inspectMaterialGeneration(p: PetStoryProject, materialId: string, check: GenerationCheck): Promise<undefined> {
     if (!p.materials?.some((item): boolean => item.id === materialId)) throw new Error('基础素材不属于当前项目');
     const validPrompt = await check('prompt', (): void => { requireMaterialPromptSource(p, materialId); });
-    if (capability && (capability.image.state !== 'supported' || capability.image.free !== 'free')) add('capability', '图片免费入口未知或不足，未创建生成任务。');
     if (validPrompt) await check('materials', async (): Promise<void> => {
       const compiled = this.compileMaterial(p, materialId);
       await Promise.all(compiled.references.map((ref): Promise<string> => this.assetFile(p, ref.assetId, 'image')));
@@ -151,7 +149,7 @@ export class PetStoryProductionService {
     if (kind === 'video' && capability) {
       await check('capability', (): void => { resolution = resolvePetStoryMode(shot, capability, fallbacks[shot.id]); });
       if (resolution?.resolvedMode === 'first_last_frame' && !media.plannedEndImageId) add('lastFrame', '本镜使用首尾帧模式，请先制作本镜尾帧。', { shotId: shot.id, promptKind: 'lastFrame' });
-    } else if (capability && (capability.image.state !== 'supported' || capability.image.free !== 'free')) add('capability', '图片免费入口未知或不足，未创建生成任务。');
+    }
     const mode = kind === 'video' ? resolution?.resolvedMode || promptWritingTarget(p, target).mode : undefined;
     const promptValid = await check('prompt', (): void => {
       if (!prompt?.final.trim()) throw new Error('本节点尚无当前使用的提示词，请先生成并采用。');
@@ -185,30 +183,28 @@ export class PetStoryProductionService {
       return [shot.id, { requestedMode: shot.requestedMode, resolvedMode: prior?.resolvedMode || (shot.requestedMode === 'auto' ? 'reference' : shot.requestedMode), reason: prior?.reason || '仅图片节点授权，视频实际模式尚未确认', firstFrameId: selectedShotImageId(p, shot.id, 'firstFrame'), plannedEndImageId: selectedShotImageId(p, shot.id, 'lastFrame'), videoId: prior?.videoId || latest('video'), actualEndFrameId: prior?.actualEndFrameId, startFromPreviousEnd: prior?.startFromPreviousEnd }];
     }));
   }
-  async preview(id: string, capability: PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): Promise<PetStoryProductionResult> {
+  async preview(id: string, capability: PetStoryCapability | undefined = undefined, fallbacks: Record<string, 'first_frame' | 'reference'> = {}): Promise<PetStoryProductionResult> {
     const p = await this.projects.read(id);
-    this.checkCapability(p, capability);
+    capability = productionCapability(p, capability);
+    this.validateRequestContext(p, capability);
     checkPlannedReferences(p, capability, fallbacks);
     return { success: true, project: p, counts: productionCounts(p, capability, fallbacks), resolutions: Object.fromEntries(requireValue(p.plan).shots.map((shot): [string, ReturnType<typeof resolvePetStoryMode>] => [shot.id, resolvePetStoryMode(shot, capability, fallbacks[shot.id])])) };
   }
-  private checkCapability(p: PetStoryProject, c: PetStoryCapability, target?: PetStoryRuntimeTarget): void {
+  private validateRequestContext(p: PetStoryProject, c: PetStoryCapability, target?: PetStoryRuntimeTarget): void {
     if (pendingChatConflicts(p, target).length) throw new Error('本目标或其依赖仍有未收取的普通 Chat 原任务；请只读收取或明确结束等待，不自动重发');
-    if (!c || c.accountId !== p.accountId || !Number.isFinite(Date.parse(c.checkedAt)) || !c.modes || !Array.isArray(c.durations)
-      || !['visible', 'user_confirmed', 'unknown'].includes(c.freeEvidence)) throw new Error('当前原账号的入口核对结果缺失');
-    if (Date.now() - Date.parse(c.checkedAt) > 30 * 60_000 || Date.parse(c.checkedAt) > Date.now() + 60_000) throw new Error('入口核对已过期，请本人重新核对当前免费入口后继续');
-    if (c.freeEvidence === 'unknown') throw new Error('免费权益未知，零提交；本地计划数量不是官方剩余额度');
+    if (c.accountId !== p.accountId) throw new Error('生成参数与项目原账号不符');
   }
-  async approve(id: string, revision: number, capability: PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): Promise<PetStoryProductionResult> {
+  async approve(id: string, revision: number, capability: PetStoryCapability | undefined = undefined, fallbacks: Record<string, 'first_frame' | 'reference'> = {}): Promise<PetStoryProductionResult> {
     let p = await this.projects.read(id);
+    capability = productionCapability(p, capability);
     if (p.revision !== revision) throw new Error('项目版本已变化，请重新确认制作计划');
     if (p.production?.phase === 'materials' && p.production.state === 'complete') { p.productionHistory = [...(p.productionHistory || []), p.production]; p.production = undefined; }
     if (p.production) throw new Error('制作计划已确认，请继续原制作，不重复创建');
     if (!p.plan || !p.mobileStory || p.source.status !== 'review_required') throw new Error('请先保存有效的 P2/P3 制作方案');
-    this.checkCapability(p, capability);
+    this.validateRequestContext(p, capability);
     await this.checkApprovedFiles(p);
     const counts = productionCounts(p, capability, fallbacks);
     checkPlannedReferences(p, capability, fallbacks);
-    if ((counts.newCharacters + counts.firstFrames + counts.lastFrames) > 0 && (capability.image.state !== 'supported' || capability.image.free !== 'free')) throw new Error('本计划需要新增图片，但当前图片免费入口未知或不足');
     for (const char of p.plan.characters.filter((c): boolean => c.role === 'main' && (p.plan?.shots || []).some((s): boolean => s.characterIds.includes(c.id)))) {
       if (!char.referenceAssetId) throw new Error(`${char.name}必须使用本人确认的参考图`);
       await this.assetFile(p, char.referenceAssetId, 'image');
@@ -223,16 +219,16 @@ export class PetStoryProductionService {
     return { success: true, project: p, counts };
   }
   /** 每次只授权点击的媒体节点；缺少前置素材直接停止，不暗中补生成。 */
-  async generateShotMedia(id: string, revision: number, shotId: string, kind: PetStoryPromptKind, capability: PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): Promise<PetStoryProductionResult> {
+  async generateShotMedia(id: string, revision: number, shotId: string, kind: PetStoryPromptKind, capability: PetStoryCapability | undefined = undefined, fallbacks: Record<string, 'first_frame' | 'reference'> = {}): Promise<PetStoryProductionResult> {
     let p = await this.projects.read(id);
+    capability = productionCapability(p, capability);
     if (p.revision !== revision) throw new Error('项目版本已变化，请重新查看节点');
     if (!['firstFrame', 'lastFrame', 'video'].includes(kind)) throw new Error('媒体节点类型无效');
     const shot = p.plan?.shots.find((s): boolean => s.id === shotId);
     if (!shot || !shot.prompts[kind]?.final.trim()) throw new Error('镜头或最终提示词不存在');
     if (p.production && p.production.state !== 'complete') throw new Error('请先处理原制作任务，不重复创建节点任务');
-    this.checkCapability(p, capability, { shotId, promptKind: kind });
+    this.validateRequestContext(p, capability, { shotId, promptKind: kind });
     await this.checkApprovedFiles(p, [shotId]);
-    if (kind !== 'video' && (capability.image.state !== 'supported' || capability.image.free !== 'free')) throw new Error('图片免费入口未知或不足，未创建生成任务');
     // 图片节点不要求先确认尚未使用的视频入口；这里的模式仅留作未授权占位。
     const shots = this.shotMedia(p);
     const media = shots[shotId];
@@ -260,19 +256,16 @@ export class PetStoryProductionService {
     p.production.state = 'paused'; p.production.message = message;
     return { success: true, project: await this.projects.write(p), taskId: p.production.steps.find((s): boolean => s.status !== 'complete')?.taskId };
   }
-  async resume(id: string, capability: PetStoryCapability): Promise<PetStoryProductionResult> {
+  async resume(id: string, capability?: PetStoryCapability): Promise<PetStoryProductionResult> {
     const p = await this.projects.read(id);
+    capability = productionCapability(p, capability);
     if (!p.production || !p.plan || productionPlanHash(p.plan) !== p.production.planHash) throw new Error('原制作计划不存在或已经改变');
     const pending = p.production.steps.find((s): boolean => s.status !== 'complete');
     const pendingTask = pending?.taskId ? this.originalTask(p, pending) : undefined;
     const readOnly = pendingTask?.status === 'done' || !!pendingTask?.runtime?.submittedAt;
     if (!readOnly) {
-      this.checkCapability(p, capability, productionResumeTarget(p.production, pending));
-      // 刷新安全回读不改变已批准的模式；已受理／下载步骤不因免费未知受阻。
-      for (const shot of p.production.phase === 'materials' || (p.production.target && p.production.target.kind !== 'video') ? [] : p.plan.shots.filter((s): boolean => !p.production?.target || s.id === p.production.target.shotId)) {
-        const selected = p.production.shots[shot.id];
-        if (!selected.videoId && resolvePetStoryMode(shot, capability, p.production.fallbacks[shot.id]).resolvedMode !== selected.resolvedMode) throw new Error(`${shot.id}当前入口与原批准模式不同，请处理原入口，不能静默换模式`);
-      }
+      this.validateRequestContext(p, capability, productionResumeTarget(p.production, pending));
+      // 继续原批次保留已选模式；真实控件支持在该任务执行时回读，不从未知状态重新推测。
     } else if (capability?.accountId !== p.accountId) throw new Error('原账号不符，禁止切换账号');
     if (pending?.taskId) {
       const task = this.originalTask(p, pending);
@@ -338,12 +331,12 @@ export class PetStoryProductionService {
     media.actualEndFrameId = frameId; media.startFromPreviousEnd = sourceVideo;
     if (!p.materials) media.firstFrameId = frameId;
   }
-  async generateMaterials(id: string, revision: number, materialIds: string[], capability: PetStoryCapability): Promise<PetStoryProductionResult> {
+  async generateMaterials(id: string, revision: number, materialIds: string[], capability?: PetStoryCapability): Promise<PetStoryProductionResult> {
     const p = await this.projects.read(id);
+    capability = productionCapability(p, capability);
     if (revision !== p.revision) throw new Error('项目版本变化，请重新查看素材');
     requireMaterialInventory(p);
-    for (const materialId of materialIds) this.checkCapability(p, capability, { materialId });
-    if (capability.image.state !== 'supported' || capability.image.free !== 'free') throw new Error('图片免费入口未知或不足，未创建生成任务');
+    for (const materialId of materialIds) this.validateRequestContext(p, capability, { materialId });
     if (!Array.isArray(materialIds) || !materialIds.length || new Set(materialIds).size !== materialIds.length || materialIds.some((id): boolean => !p.materials?.some((m): boolean => m.id === id))) throw new Error('请选择本项目的基础素材');
     for (const materialId of materialIds) requireMaterialPromptSource(p, materialId);
     if (p.production) {
@@ -373,7 +366,6 @@ export class PetStoryProductionService {
     const targets = bindings.flatMap((b): string[] => b.slot === 'reference' && b.targetId ? [b.targetId] : []);
     if (new Set(targets).size !== targets.length) throw new Error('不同文件不能引用同一平台素材目标');
     const task = this.originalTask(p, step);
-    if (!production.capability.allowPlainReferences && bindings.some((b): boolean => b.reference === 'plain')) throw new Error('未批准当前不支持 @ 入口的中文用途映射');
     if (task.runtime?.submittedAt) throw new Error('已提交的网页绑定快照不可改写');
     bindings.forEach((binding, index): void => validatePageBinding(p, step, binding, index));
     if (step.pageBindings) throw new Error('本次网页绑定已经固定，不能重复改写');
@@ -424,7 +416,7 @@ export class PetStoryProductionService {
     if (!step || production.state !== 'running' || !this.authorized.has(p.id)) throw new Error('制作已暂停、重开尚未显式继续或原步骤无效，未授权提交');
     if (requireRun && (!step.runId || task.runtime?.runId !== step.runId)) throw new Error('原制作运行尚未绑定，禁止直接从 Studio 绕过制作授权');
     this.originalTask(p, step);
-    this.checkCapability(p, production.capability, productionStepTarget(step));
+    this.validateRequestContext(p, production.capability, productionStepTarget(step));
     await this.validateStepInputs(p, step, task);
     const shot = p.plan?.shots.find((s): boolean => s.id === step.shotId);
     const guard: PetStoryExecutionGuard = { capability: production.capability, mode: shot ? production.shots[shot.id].resolvedMode : undefined,
@@ -448,9 +440,7 @@ export class PetStoryProductionService {
       if (source) await this.assetFile(p, source.assetId, 'video');
     }
     const shot = p.plan?.shots.find((s): boolean => s.id === step.shotId);
-    if (step.kind === 'video' && (!shot || task.videoConfig?.duration !== `${shot.durationSeconds}s` || !production.capability.durations.includes(shot.durationSeconds))) throw new Error('视频时长不符，零提交');
-    if (step.kind === 'video' && shot && resolvePetStoryMode(shot, production.capability, production.fallbacks[shot.id]).resolvedMode !== production.shots[shot.id].resolvedMode) throw new Error('视频免费入口与已批准模式不符，零提交');
-    if (step.kind !== 'video' && (production.capability.image.state !== 'supported' || production.capability.image.free !== 'free')) throw new Error('图片免费入口未知或不足，保留进度');
+    if (step.kind === 'video' && (!shot || task.videoConfig?.duration !== `${shot.durationSeconds}s`)) throw new Error('视频时长不符，零提交');
   }
   private validateCompiledStep(p: PetStoryProject, step: PetStoryProductionStep, task: Task): void {
     const production = this.checked(p);
@@ -581,12 +571,7 @@ export class PetStoryProductionService {
   }
   private async prepareStep(p: PetStoryProject, target: Pick<PetStoryProductionStep, 'kind' | 'shotId' | 'characterId' | 'materialId'>, input: TaskAddParams, assetIds: string[], compiledPrompt?: PetStoryCompiledPrompt): Promise<PetStoryProductionResult> {
     const production = this.checked(p);
-    this.checkCapability(p, production.capability, productionStepTarget(target));
-    if (target.kind !== 'video' && (production.capability.image.state !== 'supported' || production.capability.image.free !== 'free')) throw new Error('图片免费入口未确认或额度不足');
-    if (target.kind === 'video') {
-      const shot = requireValue(p.plan?.shots.find((s): boolean => s.id === target.shotId));
-      if (resolvePetStoryMode(shot, production.capability, production.fallbacks[shot.id]).resolvedMode !== production.shots[shot.id].resolvedMode) throw new Error('当前免费入口与原批准模式不同，零提交');
-    }
+    this.validateRequestContext(p, production.capability, productionStepTarget(target));
     const final = input.prompts[0];
     if (!final || /@(?:Image|Video|Audio)\b/i.test(final)) throw new Error('最终提示词为空或含未验证引用语法');
     checkProductionReferences(final, p, assetIds);

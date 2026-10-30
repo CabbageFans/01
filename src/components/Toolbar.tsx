@@ -394,10 +394,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({ page }): React.ReactElement =>
         <Descriptions.Item label="失败任务">{platformStats.platformFailed}</Descriptions.Item>
         <Descriptions.Item label="依赖阻断">{platformStats.dependencyBlocked}</Descriptions.Item>
         <Descriptions.Item label="下载失败">{downloadJobsLoading ? '读取中' : downloadJobs.filter((job) => job.status === 'failed').length}</Descriptions.Item>
-        <Descriptions.Item label="未标记登录/额度异常">
-          {accounts.filter((account) => !account.seedanceQuota?.exhausted && !account.health?.verificationRequired && account.health?.loginState !== 'expired').length}
+        <Descriptions.Item label="未标记登录/验证异常">
+          {accounts.filter((account) => !account.health?.verificationRequired && account.health?.loginState !== 'expired').length}
         </Descriptions.Item>
-        <Descriptions.Item label="额度耗尽账号">{accounts.filter((account) => account.seedanceQuota?.exhausted).length}</Descriptions.Item>
+        <Descriptions.Item label="历史额度耗尽记录">{accounts.filter((account) => account.seedanceQuota?.exhausted).length}</Descriptions.Item>
       </Descriptions>
     </Modal>
     <Modal

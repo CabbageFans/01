@@ -504,7 +504,8 @@ function normalizeChatReadbackReview(raw: unknown, runtime: Record<string, unkno
 function normalizeChatAdjustmentGuard(raw: unknown): TaskRunSnapshot['chatAdjustmentGuard'] {
   if (!isObject(raw) || typeof raw.projectId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(raw.projectId)
     || typeof raw.adjustmentId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(raw.adjustmentId) || typeof raw.active !== 'boolean') return undefined;
-  return { projectId: raw.projectId, adjustmentId: raw.adjustmentId, active: raw.active };
+  return { projectId: raw.projectId, adjustmentId: raw.adjustmentId, active: raw.active,
+    ...(typeof raw.allowedTaskId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(raw.allowedTaskId) ? { allowedTaskId: raw.allowedTaskId } : {}) };
 }
 
 /** 归一化 TaskRunSnapshot（运行快照）；对话保护不依赖原运行状态。 */

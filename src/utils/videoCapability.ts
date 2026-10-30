@@ -3,13 +3,12 @@
  * 视频能力预检纯函数 — 不依赖 DOM/React/Electron 运行时
  *
  * 职责：
- * 1. 在提交视频任务前，基于本地已知状态判断是否允许提交
- * 2. 对 11–15 秒配置要求页面实时能力证据，无法确认时 fail-closed
- * 3. 提供建议配置，但绝不自动替换用户配置
+ * 1. 在提交视频任务前，检查真实登录、验证与用户调度设置
+ * 2. 具体模型、时长和比例由执行器配置并回读
+ * 3. 本地额度估算或会员未知状态不参与启动判断
  *
  * 合规约束：
  * - 不得尝试绕过、伪造或规避会员/权益/风控校验
- * - 会员资格不能仅凭本地推断为"可用"，未能确认时保持 unknown
  * - 任何降级必须由用户明确确认
  */
 
@@ -20,7 +19,6 @@ import type {
   Account,
   TaskErrorCode,
 } from '../types';
-import { getVideoQuotaRemaining, getVideoQuotaUsageUnits } from './videoQuota';
 
 // ==================== 类型定义 ====================
 
@@ -29,12 +27,10 @@ export type VideoCapabilityState = 'allowed' | 'blocked' | 'unknown';
 
 /** 结构化原因码 */
 export type VideoCapabilityIssueCode =
-  | 'quota_exhausted'
   | 'login_expired'
   | 'verification_required'
   | 'scheduling_paused'
   | 'cooldown_active'
-  | 'membership_required'
   | 'account_error';
 
 /** 能力预检问题项 */
@@ -53,12 +49,6 @@ export interface VideoCapabilityInput {
   duration: VideoDuration;
   /** 画面比例（当前未作为限制因素，保留用于未来扩展） */
   aspectRatio: VideoAspectRatio;
-  /** 是否启用手动 15 秒补丁 */
-  manual15sEnabled: boolean;
-  /** 页面实时观察结果；只有 selectable 能授权 11–15 秒继续配置。 */
-  platformAvailability?: 'selectable' | 'membership_required' | 'unknown';
-  /** 账号本地额度状态（来自 Account.seedanceQuota） */
-  seedanceQuota?: Account['seedanceQuota'];
   /** 账号健康状态（来自 Account.health） */
   health?: Account['health'];
   /** 账号调度配置（来自 Account.scheduling） */
@@ -101,11 +91,7 @@ export interface VideoCapabilityResult {
  * 3. 等待验证 → blocked
  * 4. 调度暂停 → blocked
  * 5. 冷却中 → blocked
- * 6. 额度耗尽 → blocked
- * 7. 11–15 秒缺少页面可选证据或出现会员窗口 → blocked
- * 8. 其他情况 → allowed
- *
- * 会员资格不能仅凭本地推断为"可用"。未能确认时必须 fail-closed。
+ * 6. 其他情况 → allowed；真实平台限制由执行时读取。
  */
 export function evaluateVideoCapability(input: VideoCapabilityInput): VideoCapabilityResult {
   const now = input.now ?? Date.now();
@@ -169,32 +155,6 @@ export function evaluateVideoCapability(input: VideoCapabilityInput): VideoCapab
     });
   }
 
-  // ---- 6. 额度耗尽 ----
-  const requiredUnits = getVideoQuotaUsageUnits(input.duration);
-  const remainingUnits = getVideoQuotaRemaining(input.seedanceQuota);
-  if (input.seedanceQuota?.exhausted || remainingUnits < requiredUnits) {
-    issues.push({
-      code: 'quota_exhausted',
-      message: input.seedanceQuota?.exhausted
-        ? '账号当日视频额度已耗尽，请明日再试或更换账号'
-        : `账号当日视频额度不足：本任务需 ${requiredUnits} 单位，当前剩余 ${remainingUnits} 单位`,
-      blocking: true,
-    });
-  }
-
-  // ---- 7. 11–15 秒实时能力门禁 ----
-  const durationSeconds = Number.parseInt(input.duration, 10);
-  const requiresLiveEntitlement = durationSeconds >= 11;
-  if (requiresLiveEntitlement && input.platformAvailability !== 'selectable') {
-    issues.push({
-      code: 'membership_required',
-      message: input.platformAvailability === 'membership_required'
-        ? '当前页面要求会员操作，已停止提交'
-        : '11–15 秒可能需要会员权益，缺少当前页面实时可选证据时禁止提交',
-      blocking: true,
-    });
-  }
-
   // ---- 确定最终状态 ----
   const blockingIssues = issues.filter((i) => i.blocking);
 
@@ -207,14 +167,7 @@ export function evaluateVideoCapability(input: VideoCapabilityInput): VideoCapab
       issues,
       userMessage,
       canSubmit: false,
-      // 提供建议配置（仅作为建议）
-      suggestion: requiresLiveEntitlement
-        ? {
-            model: input.model,
-            duration: '10s',
-            reason: '当前账户观察到 10 秒兼容性更好；仍应以页面实时能力为准',
-          }
-        : undefined,
+
     };
   }
 
@@ -239,7 +192,7 @@ export function suggestCompatibleVideoConfig(
     return {
       model,
       duration: '10s',
-      reason: '11–15 秒需要页面实时能力证据；当前账户观察到 10 秒兼容性更好',
+      reason: '可选择 10 秒；具体时长由执行器按实际页面配置',
     };
   }
 

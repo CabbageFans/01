@@ -18,7 +18,7 @@ const validation = { decoded: true as const, sha256: 'TEST-sha', bytes: 100, wid
 describe('媒体前置处理反馈', (): void => {
   it.each<[PetStoryGenerationBlocker['code'], string]>([
     ['story', '查看并确认方案'], ['prompt', '查看本项提示词'], ['materials', '查看并补齐素材'],
-    ['firstFrame', '去制作本镜首帧'], ['lastFrame', '去制作本镜尾帧'], ['capability', '查看入口检查'], ['task', '处理当前任务'],
+    ['firstFrame', '去制作本镜首帧'], ['lastFrame', '去制作本镜尾帧'], ['capability', '重新读取制作条件'], ['task', '处理当前任务'],
   ])('主进程%s阻断指向对应动作', (code, action): void => {
     expect(generationBlockerAction({ code, message: 'TEST' })).toBe(action);
   });
@@ -27,7 +27,7 @@ describe('媒体前置处理反馈', (): void => {
     const blocker: PetStoryGenerationBlocker = { code: 'firstFrame', message: 'TEST 前镜视频尚未生成', shotId: p.plan!.shots[0].id, promptKind: 'video' };
     const navigate = vi.fn();
     expect(generationBlockerAction(blocker)).toBe('去制作前镜视频');
-    resolveMediaBlocker(blocker, shot, 'firstFrame', 'TEST-entry', vi.fn(), navigate);
+    resolveMediaBlocker(blocker, shot, 'firstFrame', vi.fn(), navigate);
     expect(navigate).toHaveBeenCalledWith('videoPrompt', p.plan!.shots[0].id, 'video');
   });
   it('选中、文件已校验和本人确认分别投影，旧确认不能算当前图片已确认', (): void => {

@@ -16,7 +16,7 @@ async function preview(): Promise<void> { fireEvent.click(screen.getByRole('butt
 beforeEach((): void => {
   project = { schemaVersion: 1, id: 'TEST-ui-adjustment', studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 1, source: { kind: 'script', url: '', status: 'review_required' }, assets: [], jobs: [], updatedAt: now, plan: structuredClone(snapshot.plan) as PetStoryPlan,
     chatAdjustment: { id: 'TEST-adjustment', target: { shotId: 'shot_1', promptKind: 'video' }, sourceJobId: 'TEST-source', conversationUrl: 'https://www.doubao.com/chat/TEST-original', basisHash: 'TEST-basis', previousText: 'TEST 当前采用视频正文', startedAt: now, status: 'active', replies: [reply('TEST-question', 'TEST 需要保留当前机位吗？'), reply('TEST-chosen', JSON.stringify({ optimized: 'TEST 用户满意的完整视频正文\n保留台词。', requestId: 'TEST-hidden-contract' })), reply('TEST-latest', 'TEST 后来的中间建议，不应自动采用。')] } };
-  usePetStoryStore.setState({ ...initial, project, busy: false, error: '', chatReadbackError: '', previewChatReply: vi.fn(async (key: string): Promise<PetStoryAdjustmentPreview | null> => { const selected = project.chatAdjustment?.replies.find((item): boolean => item.key === key); if (!selected) return null; let body = selected.text; try { const parsed = JSON.parse(body) as { optimized?: string }; body = parsed.optimized || body; } catch { /* 测试自然语言原样返回。 */ } return { target: project.chatAdjustment!.target, previousBody: 'TEST 当前采用视频正文', body }; }), adoptChatReply: vi.fn(async (key: string): Promise<void> => { if (key !== 'TEST-chosen') throw new Error('TEST 采用了错误的具体回复'); usePetStoryStore.setState({ project: { ...project, chatAdjustment: { ...project.chatAdjustment!, status: 'adopted', adoptedReplyKey: key } } }); }), endChatAdjustment: vi.fn(async (): Promise<void> => undefined) });
+  usePetStoryStore.setState({ ...initial, project, busy: false, error: '', chatReadbackError: '', applyChatReply: vi.fn(async (key: string): Promise<PetStoryAdjustmentPreview | null> => { const selected = project.chatAdjustment?.replies.find((item): boolean => item.key === key); if (!selected) return null; let body = selected.text; try { const parsed = JSON.parse(body) as { optimized?: string }; body = parsed.optimized || body; } catch { /* 测试自然语言原样返回。 */ } return { target: project.chatAdjustment!.target, previousBody: 'TEST 当前采用视频正文', body }; }), adoptChatReply: vi.fn(async (key: string): Promise<void> => { if (key !== 'TEST-chosen') throw new Error('TEST 采用了错误的具体回复'); usePetStoryStore.setState({ project: { ...project, chatAdjustment: { ...project.chatAdjustment!, status: 'adopted', adoptedReplyKey: key } } }); }), endChatAdjustment: vi.fn(async (): Promise<void> => undefined) });
 });
 afterEach((): void => { cleanup(); unregisterPetStoryDraft(`${project.id}:TEST-draft`); usePetStoryStore.setState(initial); vi.restoreAllMocks(); });
 
@@ -64,7 +64,7 @@ describe('自由对话的具体回复选择与确认', (): void => {
     const choice = screen.getByRole('radio', { name: '豆包回复 1' }).closest('label.adjustment-reply')!;
     expect(choice.textContent).toContain(visible); expect(choice.textContent).not.toMatch(/requestId|targetIds|TEST-hidden|```|网页代码语言标签/);
     expect(usePetStoryStore.getState().project?.chatAdjustment?.replies[0].text).toBe(raw);
-    expect(usePetStoryStore.getState().previewChatReply).not.toHaveBeenCalled(); expect(usePetStoryStore.getState().adoptChatReply).not.toHaveBeenCalled();
+    expect(usePetStoryStore.getState().applyChatReply).not.toHaveBeenCalled(); expect(usePetStoryStore.getState().adoptChatReply).not.toHaveBeenCalled();
   });
   it('一条回复含两个不同JSON对象时不猜选正文，也不向用户展示原始数据', (): void => {
     project.chatAdjustment!.replies = [reply('TEST-ambiguous', 'TEST 多个版本\n{"optimized":"TEST 版本一"}\n{"optimized":"TEST 版本二"}')]; usePetStoryStore.setState({ project });
@@ -78,7 +78,7 @@ describe('自由对话的具体回复选择与确认', (): void => {
     expect(screen.getByRole('button', { name: '应用到当前创作' }).hasAttribute('disabled')).toBe(true);
     fireEvent.click(screen.getByRole('radio', { name: '豆包回复 2' })); await preview();
     const dialog = screen.getByText('确认应用这条回复').closest('[role=dialog]') as HTMLElement; expect(within(dialog).getByText('镜头 1 · 视频提示词')).toBeDefined(); expect(within(dialog).getByText('TEST 当前采用视频正文')).toBeDefined(); expect(within(dialog).getByText(/TEST 用户满意的完整视频正文/)).toBeDefined(); expect(within(dialog).queryByText(/TEST-hidden-contract/)).toBeNull();
-    expect(usePetStoryStore.getState().previewChatReply).toHaveBeenCalledExactlyOnceWith('TEST-chosen'); expect(usePetStoryStore.getState().adoptChatReply).not.toHaveBeenCalled(); fireEvent.click(within(dialog).getByRole('button', { name: '确认采用此回复' }));
+    expect(usePetStoryStore.getState().applyChatReply).toHaveBeenCalledExactlyOnceWith('TEST-chosen'); expect(usePetStoryStore.getState().adoptChatReply).not.toHaveBeenCalled(); fireEvent.click(within(dialog).getByRole('button', { name: '确认采用此回复' }));
     await waitFor((): void => expect(usePetStoryStore.getState().adoptChatReply).toHaveBeenCalledExactlyOnceWith('TEST-chosen'));
     await waitFor((): void => expect(screen.queryByRole('region', { name: '当前创作的豆包调整' })).toBeNull());
   });
@@ -96,9 +96,9 @@ describe('自由对话的具体回复选择与确认', (): void => {
     expect(screen.getByRole('button', { name: '确认采用此回复' }).hasAttribute('disabled')).toBe(true); expect(usePetStoryStore.getState().adoptChatReply).not.toHaveBeenCalled();
   });
   it('正式预览失败时保留选择并展示错误，不进入确认或采用', async (): Promise<void> => {
-    usePetStoryStore.setState({ previewChatReply: vi.fn(async (): Promise<null> => { usePetStoryStore.setState({ error: 'TEST 这条回复与当前镜头依据不符' }); return null; }) });
+    usePetStoryStore.setState({ applyChatReply: vi.fn(async (): Promise<null> => { usePetStoryStore.setState({ error: 'TEST 这条回复与当前镜头依据不符' }); return null; }) });
     render(<PetStoryChatAdjustmentPanel />); choose(2); fireEvent.click(screen.getByRole('button', { name: '应用到当前创作' }));
-    await waitFor((): void => expect(usePetStoryStore.getState().previewChatReply).toHaveBeenCalledExactlyOnceWith('TEST-chosen'));
+    await waitFor((): void => expect(usePetStoryStore.getState().applyChatReply).toHaveBeenCalledExactlyOnceWith('TEST-chosen'));
     expect(await screen.findByText('TEST 这条回复与当前镜头依据不符')).toBeDefined(); expect(screen.queryByText('确认应用这条回复')).toBeNull(); expect(usePetStoryStore.getState().adoptChatReply).not.toHaveBeenCalled();
   });
   it('回读失败或尚无可辨认回复时说明原因，保持选择不可用', (): void => {

@@ -32,9 +32,8 @@ beforeEach((): void => {
     storyApproval: { hash: 'TEST', at: now },
     materials: [{ id: 'scene:location', entityId: 'location', kind: 'scene', name: 'TEST场景', designHash: 'TEST', prompt: structuredClone(prompt) }],
     plan: { sourceSummary: 'TEST', adaptedStory: 'TEST', characters: [], props: [], scenes: [], shots: [{ id: 'shot', order: 1, scene: 'TEST', action: 'TEST', startState: 'TEST', endState: 'TEST', characterIds: [], durationSeconds: 5, transition: 'cut', requestedMode: 'first_frame', prompts: { firstFrame: structuredClone(prompt), video: structuredClone(prompt) } }] },
-    jobs: [{ id: 'TEST-review', kind: 'review', taskId: 'TEST-task', inputHash: 'TEST', sourceUrl: '', status: 'applied', requestId: 'TEST-request', resultStatus: 'candidate', reviewInputFinals: { 'scene:location': 'TEST', 'shot:firstFrame': 'TEST', 'shot:video': 'TEST' }, parsedResult: { issues: [issue('material-error', 'scene:location', 'error'), issue('material-suggestion', 'scene:location', 'suggestion'), issue('frame-suggestion', 'shot:firstFrame', 'suggestion'), issue('video-error', 'shot:video', 'error')] } }],
-  };
-  usePetStoryStore.setState({ project, busy: false, freeChatConfirmed: true }); useTaskStore.setState({ tasks: [] });
+    jobs: [{ id: 'TEST-review', kind: 'review', taskId: 'TEST-task', inputHash: 'TEST', sourceUrl: '', status: 'applied', requestId: 'TEST-request', resultStatus: 'candidate', reviewInputFinals: { 'scene:location': 'TEST', 'shot:firstFrame': 'TEST', 'shot:video': 'TEST' }, parsedResult: { issues: [issue('material-error', 'scene:location', 'error'), issue('material-suggestion', 'scene:location', 'suggestion'), issue('frame-suggestion', 'shot:firstFrame', 'suggestion'), issue('video-error', 'shot:video', 'error')] } }]};
+  usePetStoryStore.setState({ project, busy: false}); useTaskStore.setState({ tasks: [] });
 });
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
 
@@ -116,8 +115,7 @@ describe('审查逐目标送审正文快照', (): void => {
   });
   it.each([
     { target: { shotId: 'shot', promptKind: 'firstFrame' as const }, id: 'shot:firstFrame' },
-    { target: { materialId: 'scene:location' }, id: 'scene:location' },
-  ])('旧明确单项目标 $id 的 inputFinal仍可兼容，错目标或正文变化拒绝', ({ target, id }): void => {
+    { target: { materialId: 'scene:location' }, id: 'scene:location' }])('旧明确单项目标 $id 的 inputFinal仍可兼容，错目标或正文变化拒绝', ({ target, id }): void => {
     const review: PetStoryChatJob = { ...project.jobs[0], ...target, reviewInputFinals: undefined, inputFinal: 'TEST' };
     expect(reviewMatchesPrompt(review, id, 'TEST')).toBe(true);
     expect(reviewMatchesPrompt(review, id, 'TEST ')).toBe(false);

@@ -8,7 +8,7 @@
  * - per-account 执行状态监听，自动路由任务到对应 webview
  */
 
-import { readAcceptedImageOutputs, bindPetStoryReferences, verifyPetStoryReferenceBindings, checkPetStoryPageGuard, inspectPetStoryCapability, readPetStoryComposer, uploadPetStoryImages, verifyPetStoryUploads, PetStoryControlError } from '../utils/doubaoBridge';
+import { readAcceptedImageOutputs, bindPetStoryReferences, verifyPetStoryReferenceBindings, checkPetStoryPageGuard, readPetStoryComposer, uploadPetStoryImages, verifyPetStoryUploads, PetStoryControlError } from '../utils/doubaoBridge';
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { Button, Input, message, Modal, notification, Popover, Switch, Tooltip } from 'antd';
 import type { Account, AccountAvailability, AccountAvailabilitySource, Task, TaskUpdateInput } from '../types';
@@ -76,7 +76,6 @@ import { getVideoQuotaUsageUnits } from '../utils/videoQuota';
 import { availabilityBlocksAutomation, probeAccountAvailability } from '../utils/accountAvailability';
 import { isExperimentalNoWatermarkEnabled, setExperimentalNoWatermarkEnabled } from '../utils/experimentalNoWatermark';
 import { decideMaterialAuthorizationProgress } from '../utils/materialAuthorization';
-import { selectQuotaFallbackAccount } from '../utils/quotaRecovery';
 import type { GenerationConfirmationEvidence } from '../utils/generationConfirmation';
 import { createAcceptedObservationBinding, renewObservationLease } from '../utils/acceptedObservation';
 import { createVideoReadinessCheckpoint, VideoControlReadinessError } from '../utils/videoControlReadiness';
@@ -188,6 +187,15 @@ function hasAccountChatAdjustment(accountId: string | null | undefined): boolean
   const current = usePetStoryStore.getState().project;
   return !!accountId && (current?.accountId === accountId && current.chatAdjustment?.status === 'active'
     || useTaskStore.getState().tasks.some((task): boolean => task.assignedAccountId === accountId && task.runtime?.chatAdjustmentGuard?.active === true));
+}
+
+/** 只有本人继续的同一未发送修订，才可识别上次执行留下的完整请求草稿。 */
+function resumableRepairDraft(task: Task | undefined, prompt: string, selectedReplyRepair: boolean): string | undefined {
+  const runtime = task?.runtime;
+  if (!selectedReplyRepair || !task || !runtime || task.mode !== 'chat' || task.executionIntent !== 'armed' || task.promptReadback !== 'exact'
+    || runtime.attempt < 2 || runtime.input.mode !== 'chat' || runtime.input.prompt !== task.prompt || task.prompt !== prompt
+    || runtime.submittedAt || runtime.chatReadback || runtime.chatReadbackReview || runtime.chatResponse || runtime.acceptanceObservation || task.outputs?.length) return undefined;
+  return task.prompt;
 }
 
 const BrowserPanel: React.FC<BrowserPanelProps> = ({
@@ -1344,22 +1352,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     return () => window.removeEventListener('adapter-self-check', handleAdapterSelfCheck);
   }, [activeAccount]);
 
-  useEffect((): (() => void) => {
-    const inspect = (event: Event): void => {
-      const detail = (event as CustomEvent<{ accountId: string; freeConfirmed: boolean; kind?: 'image' | 'video'; resolve: (value: import('@doubao-studio/contracts').PetStoryCapability) => void; reject: (error: Error) => void }>).detail;
-      const webview = registryRef.current.get(detail.accountId);
-      if (!webview || !canSelectAccount(detail.accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState)) || useTaskStore.getState().accountBusy[detail.accountId]) { detail.reject(new Error('原账号窗口未就绪或正在执行任务')); return; }
-      // 核对的是项目原账号；沿用前台租约，只改变浏览选中与可见布局，不导航或提交。
-      useAccountStore.getState().selectAccount(detail.accountId);
-      void new Promise<void>((resolve): void => { requestAnimationFrame((): void => { requestAnimationFrame((): void => resolve()); }); }).then((): Promise<AccountAvailability> => performAvailabilityCheck(detail.accountId, webview, 'pre_task')).then(async (availability): Promise<void> => {
-        if (availability.state !== 'ready') throw new Error('请先由本人处理登录或验证，未检查／上传／提交');
-        detail.resolve(await inspectPetStoryCapability(webview, detail.accountId, detail.freeConfirmed, detail.kind));
-      }).catch((error: unknown): void => detail.reject(error instanceof Error ? error : new Error('入口核对失败')));
-    };
-    window.addEventListener('petstory-inspect-capability', inspect);
-    return (): void => window.removeEventListener('petstory-inspect-capability', inspect);
-  }, [performAvailabilityCheck]);
-
   // ---- V3 自动化：监听 per-account 执行状态 ----
   useEffect(() => {
     accounts.forEach((account) => {
@@ -1401,7 +1393,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     attachments?: string[],
     audioAttachment?: string
   ) => {
-    const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask, retryTask, assignTask, armTasks } =
+    const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask, armTasks } =
       useTaskStore.getState();
     const initialTask = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
     const expectedRunId = initialTask?.runtime?.runId;
@@ -1416,6 +1408,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (current?.runtime?.runId === expectedRunId && current?.runtime?.submittedAt) window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId } }));
       return;
     }
+    // 台账中的精确移交在切页后仍有效；已提交／已有控制器的运行先只读退出。
+    // 仅选定自由回复的修订增加导航前的草稿保护。
+    const selectedReplyRepair = mode === 'chat' && (useTaskStore.getState().tasks.some((item): boolean => item.runtime?.chatAdjustmentGuard?.active === true && item.runtime.chatAdjustmentGuard.allowedTaskId === taskId)
+      || !!usePetStoryStore.getState().project?.jobs.some((job): boolean => job.taskId === taskId && !!job.repairReplySource));
+    const ownedRepairDraft = resumableRepairDraft(initialTask, prompt, selectedReplyRepair);
     const petstoryTask = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.petstory;
     const strictPrompt = !!petstoryTask || useTaskStore.getState().tasks.find((item) => item.id === taskId)?.promptReadback === 'exact';
     let petstoryGuard: import('@doubao-studio/contracts').PetStoryExecutionGuard | undefined;
@@ -1507,7 +1504,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       videoReadinessStartedAt = Date.now();
       await persistVideoReadiness('account');
 
-      // 视频能力预检：在提交前基于本地已知状态判断是否允许提交
+      // 执行前检查账号登录、验证与用户调度设置
       if (mode === 'video' && videoConfig) {
         const account = useAccountStore.getState().accounts.find((a) => a.id === accountId);
         if (account) {
@@ -1515,8 +1512,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             model: videoConfig.model,
             duration: videoConfig.duration,
             aspectRatio: videoConfig.aspectRatio,
-            manual15sEnabled: false,
-            seedanceQuota: account.seedanceQuota,
             health: account.health,
             scheduling: account.scheduling,
             accountStatus: account.status,
@@ -1537,8 +1532,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       let initialMsgCount = 0;
       let conversationTextAfterSubmit = '';
       setAccountAutomationState(accountId, 'injecting', '正在创建新对话...', 'new_conversation');
-      const newConversationResult = await startNewConversation(webview, 20_000, mode === 'chat');
+      if (selectedReplyRepair && !useTaskStore.getState().tasks.some((item): boolean => item.runtime?.chatAdjustmentGuard?.active === true && item.runtime.chatAdjustmentGuard.allowedTaskId === taskId)) throw new SubmissionSafetyPauseError('本次豆包调整已结束或移交已收回；修订未导航、未发送');
+      const newConversationResult = await startNewConversation(webview, 20_000, mode === 'chat', selectedReplyRepair, ownedRepairDraft);
       if (!newConversationResult.ok) {
+        if (selectedReplyRepair) throw new AccountAvailabilityPauseError(`修订已暂停，当前豆包输入尚未就绪（${newConversationResult.reason || 'PAGE_UNKNOWN'}）；请处理未发送草稿或等待回复结束后继续原修订，未发送`, 'page_unrecognized');
         const failedAvailability = await performAvailabilityCheck(accountId, webview, 'pre_task');
         if (failedAvailability.state !== 'ready') {
           useAccountStore.getState().selectAccount(accountId);
@@ -1724,7 +1721,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         if (petstoryTask && petstoryGuard?.references) {
           const source = petstoryGuard.compiledPrompt;
           if (!source || source.text !== prompt || !source.segments) throw new PetStoryControlError('结构化引用编译快照缺失或与任务不符，零提交');
-          const bound = await bindPetStoryReferences(webview, source, petstoryUploads, controller.signal, !!petstoryGuard.capability.allowPlainReferences);
+          const bound = await bindPetStoryReferences(webview, source, petstoryUploads, controller.signal);
           if (!expectedRunId) throw new PetStoryControlError('本次运行缺失');
           const saved = await window.electronAPI.petstory.recordPageBindings(petstoryTask.projectId, taskId, expectedRunId, bound.bindings);
           if (!saved.success || !saved.compiledPrompt || saved.compiledPrompt.text !== bound.compiled.text) throw new PetStoryControlError(saved.error || '实际网页绑定保存不一致');
@@ -1792,8 +1789,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           await verifyPetStoryReferenceBindings(webview, petstoryBindings);
         } else if (strictPrompt && mode === 'image') {
           const snapshot = await readPetStoryComposer(webview);
-          if (!snapshot.present || !snapshot.generic || snapshot.pending || snapshot.count !== (attachments?.length || 0)
-            || snapshot.free === 'paid' || snapshot.free === 'exhausted') throw new PetStoryControlError('图片输入区、参考图或额度回读不符，未提交');
+          if (!snapshot.present || !snapshot.generic || snapshot.pending || snapshot.count !== (attachments?.length || 0)) throw new PetStoryControlError('图片输入区或参考图回读不符，未提交');
         }
         if (strictPrompt && !await verifyPromptReadyForSubmission(webview, prompt, true)) throw new SubmissionSafetyPauseError('最终全文或段落回读不一致，未提交');
         const currentRuntime = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime;
@@ -2355,32 +2351,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       } else {
         setAccountAutomationState(accountId, 'failed', errorMessage, 'failed');
         await failAutomation(taskId, accountId, errorMessage, errorInfo);
-        if (quotaExhausted && !petstoryTask && await retryTask(taskId)) {
-          const state = useTaskStore.getState();
-          const queuedTask = state.tasks.find((item) => item.id === taskId);
-          const fallbackAccountId = queuedTask ? selectQuotaFallbackAccount(
-            queuedTask,
-            state.tasks,
-            useAccountStore.getState().accounts,
-            accountId,
-          ) : null;
-          if (fallbackAccountId) {
-            const assigned = await assignTask(taskId, fallbackAccountId);
-            if (!assigned) {
-              const reason = useTaskStore.getState().error || '改派账号失败';
-              message.error(`原账号视频额度已清零，改派失败：${reason}`);
-            } else {
-              const armResult = await armTasks([taskId]);
-              if (armResult.armed === 1 && armResult.failed === 0) {
-                message.warning('原账号视频额度已清零，任务已安全改派到其他可用账号');
-              } else {
-                message.error(armResult.error || '改派后的执行授权写入失败；任务保持 hold，未继续调度');
-              }
-            }
-          } else {
-            message.warning('原账号视频额度已清零；暂无替代账号，任务保留排队等待次日 00:00 刷新');
-          }
-        }
+
       }
 
       const restartTask = pendingRestartTasksRef.current.get(taskId);

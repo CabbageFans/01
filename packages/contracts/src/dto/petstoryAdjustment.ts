@@ -23,6 +23,9 @@ export interface PetStoryChatAdjustment {
   replies: PetStoryConversationReply[];
   checkedAt?: string;
   adoptedReplyKey?: string;
+  /** 应用明确选定回复时安排的单次修订；保持自由对话保护，只放行这一个任务。 */
+  repairJobId?: string;
+  selectedReplyKey?: string;
 }
 export interface PetStoryAdjustmentResult extends PetStoryResult {
   adjustment?: PetStoryChatAdjustment;

@@ -1,24 +1,15 @@
-/** 离线页面替身核对：检查图片不会访问视频；不是豆包实机验收。 */
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { inspectPetStoryCapability } from '../../src/utils/doubaoBridge';
+/** 真实执行阶段读取控件：离线页面替身，不代表豆包实机生成。 */
+import { expect, it, vi } from 'vitest';
+import { checkPetStoryPageGuard, readPetStoryComposer } from '../../src/utils/doubaoBridge';
 import type { PetStoryComposerSnapshot } from '../../src/utils/petstoryControls';
+import type { PetStoryExecutionGuard } from '@doubao-studio/contracts';
 
-beforeEach((): void => { vi.useFakeTimers(); });
-afterEach((): void => { vi.useRealTimers(); });
-
-it.each([false, true])('独立图片检查可在没有视频控件时完成，人工免费确认=%s', async (confirmed: boolean): Promise<void> => {
-  const snapshot: PetStoryComposerSnapshot = { present: true, generic: true, first: false, last: false, nativeLabel: false, firstLabel: false, free: 'unknown', model: '', duration: 0, aspectRatio: '', durations: [], count: 0, pending: false };
-  let calls = 0;
-  const view = { getURL: (): string => 'https://www.doubao.com/chat/', loadURL: vi.fn(), executeJavaScript: vi.fn(async (): Promise<unknown> => {
-    calls++;
-    if (calls === 1 || calls === 3) return snapshot;
-    if (calls === 2) return { ok: true, method: 'TEST可见图片入口' };
-    throw new Error('TEST视频入口不存在，不得访问');
-  }) };
-  const result = inspectPetStoryCapability(view, 'TEST-account', confirmed, 'image');
-  await vi.advanceTimersByTimeAsync(600);
-  const capability = await result;
-  expect(capability).toMatchObject({ accountId: 'TEST-account', image: { state: 'supported', free: confirmed ? 'free' : 'unknown' }, durations: [], freeEvidence: confirmed ? 'user_confirmed' : 'unknown' });
-  expect(Object.values(capability.modes).every((entry): boolean => entry.state === 'unknown' && entry.free === 'unknown')).toBe(true);
-  expect(capability.videoConfig).toBeUndefined(); expect(view.executeJavaScript).toHaveBeenCalledTimes(3); expect(view.loadURL).not.toHaveBeenCalled();
+it('图片任务在执行中回读当前控件，无免费记录且无需访问视频入口', async (): Promise<void> => {
+  const snapshot: PetStoryComposerSnapshot = { present: true, generic: true, first: false, last: false, nativeLabel: false, firstLabel: false, model: '', duration: 0, aspectRatio: '', durations: [], count: 0, pending: false };
+  const view = { getURL: (): string => 'https://www.doubao.com/chat/', loadURL: vi.fn(), executeJavaScript: vi.fn(async (): Promise<unknown> => snapshot) };
+  const current = await readPetStoryComposer(view);
+  const guard = {} as PetStoryExecutionGuard;
+  expect((): void => checkPetStoryPageGuard(current, guard, false)).not.toThrow();
+  expect(view.executeJavaScript).toHaveBeenCalledOnce(); expect(view.loadURL).not.toHaveBeenCalled();
+  expect((): void => checkPetStoryPageGuard({ ...current, present: false }, guard, false)).toThrow('没有找到图片生成输入区');
 });

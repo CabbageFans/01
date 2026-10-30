@@ -270,7 +270,7 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
       } else if (autoAssign) {
         const assignment = await autoAssignTasks(newTasks);
         if (assignment.unassigned > 0) {
-          message.warning(`${assignment.unassigned} 个任务没有满足额度/健康条件的可用账号，已保留为未指派`);
+          message.warning(`${assignment.unassigned} 个任务暂无满足登录与调度条件的可用账号，已保留为未指派`);
         }
       }
       setInputText('');
@@ -624,7 +624,7 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
     { title: '任务摘要', key: 'summary', width: 310, render: (_: unknown, task: Task): React.ReactNode => <button className="task-summary-button" onClick={(): void => { setSelectedTask(task); setDetailModalOpen(true); }}><strong>{taskTitle(task)}</strong><small>{taskNextAction(task)}</small></button> },
     { title: '类型', width: 88, render: (_: unknown, task: Task): React.ReactNode => renderModeTag(task.mode || 'chat') },
     { title: '执行状态', width: 156, render: (_: unknown, task: Task): React.ReactNode => <div className="task-status-cell">{renderStatusTag(task)}{task.status === 'done' && <small>人工质量{task.qualityVerdict?.status === 'accepted' ? '合格' : task.qualityVerdict?.status === 'rejected' ? '拒收' : '未评'}</small>}</div> },
-    { title: '执行账号', width: 180, render: (_: unknown, task: Task): React.ReactNode => <Select aria-label={`${taskTitle(task)}执行账号`} size="small" placeholder="未指派" value={task.assignedAccountId || undefined} onChange={(value: string): void => { void handleAssign(task.id, value); }} style={{ width: '100%' }} disabled={!!task.petstory || ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(task.status)} popupMatchSelectWidth={false} options={buildManualAssignmentOptions(accounts, task.mode || 'chat', task.videoConfig?.duration)} /> },
+    { title: '执行账号', width: 180, render: (_: unknown, task: Task): React.ReactNode => <Select aria-label={`${taskTitle(task)}执行账号`} size="small" placeholder="未指派" value={task.assignedAccountId || undefined} onChange={(value: string): void => { void handleAssign(task.id, value); }} style={{ width: '100%' }} disabled={!!task.petstory || ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(task.status)} popupMatchSelectWidth={false} options={buildManualAssignmentOptions(accounts)} /> },
     { title: '批次 / 阶段', width: 155, render: (_: unknown, task: Task): React.ReactNode => <div className="table-secondary"><span>{task.batchId ? `批次 ${[...new Set(tasks.map((item): string | undefined => item.batchId).filter(Boolean))].indexOf(task.batchId) + 1}` : '单项任务'}</span><small>{task.runtime?.stage ? TASK_STAGE_LABELS[task.runtime.stage] || task.runtime.stage : '尚未开始'}{task.dependsOnTaskIds?.length ? ` · ${task.dependsOnTaskIds.length} 项前置` : ''}</small></div> },
     { title: '更新时间', width: 138, render: (_: unknown, task: Task): React.ReactNode => new Date(task.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) },
     { title: '下一步', width: 165, fixed: 'right', render: (_: unknown, task: Task): React.ReactNode => <Space size={4}>
@@ -691,7 +691,7 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
           </Space> }]} />
           <div className="composer-footer"><span>创建不会发送到豆包或消耗生成额度</span><Button type="primary" size="large" loading={creating} disabled={!inputText.trim()} onClick={(): void => { void handleAddTasks(); }}>创建待执行任务</Button></div>
         </section>
-        <aside className="workspace-card composer-config"><h2>创作配置</h2><label className="field-label">执行账号</label><Select aria-label="新任务执行账号" placeholder={autoAssign ? '自动指派可用账号' : '稍后在任务中心指派'} allowClear value={creationAccountId} onChange={(value: string | undefined): void => setCreationAccountId(value)} options={buildManualAssignmentOptions(accounts, selectedMode, videoConfig.duration)} className="w-full" /><p className="muted-text">独立于浏览器当前账号。指定账号后仍需授权执行。</p>
+        <aside className="workspace-card composer-config"><h2>创作配置</h2><label className="field-label">执行账号</label><Select aria-label="新任务执行账号" placeholder={autoAssign ? '自动指派可用账号' : '稍后在任务中心指派'} allowClear value={creationAccountId} onChange={(value: string | undefined): void => setCreationAccountId(value)} options={buildManualAssignmentOptions(accounts)} className="w-full" /><p className="muted-text">独立于浏览器当前账号。指定账号后仍需授权执行。</p>
           {selectedMode === 'video' && <><label className="field-label">视频模型</label><Select aria-label="视频模型" value={videoConfig.model} onChange={(value: VideoModel): void => setVideoConfig({ ...videoConfig, model: value })} options={Object.entries(VIDEO_MODEL_LABELS).map(([value, label]): { value: string; label: string } => ({ value, label }))} className="w-full" /><label className="field-label">时长</label><Select aria-label="视频时长" value={videoConfig.duration} onChange={(value: VideoDuration): void => setVideoConfig({ ...videoConfig, duration: value })} options={Array.from({ length: 12 }, (_, index: number): { value: string; label: string } => ({ value: `${index + 4}s`, label: `${index + 4} 秒` }))} className="w-full" /><label className="field-label">画面比例</label><Select aria-label="画面比例" value={videoConfig.aspectRatio} onChange={(value: VideoAspectRatio): void => setVideoConfig({ ...videoConfig, aspectRatio: value })} options={['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'].map((value: string): { value: string; label: string } => ({ value, label: value }))} className="w-full" /><p className="muted-text">{VIDEO_MODEL_COST[videoConfig.model]} · 本地配置提示；实际能力以提交前平台控件回读为准。</p></>}
           <div className="config-note"><h3>下一步</h3><ol><li>创建待执行任务</li><li>在任务中心核对内容与账号</li><li>明确授权后开始执行</li></ol><Button onClick={(): void => navigateWorkspace('tasks')}>前往任务中心</Button></div>
         </aside>
@@ -734,8 +734,6 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
               model: editingVideoConfig.model,
               duration: editingVideoConfig.duration,
               aspectRatio: editingVideoConfig.aspectRatio,
-              manual15sEnabled: false,
-              seedanceQuota: boundAccount.seedanceQuota,
               health: boundAccount.health,
               scheduling: boundAccount.scheduling,
               accountStatus: boundAccount.status,
@@ -822,8 +820,6 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
                 model: editingVideoConfig.model,
                 duration: editingVideoConfig.duration,
                 aspectRatio: editingVideoConfig.aspectRatio,
-                manual15sEnabled: false,
-                seedanceQuota: boundAccount.seedanceQuota,
                 health: boundAccount.health,
                 scheduling: boundAccount.scheduling,
                 accountStatus: boundAccount.status,

@@ -3,6 +3,9 @@ import type { PetStoryPlan, PetStoryShot, PetStoryCharacter, PetStoryPrompt, Pet
 export { PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptQuality';
 import { compileReferencedText, PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptQuality';
 import { subtitlePolicyIssues } from './petstorySubtitlePolicy';
+import { collectPetStoryPlanIssues, PetStoryContentValidationError, validPetStoryDuration } from './petstoryValidationIssues';
+export { collectPetStoryPlanIssues, formatPetStoryValidationIssue, PetStoryContentValidationError, planRepairPreservationIssues } from './petstoryValidationIssues';
+export type { PetStoryValidationIssue } from './petstoryValidationIssues';
 const MODES: PetStoryMode[] = ['auto', 'first_frame', 'first_last_frame', 'reference'];
 export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('需要 JSON 对象');
@@ -200,7 +203,24 @@ function legacySceneReferences(s: Record<string, unknown>, model: boolean): stri
 }
 
 function shotPromptRecord(shot: Record<string, unknown>): Record<string, unknown> { return shot.prompts === undefined ? {} : record(shot.prompts); }
-export function validatePetStoryPlan(value: unknown, model: boolean = false): PetStoryPlan {
+export function validatePetStoryPlan(value: unknown, model: boolean = false, allowHistoricalFractional: boolean = false): PetStoryPlan {
+  // 仅旧项目读取可展示原有小数；新生成、编辑保存和采用始终走默认整秒门禁。
+  const issues = collectPetStoryPlanIssues(value).filter((issue): boolean => !(allowHistoricalFractional && issue.code === 'duration' && historicalFractionalDuration(issue.actual)));
+  if (issues.length) throw new PetStoryContentValidationError(issues);
+  try { return validatePetStoryPlanStrict(value, model, allowHistoricalFractional); }
+  catch (error: unknown) {
+    if (!(error instanceof Error)) throw error;
+    // 只包装本地内容校验；调用方的磁盘、网络和任务映射错误不进入此类。
+    throw new PetStoryContentValidationError([{ code: 'structure', path: '$', actualType: 'object', expected: '完整有效的方案结构与引用', message: error.message, repairable: true }]);
+  }
+}
+function historicalFractionalDuration(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 5 && value <= 10;
+}
+function validPlanDuration(value: unknown, allowHistoricalFractional: boolean): value is number {
+  return allowHistoricalFractional ? historicalFractionalDuration(value) : validPetStoryDuration(value);
+}
+function validatePetStoryPlanStrict(value: unknown, model: boolean, allowHistoricalFractional: boolean): PetStoryPlan {
   const p = record(value);
   const characters = characterArray(p.characters).map((value: unknown): PetStoryCharacter => {
     const c = record(value);
@@ -229,8 +249,8 @@ export function validatePetStoryPlan(value: unknown, model: boolean = false): Pe
     unique(refs, `${shotId}.characterIds`);
     if (refs.some((ref: string): boolean => !characterIds.has(ref))) throw new Error(`${shotId}引用未知角色`);
     const duration = s.durationSeconds;
-    if (typeof duration !== 'number' || !Number.isFinite(duration) || duration < 5 || duration > 10) {
-      throw new Error(`${shotId}时长必须是 5～10 秒内的有限数值`);
+    if (!validPlanDuration(duration, allowHistoricalFractional)) {
+      throw new Error(`${shotId}时长必须是 5～10 秒内的有限数值，并使用可选整秒`);
     }
     if (!['cut', 'continue'].includes(String(s.transition))) throw new Error(`${shotId}切镜关系无效`);
     if (!MODES.includes(s.requestedMode as PetStoryMode)) throw new Error(`${shotId}模式无效`);

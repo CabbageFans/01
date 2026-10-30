@@ -113,6 +113,7 @@ data/
 # 普通 Chat 内化：原任务全文、原回复与本机核验记录不进入版本库
 /artifacts/chat-internalization/
 /artifacts/prompt-pipeline-completion/
+/artifacts/chat-auto-repair/
 
 # 用户流程修复的本机窗口与私人请求证据
 /artifacts/user-journey-repair/
@@ -127,3 +128,6 @@ data/
 /docs/ui-design-review/2026-10-29/full-product-design/evidence/canvas-focused-comparison.png
 /docs/ui-design-review/2026-10-29/full-product-design/prototype/public/screens/canvas-comparison.png
 /docs/ui-design-review/2026-10-29/full-product-design/prototype/public/screens/canvas-focused-comparison.png
+
+# 移除免费门槛专项的本机日志和数据只读证明
+/artifacts/remove-free-gates/

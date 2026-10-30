@@ -7,13 +7,14 @@ import { useTaskStore } from '../store/useTaskStore';
 import { imageBelongsToTarget, PetStoryImageReview } from './PetStoryImageReview';
 import { PetStoryExistingMediaPicker } from './PetStoryExistingMediaPicker';
 import { canvasJobLabel, isCanvasPlanLocked } from './petStoryCanvasShared';
-import { PetStoryMediaEntryCheck, petStoryModeNames } from './PetStoryMediaEntryCheck';
 import { PetStoryGenerationBlockers } from './PetStoryGenerationBlockers';
 import { usePetStoryGenerationEligibility } from './usePetStoryGenerationEligibility';
 import type { PetStoryGenerationBlocker, PetStoryGenerationEligibility } from './usePetStoryGenerationEligibility';
 import { locatePetStoryDraft, usePetStoryDraft } from './PetStoryDrafts';
 import { mergePetStoryPlanDraft } from '../utils/petstoryPlanDraft';
 import { journeyMaterialImageApproved, journeyShotAsset } from '../utils/petstoryJourney';
+
+const petStoryModeNames = { auto: '自动选择', first_frame: '首帧', first_last_frame: '首尾帧', reference: '多参考' };
 
 function productionSteps(project: PetStoryProject): PetStoryProductionStep[] {
   return [...(project.productionHistory || []).flatMap((production) => production.steps), ...(project.production?.steps || [])];
@@ -118,17 +119,12 @@ export const CanvasVideoSettings: React.FC<{ project: PetStoryProject; shot: Pet
     <label>入口不支持请求模式时<Select aria-label={`镜头${shot.order}视频备选模式`} className="w-full" disabled={locked} value={state.fallbacks[shot.id] || 'none'} options={[{ value: 'none', label: '暂停，由我处理（不切换模式）' }, { value: 'first_frame', label: '本人允许改用首帧模式' }, { value: 'reference', label: '本人允许改用多参考模式' }]} onChange={(value: string): void => state.setFallback(shot.id, value === 'none' ? undefined : value as 'first_frame' | 'reference')} /></label>
     <p className="canvas-hint">备选模式授权立即用于下次生成；修改这里不会自动发送请求。</p>
     {dirty && <Space wrap><Button disabled={locked} onClick={(): void => { void save(); }}>保存视频设置</Button><Button onClick={discard}>放弃修改</Button></Space>}
-    <p className="canvas-hint">自动选择按当前已检查入口解析。首尾帧使用平台独立首帧和尾帧槽；多参考中的两张图不代表原生首尾帧。</p>
+    <p className="canvas-hint">执行时按当前入口解析模式。首尾帧使用平台独立首帧和尾帧槽；多参考中的两张图不代表原生首尾帧。</p>
     {message && <p role="status">{message}</p>}
   </Space></div>;
 };
 
-export function resolveMediaBlocker(blocker: PetStoryGenerationBlocker, shot: PetStoryShot, kind: PetStoryPromptKind, entryId: string, refresh: () => void, onNavigate?: PetStoryMediaNavigate): void {
-    if (blocker.code === 'capability') {
-      const entry = document.getElementById(entryId);
-      if (entry?.tagName === 'DETAILS') (entry as HTMLDetailsElement).open = true;
-      entry?.scrollIntoView({ block: 'center', behavior: 'smooth' }); return;
-    }
+export function resolveMediaBlocker(blocker: PetStoryGenerationBlocker, shot: PetStoryShot, kind: PetStoryPromptKind, refresh: () => void, onNavigate?: PetStoryMediaNavigate): void {
     if (blocker.code === 'task') { window.dispatchEvent(new CustomEvent('petstory-locate-task', { detail: { jobId: blocker.jobId } })); return; }
     if (blocker.code === 'story' && onNavigate) { onNavigate('plan'); return; }
     if (blocker.code === 'materials' && onNavigate) { onNavigate('materials', blocker.materialId); return; }
@@ -145,7 +141,7 @@ export function resolveMediaBlocker(blocker: PetStoryGenerationBlocker, shot: Pe
     refresh();
   }
 
-const CanvasVideoResolution: React.FC<{ shot: PetStoryShot; eligibility?: PetStoryGenerationEligibility }> = ({ shot, eligibility }): React.ReactElement => <div className="canvas-mode"><span>请求 <b>{petStoryModeNames[shot.requestedMode]}</b></span><span>本次可用 <b>{eligibility?.resolvedMode ? petStoryModeNames[eligibility.resolvedMode] : '待核对'}</b></span>{eligibility?.modeReason && <p>{eligibility.modeReason}</p>}</div>;
+const CanvasVideoResolution: React.FC<{ shot: PetStoryShot; eligibility?: PetStoryGenerationEligibility }> = ({ shot, eligibility }): React.ReactElement => <div className="canvas-mode"><span>请求 <b>{petStoryModeNames[shot.requestedMode]}</b></span><span>执行模式 <b>{eligibility?.resolvedMode ? petStoryModeNames[eligibility.resolvedMode] : '执行时读取'}</b></span>{eligibility?.modeReason && <p>{eligibility.modeReason}</p>}</div>;
 
 interface CanvasMediaFacts { asset?: PetStoryAsset; step?: PetStoryProductionStep; pendingTask?: Task; task?: Task; waiting: boolean; video: boolean; buttonText: string }
 function mediaNodeFacts(project: PetStoryProject, shot: PetStoryShot, kind: PetStoryPromptKind, tasks: Task[]): CanvasMediaFacts {
@@ -163,8 +159,6 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
   const [settingsDirty, setSettingsDirty] = useState(false);
   const readiness = usePetStoryGenerationEligibility(project, { shotId: shot.id, promptKind: kind });
   const { asset, step, pendingTask, task, waiting, video, buttonText } = mediaNodeFacts(project, shot, kind, tasks);
-  const entryId = `shot-entry-${shot.id}-${kind}`;
-  const currentEntryChecked = !!state.capability && state.capabilityCheckedInSession;
   const hasCandidate = !video && project.assets.some((item): boolean => item.id !== asset?.id && item.imageReview?.state !== 'adopted'
     && imageBelongsToTarget(project, item, { shotId: shot.id, kind: kind as 'firstFrame' | 'lastFrame' }));
   const generationNeeded = !asset && !hasCandidate && !waiting;
@@ -185,24 +179,22 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
   return <div id={`shot-media-${shot.id}-${kind}`} tabIndex={-1} className="canvas-media-node" data-media-kind={kind}><div className="canvas-field-label"><strong>{mediaNames[kind]}</strong><span className={`canvas-state ${asset?.validation ? 'ready' : ''}`}>{mediaStatus(asset, waiting, pendingTask, hasCandidate)}</span></div>
     {video && <details className="petstory-secondary-tools"><summary>本镜制作设置</summary><CanvasVideoSettings project={project} shot={shot} onDirtyChange={setSettingsDirty} /></details>}
     {!video ? <PetStoryImageReview project={project} target={{ shotId: shot.id, kind: kind as 'firstFrame' | 'lastFrame' }} title={`镜头 ${shot.order} · ${kind === 'firstFrame' ? '首帧' : '尾帧'}`} currentAssetId={asset?.id}
-      disabled={disabled} generationDisabled={waiting || !currentEntryChecked || !readiness.eligibility?.ready} generating={readiness.loading}
+      disabled={disabled} generationDisabled={waiting || !readiness.eligibility?.ready} generating={readiness.loading}
       onUpload={async (): Promise<void> => state.uploadShotImage(shot.id, kind as 'firstFrame' | 'lastFrame')}
       onGenerate={async (): Promise<void> => state.generateShotMedia(shot.id, kind)}
       onAdopt={async (assetId: string): Promise<void> => state.adoptShotImage(shot.id, kind as 'firstFrame' | 'lastFrame', assetId)}
       onAdjust={async (): Promise<void> => state.openChatAdjustment({ shotId: shot.id, promptKind: kind })} />
       : asset ? <ExistingMedia project={project} shot={shot} asset={asset} kind={kind} /> : <div className="canvas-empty-media"><PlayCircleOutlined /><strong>{waiting ? '等待原任务产物' : '尚无镜头视频'}</strong><span>生成后自动下载，再检查文件与画面。</span></div>}
     {waiting && asset && <p className="canvas-hint">新请求：{canvasJobLabel(pendingTask?.status)}；下方仍展示原有成果。</p>}
-    {generationNeeded && <PetStoryGenerationBlockers blockers={(readiness.eligibility?.blockers || []).slice(0, 1)} onResolve={(blocker): void => resolveMediaBlocker(blocker, shot, kind, entryId, readiness.refresh, onNavigate)} />}
+    {generationNeeded && <PetStoryGenerationBlockers blockers={(readiness.eligibility?.blockers || []).slice(0, 1)} onResolve={(blocker): void => resolveMediaBlocker(blocker, shot, kind, readiness.refresh, onNavigate)} />}
     {generationNeeded && readiness.error && <Alert type="warning" message={readiness.error} action={<Button size="small" onClick={readiness.refresh}>重新核对</Button>} />}
     {video && <CanvasVideoResolution shot={shot} eligibility={readiness.eligibility} />}
     {settingsDirty && <Alert type="warning" message="本镜视频设置有未保存修改，请先保存或放弃后再生成。" />}
-    <details id={entryId} className="petstory-secondary-tools"><summary>生成设置／入口检查</summary><PetStoryMediaEntryCheck project={project} kind={video ? 'video' : 'image'} />
-      {!generationNeeded && <PetStoryGenerationBlockers blockers={readiness.eligibility?.blockers || []} onResolve={(blocker): void => resolveMediaBlocker(blocker, shot, kind, entryId, readiness.refresh, onNavigate)} />}
-      {!generationNeeded && readiness.error && <Alert type="warning" message={readiness.error} action={<Button size="small" onClick={readiness.refresh}>重新核对</Button>} />}
-    </details>
-    {video && <div className="canvas-media-actions">{!asset && <Button type="primary" size="small" loading={readiness.loading} icon={<PlayCircleOutlined />} disabled={disabled || waiting || settingsDirty || !currentEntryChecked || !readiness.eligibility?.ready} onClick={(): void => { void state.generateShotMedia(shot.id, kind); }}>{buttonText}</Button>}{asset && <Button size="small" onClick={(): void => { document.getElementById(`shot-media-${shot.id}-${kind}`)?.querySelector('video')?.focus(); }}>查看视频</Button>}</div>}
+    {!generationNeeded && <PetStoryGenerationBlockers blockers={readiness.eligibility?.blockers || []} onResolve={(blocker): void => resolveMediaBlocker(blocker, shot, kind, readiness.refresh, onNavigate)} />}
+    {!generationNeeded && readiness.error && <Alert type="warning" message={readiness.error} action={<Button size="small" onClick={readiness.refresh}>重新核对</Button>} />}
+    {video && <div className="canvas-media-actions">{!asset && <Button type="primary" size="small" loading={readiness.loading} icon={<PlayCircleOutlined />} disabled={disabled || waiting || settingsDirty || !readiness.eligibility?.ready} onClick={(): void => { void state.generateShotMedia(shot.id, kind); }}>{buttonText}</Button>}{asset && <Button size="small" onClick={(): void => { document.getElementById(`shot-media-${shot.id}-${kind}`)?.querySelector('video')?.focus(); }}>查看视频</Button>}</div>}
     <details className="petstory-secondary-tools"><summary>更多媒体操作</summary><div className="canvas-media-actions">
-      {video && asset && <Button size="small" disabled={disabled || waiting || settingsDirty || !currentEntryChecked || !readiness.eligibility?.ready} onClick={(): void => { void state.generateShotMedia(shot.id, kind); }}>重新生成视频</Button>}
+      {video && asset && <Button size="small" disabled={disabled || waiting || settingsDirty || !readiness.eligibility?.ready} onClick={(): void => { void state.generateShotMedia(shot.id, kind); }}>重新生成视频</Button>}
       {asset && <Button size="small" onClick={(): void => { void revealAsset(); }}>在文件夹中定位</Button>}
       {task && <Button size="small" disabled={!task.outputs.length || download === '正在重新下载原产物…'} onClick={(): void => { void redownload(); }}>重新下载</Button>}
     </div><PetStoryExistingMediaPicker project={project} shot={shot} kind={kind} disabled={disabled || waiting} /></details>
@@ -239,10 +231,10 @@ export function canvasActualMode(project: PetStoryProject, shot: PetStoryShot, t
   const selectedProduction = productions.find((item): boolean => !!videoAsset?.taskId && item.steps.some((step): boolean => step.taskId === videoAsset.taskId && step.runId === videoAsset.runId));
   const production = selectedProduction || productions.find((item): boolean => item.steps.some((step): boolean => step.shotId === shot.id && step.kind === 'video'));
   const step = production?.steps.find((item): boolean => item.shotId === shot.id && item.kind === 'video');
-  if (!step || !production) return '待入口核对';
+  if (!step || !production) return '尚未执行';
   const task = tasks.find((item): boolean => item.id === step.taskId); const runtime = task?.runtime;
   const mode = step.compiledPrompt?.resolvedMode || production.shots[shot.id]?.resolvedMode;
-  if (!mode) return '待入口核对';
+  if (!mode) return '尚未执行';
   const accepted = runtime?.runId === step.runId && runtime?.acceptanceObservation?.runId === step.runId;
   if (!accepted) return `计划 ${petStoryModeNames[mode]} · 待实际受理`;
   return step.pageBindings?.length ? petStoryModeNames[mode] : `${petStoryModeNames[mode]} · 历史记录，页面绑定未留存`;

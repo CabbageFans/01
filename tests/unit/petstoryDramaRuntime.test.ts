@@ -1,5 +1,7 @@
 /** 离线协议／状态测试：模拟回复仅验证宿主，不代表豆包内容或媒体验收。 */
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { capabilityParameters, productionCapability } from '../../main/utils/petstoryCapability';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -16,8 +18,8 @@ import originalFive from '../fixtures/drama-runtime-input.json';
 
 const prompt = (body: string): PetStoryPrompt => ({ original: body, optimized: body, final: body, edited: false, rulesVersion: 'TEST-old' });
 function capability(accountId = 'TEST-account'): PetStoryCapability {
-  const entry = { state: 'unknown' as const, free: 'unknown' as const, reason: 'TEST 仅文字模型选择，媒体能力未知' };
-  return { accountId, checkedAt: '2026-10-25T01:00:00.000Z', freeEvidence: 'unknown', durations: [5, 6], image: entry,
+  const entry = { state: 'unknown' as const, reason: 'TEST 仅文字模型选择，媒体能力未知' };
+  return { accountId, checkedAt: '2026-10-25T01:00:00.000Z', durations: [5, 6], image: entry,
     modes: { first_frame: entry, first_last_frame: entry, reference: entry }, videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' } };
 }
 function technicalPlan(count = 2): PetStoryPlan {
@@ -211,7 +213,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(p.plan).toBeUndefined(); await adoptPlan(repair);
     expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'adopted' }); expect(p.plan?.characters).toEqual(plan.characters); expect(tasks()).toHaveLength(2);
     expect(p.jobs[0].rawText).not.toBe(p.jobs[1].rawText); expect(p.jobs[0].status).toBe('invalid');
-    await expect(chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: job.id })).rejects.toThrow('一次'); expect(tasks()).toHaveLength(2);
+    expect(await chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: job.id })).toMatchObject({ success: true, repairJobId: repair.id }); expect(tasks()).toHaveLength(2);
     const next = await prepare('analysis'); const wrongRole = structuredClone(plan); wrongRole.characters[1].role = 'supporting';
     await finish(next, { ...wrongRole, storyUsable: true, contentBasis: { beginning: 'TEST开头', middle: 'TEST变化', ending: 'TEST结局' } });
     const nextRepair = await prepare('repair', { parentJobId: next.id }); expect(nextRepair.parentJobId).toBe(next.id); expect(tasks()).toHaveLength(4);
@@ -244,7 +246,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const exported = buildPetStoryPromptExport(p, []).prompts.find((entry): boolean => entry.id === id)!;
     expect(exported.modelPrompt).toBeNull(); expect(exported.final).toBe(''); expect(exported.review).toMatchObject({ eligibility: 'creative_plan', submissionBlocked: true });
     p = await projects.confirmStory(p.id, p.revision);
-    const available = capability(); available.checkedAt = new Date().toISOString(); available.freeEvidence = 'user_confirmed'; available.image = { state: 'supported', free: 'free', reason: 'TEST图片入口' };
+    const available = capability(); available.checkedAt = new Date().toISOString(); available.image = { state: 'supported', reason: 'TEST图片入口' };
     const production = new PetStoryProductionService(projects, { list: tasks, create: (): never => { throw new Error('TEST不得自动创建媒体'); }, adopt: (): never => { throw new Error('TEST未授权媒体'); }, retryUnsubmitted: (): never => { throw new Error('TEST未授权重试'); }, downloads: (): [] => [], download: async (): Promise<{ success: boolean; count: number; failed: number }> => ({ success: false, count: 0, failed: 0 }) });
     await expect(production.generateMaterials(p.id, p.revision, [id], available)).rejects.toThrow('尚无最终正文');
     expect((await projects.read(p.id)).production).toBeUndefined(); expect(tasks().every((task): boolean => task.mode === 'chat')).toBe(true);
@@ -331,7 +333,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: 'TEST视频0' }); expect(p.plan!.shots[0].prompts.video.needsReview).toBeUndefined();
     expect(p.jobs.at(-1)?.rawText).toContain('<声音>TEST原有环境底音</声音>');
   });
-  it('已选error的一次修订仍用XML时不再自动修订，保留原final并标记其待复核', async (): Promise<void> => {
+  it('用户局部修订仍用XML可进入一次定向纠正，仍失败后终止自动链并保留原final', async (): Promise<void> => {
     const original = p.plan!.shots[0].prompts.video.final;
     const review = await prepare('review', { shotId: 'shot-0', promptKind: 'video' }); await finish(review, { issues: [issue('sound-format', 'shot-0:video', 'error')] });
     const revision = await prepare('revise', { shotId: 'shot-0', promptKind: 'video', parentJobId: review.id, selectedIssueIds: ['sound-format'], capability: capability() });
@@ -340,8 +342,12 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     await finish(revision, { optimized: body });
     expect(p.jobs.at(-1)).toMatchObject({ status: 'invalid', parsedResult: { optimized: body } });
     expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: original, needsReview: true });
-    const collected = await chat.collect(p.id, revision.id); expect(collected.needsRepair).toBe(false);
-    await expect(prepare('repair', { parentJobId: revision.id })).rejects.toThrow('已使用一次内容修订');
+    const collected = await chat.collect(p.id, revision.id); expect(collected.needsRepair).toBe(true);
+    const repair = await prepare('repair', { parentJobId: revision.id, repairMode: 'automatic' });
+    expect(repair).toMatchObject({ originKind: 'revise', selectedIssueIds: ['sound-format'], stage: expect.stringContaining('video') });
+    expect(repair.stage).toContain('video20');
+    await finish(repair, { optimized: body }); expect((await chat.collect(p.id, repair.id)).needsRepair).toBe(false);
+    await expect(prepare('repair', { parentJobId: repair.id, repairMode: 'automatic' })).rejects.toThrow('自动修订已使用一次');
     expect((await new PetStoryProjects().open(directory)).plan!.shots[0].prompts.video).toMatchObject({ final: original, needsReview: true });
   });
   it.each(['第99张参考图定义当前场景。', '{{ref:missing-material}}定义当前场景。'])('Seedream 引用错误在采用前保留候选并进入唯一一次修订：%s', async (body: string): Promise<void> => {
@@ -356,7 +362,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     await finish(repair, { optimized: corrected });
     expect(p.plan!.shots[0].prompts.firstFrame).toMatchObject({ final: 'TEST首帧0', optimized: corrected, candidateJobId: repair.id });
     await adoptPrompt(repair); expect(p.plan!.shots[0].prompts.firstFrame.final).toBe(corrected);
-    await expect(prepare('repair', { parentJobId: job.id })).rejects.toThrow('已使用一次');
+    const count = tasks().length; expect((await prepare('repair', { parentJobId: job.id })).id).toBe(repair.id); expect(tasks()).toHaveLength(count);
   });
   it.each([false, true])('确认剧本重复台词按说话者和发声次数保留，额外声音块才报错：同说话者=%s', async (sameSpeaker: boolean): Promise<void> => {
     p.plan!.characters = [{ id: 'speaker-a', name: 'TEST甲', role: 'main', purpose: 'TEST', description: 'TEST' }, { id: 'speaker-b', name: 'TEST乙', role: 'supporting', purpose: 'TEST', description: 'TEST' }];
@@ -395,7 +401,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     await adoptPrompt(repair);
     expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: body, sourceJobId: repair.id, promptTask: repair.promptTask });
     expect((await new PetStoryProjects().open(directory)).plan!.shots[0].prompts.video.promptTask).toEqual(repair.promptTask);
-    await expect(prepare('repair', { parentJobId: job.id })).rejects.toThrow('已使用一次');
+    const count = tasks().length; expect((await prepare('repair', { parentJobId: job.id })).id).toBe(repair.id); expect(tasks()).toHaveLength(count);
   });
   it('修订后仍缺标签保留第二条候选，不允许递归再修订', async (): Promise<void> => {
     const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
@@ -404,7 +410,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     await finish(repair, { optimized: 'TEST 第二条仍缺标签的候选' });
     expect(p.jobs.at(-1)).toMatchObject({ status: 'invalid', parsedResult: { optimized: 'TEST 第二条仍缺标签的候选' } });
     expect(p.plan!.shots[0].prompts.video.final).toBe('TEST视频0');
-    await expect(prepare('repair', { parentJobId: repair.id })).rejects.toThrow('具体缺项修订一次');
+    await expect(prepare('repair', { parentJobId: repair.id })).rejects.toThrow('自动修订已使用一次');
   });
   it('已选 Seedance 方言检查原台词声音花括号，修订原回复自身携带语法且无程序补写', async (): Promise<void> => {
     p.plan!.characters = [{ id: 'speaker', name: 'TEST角色', role: 'main', purpose: 'TEST台词测试', description: 'TEST身份' }];
@@ -603,7 +609,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video' }); await finish(job, { optimized: 'TEST待采用视频候选' });
     p = await projects.saveShotPrompt(p.id, p.revision, 'shot-0', 'firstFrame', 'TEST用户新的共同首帧');
     const before = await projects.read(p.id); const tasksBefore = tasks();
-    await expect(chat.adoptPromptCandidate(p.id, p.revision, job.id)).rejects.toThrow('剧本、镜头设计或已采用帧／前镜边界与正文创作时不一致');
+    await expect(chat.adoptPromptCandidate(p.id, p.revision, job.id)).rejects.toThrow('已采用首帧或尾帧正文已变化');
     const reopened = await new PetStoryProjects().open(directory);
     expect(reopened).toEqual(before); expect(tasks()).toEqual(tasksBefore);
     expect(reopened.plan!.shots[0].prompts.video.final).toBe('TEST用户保留视频');
@@ -753,13 +759,15 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     await expect(prepare('revise', { shotId: 'shot-0', promptKind: 'video', parentJobId: review.id, selectedIssueIds: selected })).rejects.toThrow(/非空且不重复|不属于父审查/);
     expect(tasks()).toHaveLength(before); expect((await projects.read(p.id)).jobs).toHaveLength(1);
   });
-  it('一次内容修订结构仍错误时保留所选问题，不追加第二次自动改写', async (): Promise<void> => {
+  it('内容修订结构错误保留所选问题，一次自动纠正后仍错误才停止', async (): Promise<void> => {
     const review = await prepare('review', { materialId: 'scene:location' }); await finish(review, { issues: [issue('required', 'scene:location', 'error'), issue('optional', 'scene:location', 'suggestion')] });
     const original = p.materials![0].prompt.final;
     const revision = await prepare('revise', { materialId: 'scene:location', parentJobId: review.id, selectedIssueIds: ['required'] }); await finish(revision, {});
     expect(requestFacts(revision).parentResult).toMatchObject({ selectedIssueIds: ['required'], issues: [issue('required', 'scene:location', 'error')] });
-    const collected = await chat.collect(p.id, revision.id); expect(collected.needsRepair).toBe(false);
-    await expect(prepare('repair', { parentJobId: revision.id })).rejects.toThrow('已使用一次内容修订');
+    const collected = await chat.collect(p.id, revision.id); expect(collected.needsRepair).toBe(true);
+    const repair = await prepare('repair', { parentJobId: revision.id, repairMode: 'automatic' });
+    await finish(repair, {}); expect((await chat.collect(p.id, repair.id)).needsRepair).toBe(false);
+    await expect(prepare('repair', { parentJobId: repair.id })).rejects.toThrow('自动修订已使用一次');
     expect(p.materials![0].prompt).toMatchObject({ final: original, needsReview: true });
     expect((await new PetStoryProjects().open(directory)).jobs.at(-1)?.selectedIssueIds).toEqual(['required']);
   });
@@ -807,11 +815,37 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     p.plan!.scenes![0].lighting = 'TEST修改场景光线'; p.materials = syncMaterials(p);
     expect(p.materials![0].prompt).toEqual({ ...prompt, needsReview: true });
   });
-  it('生产前已检查模型选择进入本次文字请求与项目，重开不丢方言来源', async (): Promise<void> => {
+  it.each([false, 'unknown', undefined])('原故事重开保留创作事实，遗留免费记录%s不进入新请求或使旧分析候选过期', async (legacy): Promise<void> => {
+    p.plan = undefined; p.materials = undefined; p = await projects.write(p);
+    p = await projects.saveMobileStory(p.id, p.revision, originalFive.mobileStory.text);
+    const historical = Object.assign(capability(), { freeEvidence: legacy, allowPlainReferences: legacy });
+    Object.assign(historical.image, { free: legacy });
+    p.promptCapability = historical; p = await projects.write(p);
+    const job = await prepare('analysis');
+    expect(tasks().at(-1)?.prompt).not.toMatch(/freeEvidence|allowPlainReferences|freeChatConfirmed|"free"/);
+    // 还原旧版本原始上下文哈希，检验兼容比较，不改写原任务事实。
+    const saved = p.jobs.find((item): boolean => item.id === job.id)!;
+    saved.capability = historical;
+    const shots = p.plan?.shots.map((shot): object => Object.fromEntries(Object.entries(shot).filter(([key]): boolean => key !== 'prompts')));
+    saved.contextHash = createHash('sha256').update(JSON.stringify({ story: p.mobileStory, plan: p.plan ? { ...p.plan, shots } : undefined,
+      profile: p.promptProfile, promptModel: p.promptModel, promptCapability: historical,
+      materials: p.materials?.map((m): object => ({ id: m.id, designHash: m.designHash, selectedAssetId: m.selectedAssetId, approved: m.approved })),
+      assets: p.assets.map((a): object => ({ id: a.id, kind: a.kind, shotId: a.shotId, validation: a.validation, sourceVideo: a.sourceVideo })) })).digest('hex');
+    const originalHash = saved.contextHash;
+    p.promptCapability = capabilityParameters(historical, p.accountId); delete p.promptCapability.checkedAt;
+    p.promptCapability.image.state = 'unknown'; p = await projects.write(p);
+    const reopened = await new PetStoryProjects().open(directory); const reopenedJob = reopened.jobs.find((item): boolean => item.id === job.id)!;
+    expect(chat.conversationSourceCurrent(reopened, reopenedJob)).toBe(true);
+    expect(reopenedJob.contextHash).toBe(originalHash); expect(reopenedJob.capability).toEqual(historical);
+    expect(productionCapability(reopened)).not.toHaveProperty('checkedAt');
+    reopened.promptCapability!.videoConfig!.aspectRatio = '16:9';
+    expect(chat.conversationSourceCurrent(reopened, reopenedJob)).toBe(false);
+  });
+  it('模型选择进入本次文字请求与项目，重开不丢方言来源', async (): Promise<void> => {
     const selected = capability(); const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: selected });
-    expect(p.production).toBeUndefined(); expect(p.promptCapability).toEqual(selected); expect(job.capability).toEqual(selected);
+    expect(p.production).toBeUndefined(); expect(p.promptCapability).toEqual(capabilityParameters(selected, p.accountId)); expect(job.capability).toEqual(capabilityParameters(selected, p.accountId));
     expect(job.stage).toBe('video+video20'); expect(tasks()[0].prompt).toContain('seedance-2.0');
-    const reopened = await new PetStoryProjects().open(directory); expect(reopened.promptCapability).toEqual(selected);
+    const reopened = await new PetStoryProjects().open(directory); expect(reopened.promptCapability).toEqual(capabilityParameters(selected, p.accountId));
   });
   it('其他账号能力和不存在的编辑基准在创建任务前拒绝', async (): Promise<void> => {
     await expect(prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability('TEST-other-account') })).rejects.toThrow('项目原账号');

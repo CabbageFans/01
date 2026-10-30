@@ -7,6 +7,8 @@ import { inspectPromptEligibility, promptDesignHash, promptWritingTarget, requir
 import { compilePrompt, promptReferences } from '../../main/utils/petstoryPromptQuality';
 import { buildPetStoryPromptExport } from '../../main/utils/petstoryExport';
 import { storyHash } from '../../main/utils/petstoryMaterials';
+import { resolvePetStoryMode } from '../../main/utils/petstoryModes';
+import { productionCapability } from '../../main/utils/petstoryCapability';
 
 function project(images = true): PetStoryProject {
   const p: PetStoryProject = { schemaVersion: 1, id: 'TEST-five', studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 1,
@@ -73,21 +75,22 @@ describe('专用正文媒体资格与计划导出', (): void => {
     expect(inspectPromptEligibility(p, shot.prompts.video, { ...t, mode: 'first_frame' }).writingReady).toBe(false);
     p.promptModel = 'seedance-2.0'; expect(inspectPromptEligibility(p, shot.prompts.video, t).writingReady).toBe(false);
   });
-  it('已知模型但auto模式尚未解析的专用文字计划可完成；媒体仍阻断，明确模式后需Chat适配', (): void => {
-    const p = project(); const shot = p.plan!.shots[0]; shot.requestedMode = 'auto';
+  it('auto文字与媒体使用同一输入计划，不以缺少入口检查为由要求重新适配', (): void => {
+    const p = project(); const shot = p.plan!.shots[0]; shot.requestedMode = 'auto'; delete shot.prompts.video.promptTask;
     seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' });
     const t = promptWritingTarget(p, { shotId: shot.id, promptKind: 'video' });
-    expect(t).toMatchObject({ model: 'seedance-2.0', mode: undefined });
-    expect(inspectPromptEligibility(p, shot.prompts.video, t)).toMatchObject({ state: 'creative_plan', writingReady: true });
-    expect((): void => requirePromptEligibility(p, shot.prompts.video, t)).toThrow('目标视频模式');
+    expect(t).toMatchObject({ model: 'seedance-2.0', mode: 'reference' });
+    expect(resolvePetStoryMode(shot, productionCapability(p)).resolvedMode).toBe(t.mode);
+    expect(inspectPromptEligibility(p, shot.prompts.video, t)).toMatchObject({ state: 'adopted_unbound', writingReady: true });
+    expect((): void => requirePromptEligibility(p, shot.prompts.video, t)).not.toThrow();
     expect(inspectPromptEligibility(p, shot.prompts.video, { ...t, mode: 'first_frame' }).writingReady).toBe(false);
   });
   it('归档制作后历史模型意图在继续和导出相同，显式generic仍覆盖历史', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; const target = { shotId: shot.id, promptKind: 'video' as const, mode: shot.prompts.video.promptTask!.mode };
     p.promptModel = undefined; p.promptCapability = undefined;
-    const entry = { state: 'supported' as const, free: 'free' as const, reason: 'TEST历史能力记录' };
+    const entry = { state: 'supported' as const, reason: 'TEST历史能力记录' };
     p.productionHistory = [{ state: 'complete', planHash: 'TEST', approvedAt: p.updatedAt, fallbacks: {}, message: 'TEST', steps: [], shots: {},
-      capability: { accountId: p.accountId, checkedAt: p.updatedAt, freeEvidence: 'user_confirmed', durations: [5], image: entry,
+      capability: { accountId: p.accountId, checkedAt: p.updatedAt, durations: [5], image: entry,
         modes: { first_frame: entry, first_last_frame: entry, reference: entry }, videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' } } }];
     expect(inspectPromptEligibility(p, shot.prompts.video, target).state).toBe('adopted_unbound');
     expect(buildPetStoryPromptExport(p, []).prompts.find((item): boolean => item.id === `${shot.id}:video`)!.review.eligibility).toBe('adopted_unbound');

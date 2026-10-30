@@ -20,7 +20,7 @@ beforeEach((): void => {
   prompt.final = 'TEST 已采用首帧正文'; prompt.optimized = 'TEST 新的完整候选'; prompt.edited = false;
   prompt.candidateJobId = 'TEST-candidate';
   project = { schemaVersion: 1, id: 'TEST-canvas-review', studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 1, updatedAt: now, source: { kind: 'script', url: '', status: 'review_required' }, mobileStory: { id: 'TEST-story', text: snapshot.mobileStory, importedAt: now }, assets: [], plan, jobs: [{ id: 'TEST-candidate', kind: 'optimize', taskId: 'TEST-chat', shotId: plan.shots[0].id, promptKind: 'firstFrame', status: 'applied', resultStatus: 'candidate', requestId: 'TEST-request', inputHash: 'TEST', sourceUrl: '', parsedResult: { optimized: prompt.optimized } }] };
-  usePetStoryStore.setState({ ...initial.pet, project, busy: false, freeChatConfirmed: true, error: '' });
+  usePetStoryStore.setState({ ...initial.pet, project, busy: false, error: '' });
   useTaskStore.setState({ ...initial.tasks, tasks: [] });
 });
 afterEach((): void => { usePetStoryStore.setState(initial.pet); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
@@ -76,7 +76,7 @@ describe('成果按实际采用、任务与文件分别交接', (): void => {
 
   it('已有平台产物而未保存本地文件时，提供下载收取入口且不暗示重新生成', (): void => {
     const task: Task = { id: 'TEST-video', mode: 'video', status: 'done', assignedAccountId: project.accountId, prompt: 'TEST', outputs: ['https://TEST.invalid/output.mp4'], result: null, createdAt: now, updatedAt: now, runtime: { runId: 'TEST-run', attempt: 1, stage: 'completed', message: '', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { prompt: 'TEST', mode: 'video', attachments: [] } } };
-    const capability = { accountId: project.accountId, checkedAt: now, image: { state: 'unknown' as const, free: 'unknown' as const, reason: '' }, modes: { first_frame: { state: 'unknown' as const, free: 'unknown' as const, reason: '' }, first_last_frame: { state: 'unknown' as const, free: 'unknown' as const, reason: '' }, reference: { state: 'unknown' as const, free: 'unknown' as const, reason: '' } }, durations: [], freeEvidence: 'unknown' as const };
+    const capability = { accountId: project.accountId, checkedAt: now, image: { state: 'unknown' as const, reason: '' }, modes: { first_frame: { state: 'unknown' as const, reason: '' }, first_last_frame: { state: 'unknown' as const, reason: '' }, reference: { state: 'unknown' as const, reason: '' } }, durations: [], };
     project.production = { state: 'paused', planHash: 'TEST', approvedAt: now, capability, fallbacks: {}, shots: {}, steps: [{ id: 'TEST-step', kind: 'video', shotId: project.plan!.shots[0].id, taskId: task.id, runId: 'TEST-run', inputHash: 'TEST', attachmentAssetIds: [], status: 'bound' }], message: 'TEST' };
     useTaskStore.setState({ tasks: [task] });
     const navigate = vi.fn(); render(<PetStoryResults project={project} onNavigate={navigate} />);

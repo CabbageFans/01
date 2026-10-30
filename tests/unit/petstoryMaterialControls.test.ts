@@ -35,17 +35,16 @@ function editPlanField(html: string): string {
 }
 beforeEach((): void => {
   vi.spyOn(React, 'useSyncExternalStore').mockImplementation(<T,>(_subscribe: (onStoreChange: () => void) => () => void, getSnapshot: () => T): T => getSnapshot());
-  const entry = { state: 'supported' as const, free: 'free' as const, reason: 'TEST' };
-  capability = { accountId: 'TEST-account', checkedAt: now, freeEvidence: 'user_confirmed', durations: [5], image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' } };
+  const entry = { state: 'supported' as const, reason: 'TEST' };
+  capability = { accountId: 'TEST-account', checkedAt: now, durations: [5], image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' } };
   project = {
     schemaVersion: 1, id: 'TEST-project', studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 1,
     source: { kind: 'script', url: '', status: 'review_required' }, updatedAt: now, assets: [],
     storyApproval: { hash: 'TEST', at: now },
     plan: { sourceSummary: 'TEST', adaptedStory: 'TEST', characters: [], props: [], scenes: [], shots: [] },
     materials: [{ id: 'scene:location', kind: 'scene', entityId: 'location', name: 'TEST场景', designHash: 'TEST', prompt: { original: 'TEST原文', optimized: 'TEST候选', final: 'TEST原文', edited: false, rulesVersion: 'TEST', candidateJobId: 'TEST-job' } }],
-    jobs: [{ id: 'TEST-job', kind: 'materialPrompt', materialId: 'scene:location', taskId: 'TEST-task', inputHash: 'TEST', sourceUrl: '', status: 'applied', createdAt: now, requestId: 'TEST-request', resultStatus: 'candidate', rawText: JSON.stringify({ optimized: 'TEST候选' }) }],
-  };
-  usePetStoryStore.setState({ project, busy: false, freeChatConfirmed: true, capability, capabilityCheckedInSession: true });
+    jobs: [{ id: 'TEST-job', kind: 'materialPrompt', materialId: 'scene:location', taskId: 'TEST-task', inputHash: 'TEST', sourceUrl: '', status: 'applied', createdAt: now, requestId: 'TEST-request', resultStatus: 'candidate', rawText: JSON.stringify({ optimized: 'TEST候选' }) }]};
+  usePetStoryStore.setState({ project, busy: false, capability});
   useTaskStore.setState({ tasks: [] });
 });
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
@@ -77,33 +76,31 @@ describe('素材文字与媒体独立门禁', (): void => {
     expect(html).not.toContain('scene:location选择已有图片');
     expect(html).not.toContain('采用这张');
   });
-  it('锁定仍阻止编辑与采用，免费Chat未核对或有待处理请求时禁止新的文字请求', (): void => {
+  it('锁定及未保存前置仍阻止编辑与采用，空闲文字入口不需额外确认', (): void => {
     const locked = render(true);
     expect(editor(locked)).toContain('disabled'); expect(button(locked, '采用此候选')).toContain('disabled');
     for (const label of ['重新生成提示词', '检查正文']) {
       expect(button(locked, label)).toContain('disabled'); expect(button(render(false, true), label)).toContain('disabled');
     }
-    usePetStoryStore.setState({ freeChatConfirmed: false });
-    for (const label of ['重新生成提示词', '检查正文']) expect(button(render(), label)).toContain('disabled');
+    for (const label of ['重新生成提示词', '检查正文']) expect(button(render(), label)).not.toContain('disabled');
   });
-  it('确认剧本仍不能绕过当前会话媒体能力核对，核对后才启用图片生成', (): void => {
+  it('确认剧本后图片生成无需当前会话检查，上传保持独立', (): void => {
     project.storyApproval = { hash: 'TEST', at: now };
-    usePetStoryStore.setState({ capabilityCheckedInSession: false });
-    expect(button(render(), '生成图片')).toContain('disabled');
-    usePetStoryStore.setState({ capabilityCheckedInSession: true, capability: null });
-    expect(button(render(), '生成图片')).toContain('disabled');
+    expect(button(render(), '生成图片')).not.toContain('disabled');
+    usePetStoryStore.setState({ capability: null });
+    expect(button(render(), '生成图片')).not.toContain('disabled');
     usePetStoryStore.setState({ capability });
     expect(button(render(), '生成图片')).not.toContain('disabled');
     expect(button(render(), '上传图片')).not.toContain('disabled');
   });
   it('待采用的真实提示词回复可直接审阅，历史已采用或过期正文不冒充新候选', (): void => {
     project.materials![0].prompt.final = '';
-    usePetStoryStore.setState({ freeChatConfirmed: false, capability: null, capabilityCheckedInSession: false });
+    usePetStoryStore.setState({ capability: null});
     expect(button(render(), '查看并采用提示词')).not.toContain('disabled');
     for (const resultStatus of ['adopted', 'stale'] as const) {
       project.jobs[0].resultStatus = resultStatus;
       expect(render()).not.toContain('查看并采用提示词');
-      expect(button(render(), '生成提示词')).toContain('disabled');
+      expect(button(render(), '生成提示词')).not.toContain('disabled');
     }
   });
   it('结束等待保留原bound记录，素材重生与编辑计划恢复；无关待收取素材不锁本项', (): void => {

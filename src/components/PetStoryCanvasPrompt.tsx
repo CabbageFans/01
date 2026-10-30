@@ -60,7 +60,7 @@ const PromptReviewActions: React.FC<{ project: PetStoryProject; shot: PetStorySh
   const state = usePetStoryStore();
   const review = [...project.jobs].reverse().find((item): boolean => isSavedReviewResult(item, project.jobs) && reviewMatchesPrompt(item, `${shot.id}:${kind}`, shot.prompts[kind]?.final) && item.parsedResult?.issues?.some((issue): boolean => (issue.targetId === shot.id || issue.targetId === `${shot.id}:${kind}`) && (!issue.promptKind || issue.promptKind === kind)) === true);
   const revised = !!review && project.jobs.some((item): boolean => item.kind === 'revise' && item.parentJobId === review.id && item.shotId === shot.id && item.promptKind === kind);
-  const actionDisabled = disabled || generationBlocked || pending || !state.freeChatConfirmed;
+  const actionDisabled = disabled || generationBlocked || pending;
   const issues = review?.parsedResult?.issues?.filter((issue): boolean => (issue.targetId === shot.id || issue.targetId === `${shot.id}:${kind}`) && (!issue.promptKind || issue.promptKind === kind)) || [];
   return <><div className="canvas-prompt-actions"><Button size="small" disabled={actionDisabled} onClick={(): void => { void state.reviewContent({ shotId: shot.id, promptKind: kind }); }}>审查本项正文</Button></div>
     {review && <ReviewIssueSelection key={`${review.id}:${shot.id}:${kind}`} issues={issues} targetLabel={`镜头 ${shot.order} ${canvasPromptNames[kind]}`} disabled={actionDisabled} revised={revised} onRevise={async (selectedIssueIds: string[]): Promise<void> => state.reviseContent(review.id, { shotId: shot.id, promptKind: kind, selectedIssueIds })} />}</>;
@@ -124,7 +124,7 @@ export const CanvasPromptEditor: React.FC<{
     </div>}
     <PromptCandidate prompt={prompt} disabled={candidateDisabled} latestApplied={latestApplied} save={save} adopt={adopt} />
     <Button size="small" className="canvas-chat-button" disabled={disabled} onClick={(): void => { void state.openChatAdjustment({ shotId: shot.id, promptKind: kind }); }}>在豆包中调整</Button>
-    <details className="petstory-secondary-tools"><summary>更多提示词操作</summary><Button size="small" disabled={!text} onClick={copy} icon={<CopyOutlined />}>{copyStatus || '复制'}</Button><Button size="small" disabled={disabled || generationBlocked || pending || !state.freeChatConfirmed} onClick={(): void => { void state.optimize(shot.id, kind); }}>{pending ? `豆包 ${canvasJobLabel(task?.status)}` : '重新生成提示词'}</Button>
+    <details className="petstory-secondary-tools"><summary>更多提示词操作</summary><Button size="small" disabled={!text} onClick={copy} icon={<CopyOutlined />}>{copyStatus || '复制'}</Button><Button size="small" disabled={disabled || generationBlocked || pending} onClick={(): void => { void state.optimize(shot.id, kind); }}>{pending ? `豆包 ${canvasJobLabel(task?.status)}` : '重新生成提示词'}</Button>
       <PromptReviewActions project={project} shot={shot} kind={kind} disabled={disabled} generationBlocked={generationBlocked} pending={pending} />
     </details>
     {(job || candidateJob) && <details className="canvas-provenance"><summary>生成记录／诊断详情</summary>{job && <PromptProvenance job={job} task={task} />}{candidateJob && candidateJob.id !== job?.id && <PromptProvenance job={candidateJob} task={tasks.find((item): boolean => item.id === candidateJob.taskId)} />}</details>}

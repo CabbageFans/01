@@ -32,7 +32,7 @@ beforeEach((): void => {
     runtime: { runId: job.runId!, attempt: 1, stage: 'waiting_verification', message: 'TEST未发送', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { prompt: 'TEST离线请求', mode: 'chat', attachments: [] } } };
   project = { schemaVersion: 1, id: 'TEST-project', studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 1, updatedAt: now,
     source: { kind: 'script', url: '', status: 'review_required' }, assets: [], jobs: [job], mobileStory: { id: 'TEST-story', text: snapshot.mobileStory, importedAt: now }, plan: structuredClone(snapshot.plan) as PetStoryPlan };
-  usePetStoryStore.setState({ project, busy: false, freeChatConfirmed: true });
+  usePetStoryStore.setState({ project, busy: false});
   useTaskStore.setState({ tasks: [task], activeTaskId: null, accountBusy: {} });
 });
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
@@ -45,8 +45,7 @@ describe('已保存动态角色资料的正常编辑投影', (): void => {
       lulu: { identity: 'TEST已存噜噜身份', appearance: 'TEST已存噜噜造型' },
       lumei: { identity: 'TEST已存噜妹身份', appearance: 'TEST已存噜妹造型' },
       friend: { identity: 'TEST已存配角身份', appearance: 'TEST已存配角造型' },
-      supporting_saved: { identity: 'TEST无当前方案映射身份', appearance: 'TEST无当前方案映射造型' },
-    }, assetStyles: { common: 'TEST已存共同风格' } };
+      supporting_saved: { identity: 'TEST无当前方案映射身份', appearance: 'TEST无当前方案映射造型' }}, assetStyles: { common: 'TEST已存共同风格' } };
     project.promptProfile = profile;
     project.plan!.characters = [...project.plan!.characters.filter((character): boolean => character.id !== 'friend'), { ...project.plan!.characters[0], id: 'friend', name: 'TEST当前方案配角名称' }];
     const before = structuredClone(project.promptProfile); const change = vi.fn(); const save = vi.fn(async (): Promise<void> => undefined);
@@ -62,8 +61,7 @@ describe('已保存动态角色资料的正常编辑投影', (): void => {
   it('任意已配置演员的别名顺序与主配角职责原样显示，控件修改沿profile草稿保存且可清空旧可选字段', (): void => {
     const id = 'TEST-dynamic-performer';
     let profile: PetStoryPromptProfile = { style: 'TEST共同风格', characters: {
-      [id]: { identity: 'TEST演员既有身份', appearance: 'TEST演员既有造型', aliases: ['来源称谓乙', ' 原始别名 '], role: 'supporting' },
-    } };
+      [id]: { identity: 'TEST演员既有身份', appearance: 'TEST演员既有造型', aliases: ['来源称谓乙', ' 原始别名 '], role: 'supporting' }} };
     project.promptProfile = structuredClone(profile); const savedBefore = structuredClone(project.promptProfile);
     const save = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ project, savePromptProfile: save });
     const render = (): string => renderToStaticMarkup(<PromptProfileEditor project={project} profile={profile} setProfile={(value: PetStoryPromptProfile): void => { profile = value; }} disabled={false} onDirtyChange={(): void => undefined} />);

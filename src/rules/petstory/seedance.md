@@ -1,6 +1,6 @@
 # Seedance · petstory-asset-first-v3
 
-规则方法来源：silentbuilds/seedance-prompt-forge，commit 33fd93e0dbd1d5ccf85e4bb819300101d2e7284b；SKILL.md、references/reference-materials.md、advanced-modes.md、checklist.md。MIT，完整许可保留于本目录。上游面向 Dreamina，不能把其模型、时长、数量或免费权益当豆包网页事实，不执行脚本或外部模型。
+规则方法来源：silentbuilds/seedance-prompt-forge，commit 33fd93e0dbd1d5ccf85e4bb819300101d2e7284b；SKILL.md、references/reference-materials.md、advanced-modes.md、checklist.md。MIT，完整许可保留于本目录。上游面向 Dreamina，不能把其模型、时长或数量当豆包网页事实，不执行脚本或外部模型。
 
 首帧视频：实际选定首帧定义起始外观、构图、站位、道具状态，正文描述从该状态开始的表演和变化，不重设计起点。
 首尾帧视频：实际首槽绑定选定首帧，尾槽绑定相应尾帧；描述中间主要动作如何到达目标姿态、视线和持物状态，不以“自然过渡”替代过程。普通双参考不能冒充原生首尾槽位。
