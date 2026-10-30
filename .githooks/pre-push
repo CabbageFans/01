@@ -1,0 +1,7 @@
+#!/bin/sh
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in
+    0000000000000000000000000000000000000000) continue ;;
+  esac
+  node "$(git rev-parse --show-toplevel)/scripts/check-commit-attribution.mjs" --history "$local_sha" || exit 1
+done

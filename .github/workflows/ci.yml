@@ -7,6 +7,20 @@ on:
     branches: [main]
 
 jobs:
+  commit-attribution:
+    name: Commit attribution
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/check-commit-attribution.mjs --history HEAD
+
   validate:
     runs-on: windows-latest
     steps:

@@ -116,6 +116,12 @@ Dola 当前只有账号平台字段、Session/URL 边界和 CSV 账号消歧接�
 - 使用 Tailwind 工具类优先，必要时补充自定义 CSS
 - Ant Design 组件通过 ConfigProvider 统一深色主题
 
+## 提交与贡献者署名
+
+- 用户明确禁止将 `dorakoo` 加入本仓库 Contributors。后续提交不得使用该作者、提交者或 `Co-authored-by` 署名，不得合入含这些署名的提交；不要为自动化添加虚构共同作者。
+- 使用实际贡献者身份；当前维护账号为 `CabbageFans`。提交前运行 `node scripts/check-commit-attribution.mjs --identity --history HEAD`，新克隆运行 `git config --local core.hooksPath .githooks` 启用提交和推送检查。CI 的 `Commit attribution` 检查完整历史，默认分支必须通过该检查。
+- Contributors 由 GitHub 根据提交自动统计，不手写名单、不伪造他人贡献，也不因这条规则删除上游许可、版权或历史来源说明。若统计与当前提交不一致，先核对 GitHub 缓存，不擅自重复改写历史。详见 `docs/COMMIT_ATTRIBUTION.md`。
+
 ## 发布与更新说明
 
 任何新的版本 Release（创建 `v*` Tag / GitHub Release）**必须**在 Release 包中注明完成了什么更新：
