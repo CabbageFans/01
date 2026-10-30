@@ -38,12 +38,11 @@ beforeEach((): void => {
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
 
 describe('C12显式选择同一目标的修订问题', (): void => {
-  it('素材、单镜和全局界面默认只勾错误，同目标建议保留但不默认发送', (): void => {
+  it('素材页隐藏文字诊断，单镜和全局仍保留原修订选择规则', (): void => {
     const material = renderToStaticMarkup(<PetStoryMaterials project={project} disabled={false} />);
-    expect(material).toContain('修订所选 1 项问题');
-    const inputs = material.match(/<input\b[^>]*>/g) || [];
-    expect(inputs.find((entry): boolean => entry.includes('material-error'))).toContain('checked');
-    expect(inputs.find((entry): boolean => entry.includes('material-suggestion'))).not.toContain('checked');
+    expect(material).not.toContain('修订所选');
+    expect(material).not.toContain('TEST证据material-error');
+    expect(material).toContain('生成图片');
     const frame = renderToStaticMarkup(<CanvasPromptEditor project={project} shot={project.plan!.shots[0]} kind="firstFrame" disabled={false} generationBlocked={false} dirtyChanged={(): void => undefined} />);
     expect(frame).toContain('修订所选 0 项问题'); expect(frame).not.toContain('TEST影响video-error');
     const runtime = renderToStaticMarkup(<PetStoryRuntime project={project} disabled={false} />);
@@ -89,11 +88,11 @@ describe('审查逐目标送审正文快照', (): void => {
     const frame = renderToStaticMarkup(<CanvasPromptEditor project={project} shot={project.plan!.shots[0]} kind="video" disabled={false} generationBlocked={false} dirtyChanged={(): void => undefined} />);
     expect(frame).not.toContain('TEST证据video-error');
     expect(frame).not.toContain('修订所选');
-    expect(renderToStaticMarkup(<PetStoryMaterials project={project} disabled={false} />)).toContain('修订所选 1 项问题');
+    expect(renderToStaticMarkup(<PetStoryMaterials project={project} disabled={false} />)).not.toContain('修订所选');
   });
   it('素材正文变化时卡片不再套用旧问题，实体ID问题仍按素材canonical ID比对', (): void => {
     project.jobs[0].parsedResult!.issues![0].targetId = 'location';
-    expect(renderToStaticMarkup(<PetStoryMaterials project={project} disabled={false} />)).toContain('TEST证据material-error');
+    expect(renderToStaticMarkup(<PetStoryMaterials project={project} disabled={false} />)).not.toContain('TEST证据material-error');
     project.materials![0].prompt.final = 'TEST新采用素材';
     const material = renderToStaticMarkup(<PetStoryMaterials project={project} disabled={false} />);
     expect(material).not.toContain('TEST证据material-error');

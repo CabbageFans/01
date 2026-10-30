@@ -8,13 +8,15 @@
  * - per-account 执行状态监听，自动路由任务到对应 webview
  */
 
-import { readAcceptedImageOutputs, bindPetStoryReferences, verifyPetStoryReferenceBindings, checkPetStoryPageGuard, readPetStoryComposer, uploadPetStoryImages, verifyPetStoryUploads, PetStoryControlError } from '../utils/doubaoBridge';
+import { readAcceptedImageOutputs, bindPetStoryReferences, verifyPetStoryReferenceBindings, checkPetStoryPageGuard, readPetStoryComposer, waitForPetStoryImageComposer, uploadPetStoryImages, verifyPetStoryUploads, PetStoryControlError } from '../utils/doubaoBridge';
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { Button, Input, message, Modal, notification, Popover, Switch, Tooltip } from 'antd';
 import type { Account, AccountAvailability, AccountAvailabilitySource, Task, TaskUpdateInput } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { usePetStoryStore } from '../store/usePetStoryStore';
+import { isBackgroundImageOperationTask } from '../utils/petstoryBackground';
+import type { BackgroundNativeInput } from '../utils/doubaoBridge';
 import { readPetStoryConversationReplies } from '../utils/petstoryConversationReplies';
 import type { PetStoryConversationReply } from '@doubao-studio/contracts';
 import type { AutomationState } from '../store/useTaskStore';
@@ -723,11 +725,41 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
       }
     };
+    /** 素材页先保存只读观察意图；预检提前退出时必须收回没有观察器的等待状态。 */
+    const handleSubmissionReconcileSafely = async (event: Event): Promise<void> => {
+      const taskId = (event as CustomEvent<{ taskId?: string }>).detail?.taskId;
+      if (!taskId || submissionReconcileRef.current.has(taskId)) return;
+      const initial = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+      const initialRunId = initial?.runtime?.runId; const initialSubmittedAt = initial?.runtime?.submittedAt;
+      const imageOperation = initial?.mode === 'image' && initial.status === 'manual_submission_observing'
+        && !!initial.runtime?.runId && !!initial.runtime.submittedAt
+        && isBackgroundImageOperationTask(usePetStoryStore.getState().project, taskId);
+      if (!imageOperation) { await handleSubmissionReconcile(event); return; }
+      try { await handleSubmissionReconcile(event); }
+      catch { message.error('图片原结果暂时无法核对；未重新发送'); }
+      finally {
+        // 新运行或已有观察器仍拥有任务时，不覆盖其状态；只收束本次没有启动的观察。
+        if (!abortControllersRef.current.has(taskId)) {
+          submissionReconcileRef.current.delete(taskId);
+          const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+          if (latest?.status === 'manual_submission_observing' && latest.runtime?.runId === initialRunId
+            && latest.runtime?.submittedAt === initialSubmittedAt) {
+            const reason = '原图片提交尚未核对，请查看豆包对话后继续；未重新发送';
+            try {
+              const saved = await useTaskStore.getState().updateTaskRuntime(taskId, { status: 'paused',
+                errorInfo: { code: 'submission_uncertain', message: reason, recoverable: true, detectedAt: new Date().toISOString() },
+                runtime: { stage: 'paused', message: reason, lastHeartbeatAt: new Date().toISOString() } });
+              if (!saved) message.error('图片核对暂停状态未保存，请稍后重试');
+            } catch { message.error('图片核对暂停状态未保存，请稍后重试'); }
+          }
+        }
+      }
+    };
     window.addEventListener('mark-manual-submission', handleManualSubmission);
-    window.addEventListener('reconcile-task-submission', handleSubmissionReconcile);
+    window.addEventListener('reconcile-task-submission', handleSubmissionReconcileSafely);
     return () => {
       window.removeEventListener('mark-manual-submission', handleManualSubmission);
-      window.removeEventListener('reconcile-task-submission', handleSubmissionReconcile);
+      window.removeEventListener('reconcile-task-submission', handleSubmissionReconcileSafely);
     };
   }, []);
 
@@ -1412,7 +1444,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     // 仅选定自由回复的修订增加导航前的草稿保护。
     const selectedReplyRepair = mode === 'chat' && (useTaskStore.getState().tasks.some((item): boolean => item.runtime?.chatAdjustmentGuard?.active === true && item.runtime.chatAdjustmentGuard.allowedTaskId === taskId)
       || !!usePetStoryStore.getState().project?.jobs.some((job): boolean => job.taskId === taskId && !!job.repairReplySource));
-    const ownedRepairDraft = resumableRepairDraft(initialTask, prompt, selectedReplyRepair);
+    const backgroundImageTask = isBackgroundImageOperationTask(usePetStoryStore.getState().project, taskId);
+    const imageRuntime = initialTask?.runtime;
+    const ownedImageDraft = backgroundImageTask && initialTask?.mode === 'image' && initialTask.executionIntent === 'armed'
+      && initialTask.promptReadback === 'exact' && imageRuntime && imageRuntime.attempt >= 2
+      && imageRuntime.input.prompt === prompt && imageRuntime.input.mode === mode && initialTask.prompt === prompt
+      && !imageRuntime.submittedAt && !imageRuntime.acceptanceObservation && !initialTask.outputs.length ? prompt : undefined;
+    const ownedRepairDraft = ownedImageDraft || resumableRepairDraft(initialTask, prompt, selectedReplyRepair || backgroundImageTask);
     const petstoryTask = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.petstory;
     const strictPrompt = !!petstoryTask || useTaskStore.getState().tasks.find((item) => item.id === taskId)?.promptReadback === 'exact';
     let petstoryGuard: import('@doubao-studio/contracts').PetStoryExecutionGuard | undefined;
@@ -1533,8 +1571,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       let conversationTextAfterSubmit = '';
       setAccountAutomationState(accountId, 'injecting', '正在创建新对话...', 'new_conversation');
       if (selectedReplyRepair && !useTaskStore.getState().tasks.some((item): boolean => item.runtime?.chatAdjustmentGuard?.active === true && item.runtime.chatAdjustmentGuard.allowedTaskId === taskId)) throw new SubmissionSafetyPauseError('本次豆包调整已结束或移交已收回；修订未导航、未发送');
-      const newConversationResult = await startNewConversation(webview, 20_000, mode === 'chat', selectedReplyRepair, ownedRepairDraft);
+      const newConversationResult = await startNewConversation(webview, 20_000, mode === 'chat', selectedReplyRepair || backgroundImageTask, ownedRepairDraft);
       if (!newConversationResult.ok) {
+        if (backgroundImageTask) throw new AccountAvailabilityPauseError('豆包当前有未发送内容、正在回复或输入区尚未就绪，请处理后继续这次图片任务；本次未发送', 'page_unrecognized');
         if (selectedReplyRepair) throw new AccountAvailabilityPauseError(`修订已暂停，当前豆包输入尚未就绪（${newConversationResult.reason || 'PAGE_UNKNOWN'}）；请处理未发送草稿或等待回复结束后继续原修订，未发送`, 'page_unrecognized');
         const failedAvailability = await performAvailabilityCheck(accountId, webview, 'pre_task');
         if (failedAvailability.state !== 'ready') {
@@ -1665,7 +1704,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
         if (petstoryGuard) {
           if (mode === 'video') { await readPetStoryComposer(webview, { selectMode: petstoryGuard.mode }); await pause(250); }
-          checkPetStoryPageGuard(await readPetStoryComposer(webview), petstoryGuard, mode === 'video');
+          checkPetStoryPageGuard(mode === 'image' ? await waitForPetStoryImageComposer(webview, controller.signal) : await readPetStoryComposer(webview), petstoryGuard, mode === 'video');
         }
         await uploadTaskImages();
         // 有参考音频时上传（仅视频模式）
@@ -1931,7 +1970,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       await persistVideoReadiness('submission_controls');
 
       // 只读焦点／命中检查先于提交意图；明确未就绪不会留下“可能已发送”的记录。
-      if (!authorizationTriggeredSubmission && !(await prepareNativeSubmission(webview)).ok) {
+      const backgroundInput: BackgroundNativeInput | undefined = backgroundImageTask ? {
+        taskId,
+        isCurrent: (): boolean => isBackgroundImageOperationTask(usePetStoryStore.getState().project, taskId)
+          && useTaskStore.getState().tasks.some((task): boolean => task.id === taskId && task.assignedAccountId === accountId && task.runtime?.runId === expectedRunId && task.status === 'executing')
+          && automationEngine.ownsAccountController(taskId, accountId, controller),
+      } : undefined;
+      if (!authorizationTriggeredSubmission && !(await prepareNativeSubmission(webview, undefined, backgroundInput)).ok) {
         throw new AccountAvailabilityPauseError('当前窗口焦点、输入区或发送控件命中尚未就绪；未记录提交意图、未发送，请处理窗口后继续原任务', 'page_unrecognized');
       }
 
@@ -1975,7 +2020,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
                   && current.runtime?.input.mode === mode && automationEngine.ownsAccountController(taskId, accountId, controller);
               },
               verifyLease: (): Promise<boolean> => automationEngine.confirmSubmissionOwnership(taskId, accountId, controller),
-            }),
+            }, backgroundInput),
             new Promise<boolean>((_, reject): void => {
               dispatchTimeout = setTimeout((): void => { abortDispatch(); reject(new Error('提交超时')); }, 10_000);
             }),

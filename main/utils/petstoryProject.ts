@@ -66,9 +66,32 @@ export function validateProject(value: unknown, readHistorical: boolean = false)
     if (shot.sceneReferenceAssetIds?.some((id: string): boolean => !result.assets.some((a): boolean => a.id === id && a.kind === 'scene' && (a.shotId === shot.id || !!a.materialId)))) throw new Error('场景参考图错绑');
   }
   validateMaterials(result);
+  validateImageOperations(result);
   validateAdoptedImages(result);
   validateProduction(result, ids);
   return result;
+}
+
+/** 操作台账兼容历史对象；具体执行时再核对当前事实与原文件。 */
+function validateImageOperations(project: PetStoryProject): void {
+  if (project.imageOperations === undefined) return;
+  if (!Array.isArray(project.imageOperations)) throw new Error('图片操作记录无效');
+  const ids = new Set<string>(); const requests = new Set<string>();
+  for (const operation of project.imageOperations) {
+    if (!operation || typeof operation.id !== 'string' || !operation.id || ids.has(operation.id)
+      || typeof operation.requestId !== 'string' || !/^[a-zA-Z0-9_-]{8,100}$/.test(operation.requestId) || requests.has(operation.requestId)
+      || !['generate', 'modify'].includes(operation.mode) || !['preparing', 'generating', 'saving', 'complete', 'failed'].includes(operation.stage)
+      || !Number.isFinite(Date.parse(operation.createdAt)) || !/^[a-f0-9]{64}$/.test(operation.basisHash)
+      || !validImageOperationTarget(operation.target)) throw new Error('图片操作授权或进度记录无效');
+    if (operation.mode === 'modify' && (typeof operation.feedback !== 'string' || !operation.feedback.trim() || operation.feedback.length > 4000
+      || !/^[a-f0-9]{64}$/.test(operation.baseSha256 || '') || !project.assets.some((asset): boolean => asset.id === operation.baseAssetId && imageTargetMatches(asset, operation.target)))) throw new Error('图片修改基图或反馈记录无效');
+    if (operation.chatJobId && !project.jobs.some((job): boolean => job.id === operation.chatJobId && job.materialId === operation.target.materialId)) throw new Error('图片准备原任务记录无效');
+    if (operation.outputAssetId && !project.assets.some((asset): boolean => asset.id === operation.outputAssetId && imageTargetMatches(asset, operation.target))) throw new Error('图片输出与目标素材不符');
+    ids.add(operation.id); requests.add(operation.requestId);
+  }
+}
+function validImageOperationTarget(target: PetStoryImageTarget): boolean {
+  return !!target && !!target.materialId !== !!target.shotId && (!target.shotId || ['firstFrame', 'lastFrame'].includes(target.kind || ''));
 }
 
 function validateAdoptedImages(result: PetStoryProject): void {

@@ -29,7 +29,7 @@ class ProbeNode {
   dispatchEvent(event: { type: string; options?: { buttons?: number } }): boolean { this.events.push(event.type); this.eventOptions.push({ type: event.type, buttons: event.options?.buttons }); if (event.type === this.failEvent) throw new Error('TEST partial event'); return true; }
 }
 class ProbeEvent { constructor(readonly type: string, readonly options: unknown) {} }
-interface ProbeOptions { exact?: boolean; icon?: boolean; occluded?: boolean; outside?: boolean; focused?: boolean; moving?: boolean; hostOutside?: boolean; hostButtonOccluded?: boolean }
+interface ProbeOptions { exact?: boolean; icon?: boolean; occluded?: boolean; outside?: boolean; focused?: boolean; moving?: boolean; hostOutside?: boolean; hostButtonOccluded?: boolean; parked?: boolean; inert?: boolean }
 function fixture(options: ProbeOptions = {}): { webview: WebviewHandle; native: ReturnType<typeof vi.fn>; events: string[]; button: ProbeNode; setOccluded: (value: boolean) => void; setHostButtonOccluded: (value: boolean) => void; setHostBounds: (value: Rect) => void; setFocused: (value: boolean) => void } {
   const events: string[] = []; let occluded = !!options.occluded; let hostButtonOccluded = !!options.hostButtonOccluded;
   let focused = options.focused !== false; let hostBounds = rect(options.hostOutside ? 2000 : 100, 80, 800, 600);
@@ -46,6 +46,7 @@ function fixture(options: ProbeOptions = {}): { webview: WebviewHandle; native: 
   const pageWindow = { innerWidth: 800, innerHeight: 600, getComputedStyle: (): object => ({ visibility: 'visible', display: 'block', pointerEvents: 'auto', opacity: '1', backgroundColor: 'rgb(20, 30, 180)' }) };
   const native = vi.fn(async (): Promise<void> => undefined);
   const webview: WebviewHandle = { focus: vi.fn(), isConnected: true, getBoundingClientRect: (): Rect => hostBounds,
+    closest: (): Element | null => options.parked ? { hasAttribute: (name: string): boolean => name === 'inert' && !!options.inert } as unknown as Element : null,
     executeJavaScript: vi.fn(async (code: string): Promise<unknown> => runInNewContext(code, { document: doc, window: pageWindow, Date, requestAnimationFrame: (callback: (at: number) => void): number => { callback(0); return 1; }, PointerEvent: ProbeEvent, MouseEvent: ProbeEvent })),
     sendInputEvent: native, loadURL: vi.fn(), getURL: (): string => '' };
   vi.stubGlobal('window', { innerWidth: 1200, innerHeight: 800, electronAPI: { system: { prepareNativeInput: async (): Promise<boolean> => true } } });
@@ -92,6 +93,30 @@ describe('single verified submission requires focus and a stable visible compose
     expect(test.native.mock.calls.map((call): unknown => call[0])).toEqual([
       { type: 'mouseMove', x: 330, y: 230 }, { type: 'mouseDown', x: 330, y: 230, button: 'left', clickCount: 1 }, { type: 'mouseUp', x: 330, y: 230, button: 'left', clickCount: 1 },
     ]);
+  });
+  it('sends through the same native transport from an owned non-inert parked image host', async (): Promise<void> => {
+    const test = fixture({ hostOutside: true, parked: true }); const attempt = safety();
+    expect(await submitPromptWithNativeClick(test.webview, 'native', attempt.guard, { taskId: 'image-operation-task', isCurrent: (): boolean => true })).toBe(true);
+    expect(attempt.verifyLease).toHaveBeenCalledOnce();
+    expect(test.native.mock.calls.map((call): string => (call[0] as { type: string }).type)).toEqual(['mouseMove', 'mouseDown', 'mouseUp']);
+    expect(test.events).toEqual([]);
+  });
+  it.each([{ inert: true }, { parked: false }, { focused: false }, { occluded: true }, { outside: true }])('parked image mode still rejects invalid host, focus and guest target %j', async (option): Promise<void> => {
+    const test = fixture({ hostOutside: true, parked: true, ...option });
+    expect(await submitPromptWithNativeClick(test.webview, 'native', safety().guard, { taskId: 'image-operation-task', isCurrent: (): boolean => true })).toBe(false);
+    expect(test.native).not.toHaveBeenCalled(); expect(test.events).toEqual([]);
+  });
+  it('revoking the image operation during lease verification prevents background dispatch', async (): Promise<void> => {
+    const test = fixture({ hostOutside: true, parked: true }); const attempt = safety(); let current = true;
+    attempt.verifyLease.mockImplementation(async (): Promise<boolean> => { current = false; return true; });
+    expect(await submitPromptWithNativeClick(test.webview, 'native', attempt.guard, { taskId: 'image-operation-task', isCurrent: (): boolean => current })).toBe(false);
+    expect(test.native).not.toHaveBeenCalled(); expect(test.events).toEqual([]);
+  });
+  it('background authorization never enables guest fallback or skips the submission lease', async (): Promise<void> => {
+    const test = fixture({ hostOutside: true, parked: true }); const background = { taskId: 'image-operation-task', isCurrent: (): boolean => true };
+    expect(await submitPromptWithNativeClick(test.webview, 'guest', safety().guard, background)).toBe(false);
+    expect(await submitPromptWithNativeClick(test.webview, 'native', undefined, background)).toBe(false);
+    expect(test.native).not.toHaveBeenCalled(); expect(test.events).toEqual([]);
   });
   it('rejects a host overlay covering only the mapped send point while the webview center remains visible', async (): Promise<void> => {
     const test = fixture({ hostButtonOccluded: true }); expect((await prepareNativeSubmission(test.webview)).ok).toBe(false);

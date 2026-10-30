@@ -43,7 +43,7 @@ describe('自由对话的具体回复选择与确认', (): void => {
       dialog = (await screen.findByText('镜头 1 · 首帧 · 选择图片')).closest('[role="dialog"]') as HTMLElement;
       expect(within(dialog).queryByText('TEST 第二张原图下载失败，先取得的候选保留')).toBeNull(); expect(adopt).not.toHaveBeenCalled();
     }
-    const confirm = within(dialog).getByRole('button', { name: '采用这张' }); await waitFor((): void => expect(confirm.hasAttribute('disabled')).toBe(false)); fireEvent.click(confirm);
+    const confirm = within(dialog).getByRole('button', { name: '满意，采用图片' }); await waitFor((): void => expect(confirm.hasAttribute('disabled')).toBe(false)); fireEvent.click(confirm);
     await waitFor((): void => expect(adopt).toHaveBeenCalledExactlyOnceWith('shot_1', 'firstFrame', 'TEST-image-candidate'));
   });
 

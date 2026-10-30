@@ -4,7 +4,7 @@
  *
  * 消费方必须使用 `import type` 导入，禁止普通 import。
  */
-export type { PetStoryImageTarget, PetStoryImageReview } from './dto/petstory';
+export type { PetStoryImageTarget, PetStoryImageReview, PetStoryImageOperation, PetStoryImageOperationRequest, PetStoryImageOperationResult } from './dto/petstory';
 
 export type {
   GenerationMode,

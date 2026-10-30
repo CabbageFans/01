@@ -356,13 +356,14 @@ describe('产品运行时按钮到主进程请求', (): void => {
     expect(retryUnsubmitted).not.toHaveBeenCalled(); expect(start).not.toHaveBeenCalled();
     expect(tasks).toHaveLength(1); expect(project.jobs).toHaveLength(1); expect(usePetStoryStore.getState().error).toContain('请只读核对');
   });
-  it('基础素材卡有真实编辑计划表单且查看表单不调用豆包或媒体', (): void => {
+  it('基础素材卡只显示图片操作，查看素材不调用豆包或媒体', (): void => {
     project.materials = [{ id: 'scene:location', entityId: 'location', name: 'TEST地点', kind: 'scene', designHash: 'TEST', selectedAssetId: 'TEST-base', prompt: { original: 'TEST', optimized: 'TEST', final: 'TEST', edited: false, rulesVersion: 'TEST' } }];
     project.assets = [{ id: 'TEST-base', kind: 'scene', materialId: 'scene:location', relativePath: 'materials/TEST.png' }];
     project.storyApproval = { hash: 'TEST', at: now }; usePetStoryStore.setState({ project });
     const html = renderToStaticMarkup(React.createElement(PetStoryMaterials, { project, disabled: false }));
-    expect(html).toContain('变体／局部编辑计划'); expect(html).toContain('scene:location编辑基准图片'); expect(html).toContain('scene:location编辑变化'); expect(html).toContain('scene:location编辑保留项'); expect(html).toContain('scene:location编辑适用范围');
-    expect(html).toContain('豆包生成编辑计划候选（不生成图片）'); expect(prepareRuntime).not.toHaveBeenCalled(); expect(generateMaterials).not.toHaveBeenCalled();
+    expect(html).toContain('查看图片'); expect(html).toContain('图片待确认');
+    for (const text of ['变体／局部编辑计划', '生成提示词', '采用提示词', '更多操作', '查看与编辑图片提示词', '生成记录／诊断详情']) expect(html).not.toContain(text);
+    expect(prepareRuntime).not.toHaveBeenCalled(); expect(generateMaterials).not.toHaveBeenCalled();
   });
   it('补齐入口只使用主进程当前资格清单，已手改且有新候选时不自行循环生成', async (): Promise<void> => {
     const target = { shotId: 'shot_3', kind: 'video' as const };

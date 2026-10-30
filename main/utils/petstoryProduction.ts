@@ -14,7 +14,7 @@ import { productionCapability } from './petstoryCapability';
 import { extractActualEndFrame, mediaDigest, validatePetStoryMedia } from './petstoryMedia';
 import { requirePromptEligibility, promptWritingTarget } from './petstoryEligibility';
 import { pendingChatConflicts } from './petstoryPending';
-import { imageTargetBasis, isPetStoryImageAdopted, selectedShotImageId } from './petstoryImageReview';
+import { compileImageFeedback, imageTargetBasis, imageTargetMatches, isPetStoryImageAdopted, selectedShotImageId } from './petstoryImageReview';
 
 /** 页面绑定属于本次上传文件与当前编译片段，不接受导出文本作为绑定证据。 */
 function validatePageBinding(p: PetStoryProject, step: PetStoryProductionStep, b: PetStoryPageBinding, index: number): void {
@@ -85,6 +85,11 @@ function productionStepTarget(step?: Pick<PetStoryProductionStep, 'materialId' |
 }
 function productionResumeTarget(production: NonNullable<PetStoryProject['production']>, pending?: PetStoryProductionStep): PetStoryRuntimeTarget | undefined { return production.target || productionStepTarget(pending); }
 function productionShotScope(production: NonNullable<PetStoryProject['production']>): string[] | undefined { return production.target ? [production.target.shotId] : undefined; }
+function isFeedbackBase(p: PetStoryProject, asset: PetStoryAsset, operationId?: string): boolean {
+  const operation = operationId ? p.imageOperations?.find((item): boolean => item.id === operationId && item.mode === 'modify') : undefined;
+  return !!operation && p.production?.imageOperationId === operation.id && operation.baseAssetId === asset.id
+    && operation.baseSha256 === asset.validation?.sha256 && imageTargetMatches(asset, operation.target);
+}
 function checkPlannedReferences(p: PetStoryProject, capability: PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): void {
   for (const shot of requireValue(p.plan).shots) {
     const mode = resolvePetStoryMode(shot, capability, fallbacks[shot.id]).resolvedMode;
@@ -287,7 +292,8 @@ export class PetStoryProductionService {
   }
   private resetPageBindingForRetry(p: PetStoryProject, pending: PetStoryProductionStep): PetStoryCompiledPrompt | undefined {
     if (!pending.pageBindings) return undefined;
-    const source = pending.materialId ? this.compileMaterial(p, pending.materialId)
+    const operation = p.imageOperations?.find((item): boolean => item.id === p.production?.imageOperationId && item.mode === 'modify');
+    const source = operation ? compileImageFeedback(p, operation) : pending.materialId ? this.compileMaterial(p, pending.materialId)
       : compilePrompt(p, requireValue(pending.shotId), pending.kind as 'firstFrame' | 'lastFrame' | 'video', pending.kind === 'video' ? this.checked(p).shots[requireValue(pending.shotId)].resolvedMode : undefined);
     if (pending.compiledPrompt) pending.pageBindingHistory = [...(pending.pageBindingHistory || []), { runId: pending.runId, compiledPrompt: pending.compiledPrompt, bindings: pending.pageBindings }];
     pending.pageBindings = undefined; pending.compiledPrompt = source; pending.inputHash = hash(source.text);
@@ -331,7 +337,7 @@ export class PetStoryProductionService {
     media.actualEndFrameId = frameId; media.startFromPreviousEnd = sourceVideo;
     if (!p.materials) media.firstFrameId = frameId;
   }
-  async generateMaterials(id: string, revision: number, materialIds: string[], capability?: PetStoryCapability): Promise<PetStoryProductionResult> {
+  async generateMaterials(id: string, revision: number, materialIds: string[], capability?: PetStoryCapability, imageOperationId?: string): Promise<PetStoryProductionResult> {
     const p = await this.projects.read(id);
     capability = productionCapability(p, capability);
     if (revision !== p.revision) throw new Error('项目版本变化，请重新查看素材');
@@ -351,12 +357,33 @@ export class PetStoryProductionService {
       ordered.push(id);
     };
     materialIds.forEach(append);
-    p.production = { phase: 'materials', materialIds: ordered, state: 'running', planHash: productionPlanHash(requireValue(p.plan)), approvedAt: new Date().toISOString(), capability, fallbacks: {}, shots: {}, steps: [], message: '基础图已单独授权，下载后仍需用户接受图片' };
+    p.production = { phase: 'materials', materialIds: ordered, imageOperationId, state: 'running', planHash: productionPlanHash(requireValue(p.plan)), approvedAt: new Date().toISOString(), capability, fallbacks: {}, shots: {}, steps: [], message: '基础图已单独授权，下载后仍需用户接受图片' };
     const saved = await this.projects.write(p); this.authorized.add(id);
     return { success: true, project: saved };
   }
   private compileMaterial(p: PetStoryProject, materialId: string): PetStoryCompiledPrompt {
     return compileMaterialPrompt(p, materialId);
+  }
+  /** 精确选图编辑复用生产、上传、单次发送和下载；基图无需先正式采用。 */
+  async generateImageFeedback(id: string, revision: number, operationId: string, capability?: PetStoryCapability): Promise<PetStoryProductionResult> {
+    const p = await this.projects.read(id);
+    if (p.revision !== revision) throw new Error('项目版本变化，请刷新后修改图片');
+    requireMaterialInventory(p);
+    const operation = requireValue(p.imageOperations?.find((item): boolean => item.id === operationId && item.mode === 'modify'), '本次图片修改授权不存在');
+    capability = productionCapability(p, capability);
+    this.validateRequestContext(p, capability, operation.target.materialId ? { materialId: operation.target.materialId } : { shotId: operation.target.shotId, promptKind: operation.target.kind });
+    if (p.production) {
+      if (p.production.state !== 'complete') throw new Error('已有制作任务尚未结束，请先处理原任务');
+      p.productionHistory = [...(p.productionHistory || []), p.production];
+    }
+    compileImageFeedback(p, operation);
+    p.production = { phase: operation.target.materialId ? 'materials' : 'shots', imageOperationId: operation.id,
+      materialIds: operation.target.materialId ? [operation.target.materialId] : undefined,
+      target: operation.target.shotId ? { shotId: operation.target.shotId, kind: operation.target.kind } : undefined,
+      materialHash: approvedMaterialHash(p, operation.target.shotId ? [operation.target.shotId] : undefined),
+      state: 'running', planHash: productionPlanHash(requireValue(p.plan)), approvedAt: new Date().toISOString(), capability, fallbacks: {}, shots: this.shotMedia(p), steps: [], message: '正在按你的要求修改图片…' };
+    const saved = await this.projects.write(p); this.authorized.add(id);
+    return { success: true, project: saved };
   }
   async recordPageBindings(id: string, taskId: string, runId: string, bindings: PetStoryPageBinding[]): Promise<PetStoryProductionResult> {
     const p = await this.projects.read(id); const production = this.checked(p);
@@ -378,10 +405,10 @@ export class PetStoryProductionService {
     if (bound.prompt !== compiled.text || bound.runtime?.input.prompt !== compiled.text) throw new Error('网页引用保存回读不一致，零提交');
     return { success: true, project: saved, compiledPrompt: compiled };
   }
-  async assetFile(p: PetStoryProject, id: string, kind: 'image' | 'video'): Promise<string> {
+  async assetFile(p: PetStoryProject, id: string, kind: 'image' | 'video', feedbackOperationId?: string): Promise<string> {
     const asset = p.assets.find((a): boolean => a.id === id);
     if (!asset || (kind === 'video' ? asset.kind !== 'video' : asset.kind === 'video')) throw new Error('素材未登记或类别不符');
-    if (kind === 'image' && !isPetStoryImageAdopted(p, asset)) throw new Error('这张图片尚未采用或需要复核，请先预览确认');
+    if (kind === 'image' && !isPetStoryImageAdopted(p, asset) && !isFeedbackBase(p, asset, feedbackOperationId)) throw new Error('这张图片尚未采用或需要复核，请先预览确认');
     if (kind === 'video') {
       const step = [p.production, ...(p.productionHistory || [])].flatMap((r): PetStoryProductionStep[] => r?.steps || []).find((s): boolean => s.kind === 'video' && s.assetId === asset.id && s.status === 'complete');
       const task = step ? this.originalTask(p, step) : undefined;
@@ -425,10 +452,11 @@ export class PetStoryProductionService {
   }
   private async validateStepInputs(p: PetStoryProject, step: PetStoryProductionStep, task: Task): Promise<void> {
     const production = this.checked(p);
-    if (production.phase !== 'materials') await this.checkApprovedFiles(p, productionShotScope(production));
+    const feedback = p.imageOperations?.find((item): boolean => item.id === production.imageOperationId && item.mode === 'modify');
+    if (production.phase !== 'materials' && !feedback) await this.checkApprovedFiles(p, productionShotScope(production));
     else requireMaterialInventory(p);
     this.validateCompiledStep(p, step, task);
-    const files = await Promise.all(step.attachmentAssetIds.map((id): Promise<string> => this.assetFile(p, id, 'image')));
+    const files = await Promise.all(step.attachmentAssetIds.map((id): Promise<string> => this.assetFile(p, id, 'image', feedback?.id)));
     if (JSON.stringify(files) !== JSON.stringify(task.attachments || [])) throw new Error('实际上传顺序与批准素材绑定不一致');
     if (task.runtime && (task.runtime.input.prompt !== task.prompt || JSON.stringify(task.runtime.input.attachments) !== JSON.stringify(files)
       || JSON.stringify(task.runtime.input.videoConfig) !== JSON.stringify(task.videoConfig))) throw new Error('本次持久化运行输入不符');
@@ -444,6 +472,14 @@ export class PetStoryProductionService {
   }
   private validateCompiledStep(p: PetStoryProject, step: PetStoryProductionStep, task: Task): void {
     const production = this.checked(p);
+    const feedback = p.imageOperations?.find((item): boolean => item.id === production.imageOperationId && item.mode === 'modify');
+    if (feedback) {
+      const source = compileImageFeedback(p, feedback);
+      const compiled = step.pageBindings ? bindReferenceText(source, step.pageBindings) : source;
+      if (JSON.stringify(compiled) !== JSON.stringify(step.compiledPrompt) || compiled.text !== task.prompt
+        || JSON.stringify(step.attachmentAssetIds) !== JSON.stringify([feedback.baseAssetId])) throw new Error('图片修改基图、反馈或输入已变化，零提交');
+      return;
+    }
     if (step.materialId) {
       const source = this.compileMaterial(p, step.materialId);
       const compiled = step.pageBindings ? bindReferenceText(source, step.pageBindings) : source;
@@ -479,6 +515,8 @@ export class PetStoryProductionService {
         const media = production.shots[shot.id];
         if (media) { media.firstFrameId = selectedShotImageId(p, shot.id, 'firstFrame'); media.plannedEndImageId = selectedShotImageId(p, shot.id, 'lastFrame'); }
       }
+      const feedback = p.imageOperations?.find((item): boolean => item.id === production.imageOperationId && item.mode === 'modify');
+      if (feedback) return await this.advanceImageFeedback(p, feedback.id);
       if (production.phase === 'materials') return await this.advanceMaterials(p);
       await this.checkApprovedFiles(p, productionShotScope(production));
       if (production.target) return await this.advanceTarget(p, production.target);
@@ -514,6 +552,20 @@ export class PetStoryProductionService {
       if (current.production) { current.production.state = 'paused'; current.production.message = message; }
       return { success: false, error: message, project: await this.projects.write(current) };
     }
+  }
+  private async advanceImageFeedback(p: PetStoryProject, operationId: string): Promise<PetStoryProductionResult> {
+    const production = this.checked(p);
+    const operation = requireValue(p.imageOperations?.find((item): boolean => item.id === operationId));
+    if (production.steps.some((step): boolean => step.status === 'complete')) {
+      production.state = 'complete'; production.message = '图片已生成，请查看'; this.authorized.delete(p.id);
+      return { success: true, project: await this.projects.write(p) };
+    }
+    const compiled = compileImageFeedback(p, operation);
+    const attachments = [await this.assetFile(p, requireValue(operation.baseAssetId), 'image', operation.id)];
+    const material = p.materials?.find((item): boolean => item.id === operation.target.materialId);
+    return this.prepareStep(p, { kind: material?.kind || requireValue(operation.target.kind), materialId: material?.id,
+      characterId: material?.kind === 'character' ? material.entityId : undefined, shotId: operation.target.shotId },
+    { prompts: [compiled.text], mode: 'image', projectId: p.studioProjectId, executionIntent: 'hold', attachments }, [requireValue(operation.baseAssetId)], compiled);
   }
   private async advanceMaterials(p: PetStoryProject): Promise<PetStoryProductionResult> {
     const production = this.checked(p);
@@ -558,12 +610,15 @@ export class PetStoryProductionService {
           p = await this.projects.write(p);
           return { success: true, project: p, action: 'wait' };
         }
+        // 活跃原控制器可能先写 submittedAt、再写受理证据。这里只等待同一绑定运行，
+        // 不发送、重试或创建观察器；停止后的不明提交仍必须走下方原会话核对。
+        if (task.runtime?.acceptanceObservation?.outcome === 'manual_review') throw new Error('提交受理状态不明，只读核对原会话，禁止重发');
+        if (['executing', 'generating', 'manual_submission_observing'].includes(task.status)) return { success: true, project: p, action: 'wait' };
         if (task.runtime?.submittedAt) {
           const observation = task.runtime.acceptanceObservation;
-          if (!observation || observation.runId !== pending.runId || observation.accountId !== p.accountId || observation.expectedArtifact.runId !== pending.runId || !task.runtime.conversationUrl || observation.conversationUrl !== task.runtime.conversationUrl || observation.outcome === 'manual_review') throw new Error('提交受理状态不明，只读核对原会话，禁止重发');
-          return { success: true, project: p, taskId: task.id, action: ['executing', 'generating', 'manual_submission_observing'].includes(task.status) ? 'wait' : 'observe' };
+          if (!observation || observation.runId !== pending.runId || observation.accountId !== p.accountId || observation.expectedArtifact.runId !== pending.runId || !task.runtime.conversationUrl || observation.conversationUrl !== task.runtime.conversationUrl) throw new Error('提交受理状态不明，只读核对原会话，禁止重发');
+          return { success: true, project: p, taskId: task.id, action: 'observe' };
         }
-        if (['executing', 'generating'].includes(task.status)) return { success: true, project: p, action: 'wait' };
         if (task.status !== 'queued') throw new Error(task.errorInfo?.message || '原任务已停止，请处理后显式继续');
         if (pending.runId) throw new Error('原任务已有运行记录，禁止重新发送');
         await this.guard(task.id, false);

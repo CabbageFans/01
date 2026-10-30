@@ -76,7 +76,7 @@ describe('素材实际图片与格式纠正后的内容审查', (): void => {
     project = await projects.write(project); await prepare('review', { materialId: 'scene:location' });
     expect(list()[0].attachments).toEqual([await fs.realpath(path.join(directory, 'materials/TEST.png'))]);
   });
-  it.each(['shot', 'material'] as const)('格式纠正后的 %s 问题可见并按实际回复ID局部修订一次', async (kind): Promise<void> => {
+  it.each(['shot', 'material'] as const)('格式纠正后的 %s 审查保留实际回复ID与局部修订安全，素材页不显示文字诊断', async (kind): Promise<void> => {
     const target: PetStoryRuntimeTarget = kind === 'shot' ? { shotId: 'shot-0', promptKind: 'firstFrame' } : { materialId: 'scene:location' };
     const targetId = kind === 'shot' ? 'shot-0:firstFrame' : 'scene:location';
     const original = await prepare('review', target); await finish(original, '{ TEST 部分审查回复'); expect(project.jobs.at(-1)!.status).toBe('invalid');
@@ -85,7 +85,10 @@ describe('素材实际图片与格式纠正后的内容审查', (): void => {
     const result = project.jobs.at(-1)!; expect(isSavedReviewResult(result, project.jobs)).toBe(true);
     clientRender();
     const html = kind === 'shot' ? renderToStaticMarkup(React.createElement(CanvasPromptEditor, { project, shot: project.plan!.shots[0], kind: 'firstFrame', disabled: false, generationBlocked: false, dirtyChanged: (): void => undefined })) : renderToStaticMarkup(React.createElement(PetStoryMaterials, { project, disabled: false }));
-    expect(html).toContain('修订所选 0 项问题'); expect(html).toContain('TEST具体证据');
+    if (kind === 'shot') { expect(html).toContain('修订所选 0 项问题'); expect(html).toContain('TEST具体证据'); }
+    else { expect(html).not.toContain('修订所选'); expect(html).not.toContain('TEST具体证据'); expect(html).toContain('生成图片'); }
+    // 隐藏素材文字入口不删除原回复；原修订服务继续使用真实问题归属。
+    expect(result.parsedResult?.issues).toMatchObject([{ id: 'TEST-issue', targetId, evidence: 'TEST具体证据' }]);
     const revision = await prepare('revise', { ...target, parentJobId: repaired.id, selectedIssueIds: ['TEST-issue'] }); await finish(revision, { optimized: 'TEST局部修订正文' });
     expect(project.jobs.at(-1)!.parentJobId).toBe(repaired.id);
     expect(project.jobs.at(-1)!.resultStatus).toBe('candidate');

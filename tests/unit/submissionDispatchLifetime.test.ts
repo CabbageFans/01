@@ -34,7 +34,7 @@ function fixture(): Task {
 }
 
 function bindings(current: Task, submit: ReturnType<typeof vi.fn>, controller = new AbortController()): Record<string, unknown> {
-  return { current, submitPromptWithNativeClick: submit, controller, authorizationTriggeredSubmission: false, webview: {}, prompt: current.prompt,
+  return { current, submitPromptWithNativeClick: submit, controller, authorizationTriggeredSubmission: false, backgroundInput: undefined, webview: {}, prompt: current.prompt,
     accountId: current.assignedAccountId, taskId: current.id, mode: current.mode, expectedRunId: current.runtime?.runId, submissionMarkedAt: current.runtime?.submittedAt,
     useTaskStore: { getState: (): object => ({ tasks: [current] }) }, automationEngine: { ownsAccountController: (): boolean => true, confirmSubmissionOwnership: vi.fn(async (): Promise<boolean> => true) },
     SubmissionSafetyPauseError: class extends Error {} };

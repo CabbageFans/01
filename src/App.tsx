@@ -7,7 +7,8 @@ import { PetStoryPanel } from './components/PetStoryPanel';
 import TaskConsole from './components/TaskConsole';
 import { AccountList } from './components/AccountList';
 import { WorkspaceOverview } from './components/WorkspaceOverview';
-import { observePetStoryTasks } from './store/usePetStoryStore';
+import { observePetStoryTasks, usePetStoryStore } from './store/usePetStoryStore';
+import { hasBackgroundImageExecution, hasForegroundAccountInteraction, isBackgroundImageOperationTask } from './utils/petstoryBackground';
 import { Toolbar } from './components/Toolbar';
 import { useAccountStore } from './store/useAccountStore';
 import { useTaskStore } from './store/useTaskStore';
@@ -55,30 +56,45 @@ const App: React.FC = (): React.ReactElement => {
       setPage((current: WorkspacePage): WorkspacePage => { if (detail.page === 'accounts' && current !== 'accounts') pageBeforeBrowser.current = current; return detail.page; });
     };
     const reveal = (): void => setBrowserOpen(true);
+    const revealReconciliation = (event: Event): void => {
+      const taskId = (event as CustomEvent<{ taskId?: string }>).detail?.taskId;
+      if (!isBackgroundImageOperationTask(usePetStoryStore.getState().project, taskId)) setBrowserOpen(true);
+    };
     const revealWide = (): void => { setBrowserWide(true); setBrowserOpen(true); };
     const escape = (event: KeyboardEvent): void => { if (event.key === 'Escape' && !document.querySelector('.ant-modal-wrap:not([style*="display: none"])')) setBrowserOpen(false); };
     window.addEventListener('navigate-workspace', navigate);
     window.addEventListener('reveal-workspace-browser', reveal);
     // 原会话／人工处理仍由 BrowserPanel 执行；这里仅展开可见区域。
     window.addEventListener('open-task-conversation', reveal);
-    window.addEventListener('reconcile-task-submission', reveal);
+    window.addEventListener('reconcile-task-submission', revealReconciliation);
     window.addEventListener('adapter-self-check', revealWide);
     window.addEventListener('keydown', escape);
     return (): void => {
       window.removeEventListener('navigate-workspace', navigate);
       window.removeEventListener('reveal-workspace-browser', reveal);
       window.removeEventListener('open-task-conversation', reveal);
-      window.removeEventListener('reconcile-task-submission', reveal);
+      window.removeEventListener('reconcile-task-submission', revealReconciliation);
       window.removeEventListener('adapter-self-check', revealWide);
       window.removeEventListener('keydown', escape);
     };
   }, []);
   const autoStates = useTaskStore((s) => s.accountAutomationState);
+  const executingTasks = useTaskStore((s) => s.executingTasks);
+  const petStoryProject = usePetStoryStore((s) => s.project);
+  const activeImageOperationId = usePetStoryStore((s) => s.activeImageOperationId);
+  const previousTaskStatuses = useRef<Map<string, Task['status']>>(new Map());
   useEffect((): void => {
-    if (tasks.some((task: Task): boolean => ['waiting_verification', 'waiting_generation_confirmation'].includes(task.status))) setBrowserOpen(true);
+    // 只响应本次执行新出现的人工处理状态，历史等待项不随图片阶段刷新反复展开。
+    const enteredWaiting = tasks.some((task: Task): boolean => previousTaskStatuses.current.has(task.id)
+      && previousTaskStatuses.current.get(task.id) !== task.status
+      && ['waiting_verification', 'waiting_generation_confirmation'].includes(task.status));
+    previousTaskStatuses.current = new Map(tasks.map((task: Task): [string, Task['status']] => [task.id, task.status]));
+    if (enteredWaiting) setBrowserOpen(true);
   }, [tasks]);
   const interactive = Object.values(autoStates).some((state): boolean => state === 'injecting' || state === 'submitting');
-  const browserVisible = browserOpen || interactive;
+  const foregroundInteractive = hasForegroundAccountInteraction(petStoryProject, tasks, autoStates, executingTasks);
+  const backgroundInteractive = !foregroundInteractive && hasBackgroundImageExecution(petStoryProject, tasks, activeImageOperationId);
+  const browserVisible = browserOpen || foregroundInteractive;
 
   // ---- 初始化加载 ----
 
@@ -173,8 +189,8 @@ const App: React.FC = (): React.ReactElement => {
             <div className={page === 'create' ? 'page-fill' : 'page-hidden'}><PetStoryPanel /></div>
             <div className={page === 'accounts' ? 'account-workspace' : 'page-hidden'}><AccountList /><p className="account-note">选择账号后，在右侧处理登录或查看会话。正在配置或提交时，请先等待当前操作结束。</p></div>
           </main>
-          {/* 唯一运行时宿主：只调整 CSS；屏外保持非零尺寸及可合成，不改 key 或 partition。 */}
-          <aside className={`browser-host ${page === 'accounts' ? 'is-full' : browserVisible ? 'is-assist' : 'is-parked'} ${interactive || browserWide && browserVisible ? 'is-engaged' : ''}`} aria-label="豆包常驻浏览器" aria-hidden={page !== 'accounts' && !browserVisible} {...(page !== 'accounts' && !browserVisible ? { inert: '' } : {})}>
+          {/* 唯一常驻宿主。图片任务保留视口交集与原生输入，由不透明工作区覆盖；不卸载或改 partition。 */}
+          <aside className={`browser-host ${page === 'accounts' ? 'is-full' : browserVisible ? 'is-assist' : 'is-parked'} ${backgroundInteractive ? 'is-background-executing' : ''} ${browserVisible && (interactive || browserWide) ? 'is-engaged' : ''}`} aria-label="豆包常驻浏览器" aria-hidden={page !== 'accounts' && !browserVisible} {...(page !== 'accounts' && !browserVisible && !backgroundInteractive ? { inert: '' } : {})}>
             <div className="browser-host-header"><GlobalOutlined /><strong>{activeAccount?.name || '豆包浏览器'}</strong><span className="host-caption">豆包 Chat</span>{page !== 'accounts' && <Button type="text" aria-label="全宽浏览器" icon={<ExpandOutlined />} onClick={(): void => { changePage('accounts'); setBrowserOpen(false); }} />}<Button type="text" disabled={interactive} title={interactive ? '正在配置或提交，保持原账号可见' : undefined} aria-label={page === 'accounts' ? '返回之前的工作区' : '收起浏览器'} icon={<CloseOutlined />} onClick={(): void => { if (page === 'accounts') setPage(pageBeforeBrowser.current); setBrowserOpen(false); }} /></div>
             <BrowserPanel accounts={accounts} activeAccount={activeAccount} refreshKey={0} />
             <PetStoryChatAdjustmentPanel />

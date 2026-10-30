@@ -131,3 +131,6 @@ data/
 
 # 移除免费门槛专项的本机日志和数据只读证明
 /artifacts/remove-free-gates/
+
+# 图片反馈专项：真实素材副本、会话与截图仅保留本机
+/artifacts/material-image-feedback/

@@ -6,10 +6,9 @@ import type { PetStoryCapability, PetStoryProject, Task } from '@doubao-studio/c
 import { PetStoryMaterials } from '../../src/components/PetStoryMaterials';
 import { usePetStoryStore } from '../../src/store/usePetStoryStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
-import { petStoryWritingModel } from '../../src/utils/petstoryCandidate';
+import { isMaterialPromptBlocked, petStoryWritingModel } from '../../src/utils/petstoryCandidate';
 import { promptWritingTarget } from '../../main/utils/petstoryEligibility';
 
-vi.mock('../../src/components/usePetStoryGenerationEligibility', () => ({ usePetStoryGenerationEligibility: () => ({ eligibility: { ready: true, blockers: [] }, loading: false, error: '', refresh: vi.fn() }) }));
 
 const initial = { petstory: usePetStoryStore.getState(), tasks: useTaskStore.getState() };
 const now = '2026-10-26T00:00:00.000Z';
@@ -22,16 +21,6 @@ function button(html: string, label: string): string {
 }
 function render(disabled = false, generationBlocked = false): string {
   return renderToStaticMarkup(React.createElement(PetStoryMaterials, { project, disabled, generationBlocked }));
-}
-function editor(html: string): string {
-  const result = html.match(/<textarea\b[^>]*>/g)?.find((entry): boolean => entry.includes('scene:location基础图最终提示词'));
-  if (!result) throw new Error('缺少实际正文编辑框');
-  return result;
-}
-function editPlanField(html: string): string {
-  const field = html.match(/<textarea\b[^>]*>/g)?.find((entry): boolean => entry.includes('scene:location编辑变化'));
-  if (!field) throw new Error('缺少实际素材编辑意图输入框');
-  return field;
 }
 beforeEach((): void => {
   vi.spyOn(React, 'useSyncExternalStore').mockImplementation(<T,>(_subscribe: (onStoreChange: () => void) => () => void, getSnapshot: () => T): T => getSnapshot());
@@ -49,7 +38,7 @@ beforeEach((): void => {
 });
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
 
-describe('素材文字与媒体独立门禁', (): void => {
+describe('素材图片入口与后台文字安全边界', (): void => {
   it('文字目标投影与实际请求顺序一致，显式generic覆盖曾经核对的模型', (): void => {
     const production = { capability } as NonNullable<PetStoryProject['production']>;
     project.productionHistory = [production];
@@ -69,20 +58,18 @@ describe('素材文字与媒体独立门禁', (): void => {
     expect(html.match(/<button\b/g)).toHaveLength(1);
     for (const label of ['重新生成提示词', '检查正文', '采用此候选', '上传图片', '生成图片', '入口检查', '批量准备', '基础图最终提示词']) expect(html).not.toContain(label);
   });
-  it('方案已确认后素材文字编辑与候选采用保留，未展开不触发请求', (): void => {
-    const html = render();
-    for (const label of ['重新生成提示词', '检查正文', '采用此候选']) expect(button(html, label)).not.toContain('disabled');
-    expect(editor(html)).not.toContain('disabled');
-    expect(html).not.toContain('scene:location选择已有图片');
-    expect(html).not.toContain('采用这张');
+  it('方案已确认后只提供图片操作，渲染不采用已有文字候选或改动手改正文', (): void => {
+    project.materials![0].prompt.edited = true;
+    const before = structuredClone(project); const html = render();
+    expect(button(html, '生成图片')).not.toContain('disabled'); expect(button(html, '上传图片')).not.toContain('disabled');
+    for (const label of ['重新生成提示词', '检查正文', '采用此候选', '查看与编辑图片提示词', '更多操作', '变体／局部编辑计划']) expect(html).not.toContain(label);
+    expect(html).not.toContain('<textarea'); expect(html).not.toContain('TEST候选');
+    expect(project).toEqual(before); expect(useTaskStore.getState().tasks).toEqual([]);
   });
-  it('锁定及未保存前置仍阻止编辑与采用，空闲文字入口不需额外确认', (): void => {
-    const locked = render(true);
-    expect(editor(locked)).toContain('disabled'); expect(button(locked, '采用此候选')).toContain('disabled');
-    for (const label of ['重新生成提示词', '检查正文']) {
-      expect(button(locked, label)).toContain('disabled'); expect(button(render(false, true), label)).toContain('disabled');
-    }
-    for (const label of ['重新生成提示词', '检查正文']) expect(button(render(), label)).not.toContain('disabled');
+  it('锁定与未保存前置阻止图片生成，上传不受正文准备状态限制', (): void => {
+    const locked = render(true); expect(button(locked, '生成图片')).toContain('disabled'); expect(button(locked, '上传图片')).toContain('disabled');
+    const sourceDirty = render(false, true); expect(button(sourceDirty, '生成图片')).toContain('disabled'); expect(button(sourceDirty, '上传图片')).not.toContain('disabled');
+    expect(button(render(), '生成图片')).not.toContain('disabled'); expect(locked).not.toContain('<textarea');
   });
   it('确认剧本后图片生成无需当前会话检查，上传保持独立', (): void => {
     project.storyApproval = { hash: 'TEST', at: now };
@@ -93,40 +80,40 @@ describe('素材文字与媒体独立门禁', (): void => {
     expect(button(render(), '生成图片')).not.toContain('disabled');
     expect(button(render(), '上传图片')).not.toContain('disabled');
   });
-  it('待采用的真实提示词回复可直接审阅，历史已采用或过期正文不冒充新候选', (): void => {
-    project.materials![0].prompt.final = '';
-    usePetStoryStore.setState({ capability: null});
-    expect(button(render(), '查看并采用提示词')).not.toContain('disabled');
-    for (const resultStatus of ['adopted', 'stale'] as const) {
-      project.jobs[0].resultStatus = resultStatus;
-      expect(render()).not.toContain('查看并采用提示词');
-      expect(button(render(), '生成提示词')).not.toContain('disabled');
+  it('新候选、已采用或过期文字均不暴露中间采用按钮，也不因查看素材而改变来源', (): void => {
+    project.materials![0].prompt.final = ''; usePetStoryStore.setState({ capability: null });
+    for (const resultStatus of ['candidate', 'adopted', 'stale'] as const) {
+      project.jobs[0].resultStatus = resultStatus; const before = structuredClone(project); const html = render();
+      expect(button(html, '生成图片')).not.toContain('disabled');
+      for (const label of ['查看并采用提示词', '生成提示词', '采用此候选']) expect(html).not.toContain(label);
+      expect(project).toEqual(before); expect(project.materials![0].prompt.final).toBe('');
     }
   });
-  it('结束等待保留原bound记录，素材重生与编辑计划恢复；无关待收取素材不锁本项', (): void => {
+  it('结束等待保留原绑定和历史，无关待收取素材不锁本目标的后台安全判断', (): void => {
     const job = project.jobs[0]; job.status = 'bound'; job.endedWaitingAt = now;
     project.jobs.push({ ...job, id: 'TEST-other-job', taskId: 'TEST-other-task', materialId: 'scene:other', endedWaitingAt: undefined });
     const before = structuredClone(project); const html = render();
-    expect(button(html, '重新生成提示词')).not.toContain('disabled');
-    expect(button(html, '检查正文')).not.toContain('disabled');
-    expect(editPlanField(html)).not.toContain('disabled');
+    expect(isMaterialPromptBlocked(project, 'scene:location', [])).toBe(false);
+    expect(button(html, '生成图片')).not.toContain('disabled'); expect(html).not.toContain('编辑变化');
     expect(project).toEqual(before); expect(useTaskStore.getState().tasks).toEqual([]);
   });
-  it.each(['bound', 'captured'] as const)('本素材%s仍锁新的创作操作，全局待收取仍阻断', (status): void => {
+  it.each(['bound', 'captured'] as const)('本素材%s和全局待收取继续保留后台冲突事实，不恢复旧编辑表单', (status): void => {
     project.jobs[0].status = status;
     for (const global of [false, true]) {
-      project.jobs[0].materialId = global ? undefined : 'scene:location';
-      const html = render(); expect(button(html, '重新生成提示词')).toContain('disabled');
-      expect(editPlanField(html)).toContain('disabled');
+      project.jobs[0].materialId = global ? undefined : 'scene:location'; const before = structuredClone(project);
+      expect(isMaterialPromptBlocked(project, 'scene:location', [])).toBe(true);
+      const html = render(); expect(html).not.toContain('<textarea'); expect(html).not.toContain('变体／局部编辑计划'); expect(project).toEqual(before);
     }
   });
   it('结束等待不释放仍活动的原账号任务或租约，其他账号活动不冒充本账号占用', (): void => {
     project.jobs[0].status = 'bound'; project.jobs[0].endedWaitingAt = now;
     const active: Task = { id: 'TEST-original-task', projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'chat', status: 'executing', prompt: 'TEST', result: null, outputs: [], createdAt: now, updatedAt: now };
     useTaskStore.setState({ tasks: [active] });
-    expect(button(render(), '重新生成提示词')).toContain('disabled'); expect(editPlanField(render())).toContain('disabled');
-    expect(useTaskStore.getState().tasks).toEqual([active]);
+    expect(isMaterialPromptBlocked(project, 'scene:location', useTaskStore.getState().tasks)).toBe(true);
+    expect(render()).not.toContain('<textarea'); expect(useTaskStore.getState().tasks).toEqual([active]);
     useTaskStore.setState({ tasks: [{ ...active, assignedAccountId: 'TEST-other-account' }] });
-    expect(button(render(), '重新生成提示词')).not.toContain('disabled'); expect(editPlanField(render())).not.toContain('disabled');
+    expect(isMaterialPromptBlocked(project, 'scene:location', useTaskStore.getState().tasks)).toBe(false);
+    expect(button(render(), '生成图片')).not.toContain('disabled');
   });
+
 });

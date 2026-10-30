@@ -94,6 +94,10 @@ pnpm run lint
 
 Dola 当前只有账号平台字段、Session/URL 边界和 CSV 账号消歧接线，尚未完成真实端到端人工验收。任何开发或文档不得把 Dola 表述为生产可用；进入平台写入前必须重新冻结并验证登录、控件、提交、生成、产物和下载全链。
 
+### 图片反馈规则
+
+基础素材页遵循 `docs/PRODUCT_REQUIREMENTS.md` v1.9 与 `petstory-image-feedback-flow`：用户只操作生成图片、图片反馈和明确采用，必要文字由本次图片操作后台准备。不得恢复提示词生成／编辑／采用、生成记录／诊断、更多或省略号替代菜单、局部编辑计划。修改绑定预览中具体选中的图片，支持上传／未采用／历史候选和连续修改，不强制原会话。图片先候选、后正式采用；画布布局和视频流程保持原规则。
+
 ### IPC 通信
 主进程通过 `ipcMain.handle` 注册处理器，渲染进程通过 `contextBridge.exposeInMainWorld` 暴露的 `window.electronAPI` 调用，严格遵循 contextIsolation + 无 nodeIntegration 的安全模式。
 

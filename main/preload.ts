@@ -11,6 +11,9 @@ import type { ElectronAPI, Account, AccountAvailability, AccountPlatform, Task, 
 
 const electronAPI = {
   petstory: {
+    beginImageOperation: (id: string, revision: number, request: import('@doubao-studio/contracts').PetStoryImageOperationRequest, capability?: import('@doubao-studio/contracts').PetStoryCapability): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => ipcRenderer.invoke('petstory:beginImageOperation', { id, revision, request, capability }),
+    advanceImageOperation: (id: string, operationId: string): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => ipcRenderer.invoke('petstory:advanceImageOperation', { id, operationId }),
+    resumeImageOperation: (id: string, operationId: string, capability?: import('@doubao-studio/contracts').PetStoryCapability): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => ipcRenderer.invoke('petstory:resumeImageOperation', { id, operationId, capability }),
     previewAdjustmentReply: (id: string, revision: number, adjustmentId: string, replyKey: string): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentPreviewResult> => ipcRenderer.invoke('petstory:previewAdjustmentReply', { id, revision, adjustmentId, replyKey }),
     beginAdjustment: (id: string, revision: number, target: import('@doubao-studio/contracts').PetStoryRuntimeTarget): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentResult> => ipcRenderer.invoke('petstory:beginAdjustment', { id, revision, target }),
     captureAdjustmentReplies: (id: string, adjustmentId: string, conversationUrl: string, replies: import('@doubao-studio/contracts').PetStoryConversationReply[]): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentResult> => ipcRenderer.invoke('petstory:captureAdjustmentReplies', { id, adjustmentId, conversationUrl, replies }),

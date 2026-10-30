@@ -796,6 +796,11 @@ button:focus-visible,a:focus-visible,summary:focus-visible,[role=button]:focus-v
 /* 单一 BrowserPanel 宿主不可 display:none 或 visibility:hidden；屏外保留非零尺寸。 */
 .browser-host { display:flex; flex-direction:column; width:390px; flex-shrink:0; height:100%; background:#FFF; border-left:1px solid var(--studio-border); position:relative; }
 .browser-host.is-parked { position:absolute; top:0; right:0; transform:translate3d(220vw,0,0); pointer-events:none; width:960px; height:100%; }
+/* 平台按视口交集懒加载；后台 guest 必须解除继承的 pointer-events:none 才接收
+   原生输入。由不透明工作区覆盖并承接用户点击，只对当前图片任务生效。 */
+.workspace-body:has(> .browser-host.is-parked.is-background-executing) { isolation:isolate; }
+.workspace-body:has(> .browser-host.is-parked.is-background-executing) > .workspace-content { position:relative; z-index:1; background:var(--studio-bg); }
+.browser-host.is-parked.is-background-executing { transform:none; opacity:1; z-index:0; pointer-events:auto; }
 .browser-host.is-assist { width:390px; }
 .browser-host.is-full { flex:1; min-width:0; width:auto; }
 .browser-host-header { display:flex; gap:9px; align-items:center; height:48px; min-height:48px; padding:0 10px 0 16px; border-bottom:1px solid var(--studio-border); }

@@ -1,173 +1,119 @@
-/** 原故事素材卡的离线点击回归：使用实际 Store，IPC／调度为替身，不属于平台发送验收。 */
+/** 原故事素材页的离线点击回归：图片任务为明确替身，不属于平台生成验收。 */
 import React from 'react';
 import { act, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Account, PetStoryChatJob, PetStoryPlan, PetStoryProject, PetStoryResult, PetStoryRuntimeTarget, Task } from '@doubao-studio/contracts';
+import type { PetStoryAsset, PetStoryPlan, PetStoryProject } from '@doubao-studio/contracts';
 import { PetStoryMaterials } from '../../src/components/PetStoryMaterials';
 import { usePetStoryStore } from '../../src/store/usePetStoryStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
-import { useAccountStore } from '../../src/store/useAccountStore';
-import { useProjectStore } from '../../src/store/useProjectStore';
 import originalStory from '../fixtures/storyboard-five-shots.json';
 
-vi.mock('../../src/components/usePetStoryGenerationEligibility', (): object => ({
-  usePetStoryGenerationEligibility: (): object => ({ eligibility: { ready: true, blockers: [] }, loading: false, error: '', refresh: vi.fn() })}));
-
-const original = { pet: usePetStoryStore.getState(), tasks: useTaskStore.getState(), accounts: useAccountStore.getState(), projects: useProjectStore.getState() };
+const original = { pet: usePetStoryStore.getState(), tasks: useTaskStore.getState() };
 const now = '2026-10-30T03:00:00.000Z';
 const materialId = 'prop:TEST-original-electric-bike';
 let project: PetStoryProject;
-let tasks: Task[];
-const prepareRuntime = vi.fn<(id: string, revision: number, kind: PetStoryChatJob['kind'], target?: PetStoryRuntimeTarget) => Promise<PetStoryResult>>();
-const startAutomation = vi.fn<(taskId: string, beforeDispatch?: (task: Task) => Promise<void>) => Promise<boolean>>();
-const retryUnsubmitted = vi.fn<(projectId: string, jobId: string) => Promise<PetStoryResult>>();
-
-function queuedTask(job: PetStoryChatJob): Task {
-  const prompt = 'TEST 原故事电车素材文字任务；离线 IPC 替身';
-  return { id: job.taskId, mode: 'chat', projectId: project.studioProjectId, assignedAccountId: project.accountId, prompt, status: 'queued', executionIntent: 'hold', result: null, outputs: [], createdAt: now, updatedAt: now,
-    runtime: { runId: `TEST-run-${job.id}`, attempt: 1, stage: 'preparing_account', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { mode: 'chat', prompt, attachments: [] } } };
-}
-function createPreparedJob(): PetStoryResult {
-  project = structuredClone(project); project.revision++;
-  const job: PetStoryChatJob = { id: 'TEST-material-job', taskId: 'TEST-material-task', materialId, kind: 'materialPrompt', status: 'bound', inputHash: 'TEST', sourceUrl: '', sourceStoryId: project.mobileStory!.id, requestId: 'TEST-material-request', expectedIds: [materialId], createdAt: now };
-  project.jobs.push(job); tasks.push(queuedTask(job));
-  return { success: true, project, taskId: job.taskId };
-}
-function guardedTask(accountId: string = project.accountId): Task {
-  const task = queuedTask({ id: 'TEST-guard-source', taskId: 'TEST-guard-source-task' } as PetStoryChatJob);
-  task.assignedAccountId = accountId; task.projectId = 'TEST-other-studio'; task.status = 'done';
-  if (!task.runtime) throw new Error('TEST 缺少保护快照');
-  task.runtime.chatAdjustmentGuard = { active: true, projectId: 'TEST-other-project', adjustmentId: 'TEST-other-adjustment' };
-  return task;
-}
-const LiveMaterials: React.FC = (): React.ReactElement | null => {
-  const value = usePetStoryStore();
-  return value.project ? <PetStoryMaterials project={value.project} disabled={value.busy} /> : null;
-};
 function card(): HTMLElement {
   const value = document.getElementById(`material-${materialId}`);
   if (!value) throw new Error('TEST 缺少原故事电车素材卡');
   return value;
 }
-function generate(): HTMLElement { return within(card()).getByRole('button', { name: /^(?:loading )?生成提示词$/ }); }
-
+const LiveMaterials: React.FC = (): React.ReactElement | null => {
+  const value = usePetStoryStore();
+  return value.project ? <PetStoryMaterials project={value.project} disabled={value.busy} /> : null;
+};
+function candidate(id: string): PetStoryAsset {
+  return { id, kind: 'prop', materialId, relativePath: `TEST/${id}.png`, imageReview: { state: 'candidate', target: { materialId }, basisHash: 'TEST' }, validation: { decoded: true, sha256: `TEST-${id}`, bytes: 1, width: 64, height: 64, checkedAt: now } };
+}
 beforeEach((): void => {
-  vi.clearAllMocks(); tasks = [];
   project = { schemaVersion: 1, id: 'TEST-material-project', studioProjectId: 'TEST-material-studio', accountId: 'TEST-account', revision: 1,
     source: { kind: 'script', url: '', status: 'review_required' }, mobileStory: { id: 'TEST-story', text: originalStory.mobileStory, importedAt: now },
     plan: structuredClone(originalStory.plan) as PetStoryPlan, storyApproval: { hash: 'TEST-original-approval', at: now }, assets: [], jobs: [], updatedAt: now,
     materials: [{ id: materialId, entityId: 'TEST-original-electric-bike', kind: 'prop', name: '粉色电驴', designHash: 'TEST', prompt: { original: 'TEST 原故事既有道具摘要', optimized: '', final: '', edited: false, rulesVersion: 'TEST' } }] };
-  const account: Account = { id: project.accountId, platform: 'doubao', name: 'TEST 原账号', partition: 'TEST-only', avatar: '', pinned: false, status: 'idle', createdAt: now, updatedAt: now };
-  useAccountStore.setState({ ...original.accounts, accounts: [account], selectedAccountId: account.id });
-  useProjectStore.setState({ ...original.projects, projects: [{ id: project.studioProjectId, name: 'TEST 原故事容器', color: '#fff', description: '', archived: false, createdAt: now, updatedAt: now }], activeProjectId: project.studioProjectId });
-  prepareRuntime.mockImplementation(async (): Promise<PetStoryResult> => createPreparedJob());
-  startAutomation.mockImplementation(async (taskId: string, beforeDispatch?: (task: Task) => Promise<void>): Promise<boolean> => {
-    const task = tasks.find((item): boolean => item.id === taskId); if (!task) throw new Error('TEST 未找到原任务');
-    if (beforeDispatch) await beforeDispatch(task);
-    tasks = tasks.map((item): Task => item.id === taskId ? { ...item, status: 'executing' } : item); useTaskStore.setState({ tasks }); return true;
-  });
-  retryUnsubmitted.mockImplementation(async (_projectId: string, jobId: string): Promise<PetStoryResult> => {
-    project = structuredClone(project); project.revision++;
-    const job = project.jobs.find((item): boolean => item.id === jobId); if (!job) throw new Error('TEST 未找到原绑定');
-    job.runId = undefined;
-    tasks = tasks.map((item): Task => item.id === job.taskId ? { ...item, status: 'queued', executionIntent: 'hold' } : item);
-    return { success: true, project, taskId: job.taskId };
-  });
-  window.electronAPI = { petstory: { prepareRuntime, retryUnsubmitted,
-    bindRun: vi.fn(async (_id: string, jobId: string, runId: string): Promise<PetStoryResult> => {
-      project = structuredClone(project); project.revision++; const job = project.jobs.find((item): boolean => item.id === jobId);
-      if (!job) throw new Error('TEST 缺少已持久化绑定'); job.runId = runId; return { success: true, project };
-    }),
-    readReference: vi.fn(async (): Promise<{ success: false }> => ({ success: false }))}, tasks: { list: vi.fn(async (): Promise<Task[]> => tasks) } } as unknown as typeof window.electronAPI;
-  useTaskStore.setState({ ...original.tasks, tasks, startAutomation, activeTaskId: null, accountBusy: {}, accountAutomationState: {}, error: null });
-  usePetStoryStore.setState({ ...original.pet, project, projectName: 'TEST 原故事', busy: false, error: '', capability: null, promptBatch: { total: 0, completed: 0, status: 'idle' } });
+  useTaskStore.setState({ ...original.tasks, tasks: [] });
+  usePetStoryStore.setState({ ...original.pet, project, busy: false, error: '', generateMaterialImage: vi.fn(async (): Promise<void> => undefined) });
+  window.electronAPI = { petstory: { readReference: vi.fn(async (_projectId: string, assetId: string): Promise<{ success: true; data: string }> => ({ success: true, data: `data:image/png;base64,${assetId}` })) } } as unknown as typeof window.electronAPI;
 });
-afterEach((): void => {
-  usePetStoryStore.setState(original.pet); useTaskStore.setState(original.tasks); useAccountStore.setState(original.accounts); useProjectStore.setState(original.projects); vi.restoreAllMocks();
-});
+afterEach((): void => { usePetStoryStore.setState(original.pet); useTaskStore.setState(original.tasks); vi.restoreAllMocks(); });
 
-describe('生成素材提示词的当前卡片反馈与原任务恢复', (): void => {
-  it('当前项目的自由调整也就地提示，处理入口只打开原会话而不结束调整', (): void => {
-    project.chatAdjustment = { id: 'TEST-current-adjustment', target: {}, sourceJobId: 'TEST-current-source', conversationUrl: 'https://www.doubao.com/chat/TEST-original', basisHash: 'TEST', startedAt: now, status: 'active', replies: [] };
-    usePetStoryStore.setState({ project }); const before = structuredClone(project.chatAdjustment); const dispatch = vi.spyOn(window, 'dispatchEvent'); render(<LiveMaterials />);
-    expect(generate().hasAttribute('disabled')).toBe(true);
-    fireEvent.click(within(card()).getByRole('button', { name: '处理当前豆包调整' }));
-    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: 'petstory-open-adjustment' }));
-    expect(usePetStoryStore.getState().project?.chatAdjustment).toEqual(before); expect(prepareRuntime).not.toHaveBeenCalled(); expect(startAutomation).not.toHaveBeenCalled();
+describe('基础素材只操作图片', (): void => {
+  it('没有正文也一次点击生成图片，不渲染提示词、诊断、更多或局部编辑表单', async (): Promise<void> => {
+    const generate = usePetStoryStore.getState().generateMaterialImage;
+    render(<LiveMaterials />);
+    expect(card().textContent).not.toMatch(/提示词|生成记录|诊断|更多操作|变体|局部编辑|最终正文|设计摘要/);
+    expect(card().querySelector('textarea, summary, [aria-label*="更多"]')).toBeNull();
+    fireEvent.click(within(card()).getByRole('button', { name: '生成图片' }));
+    await waitFor((): void => expect(generate).toHaveBeenCalledExactlyOnceWith(materialId));
+    expect(project.materials?.[0].prompt.final).toBe('');
   });
-  it('同账号另一项目自由调整时就地说明并提供原调整入口，不创建请求或清除保护', (): void => {
-    const guard = guardedTask(); tasks = [guard]; useTaskStore.setState({ tasks });
-    const before = structuredClone(project); const dispatch = vi.spyOn(window, 'dispatchEvent'); render(<LiveMaterials />);
-    expect(generate().hasAttribute('disabled')).toBe(true);
-    const action = within(card()).getByRole('button', { name: '处理当前豆包调整' });
-    expect(within(card()).getByText(/调整.*(?:结束|采用)|(?:结束|采用).*调整/)).toBeDefined();
-    fireEvent.click(action);
-    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: 'reveal-workspace-browser' }));
-    expect(prepareRuntime).not.toHaveBeenCalled(); expect(startAutomation).not.toHaveBeenCalled();
-    expect(usePetStoryStore.getState().project).toEqual(before); expect(tasks[0].runtime?.chatAdjustmentGuard?.active).toBe(true);
+  it('方案未确认只返回方案，不建立图片任务', (): void => {
+    delete project.storyApproval; usePetStoryStore.setState({ project }); render(<LiveMaterials />);
+    expect(document.querySelector('[data-material-id]')).toBeNull();
+    expect(within(document.body).getByRole('button', { name: '查看并确认方案' })).toBeDefined();
+    expect(usePetStoryStore.getState().generateMaterialImage).not.toHaveBeenCalled();
   });
-  it('其他账号的自由调整不阻断原账号，点击实际 Store 后只创建本素材文字请求', async (): Promise<void> => {
-    tasks = [guardedTask('TEST-other-account')]; useTaskStore.setState({ tasks }); render(<LiveMaterials />);
-    expect(generate().hasAttribute('disabled')).toBe(false); fireEvent.click(generate());
-    await waitFor((): void => expect(prepareRuntime).toHaveBeenCalledExactlyOnceWith(project.id, 1, 'materialPrompt', { materialId }));
-    await waitFor((): void => expect(startAutomation).toHaveBeenCalledOnce());
-    expect(tasks.filter((item): boolean => item.id === 'TEST-material-task')).toHaveLength(1); expect(tasks.at(-1)?.mode).toBe('chat');
-    expect(usePetStoryStore.getState().project?.assets).toEqual([]);
-  });
-  it.each(['returned', 'thrown'] as const)('准备请求%s失败时，原因显示在被点击的素材卡，不能只留在页面顶部', async (failure): Promise<void> => {
-    const message = 'TEST 当前文字请求准备失败，请核对绑定账号';
-    prepareRuntime.mockImplementation(async (): Promise<PetStoryResult> => { if (failure === 'thrown') throw new Error(message); return { success: false, error: message }; });
-    render(<LiveMaterials />); fireEvent.click(generate());
-    await waitFor((): void => expect(within(card()).getByText(message)).toBeDefined());
-    expect(usePetStoryStore.getState().error).toBe(message); expect(prepareRuntime).toHaveBeenCalledOnce(); expect(startAutomation).not.toHaveBeenCalled();
-    expect(project.jobs).toEqual([]); expect(tasks).toEqual([]); expect(generate().hasAttribute('disabled')).toBe(false);
-  });
-  it('某素材准备失败的即时错误不泄漏到未点击的其他素材卡', async (): Promise<void> => {
+  it('请求准备期间就地显示忙碌并禁用重复点击，失败只显示在当前素材', async (): Promise<void> => {
+    let finish: (() => void) | undefined;
+    const generate = vi.fn((): Promise<void> => new Promise((resolve): void => { finish = resolve; }));
     const actor = project.plan!.characters[0];
     project.materials!.push({ id: `character:${actor.id}`, entityId: actor.id, kind: 'character', name: actor.name, designHash: 'TEST', prompt: { original: actor.description, optimized: '', final: '', edited: false, rulesVersion: 'TEST' } });
-    usePetStoryStore.setState({ project });
-    prepareRuntime.mockResolvedValue({ success: false, error: 'TEST 仅本次电车文字准备失败' }); render(<LiveMaterials />); fireEvent.click(generate());
-    await waitFor((): void => expect(within(card()).getByText('TEST 仅本次电车文字准备失败')).toBeDefined());
-    const other = document.getElementById(`material-character:${actor.id}`); if (!other) throw new Error('TEST 缺少原故事人物卡');
-    expect(within(other).queryByText('TEST 仅本次电车文字准备失败')).toBeNull(); expect(prepareRuntime).toHaveBeenCalledOnce();
+    usePetStoryStore.setState({ project, generateMaterialImage: generate }); render(<LiveMaterials />);
+    const button = within(card()).getByRole('button', { name: '生成图片' }); fireEvent.click(button); fireEvent.click(button);
+    expect(generate).toHaveBeenCalledOnce(); expect(button.hasAttribute('disabled')).toBe(true);
+    await act(async (): Promise<void> => { usePetStoryStore.setState({ error: 'TEST 本次图片准备失败' }); finish?.(); });
+    await waitFor((): void => expect(within(card()).getByText('TEST 本次图片准备失败')).toBeDefined());
+    const other = document.getElementById(`material-character:${actor.id}`); if (!other) throw new Error('TEST 缺少人物卡');
+    expect(within(other).queryByText('TEST 本次图片准备失败')).toBeNull(); expect(button.hasAttribute('disabled')).toBe(false);
   });
-  it('请求准备期间立即展示当前卡片进度并禁用重复点击，失败后保留具体原因', async (): Promise<void> => {
-    let settle: ((result: PetStoryResult) => void) | undefined;
-    prepareRuntime.mockImplementation((): Promise<PetStoryResult> => new Promise((resolve): void => { settle = resolve; }));
-    render(<LiveMaterials />); const button = generate(); fireEvent.click(button);
-    await waitFor((): void => expect(button.classList.contains('ant-btn-loading')).toBe(true));
-    expect(button.hasAttribute('disabled')).toBe(true); fireEvent.click(button); expect(prepareRuntime).toHaveBeenCalledOnce();
-    await act(async (): Promise<void> => { if (!settle) throw new Error('TEST 未进入准备'); settle({ success: false, error: 'TEST 请求尚未创建' }); });
-    expect(within(card()).getByText('TEST 请求尚未创建')).toBeDefined(); expect(tasks).toEqual([]);
+  it('当前账号自由调整时禁用图片发送，不擅自结束调整', (): void => {
+    project.chatAdjustment = { id: 'TEST-adjustment', target: {}, sourceJobId: 'TEST-source', conversationUrl: 'https://www.doubao.com/chat/TEST', basisHash: 'TEST', startedAt: now, status: 'active', replies: [] };
+    usePetStoryStore.setState({ project }); render(<LiveMaterials />);
+    const button = within(card()).getByRole('button', { name: '生成图片' }); expect(button.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(button); expect(usePetStoryStore.getState().generateMaterialImage).not.toHaveBeenCalled();
+    expect(project.chatAdjustment.status).toBe('active');
   });
-  it('已创建任务但启动失败时就地显示原因，继续原任务不会重新创建任务', async (): Promise<void> => {
-    startAutomation.mockImplementationOnce(async (): Promise<boolean> => { useTaskStore.setState({ error: 'TEST 页面暂未就绪，原任务尚未发送' }); return false; });
-    render(<LiveMaterials />); fireEvent.click(generate());
-    await waitFor((): void => expect(within(card()).getByText('TEST 页面暂未就绪，原任务尚未发送')).toBeDefined());
-    expect(tasks).toHaveLength(1); expect(project.jobs).toHaveLength(1); expect(generate().hasAttribute('disabled')).toBe(true);
-    const resume = within(card()).getByRole('button', { name: '继续原文字任务（尚未发送）' }); fireEvent.click(resume);
-    await waitFor((): void => expect(startAutomation).toHaveBeenCalledTimes(2));
-    expect(prepareRuntime).toHaveBeenCalledOnce(); expect(tasks).toHaveLength(1); expect(project.jobs).toHaveLength(1);
+  it('当前素材生成后自动预览候选，关闭不采用；重渲染不再弹出', async (): Promise<void> => {
+    const generate = vi.fn(async (): Promise<void> => { usePetStoryStore.setState({ project: { ...project, revision: 2, assets: [candidate('TEST-generated')] } }); });
+    const approve = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ generateMaterialImage: generate, approveMaterials: approve }); render(<LiveMaterials />);
+    fireEvent.click(within(card()).getByRole('button', { name: '生成图片' }));
+    const dialog = await within(document.body).findByRole('dialog', { name: '粉色电驴 · 道具参考图 · 选择图片' });
+    expect(approve).not.toHaveBeenCalled(); expect(project.materials?.[0].selectedAssetId).toBeUndefined();
+    fireEvent.click(within(dialog).getByRole('button', { name: '暂不采用' }));
+    await waitFor((): void => expect(within(document.body).queryByRole('dialog')).toBeNull());
+    await act(async (): Promise<void> => { usePetStoryStore.setState({ project: { ...usePetStoryStore.getState().project!, revision: 3 } }); });
+    expect(within(document.body).queryByRole('dialog')).toBeNull(); expect(within(card()).getAllByText('图片待确认').length).toBeGreaterThan(0);
   });
-  it('任务开始后当前卡展示处理状态；提交后展示等待或核对状态，不能再创建同目标任务', async (): Promise<void> => {
-    render(<LiveMaterials />); fireEvent.click(generate()); await waitFor((): void => expect(startAutomation).toHaveBeenCalledOnce());
-    await waitFor((): void => expect(within(card()).getByText(/正在准备这次豆包请求|正在生成提示词/)).toBeDefined());
-    await act(async (): Promise<void> => {
-      tasks = tasks.map((task): Task => ({ ...task, status: 'generating', runtime: task.runtime ? { ...task.runtime, submittedAt: now, stage: 'generating' } : undefined })); useTaskStore.setState({ tasks });
-    });
-    expect(within(card()).getByText(/正在核对发送结果|正在等待.*回复/)).toBeDefined();
-    expect(generate().hasAttribute('disabled')).toBe(true); fireEvent.click(generate());
-    expect(prepareRuntime).toHaveBeenCalledOnce(); expect(startAutomation).toHaveBeenCalledOnce(); expect(project.materials?.[0].prompt.final).toBe('');
+  it('重开保存中的图片操作只显示继续入口，不重复生成或伪装正在执行', async (): Promise<void> => {
+    project.imageOperations = [{ id: 'TEST-saved-operation', requestId: 'TEST-original-click', target: { materialId }, mode: 'generate', stage: 'generating', basisHash: 'TEST', createdAt: now }];
+    const recover = vi.fn(async (): Promise<void> => undefined); const generate = usePetStoryStore.getState().generateMaterialImage;
+    usePetStoryStore.setState({ project, activeImageOperationId: null, recoverImageOperation: recover }); render(<LiveMaterials />);
+    expect(within(card()).getByText('图片任务已保存，可继续本次任务')).toBeDefined();
+    expect(within(card()).queryByRole('progressbar')).toBeNull();
+    expect(within(card()).getByRole('button', { name: '生成图片' }).hasAttribute('disabled')).toBe(true);
+    expect(recover).not.toHaveBeenCalled(); expect(generate).not.toHaveBeenCalled();
+    recover.mockImplementationOnce(async (): Promise<void> => { usePetStoryStore.setState({ error: 'TEST 原会话暂未就绪' }); });
+    fireEvent.click(within(card()).getByRole('button', { name: '继续本次任务' }));
+    await waitFor((): void => expect(recover).toHaveBeenCalledExactlyOnceWith('TEST-saved-operation')); expect(generate).not.toHaveBeenCalled();
+    expect(within(card()).getByText('TEST 原会话暂未就绪')).toBeDefined();
+    expect(within(card()).getByRole('button', { name: '继续本次任务' })).toBeDefined();
   });
-  it('重开时已暂停原任务就在当前卡可恢复，不因渲染而发送，恢复仍使用相同任务', async (): Promise<void> => {
-    createPreparedJob(); const job = project.jobs[0]; job.runId = tasks[0].runtime?.runId;
-    tasks[0] = { ...tasks[0], status: 'waiting_verification', errorInfo: { code: 'page_unrecognized', message: 'TEST 请处理原页面', recoverable: true, detectedAt: now } };
-    usePetStoryStore.setState({ project }); useTaskStore.setState({ tasks }); render(<LiveMaterials />);
-    expect(within(card()).getByText(/原任务尚未发送|请处理原页面/)).toBeDefined();
-    expect(prepareRuntime).not.toHaveBeenCalled(); expect(startAutomation).not.toHaveBeenCalled();
-    fireEvent.click(within(card()).getByRole('button', { name: /处理阻断后继续原任务/ }));
-    await waitFor((): void => expect(retryUnsubmitted).toHaveBeenCalledExactlyOnceWith(project.id, job.id));
-    await waitFor((): void => expect(startAutomation).toHaveBeenCalledExactlyOnceWith(job.taskId, expect.any(Function)));
-    expect(prepareRuntime).not.toHaveBeenCalled(); expect(tasks).toHaveLength(1); expect(project.jobs).toHaveLength(1);
+  it('已完成操作之后上传失败只保留上传重试，不错误继续旧生成任务', async (): Promise<void> => {
+    project.assets = [candidate('TEST-complete')]; project.imageOperations = [{ id: 'TEST-complete-operation', requestId: 'TEST-original-click', target: { materialId }, mode: 'generate', stage: 'complete', outputAssetId: 'TEST-complete', basisHash: 'TEST', createdAt: now }];
+    const recover = vi.fn(async (): Promise<void> => undefined); const upload = vi.fn(async (): Promise<void> => { throw new Error('TEST 新上传文件不可读取'); });
+    usePetStoryStore.setState({ project, recoverImageOperation: recover, addMaterialImage: upload }); render(<LiveMaterials />);
+    fireEvent.click(within(card()).getByRole('button', { name: '上传替代图片' }));
+    await waitFor((): void => expect(within(card()).getByText('TEST 新上传文件不可读取')).toBeDefined());
+    expect(within(card()).queryByRole('button', { name: '继续本次任务' })).toBeNull(); expect(recover).not.toHaveBeenCalled();
+    expect(within(card()).getByRole('button', { name: '上传替代图片' }).hasAttribute('disabled')).toBe(false);
+  });
+  it('切到其他位置后只保留待确认，不自动弹出结果', async (): Promise<void> => {
+    let complete: (() => void) | undefined;
+    usePetStoryStore.setState({ generateMaterialImage: vi.fn((): Promise<void> => new Promise((resolve): void => { complete = resolve; })) });
+    const { container } = render(<div data-testid="stage"><LiveMaterials /></div>);
+    fireEvent.click(within(card()).getByRole('button', { name: '生成图片' })); container.firstElementChild?.setAttribute('hidden', '');
+    await act(async (): Promise<void> => { usePetStoryStore.setState({ project: { ...project, revision: 2, assets: [candidate('TEST-background')] } }); complete?.(); });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    container.firstElementChild?.removeAttribute('hidden');
+    expect(within(card()).getByRole('button', { name: '查看图片' })).toBeDefined();
   });
 });

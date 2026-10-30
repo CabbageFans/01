@@ -168,6 +168,30 @@ export interface PetStoryPlan {
 }
 export type PetStoryImageTarget = { materialId: string; shotId?: never; kind?: never }
   | { shotId: string; kind: 'firstFrame' | 'lastFrame'; materialId?: never };
+/** 一次明确图片操作；文字准备、真实生成和候选下载沿同一授权恢复。 */
+export interface PetStoryImageOperation {
+  id: string;
+  requestId: string;
+  target: PetStoryImageTarget;
+  mode: 'generate' | 'modify';
+  stage: 'preparing' | 'generating' | 'saving' | 'complete' | 'failed';
+  createdAt: string;
+  basisHash: string;
+  baseAssetId?: string;
+  baseSha256?: string;
+  feedback?: string;
+  chatJobId?: string;
+  taskId?: string;
+  outputAssetId?: string;
+  productionApprovedAt?: string;
+  error?: string;
+}
+export interface PetStoryImageOperationRequest {
+  requestId: string;
+  target: PetStoryImageTarget;
+  baseAssetId?: string;
+  feedback?: string;
+}
 export interface PetStoryImageReview {
   state: 'candidate' | 'adopted';
   target: PetStoryImageTarget;
@@ -261,6 +285,8 @@ export interface PetStoryShotMedia extends PetStoryModeResolution {
   startFromPreviousEnd?: PetStoryAsset['sourceVideo'];
 }
 export interface PetStoryProduction {
+  /** 图片操作的单次授权关联；不改变正式选图。 */
+  imageOperationId?: string;
   phase?: 'materials' | 'shots';
   /** 画布单节点授权；完成这一项后停止，不补生成其他媒体。 */
   target?: { shotId: string; kind: PetStoryPromptKind };
@@ -297,6 +323,10 @@ export interface PetStoryProductionResult extends PetStoryResult {
   guard?: PetStoryExecutionGuard;
   counts?: PetStoryProductionCounts;
   resolutions?: Record<string, PetStoryModeResolution>;
+}
+export interface PetStoryImageOperationResult extends PetStoryProductionResult {
+  operationId?: string;
+  chatJobId?: string;
 }
 
 export interface PetStoryReviewIssue {
@@ -402,6 +432,7 @@ export interface PetStoryChatJob {
   parsedResult?: { plan?: PetStoryPlan; optimized?: string; issues?: PetStoryReviewIssue[]; assets?: PetStoryAssetBindings; contentBasis?: PetStoryProject['contentBasis']; requiresConfirmation?: boolean; changeReason?: string };
 }
 export interface PetStoryProject {
+  imageOperations?: PetStoryImageOperation[];
   /** 同一项目内的对象级自由对话记录，不改变任务执行事实。 */
   chatAdjustment?: PetStoryChatAdjustment;
   chatAdjustmentHistory?: PetStoryChatAdjustment[];
@@ -477,6 +508,9 @@ export interface PetStoryGenerationEligibilityResult extends PetStoryResult {
   eligibility?: PetStoryGenerationEligibility;
 }
 export interface PetStoryAPI {
+  beginImageOperation: (projectId: string, revision: number, request: PetStoryImageOperationRequest, capability?: PetStoryCapability) => Promise<PetStoryImageOperationResult>;
+  advanceImageOperation: (projectId: string, operationId: string) => Promise<PetStoryImageOperationResult>;
+  resumeImageOperation: (projectId: string, operationId: string, capability?: PetStoryCapability) => Promise<PetStoryImageOperationResult>;
   previewAdjustmentReply: (projectId: string, revision: number, adjustmentId: string, replyKey: string) => Promise<PetStoryAdjustmentPreviewResult>;
   beginAdjustment: (projectId: string, revision: number, target: PetStoryRuntimeTarget) => Promise<PetStoryAdjustmentResult>;
   captureAdjustmentReplies: (projectId: string, adjustmentId: string, conversationUrl: string, replies: PetStoryConversationReply[]) => Promise<PetStoryAdjustmentResult>;

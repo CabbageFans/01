@@ -21,20 +21,20 @@ beforeEach((): void => {
 afterEach((): void => { usePetStoryStore.setState(original); vi.restoreAllMocks(); });
 
 describe('图片候选预览与明确采用', (): void => {
-  it('没有提示词时只突出生成提示词，入口尚未检查不会阻断文字准备', (): void => {
-    project.assets = []; const prepare = vi.fn(async (): Promise<void> => undefined); const generate = vi.fn(async (): Promise<void> => undefined);
-    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" disabled={false} generationDisabled promptReady={false} onPreparePrompt={prepare} onGenerate={generate} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
-    const action = screen.getByRole('button', { name: '生成提示词' });
+  it('无图时只提供生成图片和上传，不暴露提示词生产入口', (): void => {
+    project.assets = []; const generate = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" disabled={false} onGenerate={generate} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    const action = screen.getByRole('button', { name: '生成图片' });
     expect(action.classList.contains('ant-btn-primary')).toBe(true); expect(action.hasAttribute('disabled')).toBe(false);
-    expect(screen.queryByRole('button', { name: '生成图片' })).toBeNull(); expect(screen.getByRole('button', { name: '上传图片' })).toBeDefined();
-    fireEvent.click(action); expect(prepare).toHaveBeenCalledOnce(); expect(generate).not.toHaveBeenCalled();
+    expect(screen.queryByText(/生成提示词|采用提示词|更多操作/)).toBeNull(); expect(screen.getByRole('button', { name: '上传图片' })).toBeDefined();
+    fireEvent.click(action); expect(generate).toHaveBeenCalledOnce();
   });
 
-  it('新候选到来时保留已采用缩略图，只突出查看并采用', (): void => {
+  it('新候选到来时保留已采用缩略图，只突出查看图片', (): void => {
     render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
     expect(screen.getByRole('button', { name: '查看镜头 3 · 首帧已采用图片' })).toBeDefined();
-    expect(screen.queryByRole('button', { name: '查看图片' })).toBeNull();
-    expect(screen.getAllByRole('button').filter((button): boolean => button.classList.contains('ant-btn-primary'))).toEqual([screen.getByRole('button', { name: '查看并采用' })]);
+    expect(screen.getByText('图片待确认 · 2 张')).toBeDefined();
+    expect(screen.getAllByRole('button').filter((button): boolean => button.classList.contains('ant-btn-primary'))).toEqual([screen.getByRole('button', { name: '查看图片' })]);
   });
 
   it.each([false, true])('当前旧图需复核时可预览并明确继续采用（外部确认失效=%s）', async (external): Promise<void> => {
@@ -51,20 +51,20 @@ describe('图片候选预览与明确采用', (): void => {
     const adopt = vi.fn(async (): Promise<void> => undefined);
     render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onUpload={async (): Promise<void> => undefined} onAdopt={adopt} />);
     await waitFor((): void => expect(screen.getByRole('img', { name: '镜头 3 · 首帧 · 当前采用' }).getAttribute('src')).toContain('old'));
-    fireEvent.click(screen.getByRole('button', { name: '查看并采用' }));
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' }));
     const dialog = screen.getByRole('dialog', { name: '镜头 3 · 首帧 · 选择图片' });
     expect(within(dialog).getByText('镜头 3 · 首帧')).toBeDefined();
     fireEvent.click(within(dialog).getByRole('button', { name: '选择候选图片 2' }));
-    await waitFor((): void => expect(within(dialog).getByRole('button', { name: '采用这张' }).hasAttribute('disabled')).toBe(false));
+    await waitFor((): void => expect(within(dialog).getByRole('button', { name: '满意，采用图片' }).hasAttribute('disabled')).toBe(false));
     expect(adopt).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole('button', { name: '暂不采用' }));
     expect(adopt).not.toHaveBeenCalled();
     expect(project.adoptedImages?.['TEST-shot'].firstFrameId).toBe('old');
-    fireEvent.click(screen.getByRole('button', { name: '查看并采用' }));
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' }));
     const reopened = screen.getByRole('dialog', { name: '镜头 3 · 首帧 · 选择图片' });
     fireEvent.click(within(reopened).getByRole('button', { name: '选择候选图片 2' }));
-    await waitFor((): void => expect(within(reopened).getByRole('button', { name: '采用这张' }).hasAttribute('disabled')).toBe(false));
-    fireEvent.click(within(reopened).getByRole('button', { name: '采用这张' }));
+    await waitFor((): void => expect(within(reopened).getByRole('button', { name: '满意，采用图片' }).hasAttribute('disabled')).toBe(false));
+    fireEvent.click(within(reopened).getByRole('button', { name: '满意，采用图片' }));
     await waitFor((): void => expect(adopt).toHaveBeenCalledExactlyOnceWith('candidate-b'));
   });
 
@@ -73,10 +73,10 @@ describe('图片候选预览与明确采用', (): void => {
     window.electronAPI.petstory.readReference = read;
     const adopt = vi.fn(async (): Promise<void> => undefined);
     render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onUpload={async (): Promise<void> => undefined} onAdopt={adopt} />);
-    fireEvent.click(screen.getByRole('button', { name: '查看并采用' }));
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' }));
     const dialog = screen.getByRole('dialog');
     await waitFor((): void => expect(within(dialog).getAllByText('TEST 文件缺失').length).toBeGreaterThan(0));
-    const apply = within(dialog).getByRole('button', { name: '采用这张' });
+    const apply = within(dialog).getByRole('button', { name: '满意，采用图片' });
     expect(apply.hasAttribute('disabled')).toBe(true); fireEvent.click(apply); expect(adopt).not.toHaveBeenCalled();
   });
 
@@ -98,5 +98,63 @@ describe('图片候选预览与明确采用', (): void => {
     expect(imageBelongsToTarget(project, image('own'), target)).toBe(true);
     expect(imageBelongsToTarget(project, image('own'), { shotId: 'TEST-other', kind: 'firstFrame' })).toBe(false);
     expect(imageBelongsToTarget(project, image('own'), { shotId: target.shotId, kind: 'lastFrame' })).toBe(false);
+  });
+});
+
+/** 选图反馈只验证交互绑定，图片输出在这些用例中是离线替身。 */
+describe('直接对所选图片提出反馈', (): void => {
+  it('未采用候选可修改，保留原话和选中的较早基图，不采用后再修改', async (): Promise<void> => {
+    const modify = vi.fn(async (): Promise<void> => undefined); const adopt = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onModify={modify} onUpload={async (): Promise<void> => undefined} onAdopt={adopt} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' }));
+    const review = screen.getByRole('dialog'); fireEvent.click(within(review).getByRole('button', { name: '选择候选图片 1' }));
+    const change = within(review).getByRole('button', { name: '不满意，修改图片' }); await waitFor((): void => expect(change.hasAttribute('disabled')).toBe(false)); fireEvent.click(change);
+    const dialog = screen.getByRole('dialog', { name: '修改这张图片' });
+    expect(within(dialog).getByText('镜头 3 · 首帧')).toBeDefined();
+    const input = within(dialog).getByRole('textbox', { name: '图片修改意见' });
+    const submit = within(dialog).getByRole('button', { name: '提交修改' }); expect(submit.hasAttribute('disabled')).toBe(true);
+    fireEvent.change(input, { target: { value: '  表情更自然，背景保持不变。  ' } }); fireEvent.click(submit);
+    await waitFor((): void => expect(modify).toHaveBeenCalledExactlyOnceWith('candidate-a', '  表情更自然，背景保持不变。  '));
+    expect(adopt).not.toHaveBeenCalled(); expect(project.adoptedImages?.['TEST-shot'].firstFrameId).toBe('old');
+    expect(screen.queryByRole('textbox', { name: /提示词/ })).toBeNull(); expect(screen.queryByText(/复制|生成修改计划|手动应用/)).toBeNull();
+  });
+  it('取消和空意见都不提交，取消后保留当前选图', async (): Promise<void> => {
+    const modify = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onModify={modify} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' })); const review = screen.getByRole('dialog');
+    const change = within(review).getByRole('button', { name: '不满意，修改图片' }); await waitFor((): void => expect(change.hasAttribute('disabled')).toBe(false)); fireEvent.click(change);
+    const dialog = screen.getByRole('dialog', { name: '修改这张图片' });
+    fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: ' \n ' } }); fireEvent.click(within(dialog).getByRole('button', { name: '提交修改' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' })); expect(modify).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: '镜头 3 · 首帧 · 选择图片' })).toBeDefined();
+  });
+  it('已采用图可修改但不要求反复采用，同一素材可选新图继续修改', async (): Promise<void> => {
+    project.assets = [image('old', 'adopted')]; const modify = vi.fn(async (): Promise<void> => undefined);
+    const props = { target, title: '镜头 3 · 首帧', currentAssetId: 'old', disabled: false, onModify: modify, onUpload: async (): Promise<void> => undefined, onAdopt: async (): Promise<void> => undefined };
+    const { rerender } = render(<PetStoryImageReview {...props} project={project} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' }));
+    let review = screen.getByRole('dialog'); expect(within(review).queryByRole('button', { name: '满意，采用图片' })).toBeNull();
+    let change = within(review).getByRole('button', { name: '不满意，修改图片' }); await waitFor((): void => expect(change.hasAttribute('disabled')).toBe(false)); fireEvent.click(change);
+    let dialog = screen.getByRole('dialog', { name: '修改这张图片' }); fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: '第一轮反馈' } }); fireEvent.click(within(dialog).getByRole('button', { name: '提交修改' }));
+    await waitFor((): void => expect(modify).toHaveBeenCalledExactlyOnceWith('old', '第一轮反馈'));
+    await waitFor((): void => expect(screen.queryByRole('dialog')).toBeNull());
+    project = { ...project, revision: 2, assets: [...project.assets, image('round-one')] }; rerender(<PetStoryImageReview {...props} project={project} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' })); review = screen.getByRole('dialog');
+    change = within(review).getByRole('button', { name: '不满意，修改图片' }); await waitFor((): void => expect(change.hasAttribute('disabled')).toBe(false)); fireEvent.click(change);
+    dialog = screen.getByRole('dialog', { name: '修改这张图片' }); fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: '第二轮反馈' } }); fireEvent.click(within(dialog).getByRole('button', { name: '提交修改' }));
+    await waitFor((): void => expect(modify).toHaveBeenLastCalledWith('round-one', '第二轮反馈')); expect(modify).toHaveBeenCalledTimes(2);
+    expect(project.adoptedImages?.['TEST-shot'].firstFrameId).toBe('old');
+  });
+  it('本地上传图可直接作为基图，修改失败保留图片与反馈', async (): Promise<void> => {
+    project.assets = [image('uploaded')]; project.adoptedImages = {};
+    const modify = vi.fn(async (): Promise<void> => { throw new Error('TEST 平台暂未返回结果'); });
+    render(<PetStoryImageReview project={project} target={target} title="上传素材" disabled={false} onModify={modify} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' })); const review = screen.getByRole('dialog');
+    const change = within(review).getByRole('button', { name: '不满意，修改图片' }); await waitFor((): void => expect(change.hasAttribute('disabled')).toBe(false)); fireEvent.click(change);
+    const dialog = screen.getByRole('dialog', { name: '修改这张图片' }); const input = within(dialog).getByRole('textbox');
+    fireEvent.change(input, { target: { value: '只修改表情' } }); fireEvent.click(within(dialog).getByRole('button', { name: '提交修改' }));
+    await waitFor((): void => expect(within(dialog).getByText('TEST 平台暂未返回结果')).toBeDefined());
+    expect(modify).toHaveBeenCalledExactlyOnceWith('uploaded', '只修改表情'); expect((input as HTMLTextAreaElement).value).toBe('只修改表情');
+    expect(project.assets).toHaveLength(1); expect(project.adoptedImages).toEqual({});
   });
 });

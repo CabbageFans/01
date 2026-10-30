@@ -365,16 +365,19 @@ export class PetStoryChatService {
     return { success: true, project: p, promptTargets: targets, pendingCandidateJobIds };
   }
 
-  async prepareRuntime(id: string, revision: number, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget = {}): Promise<PetStoryResult> {
-    if (kind !== 'repair' || !target.parentJobId) return this.prepareRuntimeRequest(id, revision, kind, target);
+  async prepareRuntime(id: string, revision: number, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget = {}, imageOperationId?: string): Promise<PetStoryResult> {
+    if (kind !== 'repair' || !target.parentJobId) return this.prepareRuntimeRequest(id, revision, kind, target, imageOperationId);
     const key = `${id}:${target.parentJobId}`; const existing = this.repairPreparations.get(key);
     if (existing) return existing;
-    const pending = this.prepareRuntimeRequest(id, revision, kind, target); this.repairPreparations.set(key, pending);
+    const pending = this.prepareRuntimeRequest(id, revision, kind, target, imageOperationId); this.repairPreparations.set(key, pending);
     try { return await pending; } finally { if (this.repairPreparations.get(key) === pending) this.repairPreparations.delete(key); }
   }
 
-  private async prepareRuntimeRequest(id: string, revision: number, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget): Promise<PetStoryResult> {
+  private async prepareRuntimeRequest(id: string, revision: number, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget, imageOperationId?: string): Promise<PetStoryResult> {
     let p = await this.projects.read(id);
+    const imageOperation = this.imagePreparationOperation(p, kind, target, imageOperationId);
+    const preparedImage = this.existingImagePreparation(p, imageOperation);
+    if (preparedImage) return preparedImage;
     const parent = target.parentJobId ? p.jobs.find((j): boolean => j.id === target.parentJobId) : undefined;
     // IPC 按项目串行；父子关联落盘后，重复回调与重开只能连接同一条修订。
     const existing = this.existingRuntimeRepair(p, kind, parent); if (existing) return existing;
@@ -403,11 +406,26 @@ export class PetStoryChatService {
     const task = this.tasks.create({ prompts: [request.prompt], promptReadback: 'exact', mode: 'chat', executionIntent: 'hold', attachments, projectId: p.studioProjectId }, p.accountId);
     const job = this.runtimeJob(p, kind, target, effectiveTarget, parent, task, requestId, request);
     p.jobs.push(job);
+    // 同一次项目原子保存包含根请求及图片授权关联，避免任务已存但图片操作无法恢复。
+    if (imageOperation) imageOperation.chatJobId = job.id;
     if (adjustmentRepair && p.chatAdjustment) p.chatAdjustment.repairJobId = job.id;
     if (p.promptBatch?.status === 'running') p.promptBatch.jobId = job.id;
     p = await this.projects.write(p);
     this.syncAdjustmentRepairGuard(p, job);
     return { success: true, project: p, taskId: task.id, attachments, ...(kind === 'repair' ? { repairJobId: job.id, repairSourceJobId: parent?.id } : {}) };
+  }
+  private imagePreparationOperation(p: PetStoryProject, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget, operationId?: string): import('@doubao-studio/contracts').PetStoryImageOperation | undefined {
+    if (!operationId) return undefined;
+    const operation = p.imageOperations?.find((item): boolean => item.id === operationId);
+    if (!operation || operation.mode !== 'generate' || operation.stage !== 'preparing' || kind !== 'materialPrompt'
+      || !target.materialId || operation.target.materialId !== target.materialId) throw new Error('本次图片准备授权与目标不符');
+    return operation;
+  }
+  private existingImagePreparation(p: PetStoryProject, operation?: import('@doubao-studio/contracts').PetStoryImageOperation): PetStoryResult | undefined {
+    if (!operation?.chatJobId) return undefined;
+    const job = p.jobs.find((item): boolean => item.id === operation.chatJobId && item.kind === 'materialPrompt' && item.materialId === operation.target.materialId);
+    if (!job) throw new Error('原图片准备关联不存在，不重新创建任务');
+    return { success: true, project: p, taskId: job.taskId };
   }
 
   private existingRuntimeRepair(p: PetStoryProject, kind: PetStoryChatJob['kind'], parent?: PetStoryChatJob): PetStoryResult | undefined {

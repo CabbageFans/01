@@ -41,6 +41,7 @@ export interface WebviewHandle {
   focus?(): void;
   getBoundingClientRect?(): { left: number; top: number; right: number; bottom: number; width: number; height: number };
   contains?(node: Node | null): boolean;
+  closest?(selector: string): Element | null;
   readonly isConnected?: boolean;
   isLoadingMainFrame?(): boolean;
 }
@@ -2138,7 +2139,13 @@ export async function injectGenerationMonitor(webview: WebviewHandle): Promise<b
   }
 }
 
-function nativeInputHostGeometry(webview: WebviewHandle, target?: SendButtonTarget): string | undefined {
+export interface BackgroundNativeInput {
+  taskId: string;
+  /** 执行器每次回读当前图片操作和账号控制器，不把历史任务当后台授权。 */
+  isCurrent: () => boolean;
+}
+
+function nativeInputHostGeometry(webview: WebviewHandle, target?: SendButtonTarget, background?: BackgroundNativeInput): string | undefined {
   if (!webview.getBoundingClientRect || webview.isConnected === false || typeof document === 'undefined') return undefined;
   const rect = webview.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return undefined;
@@ -2150,12 +2157,16 @@ function nativeInputHostGeometry(webview: WebviewHandle, target?: SendButtonTarg
     // guest DOM 看不到宿主遮挡；只映射可见命中检查，原生事件仍使用原 guest 坐标。
     points.push([rect.left + position[0] * rect.width / geometry[4], rect.top + position[1] * rect.height / geometry[5]]);
   }
-  if (!points.every(([x, y]): boolean => {
+  // 原生事件直接交给同一个 guest，而非 OS 屏幕坐标。仅显式图片操作可使用
+  // 常驻屏外宿主；仍核对连接、非零尺寸、当前控制器、guest 命中和提交租约。
+  const parked = webview.closest?.('.browser-host.is-parked');
+  const backgroundOwned = !!background?.taskId && background.isCurrent() && !!parked && !parked.hasAttribute('inert');
+  if (!backgroundOwned && !points.every(([x, y]): boolean => {
     if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return false;
     const hit = document.elementFromPoint(x, y);
     return hit === (webview as unknown as Element) || !!webview.contains?.(hit);
   })) return undefined;
-  return [rect.left, rect.top, rect.width, rect.height, window.innerWidth, window.innerHeight].join(',');
+  return [rect.left, rect.top, rect.width, rect.height, window.innerWidth, window.innerHeight, ...(backgroundOwned ? [background.taskId] : [])].join(',');
 }
 
 export interface SubmissionDispatchSafety {
@@ -2178,11 +2189,11 @@ function sameNativeSubmissionTarget(current: SendButtonTarget, previous: SendBut
 }
 
 /** 只准备焦点并回读两帧稳定命中；最终提交准备还必须受原运行及截止时间约束。 */
-export async function prepareNativeSubmission(webview: WebviewHandle, safety?: SubmissionDispatchSafety): Promise<SendButtonTarget> {
+export async function prepareNativeSubmission(webview: WebviewHandle, safety?: SubmissionDispatchSafety, background?: BackgroundNativeInput): Promise<SendButtonTarget> {
   try {
     if (!submissionDispatchAllowed(safety)) return { ok: false };
     const prepare = typeof window !== 'undefined' ? window.electronAPI?.system?.prepareNativeInput : undefined;
-    if (!prepare || !await prepare() || !submissionDispatchAllowed(safety) || !nativeInputHostGeometry(webview)) return { ok: false };
+    if (!prepare || !await prepare() || !submissionDispatchAllowed(safety) || !nativeInputHostGeometry(webview, undefined, background)) return { ok: false };
     webview.focus?.();
     const focused = await safeExecuteJS<boolean>(webview, `
       (async function() {
@@ -2203,10 +2214,10 @@ export async function prepareNativeSubmission(webview: WebviewHandle, safety?: S
     let previous: SendButtonTarget | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
       await safeExecuteJS<boolean>(webview, 'new Promise(function(resolve) { requestAnimationFrame(function() { resolve(true); }); })', 3000, 'nativeSubmissionFrame');
-      if (!submissionDispatchAllowed(safety) || !nativeInputHostGeometry(webview)) return { ok: false };
+      if (!submissionDispatchAllowed(safety) || !nativeInputHostGeometry(webview, undefined, background)) return { ok: false };
       const target = await findSendButtonTarget(webview);
       if (!submissionDispatchAllowed(safety)) return { ok: false };
-      const current = { ...target, hostGeometry: target.ok ? nativeInputHostGeometry(webview, target) : undefined };
+      const current = { ...target, hostGeometry: target.ok ? nativeInputHostGeometry(webview, target, background) : undefined };
       if (previous && sameNativeSubmissionTarget(current, previous)) return current;
       previous = current;
     }
@@ -2258,10 +2269,12 @@ async function dispatchVerifiedGuestClick(webview: WebviewHandle, target: SendBu
 }
 
 /** 一次运行只选择一种首次点击策略；返回值只表示事件派发，成功以原消息全文回执为准。 */
-export async function submitPromptWithNativeClick(webview: WebviewHandle, strategy: 'native' | 'guest' = 'native', safety?: SubmissionDispatchSafety): Promise<boolean> {
+export async function submitPromptWithNativeClick(webview: WebviewHandle, strategy: 'native' | 'guest' = 'native', safety?: SubmissionDispatchSafety, background?: BackgroundNativeInput): Promise<boolean> {
   if (typeof webview.sendInputEvent !== 'function') return false;
   try {
-    const target = await prepareNativeSubmission(webview, safety);
+    // 后台仍只使用当前正式原生发送路径，不开放页内事件回退。
+    if (background && (strategy !== 'native' || !safety)) return false;
+    const target = await prepareNativeSubmission(webview, safety, background);
     if (!target.ok || !target.position || !submissionDispatchAllowed(safety)) return false;
     if (safety && !await safety.verifyLease()) return false;
     if (!submissionDispatchAllowed(safety)) return false;
@@ -2273,7 +2286,7 @@ export async function submitPromptWithNativeClick(webview: WebviewHandle, strate
     // 租约 IPC 期间焦点、页面或宿主布局可能变化；不沿用此前缓存坐标直接发送。
     const current = await findSendButtonTarget(webview);
     if (!submissionDispatchAllowed(safety)) return false;
-    if (!sameNativeSubmissionTarget({ ...current, hostGeometry: nativeInputHostGeometry(webview, current) }, target)) return false;
+    if (!sameNativeSubmissionTarget({ ...current, hostGeometry: nativeInputHostGeometry(webview, current, background) }, target)) return false;
     const [x, y] = target.position.split(',').map(Number);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
     await webview.sendInputEvent({ type: 'mouseMove', x, y });
@@ -6581,6 +6594,19 @@ export async function manualResolveVideoArtifact(
 // PetStory 复用原执行器，在任务执行中回读实际素材槽位和生成参数。
 export async function readPetStoryComposer(webview: WebviewHandle, operation: import('./petstoryControls').PetStoryComposerOperation = {}): Promise<import('./petstoryControls').PetStoryComposerSnapshot> {
   return safeExecuteJS(webview, `(${petStoryComposerProbe.toString()})(${JSON.stringify(operation)})`, 5000, 'petstory_visible_controls');
+}
+/** 图片模式切换后输入区会异步重建；等待真实控件稳定，不把固定动画等待当作就绪。 */
+export async function waitForPetStoryImageComposer(webview: WebviewHandle, signal: AbortSignal, timeoutMs: number = 15_000): Promise<import('./petstoryControls').PetStoryComposerSnapshot> {
+  const deadline = Date.now() + timeoutMs;
+  let stableSamples = 0;
+  while (Date.now() < deadline) {
+    if (signal.aborted) throw new DOMException('图片任务已暂停', 'AbortError');
+    const snapshot = await readPetStoryComposer(webview);
+    stableSamples = snapshot.present && snapshot.generic ? stableSamples + 1 : 0;
+    if (stableSamples >= 2 && !signal.aborted) return snapshot;
+    await sleep(250);
+  }
+  throw new PetStoryControlError('图片输入区尚未就绪，请稍后继续本次任务');
 }
 export function checkPetStoryPageGuard(snapshot: import('./petstoryControls').PetStoryComposerSnapshot, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, video: boolean): void {
   if (!snapshot.present) throw new PetStoryControlError(video ? '当前页面没有找到视频生成输入区' : '当前页面没有找到图片生成输入区');

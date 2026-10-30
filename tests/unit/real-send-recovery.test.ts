@@ -330,7 +330,7 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     expect(panelSource).not.toContain('submissionAttempt < 3');
     expect(panelSource).not.toContain('验证已完成，正在新对话中重新上传并提交');
     expect(panelSource).toContain('系统不会自动重新提交');
-    const readinessIndex = panelSource.indexOf('if (!authorizationTriggeredSubmission && !(await prepareNativeSubmission(webview)).ok)');
+    const readinessIndex = panelSource.indexOf('if (!authorizationTriggeredSubmission && !(await prepareNativeSubmission(webview, undefined, backgroundInput)).ok)');
     const submittingIndex = panelSource.indexOf("markSubmissionIntent('submitting'");
     const clickIndex = panelSource.indexOf("submitPromptWithNativeClick(webview, 'native', {");
     expect(readinessIndex, '发送前必须先确认窗口、输入区和控件稳定').toBeGreaterThan(0);
@@ -376,7 +376,8 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     );
     expect(nativeClickBody).not.toContain('return submitPrompt(webview)');
     expect(nativeClickBody).toContain('禁止自动回退');
-    expect(nativeClickBody).toContain('prepareNativeSubmission(webview, safety)');
+    expect(nativeClickBody).toContain('prepareNativeSubmission(webview, safety, background)');
+    expect(nativeClickBody).toContain("background && (strategy !== 'native' || !safety)");
     expect(nativeClickBody).toContain('await safety.verifyLease()');
     expect(nativeClickBody).toContain('submissionDispatchAllowed(safety)');
     expect(bridgeSource).toContain('const target = await findSendButtonTarget(webview)');

@@ -11,6 +11,7 @@ import { PetStoryAdjustmentService } from '../utils/petstoryAdjustment';
 import { PetStoryExistingMediaService } from '../utils/petstoryExistingMedia';
 import { createPetStoryTask, retryPetStoryTask, revisePetStoryHeldPrompt, listTasksForLocalControl, setPetStoryConversationGuard } from './tasks';
 import { PetStoryProductionService } from '../utils/petstoryProduction';
+import { PetStoryImageOperationService } from '../utils/petstoryImageOperations';
 import type { PetStoryCapability, PetStoryPromptProfile, PetStoryResolvedMode, PetStoryProductionResult } from '@doubao-studio/contracts';
 import { downloadTaskOutputs, listTaskDownloads, bindPetStoryTask, bindPetStoryPageInput } from './tasks';
 import { listAccountsForLocalControl } from './accounts';
@@ -21,6 +22,7 @@ const projects = new PetStoryProjects();
 const chats = new PetStoryChatService(projects, { list: listTasksForLocalControl, create: createPetStoryTask, reviseHeldPrompt: revisePetStoryHeldPrompt, retryUnsubmitted: retryPetStoryTask, setConversationGuard: setPetStoryConversationGuard });
 const adjustments = new PetStoryAdjustmentService(projects, { list: listTasksForLocalControl, create: createPetStoryTask, setConversationGuard: setPetStoryConversationGuard }, chats, { downloads: listTaskDownloads, download: (params: import('@doubao-studio/contracts').TaskDownloadOutputsParams): ReturnType<typeof downloadTaskOutputs> => downloadTaskOutputs(params, { redirect: 'error' }) });
 const production = new PetStoryProductionService(projects, { list: listTasksForLocalControl, create: createPetStoryTask, adopt: bindPetStoryTask, bindPageInput: bindPetStoryPageInput, retryUnsubmitted: retryPetStoryTask, downloads: listTaskDownloads, download: downloadTaskOutputs });
+const imageOperations = new PetStoryImageOperationService(projects, chats, production, listTasksForLocalControl);
 const existingMedia = new PetStoryExistingMediaService(projects, { list: listTasksForLocalControl, downloads: listTaskDownloads });
 const CHANNELS = ['petstory:saveOriginalStory', 'petstory:linkExistingMedia', 'petstory:listExistingMediaCandidates', 'petstory:saveShotPrompt', 'petstory:generateShotMedia', 'petstory:readMedia', 'petstory:exportPrompts', 'petstory:confirmStory', 'petstory:saveMaterialPrompt', 'petstory:addMaterialImage', 'petstory:selectMaterialImage', 'petstory:approveMaterials', 'petstory:generateMaterials', 'petstory:recordPageBindings', 'petstory:bindSharedReference', 'petstory:previewPrompt', 'petstory:savePromptProfile', 'petstory:selectProductionImage', 'petstory:addSceneReference', 'petstory:previewProduction', 'petstory:approveProduction', 'petstory:advanceProduction', 'petstory:pauseProduction', 'petstory:resumeProduction', 'petstory:bindProductionRun', 'petstory:guardProductionTask', 'petstory:create', 'petstory:open', 'petstory:saveSource', 'petstory:saveMobileStory', 'petstory:addReference', 'petstory:savePlan', 'petstory:prepareChat', 'petstory:collectChat', 'petstory:bindRun', 'petstory:retryUnsubmitted', 'petstory:readReference', 'petstory:draftFinal'] as const;
 type Handler = (event: IpcMainInvokeEvent, params: Record<string, unknown>) => Promise<PetStoryResult & { data?: string }>;
@@ -41,7 +43,10 @@ function dialogOwner(event: IpcMainInvokeEvent): BrowserWindow {
   return owner;
 }
 export function registerPetStoryIPC(): () => void {
-  const dispose = replaceIpcHandlers(ipcMain, [...CHANNELS, ...RUNTIME_CHANNELS, 'petstory:importAdjustmentImages']);
+  const dispose = replaceIpcHandlers(ipcMain, [...CHANNELS, ...RUNTIME_CHANNELS, 'petstory:importAdjustmentImages', 'petstory:beginImageOperation', 'petstory:advanceImageOperation', 'petstory:resumeImageOperation']);
+  ipcMain.handle('petstory:beginImageOperation', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => projects.serial(String(p.id), (): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => imageOperations.begin(String(p.id), Number(p.revision), p.request as import('@doubao-studio/contracts').PetStoryImageOperationRequest, p.capability as PetStoryCapability | undefined))));
+  ipcMain.handle('petstory:advanceImageOperation', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => projects.serial(String(p.id), (): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => imageOperations.advance(String(p.id), String(p.operationId)))));
+  ipcMain.handle('petstory:resumeImageOperation', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => projects.serial(String(p.id), (): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => imageOperations.resume(String(p.id), String(p.operationId), p.capability as PetStoryCapability | undefined))));
   ipcMain.handle('petstory:previewAdjustmentReply', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => adjustments.preview(String(p.id), Number(p.revision), String(p.adjustmentId), String(p.replyKey)))));
   ipcMain.handle('petstory:beginAdjustment', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => adjustments.begin(String(p.id), Number(p.revision), p.target as import('@doubao-studio/contracts').PetStoryRuntimeTarget))));
   ipcMain.handle('petstory:captureAdjustmentReplies', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), (): Promise<PetStoryResult> => adjustments.capture(String(p.id), String(p.adjustmentId), String(p.conversationUrl), p.replies as import('@doubao-studio/contracts').PetStoryConversationReply[]))));
@@ -158,6 +163,7 @@ export function registerPetStoryIPC(): () => void {
     const directory = info.isDirectory() ? chosen : path.dirname(chosen);
     const project = await projects.open(directory);
     production.suspend(project.id);
+    imageOperations.suspend(project.id);
     adjustments.restore(project);
     return { success: true, displayName: path.basename(directory), project };
   }));

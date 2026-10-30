@@ -21,3 +21,23 @@
   .petstory-material-settings-links { width: 100%; }
   .petstory-materials-panel .petstory-material-grid { grid-template-columns: repeat(auto-fit, minmax(min(265px, 100%), 1fr)); }
 }
+.petstory-material-purpose { margin-bottom: 12px; font-size: 13px; }
+.petstory-material-card .canvas-media-actions { gap: 8px; }
+.petstory-material-card .canvas-media-actions .ant-btn { height: 32px; padding-inline: 10px; }
+.petstory-image-conversation.ant-btn { padding-inline: 0; height: auto; margin-top: 8px; }
+.petstory-image-progress { display: grid; gap: 7px; margin: 14px 0; font-size: 12px; color: #566575; }
+.petstory-image-progress-track { height: 5px; border-radius: 4px; background: #E8EFED; overflow: hidden; }
+.petstory-image-progress-track > span { display: block; height: 100%; background: #087F72; border-radius: inherit; }
+.petstory-image-progress-track.is-pending > span { width: 35%; animation: petstory-image-wait 1.5s ease-in-out infinite alternate; }
+.petstory-image-progress-track.is-complete > span { width: 100%; }
+.petstory-image-feedback-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; color: #A33D32; font-size: 13px; line-height: 1.65; }
+.petstory-image-feedback-error > span { flex: 1 1 180px; }
+.petstory-feedback-image { display: flex; justify-content: center; background: #F8FAFB; border-radius: 8px; overflow: hidden; }
+.petstory-feedback-image .ant-image { display: block; max-width: 100%; }
+.petstory-feedback-image img { width: 100%; max-height: 240px; object-fit: contain; }
+.petstory-feedback-label { display: block; margin-bottom: 8px; }
+.petstory-image-feedback-modal .ant-modal-body > p { margin: 12px 0; }
+.petstory-image-source { color: #697584; }
+@keyframes petstory-image-wait { from { transform: translateX(0); } to { transform: translateX(185%); } }
+@media (max-width: 760px) { .petstory-image-preview-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; } .petstory-image-modal .petstory-adoption-note { max-width: 100%; flex-basis: 100%; } }
+@media (prefers-reduced-motion: reduce) { .petstory-image-progress-track.is-pending > span { animation: none; } }
