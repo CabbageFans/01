@@ -28,7 +28,7 @@ function fixture(mention = true): { view: WebviewHandle; snapshot: PetStoryCompo
     }
     if (code.includes('insertExactComposerText')) { const match = code.match(/\)\(("[\s\S]*")\)$/); if (match) text = JSON.parse(match[1]) as string; return true; }
     // 正式全文校验脚本在该边界读取的编辑器正文；比较保持完整空白，不模拟实际发送。
-    if (code.includes('readExactText')) return runInNewContext(code, { document: { querySelectorAll: (): object[] => [{ offsetParent: {}, disabled: false, tagName: 'TEXTAREA', value: text, getAttribute: (): null => null, getBoundingClientRect: (): object => ({ width: 600, height: 100, top: 10 }) }] }, window: { innerHeight: 900, getComputedStyle: (): object => ({ visibility: 'visible', display: 'block' }) } }) as boolean;
+    if (code.includes('readExactText')) return runInNewContext(code, { document: { querySelectorAll: (): object[] => [{ offsetParent: {}, disabled: false, tagName: 'TEXTAREA', value: text, getAttribute: (): null => null, getBoundingClientRect: (): object => ({ left: 20, top: 10, right: 620, bottom: 110, width: 600, height: 100 }) }] }, window: { innerWidth: 1200, innerHeight: 900, getComputedStyle: (): object => ({ visibility: 'visible', display: 'block' }) } }) as boolean;
     return true;
   } };
   const receipts: PetStoryUploadReceipt[] = [{ fileIndex: 0, key: 'key-a', label: mention ? '@图片1' : '第 2 张图', slot: 'reference', reference: mention ? 'mention' : 'plain' }, { fileIndex: 1, key: 'key-b', label: mention ? '@图片2' : '第 1 张图', slot: 'reference', reference: mention ? 'mention' : 'plain' }];

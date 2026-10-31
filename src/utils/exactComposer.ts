@@ -6,11 +6,13 @@ export function insertExactComposerText(value: string): boolean {
       const rect = editor.getBoundingClientRect();
       return editor.offsetParent !== null && !('disabled' in editor && editor.disabled) && editor.getAttribute('aria-disabled') !== 'true'
         && !editor.closest('[aria-hidden="true"]') && style.display !== 'none' && style.visibility !== 'hidden'
-        && rect.width >= 50 && rect.height >= 20 && rect.top >= 0 && rect.top <= window.innerHeight;
+        && rect.width >= 50 && rect.height >= 20 && rect.right > 0 && rect.bottom > 0
+        && rect.left < window.innerWidth && rect.top < window.innerHeight;
     });
     if (editors.length !== 1) return false;
     const editor = editors[0];
-    editor.focus();
+    // 聚焦不得滚动长输入区，使随后全文回读沿用同一可见编辑器。
+    editor.focus({ preventScroll: true });
     if (editor.tagName === 'TEXTAREA') (editor as HTMLTextAreaElement).select();
     else {
       const selection = window.getSelection();
@@ -37,10 +39,13 @@ export function readExactComposerText(editor: HTMLElement): string {
 export function appendExactComposerText(value: string, reset = false): boolean {
   const editors = Array.from(document.querySelectorAll<HTMLElement>('textarea,[contenteditable="true"],[contenteditable=""]')).filter((el): boolean => {
     const rect = el.getBoundingClientRect(); const style = window.getComputedStyle(el);
-    return rect.width > 50 && rect.height > 20 && rect.top >= 0 && rect.top <= window.innerHeight && style.display !== 'none' && style.visibility !== 'hidden' && !el.closest('[aria-hidden="true"]');
+    return el.offsetParent !== null && !('disabled' in el && el.disabled) && el.getAttribute('aria-disabled') !== 'true'
+      && style.display !== 'none' && style.visibility !== 'hidden' && !el.closest('[aria-hidden="true"]')
+      && rect.width >= 50 && rect.height >= 20 && rect.right > 0 && rect.bottom > 0
+      && rect.left < window.innerWidth && rect.top < window.innerHeight;
   });
   if (editors.length !== 1) return false;
-  const editor = editors[0]; editor.focus();
+  const editor = editors[0]; editor.focus({ preventScroll: true });
   if (editor.tagName === 'TEXTAREA') { const input = editor as HTMLTextAreaElement; input.setSelectionRange(reset ? 0 : input.value.length, input.value.length); }
   else {
     const range = document.createRange(); range.selectNodeContents(editor); if (!reset) range.collapse(false);

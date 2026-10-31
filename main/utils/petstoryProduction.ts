@@ -55,9 +55,22 @@ interface ProductionPort {
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function requireValue<T>(value: T | undefined, message = '原制作引用缺失'): T { if (value === undefined) throw new Error(message); return value; }
 function safePreparationFailure(code: string): boolean {
-  return ['cancelled', 'chat_assets_not_ready', 'page_unrecognized', 'page_loading', 'authentication_unconfirmed', 'petstory_controls_unconfirmed',
+  return ['cancelled', 'chat_assets_not_ready', 'page_unrecognized', 'page_loading', 'page_changed', 'authentication_unconfirmed', 'petstory_controls_unconfirmed',
     'quota_exhausted', 'membership_required', 'login_required', 'verification', 'verification_required', 'verification_detected'].includes(code)
     || /^video_(?:[a-z_]+)_not_ready$/.test(code);
+}
+/** 仅兼容旧版误分类的确定未发送错误；未知错误及提交结果不明不能凭文案猜测重试。 */
+function legacyUnsubmittedPreparationFailure(task: Task, step: PetStoryProductionStep): boolean {
+  const error = task.errorInfo;
+  const recognized = error?.code === 'submission_uncertain' && error.message === '最终全文或段落回读不一致，未提交'
+    || task.mode === 'image' && error?.code === 'unknown' && error.message === '图片模式入口未就绪，已在提交前停止';
+  return recognized && !!step.runId && step.runId === task.runtime?.runId && task.runtime.input.mode === task.mode;
+}
+/** 任何提交、观察、回复或产物记录都优先于可恢复错误码，不能用准备阶段重试清掉它们。 */
+function hasSubmissionEvidence(task: Task): boolean {
+  const runtime = task.runtime;
+  return !!(runtime?.submittedAt || runtime?.acceptanceObservation || runtime?.chatResponse || runtime?.chatReadback
+    || runtime?.chatReadbackReview || runtime?.manualObservation || task.outputs.length || task.artifacts?.length);
 }
 export function productionPlanHash(plan: PetStoryPlan): string {
   return hash({ ...plan, characters: plan.characters.map((c): object => ({ ...c, referenceAssetId: undefined })) });
@@ -275,8 +288,8 @@ export class PetStoryProductionService {
     if (pending?.taskId) {
       const task = this.originalTask(p, pending);
       if (!task.runtime?.submittedAt && !['queued', 'executing', 'generating', 'done'].includes(task.status)) {
-        if (!safePreparationFailure(task.errorInfo?.code || '')
-          || task.runtime?.acceptanceObservation || task.outputs.length) throw new Error('原任务未确认可安全恢复，仅保留原任务核对，不重发');
+        if ((!safePreparationFailure(task.errorInfo?.code || '') && !legacyUnsubmittedPreparationFailure(task, pending))
+          || hasSubmissionEvidence(task)) throw new Error('原任务未确认可安全恢复，仅保留原任务核对，不重发');
         const source = this.resetPageBindingForRetry(p, pending);
         pending.runId = undefined;
         const held = await this.projects.write(p);
@@ -430,7 +443,7 @@ export class PetStoryProductionService {
     const task = this.tasks.list().find((t): boolean => t.id === step.taskId);
     if (!task || task.projectId !== p.studioProjectId || task.assignedAccountId !== p.accountId || hash(task.prompt) !== step.inputHash
       || task.petstory?.projectId !== p.id || task.petstory.stepId !== step.id || task.mode !== (step.kind === 'video' ? 'video' : 'image')) throw new Error('原任务／账号／项目／输入归属不符，停止且不重建');
-    if (task.runtime && (task.runtime.input.prompt !== task.prompt || JSON.stringify(task.runtime.input.attachments) !== JSON.stringify(task.attachments || []) || JSON.stringify(task.runtime.input.videoConfig) !== JSON.stringify(task.videoConfig))) throw new Error('原运行输入快照与任务不符，禁止混用产物');
+    if (task.runtime && (task.runtime.input.mode !== task.mode || task.runtime.input.prompt !== task.prompt || JSON.stringify(task.runtime.input.attachments) !== JSON.stringify(task.attachments || []) || JSON.stringify(task.runtime.input.videoConfig) !== JSON.stringify(task.videoConfig))) throw new Error('原运行输入快照与任务不符，禁止混用产物');
     if (step.runId && task.runtime?.runId !== step.runId) throw new Error('原运行已变化，不混用不同运行素材');
     return task;
   }

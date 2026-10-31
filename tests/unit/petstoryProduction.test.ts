@@ -26,6 +26,10 @@ let sequence: number;
 let downloadFailure = false;
 const download = vi.fn();
 const createdInputs: TaskAddParams[] = [];
+const legacyPreparationErrors = [
+  { code: 'submission_uncertain', message: '最终全文或段落回读不一致，未提交' },
+  { code: 'unknown', message: '图片模式入口未就绪，已在提交前停止' },
+] as const;
 function capability(): PetStoryCapability {
   const supported = { state: 'supported' as const, reason: 'TEST 可见槽位' };
   return { accountId: 'TEST-account', checkedAt: new Date().toISOString(), image: supported,
@@ -286,7 +290,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
     await service.pause(p.id); await service.resume(p.id, capability()); await service.resume(p.id, capability());
     expect((await service.advance(p.id)).taskId).toBe(results[0].taskId); expect(tasks).toHaveLength(1);
   });
-  it.each(['video_assets_not_ready', 'quota_exhausted', 'membership_required', 'login_required', 'petstory_controls_unconfirmed'])('safe preparation failure %s reuses the original task only after explicit resume', async (code): Promise<void> => {
+  it.each(['video_assets_not_ready', 'quota_exhausted', 'membership_required', 'login_required', 'petstory_controls_unconfirmed', 'page_changed'])('safe preparation failure %s reuses the original task only after explicit resume', async (code): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
     core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code, message: 'TEST upload', recoverable: true, detectedAt: new Date().toISOString() } });
     const stopped = await service.advance(p.id);
@@ -295,6 +299,80 @@ describe('P4 顺序素材接力与持久化', (): void => {
     const continued = await service.advance(p.id);
     expect(continued.taskId).toBe(original.id); expect(continued.action).toBe('start');
     expect(tasks).toHaveLength(1); expect(tasks[0].executionIntent).toBe('hold'); expect(tasks[0].runtime?.submittedAt).toBeUndefined();
+  });
+  it.each(legacyPreparationErrors)('旧版发送前错误 $code：$message 可显式继续同一个任务', async (error): Promise<void> => {
+    await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
+    core.updateRuntime({ taskId: original.id, status: error.code === 'unknown' ? 'fail' : 'paused', errorInfo: { ...error, recoverable: true, detectedAt: new Date().toISOString() } });
+    expect((await service.advance(p.id)).success).toBe(false);
+    await service.resume(p.id, capability());
+    const continued = await service.advance(p.id);
+    expect(continued).toMatchObject({ success: true, action: 'start', taskId: original.id });
+    expect(tasks).toHaveLength(1); expect(createdInputs).toHaveLength(1); expect(tasks[0].prompt).toBe(original.prompt);
+    expect(tasks[0].executionIntent).toBe('hold'); expect(tasks[0].runtime?.submittedAt).toBeUndefined();
+    expect((await projects.read(p.id)).production?.steps[0].runId).toBeUndefined();
+  });
+  it.each(['发送动作结果不确定，请人工核对豆包会话；系统未自动重发', '发送按钮不可用或点击结果不确定；系统已停止且未自动重发', '最终全文或段落回读不一致，未提交；请重试', 'TEST 未确认的其他错误'])('其他 submission_uncertain 错误仍保留原运行：%s', async (errorMessage): Promise<void> => {
+    await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
+    core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code: 'submission_uncertain', message: errorMessage, recoverable: true, detectedAt: new Date().toISOString() } });
+    await service.advance(p.id); const before = list();
+    await expect(service.resume(p.id, capability())).rejects.toThrow('未确认可安全恢复');
+    expect(list()).toEqual(before); expect(tasks).toHaveLength(1); expect(download).not.toHaveBeenCalled();
+  });
+  it.each(['图片模式入口未就绪，已在提交前停止；请重试', '视频模式入口未就绪，已在提交前停止', 'TEST 未知错误，未提交'])('其他 unknown 错误仍拒绝恢复：%s', async (message): Promise<void> => {
+    await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
+    core.updateRuntime({ taskId: original.id, status: 'fail', errorInfo: { code: 'unknown', message, recoverable: true, detectedAt: new Date().toISOString() } });
+    await service.advance(p.id); const before = list();
+    await expect(service.resume(p.id, capability())).rejects.toThrow('未确认可安全恢复');
+    expect(list()).toEqual(before); expect(tasks).toHaveLength(1);
+  });
+  it.each(legacyPreparationErrors.flatMap((error) => (['acceptance', 'reply', 'readback', 'review', 'observation', 'outputs', 'artifacts'] as const).map((evidence) => ({ error, evidence }))))('发送前错误 $error.code 遇到 $evidence 证据仍禁止重新发送', async ({ error, evidence }): Promise<void> => {
+    await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
+    const now = new Date().toISOString();
+    core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { ...error, recoverable: true, detectedAt: now } });
+    await service.advance(p.id);
+    const task = tasks[0]; const runtime = task.runtime!; const runId = runtime.runId;
+    if (evidence === 'acceptance') runtime.acceptanceObservation = {
+      schemaVersion: 1, accountId: p.accountId, runId, conversationUrl: 'https://www.doubao.com/chat/TEST-evidence', acceptedAt: now,
+      evidence: { kind: 'generation_started' }, cursor: { messageCount: 1, pollCount: 0 }, expectedArtifact: { kind: 'image', runId },
+      lease: { ownerId: 'TEST', acquiredAt: now, expiresAt: now, lastHeartbeatAt: now }, outcome: 'observing',
+    };
+    else if (evidence === 'reply') runtime.chatResponse = { text: 'TEST 已收到回复', capturedAt: now };
+    else if (evidence === 'readback') runtime.chatReadback = { runId, baselineMessageCount: 1, association: 'full_prompt', observedAt: now };
+    else if (evidence === 'review') runtime.chatReadbackReview = { runId, checkedAt: now, reason: 'TEST 需要核对', candidates: [] };
+    else if (evidence === 'observation') runtime.manualObservation = { startedAt: now, expiresAt: now, source: 'stored_conversation', outcome: 'observing' };
+    else if (evidence === 'outputs') task.outputs = ['https://TEST.invalid/already-produced.png'];
+    else task.artifacts = [{ id: 'TEST-existing-artifact', url: 'https://TEST.invalid/already-produced.png', kind: 'image', source: 'page', runId, discoveredAt: now }];
+    const before = list();
+    await expect(service.resume(p.id, capability())).rejects.toThrow('未确认可安全恢复');
+    expect(list()).toEqual(before); expect(createdInputs).toHaveLength(1); expect(download).not.toHaveBeenCalled();
+  });
+  it.each(['run', 'mode'] as const)('旧版发送前错误也必须核对原运行 %s 归属', async (mismatch): Promise<void> => {
+    await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
+    core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code: 'submission_uncertain', message: '最终全文或段落回读不一致，未提交', recoverable: true, detectedAt: new Date().toISOString() } });
+    await service.advance(p.id);
+    if (mismatch === 'run') tasks[0].runtime!.runId = 'TEST-foreign-run';
+    else tasks[0].runtime!.input.mode = 'video';
+    const before = list();
+    await expect(service.resume(p.id, capability())).rejects.toThrow(mismatch === 'run' ? '原运行已变化' : '原运行输入快照');
+    expect(list()).toEqual(before); expect(tasks).toHaveLength(1);
+  });
+  it.each(legacyPreparationErrors)('旧版发送前错误 $code 缺少生产步骤的运行绑定时不猜测恢复', async (error): Promise<void> => {
+    await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
+    core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { ...error, recoverable: true, detectedAt: new Date().toISOString() } });
+    await service.advance(p.id);
+    const stopped = await projects.read(p.id); stopped.production!.steps[0].runId = undefined; await projects.write(stopped);
+    const before = list();
+    await expect(service.resume(p.id, capability())).rejects.toThrow('未确认可安全恢复');
+    expect(list()).toEqual(before); expect(tasks).toHaveLength(1); expect(download).not.toHaveBeenCalled();
+  });
+  it('即使错误文案声称未提交，已有提交意图仍只能核对原运行', async (): Promise<void> => {
+    await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
+    core.updateRuntime({ taskId: original.id, status: 'paused', runtime: { submittedAt: new Date().toISOString() }, errorInfo: { code: 'submission_uncertain', message: '最终全文或段落回读不一致，未提交', recoverable: true, detectedAt: new Date().toISOString() } });
+    await service.advance(p.id); const before = list();
+    await service.resume(p.id, capability());
+    const continued = await service.advance(p.id);
+    expect(continued.success).toBe(false); expect(continued.error).toContain('提交受理状态不明'); expect(continued.action).toBeUndefined();
+    expect(list()).toEqual(before); expect(tasks).toHaveLength(1); expect(download).not.toHaveBeenCalled();
   });
   it('already generated assets download without any page inspection record', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); await complete(next.taskId || ''); await service.pause(p.id);

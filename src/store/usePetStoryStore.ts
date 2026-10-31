@@ -251,10 +251,21 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     if (result.project && (get().project?.id !== result.project.id || result.project.revision >= (get().project?.revision || 0))) set({ project: result.project, projectName: result.displayName ?? (get().project?.id === result.project.id ? get().projectName : '') });
     if (!result.success) set({ error: result.error || '操作未完成' });
   };
-  const run = async (work: () => Promise<void>): Promise<void> => {
-    if (get().busy) return;
-    set({ busy: true, error: '' });
-    try { await work(); }
+  let currentWork: Promise<void> | null = null;
+  const run = async (work: () => Promise<void>, background: boolean = false): Promise<void> => {
+    if (get().busy || background && currentWork) return;
+    const previous = currentWork;
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve): void => { release = resolve; });
+    currentWork = pending;
+    // 进度检查不反复禁用整页，也不清除用户刚遇到的错误。
+    // 用户操作先锁住前台，再等待本次后台推进完成，用最新项目版本执行。
+    if (!background) set({ busy: true });
+    try {
+      if (previous) await previous;
+      if (!background) set({ error: '' });
+      await work();
+    }
     catch (error: unknown) {
       let message = error instanceof Error ? error.message : '操作失败';
       try { await pauseBatch(); }
@@ -266,7 +277,9 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
         try { await pauseBatch(); }
         catch (error: unknown) { set({ error: `批次已停止后续发送，但暂停记录未保存：${error instanceof Error ? error.message : '保存失败'}` }); }
       }
-      set({ busy: false });
+      if (currentWork === pending) currentWork = null;
+      release?.();
+      if (!background) set({ busy: false });
     }
   };
   const startBound = async (jobId: string): Promise<void> => {
@@ -667,7 +680,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (!context || get().project?.id !== context.projectId) return;
       try { await driveImageOperation(await window.electronAPI.petstory.advanceImageOperation(context.projectId, context.operationId), context); }
       catch (error: unknown) { if (activeImageOperation === context) { activeImageOperation = null; set({ activeImageOperationId: null }); } throw error; }
-    }),
+    }, true),
     openImageConversation: async (target: PetStoryImageTarget, assetId?: string): Promise<void> => {
       const project = get().project;
       if (!project) return;

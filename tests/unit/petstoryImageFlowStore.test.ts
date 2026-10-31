@@ -10,6 +10,7 @@ import snapshot from '../fixtures/storyboard-five-shots.json';
 
 const original = { petstory: usePetStoryStore.getState(), tasks: useTaskStore.getState(), accounts: useAccountStore.getState(), studio: useProjectStore.getState() };
 type RuntimePatch = Parameters<ReturnType<typeof useTaskStore.getState>['updateTaskRuntime']>[1];
+type PetStoryState = ReturnType<typeof usePetStoryStore.getState>;
 const now = '2026-10-30T05:00:00.000Z';
 let project: PetStoryProject; let tasks: Task[]; let serial = 0; let unobserve: (() => void) | undefined;
 const begin = vi.fn<(id: string, revision: number, request: PetStoryImageOperationRequest) => Promise<PetStoryImageOperationResult>>();
@@ -20,8 +21,14 @@ const start = vi.fn<(taskId: string, beforeDispatch?: (task: Task) => Promise<vo
 const bindProduction = vi.fn<(id: string, taskId: string, runId: string) => Promise<PetStoryResult>>();
 const prepareRuntime = vi.fn<() => Promise<PetStoryResult>>();
 const adoptPrompt = vi.fn<() => Promise<PetStoryResult>>();
+const saveStory = vi.fn<(id: string, revision: number, text: string) => Promise<PetStoryResult>>();
 const dispatch = vi.fn<(event: Event) => boolean>();
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve: (value: T) => void = (): void => { throw new Error('TEST 异步结果尚未初始化'); };
+  const promise = new Promise<T>((done: (value: T | PromiseLike<T>) => void): void => { resolve = done; });
+  return { promise, resolve };
+}
 function save(): PetStoryProject { project = structuredClone(project); project.revision++; return project; }
 function operation(id: string): PetStoryImageOperation { return project.imageOperations!.find((item): boolean => item.id === id)!; }
 function task(id: string, mode: 'chat' | 'image'): Task {
@@ -98,9 +105,12 @@ beforeEach((): void => {
     await beforeDispatch?.(started); return true;
   });
   bindProduction.mockImplementation(async (): Promise<PetStoryResult> => ({ success: true, project }));
+  saveStory.mockImplementation(async (_id: string, _revision: number, text: string): Promise<PetStoryResult> => {
+    save(); project.mobileStory!.text = text; return { success: true, project };
+  });
   dispatch.mockReturnValue(true);
   vi.stubGlobal('window', { dispatchEvent: dispatch, electronAPI: { petstory: { beginImageOperation: begin, advanceImageOperation: advance, resumeImageOperation: resume,
-    collectChat: collect, prepareRuntime, adoptPromptCandidate: adoptPrompt, bindProductionRun: bindProduction,
+    collectChat: collect, prepareRuntime, adoptPromptCandidate: adoptPrompt, bindProductionRun: bindProduction, saveOriginalStory: saveStory,
     bindRun: async (_id: string, jobId: string, runId: string): Promise<PetStoryResult> => { project.jobs.find((job): boolean => job.id === jobId)!.runId = runId; return { success: true, project }; },
     open: async (): Promise<PetStoryResult> => ({ success: true, project }),
   }, tasks: { list: async (): Promise<Task[]> => tasks } } });
@@ -120,6 +130,102 @@ afterEach(async (): Promise<void> => {
 });
 
 describe('单次图片意图的后台接力', (): void => {
+  it('连续及未返回的后台推进不切换全局忙碌，当前图片持续显示生成状态并保留已有错误', async (): Promise<void> => {
+    const target = { materialId: project.materials![0].id };
+    await usePetStoryStore.getState().modifyImage(target, 'TEST-old-adopted', '调整表情');
+    usePetStoryStore.setState({ error: 'TEST 保留其他操作的错误' });
+    const busy: boolean[] = [];
+    const unsubscribe = usePetStoryStore.subscribe((state: PetStoryState): void => { busy.push(state.busy); });
+    const gate = deferred<PetStoryImageOperationResult>();
+    let pending: Promise<void> | undefined;
+    try {
+      await tickPetStoryImageOperation(); await tickPetStoryImageOperation();
+      const before = advance.mock.calls.length;
+      advance.mockReturnValueOnce(gate.promise);
+      pending = tickPetStoryImageOperation();
+      await vi.waitFor((): void => { expect(advance).toHaveBeenCalledTimes(before + 1); });
+      const during = usePetStoryStore.getState();
+      const progress = petStoryImageProgress(during.project!, target, tasks, during.activeImageOperationId);
+      gate.resolve(response(operation(project.imageOperations![0].id))); await pending;
+      expect(during.busy).toBe(false); expect(progress.busy).toBe(true); expect(progress.stage).toBe('generating');
+      expect(busy).not.toContain(true); expect(usePetStoryStore.getState().busy).toBe(false);
+      expect(usePetStoryStore.getState().error).toBe('TEST 保留其他操作的错误');
+    } finally {
+      gate.resolve(response(operation(project.imageOperations![0].id))); await pending; unsubscribe();
+    }
+  });
+
+  it('未返回的后台推进期间重复轮询及直接推进只进入一次IPC', async (): Promise<void> => {
+    await usePetStoryStore.getState().modifyImage({ materialId: project.materials![0].id }, 'TEST-old-adopted', '调整表情');
+    const before = advance.mock.calls.length;
+    const gate = deferred<PetStoryImageOperationResult>(); advance.mockReturnValueOnce(gate.promise);
+    const pending = tickPetStoryImageOperation();
+    try {
+      await tickPetStoryImageOperation(); await usePetStoryStore.getState().advanceImageOperation();
+      await vi.waitFor((): void => { expect(advance).toHaveBeenCalledTimes(before + 1); });
+      expect(usePetStoryStore.getState().busy).toBe(false);
+    } finally {
+      gate.resolve(response(operation(project.imageOperations![0].id))); await pending;
+    }
+    expect(begin).toHaveBeenCalledOnce(); expect(start).toHaveBeenCalledOnce();
+  });
+
+  it('轮询期间点击保存会等待原推进并用最新版本执行，前台等待时不插入其他轮询', async (): Promise<void> => {
+    await usePetStoryStore.getState().modifyImage({ materialId: project.materials![0].id }, 'TEST-old-adopted', '调整表情');
+    const before = advance.mock.calls.length;
+    const gate = deferred<PetStoryImageOperationResult>(); advance.mockReturnValueOnce(gate.promise);
+    const pending = tickPetStoryImageOperation();
+    let foreground: Promise<void> | undefined;
+    const projectId = project.id; const text = 'TEST 用户在轮询期间保存的剧本';
+    let nextRevision = 0;
+    try {
+      await vi.waitFor((): void => { expect(advance).toHaveBeenCalledTimes(before + 1); });
+      foreground = usePetStoryStore.getState().saveOriginalStory(text);
+      expect(usePetStoryStore.getState().busy).toBe(true); expect(saveStory).not.toHaveBeenCalled();
+      await tickPetStoryImageOperation(); await usePetStoryStore.getState().advanceImageOperation();
+      expect(advance).toHaveBeenCalledTimes(before + 1); expect(saveStory).not.toHaveBeenCalled();
+      nextRevision = save().revision;
+    } finally {
+      gate.resolve(response(operation(project.imageOperations![0].id))); await pending; await foreground;
+    }
+    expect(saveStory).toHaveBeenCalledExactlyOnceWith(projectId, nextRevision, text);
+    expect(usePetStoryStore.getState().project?.mobileStory?.text).toBe(text); expect(usePetStoryStore.getState().busy).toBe(false);
+    expect(begin).toHaveBeenCalledOnce(); expect(start).toHaveBeenCalledOnce();
+  });
+
+  it('后台推进期间到达的文字完成事件最终只收取一次并接续同一图片任务', async (): Promise<void> => {
+    vi.useFakeTimers(); await usePetStoryStore.getState().generateMaterialImage(project.materials![0].id);
+    unobserve = observePetStoryTasks();
+    const gate = deferred<PetStoryImageOperationResult>(); advance.mockReturnValueOnce(gate.promise);
+    const pending = tickPetStoryImageOperation();
+    try {
+      const chat = tasks[0]; chat.status = 'done'; chat.runtime!.chatResponse = { text: 'TEST 轮询期间完成的原回复', capturedAt: now };
+      useTaskStore.setState({ tasks: [...tasks] });
+      await vi.advanceTimersByTimeAsync(0); expect(collect).not.toHaveBeenCalled();
+    } finally {
+      gate.resolve(response(operation(project.imageOperations![0].id))); await pending;
+    }
+    await vi.advanceTimersByTimeAsync(2200);
+    expect(collect).toHaveBeenCalledExactlyOnceWith(project.id, project.jobs[0].id);
+    expect(begin).toHaveBeenCalledOnce(); expect(start).toHaveBeenCalledTimes(2); expect(tasks).toHaveLength(2);
+  });
+
+  it('后台推进异常后释放串行占用并停止自动推进，不创建或重新发送原图片任务', async (): Promise<void> => {
+    await usePetStoryStore.getState().modifyImage({ materialId: project.materials![0].id }, 'TEST-old-adopted', '调整表情');
+    const operationId = project.imageOperations![0].id;
+    advance.mockRejectedValueOnce(new Error('TEST 后台图片状态读取失败'));
+    await tickPetStoryImageOperation();
+    expect(usePetStoryStore.getState().error).toContain('TEST 后台图片状态读取失败');
+    expect(usePetStoryStore.getState().busy).toBe(false); expect(usePetStoryStore.getState().activeImageOperationId).toBeNull();
+    const before = advance.mock.calls.length;
+    await tickPetStoryImageOperation(); await usePetStoryStore.getState().advanceImageOperation();
+    expect(advance).toHaveBeenCalledTimes(before);
+    await usePetStoryStore.getState().saveOriginalStory('TEST 异常后的正常保存');
+    expect(saveStory).toHaveBeenCalledOnce(); expect(usePetStoryStore.getState().busy).toBe(false);
+    expect(project.imageOperations).toHaveLength(1); expect(project.imageOperations![0].id).toBe(operationId);
+    expect(begin).toHaveBeenCalledOnce(); expect(start).toHaveBeenCalledOnce(); expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it('只点击一次，从文字收取自动继续媒体，下载候选前后不改变已采用图', async (): Promise<void> => {
     const materialId = project.materials![0].id;
     await usePetStoryStore.getState().generateMaterialImage(materialId);

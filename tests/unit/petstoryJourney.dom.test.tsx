@@ -85,11 +85,11 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
       fireEvent.click(adjustment); expect(adjust).toHaveBeenCalledWith({ parentJobId: 'TEST-status-candidate' });
     }
   });
-  it('默认显示原文框和六步导航，可选链接与演员高级字段保持折叠，不在打开时发送', async (): Promise<void> => {
+  it('默认显示原文框和六步导航，不在打开时发送', async (): Promise<void> => {
     const analyze = usePetStoryStore.getState().analyze; render(<PetStoryPanel />);
     expect(screen.getByRole('textbox', { name: '完整剧本原文' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: '从抖音链接辅助提取' })).toBeNull();
     expect(screen.queryByRole('textbox', { name: '抖音分享文本或链接' })).toBeNull();
-    expect(screen.queryByRole('textbox', { name: 'luluidentity预设' })).toBeNull();
     expect(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getAllByRole('button')).toHaveLength(6);
     expect(screen.getByRole('button', { name: '分析剧本' }).hasAttribute('disabled')).toBe(true);
     await act(async (): Promise<void> => undefined); expect(analyze).not.toHaveBeenCalled();
@@ -278,14 +278,15 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     expect(adopt).toHaveBeenCalledOnce(); expect(confirm).toHaveBeenCalledOnce();
     expect(screen.queryByRole('button', { name: '确认并采用方案' })).toBeNull();
   });
-  it('可选链接草稿不会阻止返回直接剧本模式保存并分析', async (): Promise<void> => {
+  it('历史来源链接不阻止直接保存并分析剧本，也不重新保存来源', async (): Promise<void> => {
+    p.source = { kind: 'douyin', url: 'https://v.douyin.com/TEST/', status: 'review_required' };
+    usePetStoryStore.setState({ project: p });
     const analyze = usePetStoryStore.getState().analyze; const saveLink = usePetStoryStore.getState().saveSource;
     render(<PetStoryPanel />);
-    fireEvent.click(screen.getByText('从抖音链接辅助提取', { exact: true }));
-    fireEvent.change(screen.getByRole('textbox', { name: '抖音分享文本或链接' }), { target: { value: 'TEST 可选未保存分享文本' } });
-    fireEvent.click(screen.getByRole('button', { name: '返回剧本输入' }));
     readyToAnalyze(); fireEvent.click(screen.getByRole('button', { name: '分析剧本' }));
     await waitFor((): void => expect(analyze).toHaveBeenCalledOnce()); expect(saveLink).not.toHaveBeenCalled();
+    expect(usePetStoryStore.getState().project?.mobileStory?.text).toBe(snapshot.mobileStory);
+    expect(pendingPetStoryDrafts(p.id)).toEqual([]);
   });
   it('跨页草稿显示具体对象，查看修改返回原输入，放弃后解除提示', async (): Promise<void> => {
     render(<PetStoryPanel />);
@@ -298,20 +299,16 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     await waitFor((): void => expect(screen.queryByText('原剧本 · 输入剧本')).toBeNull());
     expect((screen.getByRole('textbox', { name: '完整剧本原文' }) as HTMLTextAreaElement).value).toBe('');
   });
-  it('剧本、链接、人物偏好和方案草稿都带项目归属，外部采用门可完整读取', async (): Promise<void> => {
+  it('剧本和方案草稿都带项目归属，外部采用门可完整读取', async (): Promise<void> => {
     p.plan = storedPlan(); p.mobileStory = { id: 'TEST-story', text: snapshot.mobileStory, importedAt: now };
     usePetStoryStore.setState({ project: p }); const view = render(<PetStoryPanel />);
     const navigation = screen.getByRole('navigation', { name: '短剧制作阶段' }); fireEvent.click(within(navigation).getByRole('button', { name: /输入剧本/ }));
     fireEvent.change(screen.getByRole('textbox', { name: '完整剧本原文' }), { target: { value: 'TEST未保存剧本' } });
-    fireEvent.click(screen.getByRole('button', { name: '从抖音链接辅助提取' }));
-    fireEvent.change(screen.getByRole('textbox', { name: '抖音分享文本或链接' }), { target: { value: 'TEST未保存链接' } });
-    fireEvent.click(screen.getByText('默认角色与共同风格（可编辑）'));
-    fireEvent.change(screen.getByRole('textbox', { name: 'luluidentity预设' }), { target: { value: 'TEST未保存人物身份' } });
     fireEvent.click(within(navigation).getByRole('button', { name: /确认方案/ }));
     fireEvent.click(screen.getByText('生成记录／诊断详情'));
     fireEvent.click(within(screen.getByRole('article', { name: '方案审阅' })).getByRole('button', { name: '编辑故事与镜头' }));
     fireEvent.change(screen.getByRole('textbox', { name: '原片梗概' }), { target: { value: 'TEST未保存方案' } });
-    await waitFor((): void => expect(pendingPetStoryDrafts(p.id)).toEqual(expect.arrayContaining(['原剧本 · 输入剧本', '可选抖音链接 · 输入剧本', '制作演员与共同风格 · 输入剧本', '故事、角色与镜头设定 · 高级编辑'])));
+    await waitFor((): void => expect(pendingPetStoryDrafts(p.id)).toEqual(expect.arrayContaining(['原剧本 · 输入剧本', '故事、角色与镜头设定 · 高级编辑'])));
     expect(pendingPetStoryDrafts(`${p.id}-other`)).toEqual([]);
     view.unmount(); expect(pendingPetStoryDrafts(p.id)).toEqual([]);
   });

@@ -3,20 +3,33 @@ import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import { clickAITab } from '../../src/utils/doubaoBridge';
 
-function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolean = false, hiddenMeasurement: boolean = false): {
+function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolean = false, hiddenMeasurement: boolean = false, options: {
+  imageEntryDelayMs?: number;
+  moreDelayMs?: number;
+  imageMissing?: boolean;
+  selectedImageDelayMs?: number;
+} = {}): {
   view: { executeJavaScript: (code: string) => Promise<unknown>; getURL: () => string; loadURL: ReturnType<typeof vi.fn> };
   actions: string[];
 } {
   let state = initial as string;
   let menu = false;
+  const startedAt = Date.now();
   const actions: string[] = [];
+  const synchronizeState = (): void => {
+    if (options.selectedImageDelayMs !== undefined && Date.now() - startedAt >= options.selectedImageDelayMs) state = 'image-skill';
+  };
   class Element {
     parentElement: Element | null = null;
     visibility = 'visible';
     constructor(readonly tagName: string, readonly innerText: string, readonly owned = true) {}
     get childNodes(): Array<{ nodeType: number; textContent: string }> { return [{ nodeType: 3, textContent: this.innerText }]; }
     get offsetParent(): object | null { return this.shown() ? {} : null; }
-    shown(): boolean { return this !== image || !imageInMore || menu; }
+    shown(): boolean {
+      if (this === image) return !options.imageMissing && Date.now() - startedAt >= (options.imageEntryDelayMs || 0) && (!imageInMore || menu);
+      if (this === more) return Date.now() - startedAt >= (options.moreDelayMs || 0);
+      return true;
+    }
     getBoundingClientRect(): { left: number; top: number; bottom: number; width: number; height: number } {
       return { left: this.owned ? 167 : 8, top: 672, bottom: 704, width: this.shown() ? 92 : 0, height: this.shown() ? 32 : 0 };
     }
@@ -24,6 +37,7 @@ function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolea
     closest(): null { return null; }
     contains(node: Element): boolean { return this === root && node.owned; }
     querySelectorAll(selector: string): Element[] {
+      synchronizeState();
       if (selector.includes('skill_input_exit_button')) return hiddenMeasurement || state === 'image-skill' || state === 'video' ? [skill] : [];
       if (selector.includes('aria-expanded')) return [];
       return [more, image, video].filter((n): boolean => n.shown());
@@ -49,12 +63,14 @@ function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolea
   const model = { getBoundingClientRect: (): object => ({ width: 100, height: 32 }) };
   const document = {
     querySelector: (selector: string): unknown => {
+      synchronizeState();
       if (selector === 'textarea') return editor;
       if (selector.includes('input-engine-container') || selector === '.guidance-input-surface') return root;
       if (selector.includes('video-model') || selector.includes('data-creation-params-panel-id')) return state === 'video' ? model : null;
       return null;
     },
     querySelectorAll: (selector: string): object[] => {
+      synchronizeState();
       if (selector.includes('video-model') || selector.includes('data-creation-params-panel-id')) return state === 'video' || hiddenMeasurement ? [model] : [];
       return state === 'image-skill' || state === 'video' ? [sidebarImage, sidebarVideo, skill] : [sidebarImage, sidebarVideo, more, image, video].filter((n): boolean => n.shown());
     },
@@ -94,6 +110,47 @@ describe('P4 narrow composer mode entry', (): void => {
       await vi.advanceTimersByTimeAsync(2500);
       expect(await pending).toBe(true);
       expect(test.actions).toEqual(['更多', '图像生成']);
+    } finally { vi.useRealTimers(); }
+  });
+  it('waits for an image entry that mounts after the editor without repeated clicks', async (): Promise<void> => {
+    vi.useFakeTimers();
+    try {
+      const test = fixture('plain', false, false, { imageEntryDelayMs: 4000, moreDelayMs: 20_000 });
+      const pending = clickAITab(test.view, 'image');
+      await vi.advanceTimersByTimeAsync(4500);
+      expect(await pending).toBe(true);
+      expect(test.actions).toEqual(['图像生成']);
+    } finally { vi.useRealTimers(); }
+  });
+  it('waits for a delayed More button and expands it only once', async (): Promise<void> => {
+    vi.useFakeTimers();
+    try {
+      const test = fixture('plain', true, false, { moreDelayMs: 3000 });
+      const pending = clickAITab(test.view, 'image');
+      await vi.advanceTimersByTimeAsync(3500);
+      expect(await pending).toBe(true);
+      expect(test.actions).toEqual(['更多', '图像生成']);
+    } finally { vi.useRealTimers(); }
+  });
+  it('keeps a selected image skill restored during asynchronous composer rebuilding', async (): Promise<void> => {
+    vi.useFakeTimers();
+    try {
+      const test = fixture('plain', false, false, { imageEntryDelayMs: 20_000, moreDelayMs: 20_000, selectedImageDelayMs: 3000 });
+      const pending = clickAITab(test.view, 'image');
+      await vi.advanceTimersByTimeAsync(3500);
+      expect(await pending).toBe(true);
+      expect(test.actions).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+  it('stops after a bounded wait when the image entry never mounts and never retries menu clicks', async (): Promise<void> => {
+    vi.useFakeTimers();
+    try {
+      const test = fixture('plain', true, false, { imageMissing: true });
+      const pending = clickAITab(test.view, 'image');
+      await vi.advanceTimersByTimeAsync(10_500);
+      expect(await pending).toBe(false);
+      expect(test.actions).toEqual(['更多']);
+      expect(test.view.loadURL).not.toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
   });
   it('exits the selected image skill, locates the remounted composer and waits for video controls', async (): Promise<void> => {
