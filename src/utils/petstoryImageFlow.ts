@@ -1,5 +1,7 @@
 import type { PetStoryAsset, PetStoryChatJob, PetStoryImageOperation, PetStoryImageTarget, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { resolveTaskConversationTarget } from './taskConversationLocator';
+import { imageBelongsToTarget, pendingImageCandidates } from './petstoryImageCandidates';
+import { journeyMaterialImageApproved } from './petstoryJourney';
 
 export function sameImageTarget(left: PetStoryImageTarget, right: PetStoryImageTarget): boolean {
   return left.materialId ? left.materialId === right.materialId : left.shotId === right.shotId && left.kind === right.kind;
@@ -54,6 +56,21 @@ export interface PetStoryImageProgress {
   resumable: boolean;
 }
 
+function completedImageMessage(project: PetStoryProject, target: PetStoryImageTarget): string {
+  const material = project.materials?.find((item): boolean => item.id === target.materialId);
+  const shotImages = target.shotId ? project.adoptedImages?.[target.shotId] : undefined;
+  const currentId = material?.selectedAssetId || (target.kind === 'firstFrame' ? shotImages?.firstFrameId : shotImages?.plannedEndImageId);
+  const current = project.assets.find((asset): boolean => asset.id === currentId && imageBelongsToTarget(project, asset, target));
+  if (!current || pendingImageCandidates(project, target, currentId).length) return '图片已生成，请查看';
+  const review = current.imageReview;
+  const adoptedAt = review?.adoptedAt || material?.approved?.at;
+  const validTime = !!adoptedAt && Number.isFinite(Date.parse(adoptedAt));
+  const fileValid = !!current.validation?.decoded && !!current.validation.sha256 && !current.needsReview;
+  const approved = fileValid && (material ? journeyMaterialImageApproved(project, material)
+    : review?.state === 'adopted' && review.sha256 === current.validation?.sha256);
+  return approved && validTime ? '图片已采用' : '图片需要复核';
+}
+
 /** 百分比未知时只给真实阶段，不用计时器推算完成或替用户采用。 */
 export function petStoryImageProgress(project: PetStoryProject, target: PetStoryImageTarget, tasks: Task[], activeOperationId?: string | null): PetStoryImageProgress {
   const operation = imageOperationForTarget(project, target);
@@ -66,20 +83,10 @@ export function petStoryImageProgress(project: PetStoryProject, target: PetStory
   const resumable = ['preparing', 'generating', 'saving'].includes(stage) && activeOperationId !== undefined && activeOperationId !== operation.id;
   const messages: Record<PetStoryImageOperation['stage'], string> = {
     preparing: '正在准备图片…', generating: operation.mode === 'modify' ? '正在按你的要求修改图片…' : '正在生成图片…',
-    saving: '正在保存图片…', complete: '图片已生成，请查看', failed: '本次图片处理未完成',
+    saving: '正在保存图片…', complete: stage === 'complete' ? completedImageMessage(project, target) : '图片已生成，请查看', failed: '本次图片处理未完成',
   };
   return { operation, busy: !error && !resumable && ['preparing', 'generating', 'saving'].includes(stage), stage,
     message: resumable ? '图片任务已保存，可继续本次任务' : messages[stage], error, task, candidateAssetId: available ? operation.outputAssetId : undefined, resumable };
-}
-
-function assetMatchesTarget(project: PetStoryProject, asset: PetStoryAsset, target: PetStoryImageTarget): boolean {
-  if (asset.imageReview) return sameImageTarget(asset.imageReview.target, target);
-  if (target.materialId) {
-    const material = project.materials?.find((item): boolean => item.id === target.materialId);
-    return !!material && asset.kind === material.kind && (asset.materialId === material.id
-      || material.kind === 'character' && (asset.characterIds || [asset.characterId]).includes(material.entityId));
-  }
-  return asset.shotId === target.shotId && asset.kind === (target.kind === 'firstFrame' ? 'firstFrame' : 'plannedEndImage');
 }
 
 function assetConversationTask(asset: PetStoryAsset | undefined, project: PetStoryProject, tasks: Task[]): Task | undefined {
@@ -92,17 +99,17 @@ function assetConversationTask(asset: PetStoryAsset | undefined, project: PetSto
 
 /** 选定图片只打开其真实生成任务；上传图不回退到无关文字会话。 */
 export function imageConversationTask(project: PetStoryProject, target: PetStoryImageTarget, tasks: Task[], assetId?: string): Task | undefined {
-  if (assetId) return assetConversationTask(project.assets.find((asset): boolean => asset.id === assetId && assetMatchesTarget(project, asset, target)), project, tasks);
+  if (assetId) return assetConversationTask(project.assets.find((asset): boolean => asset.id === assetId && imageBelongsToTarget(project, asset, target)), project, tasks);
   const operation = imageOperationForTarget(project, target);
   if (operation && operation.stage !== 'complete') {
     const task = imageOperationTask(project, operation, tasks);
     return task && resolveTaskConversationTarget(task).ok ? task : undefined;
   }
-  const images = project.assets.filter((asset): boolean => assetMatchesTarget(project, asset, target));
+  const images = project.assets.filter((asset): boolean => imageBelongsToTarget(project, asset, target));
   const material = target.materialId ? project.materials?.find((item): boolean => item.id === target.materialId) : undefined;
   const adopted = target.shotId ? project.adoptedImages?.[target.shotId] : undefined;
   const currentId = material?.selectedAssetId || (target.kind === 'firstFrame' ? adopted?.firstFrameId : adopted?.plannedEndImageId);
-  const candidate = [...images].reverse().find((asset): boolean => asset.id !== currentId && asset.imageReview?.state !== 'adopted');
+  const candidate = pendingImageCandidates(project, target, currentId).at(-1);
   const current = images.find((asset): boolean => asset.id === currentId) || images.at(-1);
   return assetConversationTask(candidate || current, project, tasks);
 }

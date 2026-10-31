@@ -75,6 +75,7 @@ export type {
   TaskUpdateInput,
   TaskUpdateParams,
   TaskIdParams,
+  TaskResubmitUncertainParams,
   CsvImportResult,
   CompletedOutput,
   TaskDownloadOutputsParams,

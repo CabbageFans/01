@@ -37,6 +37,7 @@ function matchBody(p: PetStoryProject, task: Task, shotId: string, kind: PetStor
 function validTask(p: PetStoryProject, task: Task, kind: PetStoryPromptKind): boolean {
   return task.projectId === p.studioProjectId && task.assignedAccountId === p.accountId && task.mode === (kind === 'video' ? 'video' : 'image')
     && task.status === 'done' && !!task.runtime?.runId && !!task.runtime.submittedAt && task.runtime.input.prompt === task.prompt
+    && task.runtime.input.mode === task.mode
     && JSON.stringify(task.runtime.input.attachments) === JSON.stringify(task.attachments || [])
     && JSON.stringify(task.runtime.input.videoConfig) === JSON.stringify(task.videoConfig)
     && (!task.petstory || task.petstory.projectId === p.id);
@@ -86,14 +87,45 @@ export class PetStoryExistingMediaService {
   }
   private async verifyBinding(p: PetStoryProject, task: Task, shotId: string, kind: PetStoryPromptKind): Promise<BodyMatch | undefined> {
     if (!validTask(p, task, kind)) return undefined;
-    const step = [p.production, ...(p.productionHistory || [])].flatMap((r): PetStoryProductionStep[] => r?.steps || []).find((s): boolean => s.taskId === task.id && s.shotId === shotId && s.kind === kind && s.runId === task.runtime?.runId && s.inputHash === inputHash(task.prompt) && s.compiledPrompt?.text === task.prompt);
+    const steps = [p.production, ...(p.productionHistory || [])].flatMap((r): PetStoryProductionStep[] => r?.steps || []);
+    const step = steps.find((s): boolean => s.taskId === task.id && s.shotId === shotId && s.kind === kind && s.runId === task.runtime?.runId && s.inputHash === inputHash(task.prompt) && s.compiledPrompt?.text === task.prompt);
     if (step?.compiledPrompt && task.petstory?.stepId === step.id) {
       if (step.attachmentAssetIds.length !== (task.attachments || []).length) return undefined;
       for (let i = 0; i < step.attachmentAssetIds.length; i++) if (!await sameFileBytes((task.attachments || [])[i], await this.projects.referenceFile(p.id, step.attachmentAssetIds[i]))) return undefined;
       return { final: step.compiledPrompt.final };
     }
+    // 重发前的请求不会再是当前 step.taskId。只能按持久化的原任务／运行／提交意图核对，
+    // 不把新运行的正文、附件或完成状态借给迟到旧结果。
+    if (task.petstory) return this.verifyResubmissionBinding(p, task, steps, shotId, kind);
     const body = matchBody(p, task, shotId, kind);
     return body && await this.verifyLegacyInputs(p, task, shotId, kind, body) ? body : undefined;
+  }
+  private async verifyResubmissionBinding(p: PetStoryProject, task: Task, steps: PetStoryProductionStep[], shotId: string, kind: PetStoryPromptKind): Promise<BodyMatch | undefined> {
+    const step = steps.find((item): boolean => item.id === task.petstory?.stepId && item.shotId === shotId && item.kind === kind);
+    if (!step || task.petstory?.projectId !== p.id || task.runtime?.input.petstory && (task.runtime.input.petstory.projectId !== p.id || task.runtime.input.petstory.stepId !== step.id)) return undefined;
+    const history = step.resubmissionHistory?.filter((record): boolean => record.taskId === task.id);
+    if (history?.length !== 1) return undefined;
+    const original = history[0]; const compiled = original.compiledPrompt;
+    if (original.runId !== task.runtime?.runId || original.submittedAt !== task.runtime?.submittedAt || original.inputHash !== inputHash(task.prompt)
+      || !compiled || compiled.text !== task.prompt || compiled.kind !== kind || !Array.isArray(compiled.references)
+      || compiled.references.length !== original.attachmentAssetIds.length
+      || compiled.references.some((reference, index): boolean => reference.assetId !== original.attachmentAssetIds[index] || reference.order !== index + 1)) return undefined;
+    const audited = Array.isArray(task.resubmittedAs) && task.resubmittedAs.some((record): boolean => !!record && record.runId === original.runId
+      && record.submittedAt === original.submittedAt && record.authorizationId === original.authorizationId && record.authorizedAt === original.authorizedAt);
+    if (!audited || !await this.verifyArchivedAttachments(p, task, original)) return undefined;
+    return { final: compiled.final };
+  }
+  private async verifyArchivedAttachments(p: PetStoryProject, task: Task, original: NonNullable<PetStoryProductionStep['resubmissionHistory']>[number]): Promise<boolean> {
+    const attachments = task.attachments || [];
+    if (original.attachmentAssetIds.length !== attachments.length || original.pageBindings && original.pageBindings.length !== attachments.length) return false;
+    for (let index = 0; index < attachments.length; index++) {
+      const assetId = original.attachmentAssetIds[index]; const asset = p.assets.find((item): boolean => item.id === assetId);
+      const reference = await this.projects.referenceFile(p.id, assetId); const digest = await mediaDigest(reference);
+      if (!asset?.validation || digest.sha256 !== asset.validation.sha256 || !await sameFileBytes(attachments[index], reference)) return false;
+      const binding = original.pageBindings?.[index];
+      if (binding && (binding.assetId !== assetId || binding.order !== index + 1 || binding.fileSha256 && binding.fileSha256 !== digest.sha256)) return false;
+    }
+    return true;
   }
   async candidates(id: string, shotId: string, kind: PetStoryPromptKind): Promise<PetStoryMediaCandidate[]> {
     const p = await this.projects.read(id);

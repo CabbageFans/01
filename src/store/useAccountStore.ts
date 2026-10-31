@@ -10,6 +10,9 @@ import type { Account, AccountAvailability, AccountPlatform, AccountStatus } fro
 import { requireStartupAvailabilityRecheck } from '../utils/accountAvailability';
 import { resolveStartupAccountId } from '../utils/accountStartupSelection';
 
+/** 丢弃同账号在途旧写入的迟到回执，尤其不能用旧 ready 覆盖新验证状态。 */
+const availabilityWriteSequences = new Map<string, number>();
+
 function prepareAccountForRuntime(account: Account, checkedAt: string): Account {
   return {
     ...account,
@@ -249,7 +252,22 @@ export const useAccountStore = create<AccountState>((set, get) => ({
   },
 
   setAccountAvailability: async (id, availability) => {
+    const previous = get().accounts.find((account: Account): boolean => account.id === id)?.health?.availability;
+    if (previous && new Date(availability.checkedAt).getTime() < new Date(previous.checkedAt).getTime()) return false;
+    const sequence = (availabilityWriteSequences.get(id) || 0) + 1;
+    availabilityWriteSequences.set(id, sequence);
+    if (availability.state === 'action_required' && availability.reason === 'human_verification') {
+      // 真实验证一经读到立即关闭该账号的调度许可，不能等待磁盘 IPC 才阻断下一任务。
+      set({ accounts: get().accounts.map((account: Account): Account => account.id === id ? {
+        ...account,
+        health: {
+          ...(account.health || { loginState: 'unknown', consecutiveFailures: 0, successCount: 0, failureCount: 0 }),
+          verificationRequired: true, lastErrorCode: 'human_verification', availability,
+        },
+      } : account) });
+    }
     const result = await window.electronAPI.accounts.setAvailability(id, availability);
+    if (availabilityWriteSequences.get(id) !== sequence) return false;
     if (!result.success || !result.account) {
       set({ error: result.error || '账号可用性状态保存失败' });
       return false;

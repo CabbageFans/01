@@ -13,6 +13,7 @@ import original from '../fixtures/storyboard-five-shots.json';
 
 type RuntimePatch = { status?: Task['status']; runtime?: Partial<NonNullable<Task['runtime']>>; errorInfo?: Task['errorInfo'] };
 type ReconcileHandler = (event: Event) => Promise<void>;
+class OfflineAccountPause extends Error { constructor(message: string, readonly code: string) { super(message); } }
 function actualHandler(name: string, bindings: Record<string, unknown>): ReconcileHandler {
   const file = ts.createSourceFile('BrowserPanel.tsx', fs.readFileSync(path.resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
   let expression = '';
@@ -44,7 +45,11 @@ function fixture(): {
   const errors = vi.fn(); const guard = { current: new Set<string>() }; const controllers = { current: new Map<string, AbortController>() };
   const view = { getURL: vi.fn((): string => 'https://www.doubao.com/chat/TEST-current'), loadURL: vi.fn(), sendInputEvent: vi.fn() };
   const bindings: Record<string, unknown> = {
-    useTaskStore: { getState: (): object => ({ tasks: [current], updateTaskRuntime: writes }) }, usePetStoryStore: { getState: (): object => ({ project }) },
+    useTaskStore: { getState: (): object => ({ tasks: [current], updateTaskRuntime: writes,
+      pauseAutomation: async (id: string, _accountId: string, text: string, options: { status: Task['status']; code: string }): Promise<boolean> => writes(id, {
+        status: options.status, errorInfo: { code: options.code, message: text, recoverable: true, detectedAt: now }, runtime: { stage: 'waiting_verification', message: text },
+      }),
+    }) }, usePetStoryStore: { getState: (): object => ({ project }) },
     useAccountStore: { getState: (): object => ({ accounts: [{ id: 'TEST-account', platform: 'doubao' }], selectAccount: vi.fn() }) },
     isBackgroundImageOperationTask, requiresSubmissionReconciliation, hasAccountChatAdjustment: (): boolean => false,
     resolveTaskConversationTarget, supportsDoubaoConversationLocator, normalizeDoubaoConversationUrl,
@@ -54,6 +59,7 @@ function fixture(): {
     waitForConversationNavigator: vi.fn(async (): Promise<typeof view> => view),
     getChatPageSnapshot: vi.fn(async (): Promise<object> => ({ messages: [], editorPresent: true, editorText: current.prompt, generating: false })),
     openTaskConversation: vi.fn(),
+    assertNoHumanVerification: vi.fn(async (): Promise<void> => undefined), AccountAvailabilityPauseError: OfflineAccountPause,
   };
   const handler = (override?: ReconcileHandler): ReconcileHandler => actualHandler('handleSubmissionReconcileSafely', {
     ...bindings, handleSubmissionReconcile: override || actualHandler('handleSubmissionReconcile', bindings),
@@ -121,9 +127,27 @@ describe('图片只读恢复预检退出后的真实状态收束', (): void => {
     expect(test.current().runtime?.runId).toBe('TEST-new-run'); expect(test.writes).not.toHaveBeenCalled(); expect(test.guard.current.size).toBe(0);
   });
 
-  it('其他图片任务与视频流程不获得素材操作专属的状态改写', async (): Promise<void> => {
-    const test = fixture(); test.replace({ ...test.current(), mode: 'video' }); const existing = vi.fn(async (): Promise<void> => {});
+  it('非PetStory且不属于图片操作的普通任务保持原处理边界', async (): Promise<void> => {
+    const test = fixture(); test.replace({ ...test.current(), mode: 'video', petstory: undefined }); const existing = vi.fn(async (): Promise<void> => {});
+    test.bindings.isBackgroundImageOperationTask = (): boolean => false;
     await test.handler(existing)(test.event);
     expect(existing).toHaveBeenCalledTimes(1); expect(test.writes).not.toHaveBeenCalled();
+  });
+
+  it.each(['image', 'video', 'chat'] as const)('PetStory %s恢复预检提前返回也收束原观察状态', async (mode): Promise<void> => {
+    const test = fixture(); test.replace({ ...test.current(), mode });
+    await test.handler(async (): Promise<void> => undefined)(test.event);
+    expect(test.current().status).toBe('paused'); expect(test.current().runtime?.runId).toBe('TEST-original-run');
+    expect(test.current().runtime?.submittedAt).toBeTruthy(); expect(test.controllers.current.size).toBe(0);
+  });
+
+  it.each(['image', 'video'] as const)('%s恢复遇到验证码只保留waiting_verification且不导航刷新', async (mode): Promise<void> => {
+    const test = fixture(); test.replace({ ...test.current(), mode }); const before = structuredClone(test.current().runtime);
+    test.bindings.assertNoHumanVerification = vi.fn(async (): Promise<never> => { throw new OfflineAccountPause('OFFLINE human verification', 'human_verification'); });
+    await test.handler()(test.event);
+    expect(test.current().status).toBe('waiting_verification'); expect(test.current().errorInfo?.code).toBe('human_verification');
+    expect(test.current().runtime?.runId).toBe(before?.runId); expect(test.current().runtime?.submittedAt).toBe(before?.submittedAt);
+    expect(test.bindings.openTaskConversation).not.toHaveBeenCalled(); expect(test.view.loadURL).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled();
+    expect(test.guard.current.size).toBe(0);
   });
 });

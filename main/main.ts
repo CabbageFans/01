@@ -40,7 +40,7 @@ import {
 import { getDataDir, readJSON } from './utils/store';
 import { configureDevelopmentProfile } from './utils/developmentProfile';
 import { parseDevelopmentWindowSize } from './utils/developmentWindow';
-import { prepareWindowForNativeInput, retainMacWindowOnClose, revealRetainedWindow } from './utils/windowLifecycle';
+import { retainMacWindowOnClose, revealRetainedWindow } from './utils/windowLifecycle';
 
 // ==================== 常量 ====================
 
@@ -268,7 +268,7 @@ function registerIPC(): void {
     registerSystemIPC(),
   ];
 
-  disposers.push(replaceIpcHandlers(ipcMain, ['system:getVersion', 'window:prepareNativeInput']));
+  disposers.push(replaceIpcHandlers(ipcMain, ['system:getVersion']));
 
   // ---- 系统级 IPC ----
 
@@ -276,22 +276,6 @@ function registerIPC(): void {
   ipcMain.handle('system:getVersion', () => {
     return app.getVersion();
   });
-  ipcMain.handle('window:prepareNativeInput', (event: Electron.IpcMainInvokeEvent): Promise<boolean> => {
-    const win = mainWindow;
-    // 只允许宿主 preload 请求准备自己的窗口，不接受 guest 或任意窗口 ID。
-    if (!win || win.isDestroyed() || event.sender.id !== win.webContents.id) return Promise.resolve(false);
-    return prepareWindowForNativeInput(win, (): void => {
-      if (process.platform === 'darwin') app.focus({ steal: true });
-    }).then((ready: boolean): boolean => {
-      if (!ready && !win.isDestroyed()) {
-        console.warn('[NativeInput] 窗口焦点未就绪', {
-          focused: win.isFocused(), visible: win.isVisible(), minimized: win.isMinimized(), focusable: win.isFocusable(),
-        });
-      }
-      return ready;
-    });
-  });
-
   // 窗口控制
   const minimizeWindow = (): void => {
     mainWindow?.minimize();

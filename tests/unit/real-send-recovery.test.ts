@@ -13,7 +13,6 @@ import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
-  canUseNativePerCharacterInput,
   findSendButtonTarget,
   isExactPromptInComposer,
   normalizePromptForComposer,
@@ -91,12 +90,6 @@ describe('CSV 多语言提示词全文守卫', () => {
     const missingEnglish = composerText.replace('Need a better scratch spot for your indoor cat?', '');
     expect(isExactPromptInComposer(c01Prompt, truncatedBeforeDialogue)).toBe(false);
     expect(isExactPromptInComposer(c01Prompt, missingEnglish)).toBe(false);
-  });
-
-  it('中文、多行与弯引号禁用逐字符 keyCode 路径，纯 ASCII 单行仍可使用', () => {
-    expect(canUseNativePerCharacterInput(c01Prompt)).toBe(false);
-    expect(canUseNativePerCharacterInput('Reply exactly: C01-A')).toBe(true);
-    expect(canUseNativePerCharacterInput('line 1\nline 2')).toBe(false);
   });
 
   it('发送前只接受可见编辑器中的完整提示词，截断内容 fail-closed', async () => {
@@ -227,15 +220,16 @@ describe('P0-2 已提交任务只读核对门禁', () => {
     for (const item of cases) expect(requiresSubmissionReconciliation(item.task), item.name).toBe(item.expected);
   });
 
-  it('已提交普通 Chat 的显式只读恢复不依赖后续异常文案，同时保留媒体和未提交门禁', (): void => {
+  it('所有模式的已提交停止任务均须核对，不依赖后续异常文案', (): void => {
     for (const status of ['fail', 'paused', 'waiting_verification', 'cancelled']) {
       const task = { mode: 'chat', status, runtime: { submittedAt: '2026-10-26T14:22:59.581Z' }, errorInfo: { code: 'unknown', message: '下载电脑版推广弹窗未能安全关闭，已在提交前停止' } };
       expect(requiresSubmissionReconciliation(task)).toBe(true);
       expect(requiresSubmissionReconciliation({ ...task, runtime: {} })).toBe(false);
-      expect(requiresSubmissionReconciliation({ ...task, mode: 'video' })).toBe(false);
-      expect(requiresSubmissionReconciliation({ ...task, mode: 'image' })).toBe(false);
+      expect(requiresSubmissionReconciliation({ ...task, mode: 'video' })).toBe(true);
+      expect(requiresSubmissionReconciliation({ ...task, mode: 'image' })).toBe(true);
     }
-    for (const status of ['executing', 'generating', 'done', 'queued']) {
+    expect(requiresSubmissionReconciliation({ mode: 'image', status: 'queued', runtime: { submittedAt: '2026-10-26T14:22:59.581Z' } })).toBe(true);
+    for (const status of ['executing', 'generating', 'done']) {
       expect(requiresSubmissionReconciliation({ mode: 'chat', status, runtime: { submittedAt: '2026-10-26T14:22:59.581Z' }, errorInfo: { code: 'unknown' } })).toBe(false);
     }
   });
@@ -313,27 +307,28 @@ describe('P0-3 真实回复终态', () => {
 });
 
 describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
-  it('真实键盘注入不得把提示词换行发送成裸 Enter', () => {
+  it('正文写入仅限页内编辑器事件，不依赖系统键盘或把换行变成发送', () => {
     const bridgeSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'utils', 'doubaoBridge.ts'), 'utf8');
-    const nativeInputBody = bridgeSource.slice(
-      bridgeSource.indexOf("const nativePromptText = promptText.replace"),
-      bridgeSource.indexOf('// ========== 第三步：回退'),
-    );
-    expect(nativeInputBody).toContain("replace(/\\r\\n?|\\n/g, ' ')");
-    expect(nativeInputBody).not.toContain("keyCode: 'Enter'");
+    const inputStart = bridgeSource.indexOf('async function injectCharByChar');
+    const inputEnd = bridgeSource.indexOf('\nexport ', inputStart + 1);
+    const inputBody = bridgeSource.slice(inputStart, inputEnd > 0 ? inputEnd : undefined);
+    expect(inputStart).toBeGreaterThan(0);
+    expect(inputBody).not.toContain('sendInputEvent');
+    expect(inputBody).not.toMatch(/keyCode: 'Enter'|submitPrompt|button\.click\(/);
   });
   it('每个 run 只有一个点击提交调用点，禁止 Enter 与循环自动重提', () => {
     const panelSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'BrowserPanel.tsx'), 'utf8');
-    const clickCalls = panelSource.match(/submitPromptWithNativeClick\(/g) || [];
-    expect(clickCalls.length, '原生点击提交必须只有一个调用点').toBe(1);
+    const clickCalls = panelSource.match(/submitPromptOnce\(/g) || [];
+    expect(clickCalls.length, '页内单次提交必须只有一个调用点').toBe(1);
+    expect(panelSource).not.toContain('submitPromptWithNativeClick');
     expect(panelSource).not.toContain('submitPromptWithNativeEnter');
     expect(panelSource).not.toContain('submissionAttempt < 3');
     expect(panelSource).not.toContain('验证已完成，正在新对话中重新上传并提交');
     expect(panelSource).toContain('系统不会自动重新提交');
-    const readinessIndex = panelSource.indexOf('if (!authorizationTriggeredSubmission && !(await prepareNativeSubmission(webview, undefined, backgroundInput)).ok)');
+    const readinessIndex = panelSource.indexOf('const preparation = await preparePageSubmission(webview, undefined, backgroundInput)');
     const submittingIndex = panelSource.indexOf("markSubmissionIntent('submitting'");
-    const clickIndex = panelSource.indexOf("submitPromptWithNativeClick(webview, 'native', {");
-    expect(readinessIndex, '发送前必须先确认窗口、输入区和控件稳定').toBeGreaterThan(0);
+    const clickIndex = panelSource.indexOf('submitPromptOnce(webview, {');
+    expect(readinessIndex, '发送前必须先确认页面输入区和控件稳定').toBeGreaterThan(0);
     expect(submittingIndex).toBeGreaterThan(readinessIndex);
     expect(clickIndex, '唯一真实点击调用必须位于提交意图持久化之后').toBeGreaterThan(submittingIndex);
     const intentBody = panelSource.slice(panelSource.indexOf('const markSubmissionIntent ='), submittingIndex);
@@ -342,9 +337,11 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     const guardedCall = panelSource.slice(clickIndex, panelSource.indexOf('new Promise<boolean>', clickIndex));
     expect(guardedCall).toContain('signal: dispatchController.signal');
     expect(guardedCall).toContain('deadlineAt: dispatchDeadline');
+    expect(guardedCall).toContain('dispatchKey:');
+    expect(guardedCall).toContain('expectedPrompt: prompt');
     expect(guardedCall).toContain('current.runtime?.submittedAt === submissionMarkedAt');
     expect(guardedCall).toContain('automationEngine.confirmSubmissionOwnership(taskId, accountId, controller)');
-    expect(panelSource).not.toContain("submitPromptWithNativeClick(webview, 'guest'");
+    expect(panelSource).not.toContain('prepareNativeSubmission');
     expect(panelSource).toContain('发送动作结果不确定，请人工核对豆包会话；系统未自动重发');
   });
 
@@ -365,21 +362,27 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     );
     expect(panelSource).toContain('authorizationTriggeredSubmission');
     expect(panelSource).toContain('if (!authorizationTriggeredSubmission)');
-    expect((panelSource.match(/submitPromptWithNativeClick\(/g) || []).length).toBe(1);
+    expect((panelSource.match(/submitPromptOnce\(/g) || []).length).toBe(1);
   });
 
-  it('原生点击失败不得回退到兼容提交', () => {
+  it('正式提交直接调用页内控件一次，不依赖鼠标、窗口焦点或其他提交回退', () => {
     const bridgeSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'utils', 'doubaoBridge.ts'), 'utf8');
-    const nativeClickBody = bridgeSource.slice(
-      bridgeSource.indexOf('export async function submitPromptWithNativeClick'),
-      bridgeSource.indexOf('export async function submitPromptWithNativeEnter'),
-    );
-    expect(nativeClickBody).not.toContain('return submitPrompt(webview)');
-    expect(nativeClickBody).toContain('禁止自动回退');
-    expect(nativeClickBody).toContain('prepareNativeSubmission(webview, safety, background)');
-    expect(nativeClickBody).toContain("background && (strategy !== 'native' || !safety)");
-    expect(nativeClickBody).toContain('await safety.verifyLease()');
-    expect(nativeClickBody).toContain('submissionDispatchAllowed(safety)');
+    const probeSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'utils', 'submissionControls.ts'), 'utf8');
+    const panelSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'BrowserPanel.tsx'), 'utf8');
+    const submitStart = bridgeSource.indexOf('export async function submitPromptOnce');
+    const nextExport = bridgeSource.indexOf('\nexport ', submitStart + 1);
+    const submitBody = bridgeSource.slice(submitStart, nextExport > 0 ? nextExport : undefined);
+    expect(submitStart).toBeGreaterThan(0);
+    expect(submitBody).not.toContain('return submitPrompt(webview)');
+    expect(submitBody).toContain('await safety.verifyLease()');
+    expect(submitBody).toContain('submissionDispatchAllowed(safety)');
+    expect(submitBody).not.toMatch(/sendInputEvent|prepareNativeInput|\.focus\(|MouseEvent|PointerEvent/);
+    expect(probeSource).toContain('button.click()');
+    expect(probeSource).not.toMatch(/sendInputEvent|prepareNativeInput|\.focus\(|document\.hasFocus|document\.activeElement|MouseEvent|PointerEvent/);
+    expect(bridgeSource).not.toContain('export async function submitPromptWithNativeClick');
+    expect(bridgeSource).not.toContain('export async function submitPromptWithNativeEnter');
+    expect(bridgeSource).not.toMatch(/\.sendInputEvent\s*\(/);
+    expect(panelSource).not.toMatch(/prepareNativeInput|webview\.focus\s*\(/);
     expect(bridgeSource).toContain('const target = await findSendButtonTarget(webview)');
   });
 

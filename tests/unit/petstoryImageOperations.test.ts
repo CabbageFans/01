@@ -229,7 +229,8 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     core.updateRuntime({ taskId: pending.id, status: 'paused', runtime: { runId, attempt: 1, stage: 'paused', message: 'TEST提交不明', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
       input: { prompt: pending.prompt, mode: pending.mode, attachments: pending.attachments || [], videoConfig: pending.videoConfig, petstory: pending.petstory } } });
     await production.bindRun(p.id, pending.id, runId); p = (await operations.advance(p.id, second.operationId!)).project!;
-    await expect(begin(base, '换成新的意见。')).rejects.toThrow('尚未结束'); expect(list()).toHaveLength(2);
+    const blocked = await begin(base, '换成新的意见。');
+    expect(blocked).toMatchObject({ success: false, operationId: second.operationId }); expect(blocked.error).toContain('已有图片任务'); expect(list()).toHaveLength(2);
   });
   it('图片准备根任务与操作关联一次原子保存，重入只能取得同一任务', async (): Promise<void> => {
     const directory = projects.directory(p.id); let linkedWrites = 0;
@@ -312,7 +313,7 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
       input: { prompt: task.prompt, mode: task.mode, attachments: task.attachments || [], videoConfig: task.videoConfig, petstory: task.petstory } } });
     await production.bindRun(p.id, task.id, runId);
     core.updateRuntime({ taskId: task.id, status: 'paused', runtime: { stage: 'paused' } });
-    const stopped = await operations.advance(p.id, begun.operationId!); expect(stopped.success).toBe(false); expect(stopped.error).toContain('提交受理状态不明');
+    const stopped = await operations.advance(p.id, begun.operationId!); expect(stopped).toMatchObject({ success: true, action: 'observe', taskId: task.id });
     expect(list()).toHaveLength(1); expect(list()[0].runtime?.runId).toBe(runId); expect(downloads).toEqual([]);
     await operations.resume(p.id, begun.operationId!);
     core.updateRuntime({ taskId: task.id, status: 'generating', runtime: { ...list()[0].runtime!, runId: 'TEST-other-run', stage: 'generating' } });

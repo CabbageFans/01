@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -91,20 +91,23 @@ describe('下载电脑版推广弹窗白名单清障', () => {
     expect(chooseDesktopDownloadPromotionAction(['确认授权', '拒绝'])).toBeNull();
   });
 
-  it('白名单弹窗使用原生单次点击并回读确认消失', async () => {
+  it('白名单弹窗只激活一次页内控件并回读消失，不发送系统鼠标事件', async () => {
     const snapshots = [
-      { present: true, position: '100,200', method: 'snooze' },
+      { present: true, position: '100,200', method: 'snooze', geometry: '80,180,40,40', fingerprint: 'OFFLINE-promotion' },
+      true,
       { present: false },
     ];
     const events: unknown[] = [];
+    const executeJavaScript = vi.fn(async (): Promise<unknown> => snapshots.shift() ?? { present: false });
     const webview = {
-      executeJavaScript: async () => snapshots.shift() || { present: false },
+      executeJavaScript,
       loadURL: () => {},
       getURL: () => 'https://www.doubao.com/chat/',
       sendInputEvent: (event: unknown) => { events.push(event); },
     } as Parameters<typeof dismissKnownDesktopDownloadPromotion>[0];
     expect(await dismissKnownDesktopDownloadPromotion(webview)).toBe('dismissed');
-    expect(events).toHaveLength(3);
+    expect(executeJavaScript).toHaveBeenCalledTimes(3);
+    expect(events).toHaveLength(0);
   });
 
   it('页面没有白名单弹窗时零点击', async () => {

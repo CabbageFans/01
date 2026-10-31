@@ -11,6 +11,7 @@ import type {
   TaskArtifact,
   TaskAddParams,
   TaskAssignParams,
+  TaskResubmitUncertainParams,
   TaskUpdateStatusParams,
   TaskUpdateInput,
   TaskUpdateRuntimeParams,
@@ -68,8 +69,6 @@ export interface TaskRecoverySummary {
   clearedLocks: number;
 }
 
-const LEGACY_UNCERTAIN_SUBMISSION = /发送按钮不可用|点击结果不确定|发送动作结果不确定|发送状态不确定|人工核对豆包会话/;
-
 const DEPENDENCY_ERROR_CODES = new Set(['dependency_failed', 'dependency_missing', 'dependency_cycle']);
 
 /** 依赖阻断不是平台生成失败，不允许直接重试，也不计入账号失败与额度消耗 */
@@ -99,9 +98,7 @@ function requiresSubmissionReconciliation(task: Task): boolean {
   if (task.runtime?.acceptanceObservation?.outcome === 'observing') return true;
   if (task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing') return true;
   if (!task.runtime?.submittedAt) return false;
-  if (!['paused', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing', 'fail', 'cancelled'].includes(task.status)) return false;
-  if (task.errorInfo?.code === 'submission_uncertain' || task.errorInfo?.code === 'generation_confirmation_required') return true;
-  return LEGACY_UNCERTAIN_SUBMISSION.test(`${task.errorInfo?.message || ''} ${task.result || ''}`);
+  return !['executing', 'generating', 'done'].includes(task.status);
 }
 
 /** CSV 导入时传入 Core 的最小账号投影 */
@@ -194,6 +191,75 @@ function artifactId(url: string): string {
   let hash = 5381;
   for (let index = 0; index < url.length; index++) hash = ((hash << 5) + hash) ^ url.charCodeAt(index);
   return `artifact-${(hash >>> 0).toString(16)}`;
+}
+
+function validResubmissionParams(params: TaskResubmitUncertainParams | null | undefined): params is TaskResubmitUncertainParams {
+  if (!params || params.acceptDuplicateRisk !== true) return false;
+  return [params.taskId, params.runId, params.submittedAt, params.authorizationId]
+    .every((value: string): boolean => typeof value === 'string' && !!value.trim() && value === value.trim() && value.length <= 200);
+}
+
+function matchesResubmissionSource(record: NonNullable<Task['resubmissionOf']>, params: TaskResubmitUncertainParams): boolean {
+  return record.taskId === params.taskId && record.runId === params.runId && record.submittedAt === params.submittedAt;
+}
+
+function validStoredResubmissionRecord(value: unknown): value is NonNullable<Task['resubmissionOf']> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return ['taskId', 'runId', 'submittedAt', 'authorizationId', 'authorizedAt'].every((key: string): boolean => {
+    const field = record[key];
+    return typeof field === 'string' && !!field.trim() && field === field.trim() && field.length <= 200;
+  });
+}
+
+/** 坏审计不能当成没有审计；保留原 JSON，并拒绝发放新的重复生成权限。 */
+function validStoredResubmissionMetadata(task: Task): boolean {
+  const raw = task as unknown as Record<string, unknown>;
+  return (raw.resubmissionOf === undefined || validStoredResubmissionRecord(raw.resubmissionOf))
+    && (raw.resubmittedAs === undefined || Array.isArray(raw.resubmittedAs) && raw.resubmittedAs.every(validStoredResubmissionRecord));
+}
+
+function canCreateUncertainResubmission(task: Task, nowMs: number): boolean {
+  const runtime = task.runtime;
+  return ['paused', 'fail', 'cancelled', 'waiting_verification', 'waiting_generation_confirmation'].includes(task.status)
+    && !!runtime && !runtime.chatAdjustmentGuard?.active && !['observing', 'completed'].includes(runtime.acceptanceObservation?.outcome || '')
+    && !['observing', 'completed'].includes(runtime.manualObservation?.outcome || '') && !runtime.chatResponse && !task.outputs.length && !task.artifacts?.length
+    && !(task.lock && Date.parse(task.lock.expiresAt) > nowMs);
+}
+
+/** 原输入属于旧运行，新任务只复制输入与业务定位，不复制任何执行或结果状态。 */
+function createResubmissionTask(source: Task, input: TaskRunSnapshot['input'], taskId: string, timestamp: string, params: TaskResubmitUncertainParams): Task {
+  const binding = input.petstory || source.petstory;
+  return {
+    id: taskId, prompt: input.prompt, assignedAccountId: source.assignedAccountId, mode: input.mode,
+    videoConfig: input.videoConfig ? structuredClone(input.videoConfig) : undefined, attachments: [...input.attachments], audioAttachment: input.audioAttachment,
+    petstory: binding ? structuredClone(binding) : undefined, promptReadback: input.promptReadback || source.promptReadback,
+    projectId: source.projectId, batchId: source.batchId, source: source.source,
+    dependsOnTaskIds: source.dependsOnTaskIds ? [...source.dependsOnTaskIds] : undefined, dependencyPolicy: source.dependencyPolicy,
+    executionIntent: 'hold', status: 'queued', result: null, outputs: [], artifacts: [], runHistory: [],
+    resubmissionOf: { taskId: source.id, runId: params.runId, submittedAt: params.submittedAt, authorizationId: params.authorizationId, authorizedAt: timestamp },
+    createdAt: timestamp, updatedAt: timestamp,
+  };
+}
+
+/** 授权 ID 在整个任务库中唯一；重复调用只回读同一关联结果，不能改绑原运行。 */
+function findAuthorizedResubmission(tasks: Task[], params: TaskResubmitUncertainParams): TaskServiceResult<Task> | undefined {
+  const authorizations: { sourceTaskId: string; taskId: string; runId: string; submittedAt: string }[] = [];
+  for (const task of tasks) {
+    const origin = task.resubmissionOf;
+    if (origin && origin.authorizationId === params.authorizationId) authorizations.push({
+      sourceTaskId: origin.taskId, taskId: task.id, runId: origin.runId, submittedAt: origin.submittedAt,
+    });
+    for (const record of task.resubmittedAs || []) {
+      if (record.authorizationId === params.authorizationId) authorizations.push({ sourceTaskId: task.id, taskId: record.taskId, runId: record.runId, submittedAt: record.submittedAt });
+    }
+  }
+  if (authorizations.some((record): boolean => record.sourceTaskId !== params.taskId || record.runId !== params.runId || record.submittedAt !== params.submittedAt)
+    || new Set(authorizations.map((record): string => record.taskId)).size > 1) return { success: false, error: '这次授权已用于其他任务或运行，未建立新任务' };
+  if (!authorizations.length) return undefined;
+  const existing = tasks.find((task): boolean => task.id === authorizations[0].taskId);
+  if (!existing?.resubmissionOf || !matchesResubmissionSource(existing.resubmissionOf, params)) return { success: false, error: '原授权结果缺失或归属不符，请核对原关联任务；未再次创建' };
+  return { success: true, data: existing };
 }
 
 export class TaskService {
@@ -348,6 +414,7 @@ export class TaskService {
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
     if (task.runtime?.chatAdjustmentGuard?.active) return { success: false, error: '该任务正在保护豆包创作对话，请先采用回复或结束调整' };
+    if (task.runtime?.submittedAt && task.status !== 'done') return { success: false, error: '原任务已有发送意图，请先核对原结果或明确授权建立关联新任务' };
     if (ACTIVE.has(task.status)) return { success: false, error: '任务正在自动化执行中，无法重新指派' };
     task.assignedAccountId = params.accountId;
     // 指派本身永远不是执行授权；需要执行时必须显式 armTasks。
@@ -362,6 +429,7 @@ export class TaskService {
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
     if (task.runtime?.chatAdjustmentGuard?.active) return { success: false, error: '该任务正在保护豆包创作对话，请先采用回复或结束调整' };
+    if (task.runtime?.submittedAt && task.status !== 'done') return { success: false, error: '原任务已有发送意图，请先核对原结果或明确授权建立关联新任务' };
     const prompt = params.updates?.prompt?.trim();
     if (!prompt) return { success: false, error: '提示词不能为空' };
     task.prompt = prompt;
@@ -442,7 +510,7 @@ export class TaskService {
     if (executionIntent === 'hold' && (task.runtime?.submittedAt || task.runtime?.acceptanceObservation || task.runtime?.chatResponse)) {
       return { success: false, error: '原任务已有提交或回复证据，禁止附件重试' };
     }
-    if (requiresSubmissionReconciliation(task)) {
+    if (task.runtime?.submittedAt || requiresSubmissionReconciliation(task)) {
       return { success: false, error: '任务存在已提交记录，请先核对平台结果；为避免重复扣费，禁止重新发送' };
     }
     // waiting_verification 已释放执行锁和账号忙状态，用户完成登录/验证后
@@ -459,6 +527,53 @@ export class TaskService {
     task.blockedByTaskIds = undefined;
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true, data: task };
+  }
+
+  /** 新授权只创建关联 hold 任务；旧运行、意图、回复及迟到产物的归属永不重置。 */
+  resubmitUncertain(params: TaskResubmitUncertainParams): TaskServiceResult<Task> {
+    if (!validResubmissionParams(params)) {
+      return { success: false, error: '请明确接受原请求可能仍会生成的风险，并提供原运行的单次授权' };
+    }
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+    if (tasks.some((task): boolean => !validStoredResubmissionMetadata(task))) {
+      return { success: false, error: '任务库存在不完整的重发审计，原记录已保留；请核对关联任务后继续' };
+    }
+    const authorized = findAuthorizedResubmission(tasks, params);
+    if (authorized) return authorized;
+    const source = tasks.find((task): boolean => task.id === params.taskId);
+    if (!source?.runtime || source.runtime.runId !== params.runId || source.runtime.submittedAt !== params.submittedAt) {
+      return { success: false, error: '原任务或提交运行已经变化，请刷新后核对，未建立新任务' };
+    }
+    const audit = (source.resubmittedAs || []).filter((record): boolean => record.runId === params.runId && record.submittedAt === params.submittedAt);
+    const replacements = tasks.filter((task): boolean => !!task.resubmissionOf && matchesResubmissionSource(task.resubmissionOf, params));
+    if (replacements.length > 1 || audit.some((record): boolean => !replacements.some((task): boolean => task.id === record.taskId))) {
+      return { success: false, error: '原运行的关联创建记录不一致，请核对已有任务；未再次创建' };
+    }
+    const timestamp = this.now();
+    let created = replacements[0];
+    if (!created) {
+      if (!canCreateUncertainResubmission(source, this.nowMs())) {
+        return { success: false, error: '原任务仍在运行或已有回复、受理观察或产物，请继续核对原结果，未建立新任务' };
+      }
+      const input = source.runtime.input;
+      if (!input || !input.prompt?.trim() || !['chat', 'image', 'video', 'music'].includes(input.mode) || !Array.isArray(input.attachments)) {
+        return { success: false, error: '原运行输入快照不完整，未建立新任务' };
+      }
+      const taskId = this.id();
+      if (!taskId || tasks.some((task): boolean => task.id === taskId)) return { success: false, error: '新任务标识冲突，未建立新任务' };
+      created = createResubmissionTask(source, input, taskId, timestamp, params);
+      tasks.push(created);
+    }
+    // 同一原运行即使再次提供新的授权 ID 也只返回同一替代任务；新 ID 仍记账防止跨运行复用。
+    source.resubmittedAs = [...(source.resubmittedAs || []), { taskId: created.id, runId: params.runId, submittedAt: params.submittedAt,
+      authorizationId: params.authorizationId, authorizedAt: timestamp }];
+    // 用户明确改由关联请求接续后，结束原本地等待占位；并不取消平台请求或改写其运行证据。
+    // 账号自身的登录／验证阻断独立保留，新任务仍必须通过实际页面门禁。
+    if (source.status === 'waiting_verification' || source.status === 'waiting_generation_confirmation') source.status = 'paused';
+    source.updatedAt = timestamp;
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: true, data: created };
   }
 
   batchPause(): TaskServiceResult {
@@ -639,7 +754,7 @@ export class TaskService {
       );
       // 新 run 必须替换而不是合并旧快照。否则旧 submittedAt/conversationUrl 会
       // 穿透到改派后的新运行，防重复门禁会把安全的新提交误判为二次发送。
-      // 旧 run 的不可变证据仍保留在 runHistory 中。
+      // runHistory 只保留运行摘要；不明提交必须保留原 Task 快照并显式建立关联新任务。
       task.runtime = (startsNewRun
         ? { ...params.runtime }
         : { ...(task.runtime || {}), ...params.runtime }) as TaskRunSnapshot;

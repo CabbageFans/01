@@ -1,7 +1,7 @@
 import React from 'react';
-import { Alert, Button, Card, message, Space, Tag } from 'antd';
-import type { PetStoryChatJob, PetStoryProject, Task } from '@doubao-studio/contracts';
-import { usePetStoryStore } from '../store/usePetStoryStore';
+import { Alert, Button, Card, message, Modal, Space, Tag } from 'antd';
+import type { PetStoryChatJob, PetStoryImageTarget, PetStoryProductionStep, PetStoryProject, Task } from '@doubao-studio/contracts';
+import { petStoryResubmissionAccountBlock, petStoryResubmissionTask, usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
 import { selectPlanReview } from '../utils/petstoryPlanReview';
@@ -10,6 +10,7 @@ import { revealBrowser } from '../utils/workspace';
 import { canvasPromptNames } from './petStoryCanvasShared';
 import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
 import { resolveTaskConversationTarget } from '../utils/taskConversationLocator';
+import { pendingImageCandidates } from '../utils/petstoryImageCandidates';
 
 function jobRepairAncestors(project: PetStoryProject, job: PetStoryChatJob): PetStoryChatJob[] {
   const ancestors: PetStoryChatJob[] = []; const visited = new Set([job.id]);
@@ -131,23 +132,94 @@ function currentJobs(project: PetStoryProject): PetStoryChatJob[] {
   });
 }
 
+/** 只保留当前明确授权的快照；平台结果或运行变化后再次核对，不能沿用旧确认。 */
+const PetStoryResubmissionActions: React.FC<{ projectId: string; task: Task }> = ({ projectId, task }): React.ReactElement => {
+  const state = usePetStoryStore();
+  const accounts = useAccountStore((store) => store.accounts);
+  const [resubmitTarget, setResubmitTarget] = React.useState<{ projectId: string; taskId: string; runId: string; submittedAt: string } | null>(null);
+  const resubmissionBlock = petStoryResubmissionAccountBlock(accounts.find((account): boolean => account.id === task.assignedAccountId));
+  const openConfirmation = (): void => {
+    if (task.runtime?.runId && task.runtime.submittedAt) setResubmitTarget({ projectId, taskId: task.id, runId: task.runtime.runId, submittedAt: task.runtime.submittedAt });
+  };
+  const confirmResubmission = async (): Promise<void> => {
+    if (!resubmitTarget || usePetStoryStore.getState().busy) return;
+    const current = usePetStoryStore.getState().project; const currentTasks = useTaskStore.getState();
+    const candidate = current?.id === resubmitTarget.projectId ? petStoryResubmissionTask(current, currentTasks.tasks, [...Object.values(currentTasks.executingTasks), ...(currentTasks.activeTaskId ? [currentTasks.activeTaskId] : [])]) : undefined;
+    if (!candidate || candidate.id !== resubmitTarget.taskId || candidate.runtime?.runId !== resubmitTarget.runId || candidate.runtime.submittedAt !== resubmitTarget.submittedAt) {
+      setResubmitTarget(null); message.warning('原任务状态已变化，请重新检查制作结果后确认'); return;
+    }
+    const block = petStoryResubmissionAccountBlock(useAccountStore.getState().accounts.find((account): boolean => account.id === candidate.assignedAccountId));
+    if (block) { message.warning(block); return; }
+    await usePetStoryStore.getState().resubmitProduction({ taskId: resubmitTarget.taskId, runId: resubmitTarget.runId, submittedAt: resubmitTarget.submittedAt, authorizationId: crypto.randomUUID(), acceptDuplicateRisk: true });
+    setResubmitTarget(null);
+  };
+  return <><Button size="small" disabled={state.busy || !!resubmissionBlock} onClick={openConfirmation}>确认重发一次</Button>
+    {resubmissionBlock && <p className="mt-2 text-amber-600" role="status">{resubmissionBlock}</p>}
+    {resubmitTarget && <Modal title="确认重发一次" open okText="确认风险，重发一次" cancelText="取消" confirmLoading={state.busy} okButtonProps={{ disabled: !!resubmissionBlock }} onOk={(): void => { void confirmResubmission(); }} onCancel={(): void => setResubmitTarget(null)}>
+      <p>原请求可能已受理，重发可能产生重复结果或再次消耗额度。原请求与产物保留。</p>
+    </Modal>}
+  </>;
+};
+
+/** 没有保存原会话地址时，必须由用户先找到原会话并明确确认当前页归属。 */
+const PetStoryProductionResultCheck: React.FC<{ task: Task; disabled: boolean }> = ({ task, disabled }): React.ReactElement => {
+  const [target, setTarget] = React.useState<{ taskId: string; runId: string; submittedAt: string } | null>(null);
+  const dispatchCheck = (taskId: string, useCurrentPage: boolean = false): void => {
+    window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId, ...(useCurrentPage ? { useCurrentPage: true } : {}) } }));
+    revealBrowser();
+  };
+  const beginCheck = (): void => {
+    if (resolveTaskConversationTarget(task).ok) { dispatchCheck(task.id); return; }
+    if (!task.runtime?.runId || !task.runtime.submittedAt) { message.warning('原运行记录不完整，请先刷新任务记录。'); return; }
+    setTarget({ taskId: task.id, runId: task.runtime.runId, submittedAt: task.runtime.submittedAt });
+  };
+  const confirmCurrentPage = (): void => {
+    if (!target) return;
+    const current = useTaskStore.getState().tasks.find((item): boolean => item.id === target.taskId);
+    if (current?.runtime?.runId !== target.runId || current.runtime.submittedAt !== target.submittedAt) { setTarget(null); message.warning('原任务运行已变化，请重新选择需要检查的原任务。'); return; }
+    dispatchCheck(target.taskId, true); setTarget(null);
+  };
+  return <><Button size="small" disabled={disabled} onClick={beginCheck}>检查原制作结果（不重复发送）</Button>
+    {target && <Modal title="核对当前原会话" open okText="当前页就是原会话，检查结果" cancelText="取消" onOk={confirmCurrentPage} onCancel={(): void => setTarget(null)}>
+      <p>请先打开原执行账号，在豆包历史对话中手动找到原请求所在会话。确认右侧当前页就是原会话后再检查；工具会核对原请求和结果归属，不会发送。</p>
+      <Button onClick={(): void => openOriginalTask(task)}>打开原执行账号</Button>
+    </Modal>}
+  </>;
+};
+
+function productionHistoryTasks(step: PetStoryProductionStep | undefined, task: Task | undefined, tasks: Task[]): Task[] {
+  const historyTaskIds = [...new Set([...(step?.resubmissionHistory?.map((item): string => item.taskId) || []), ...(task?.resubmissionOf ? [task.resubmissionOf.taskId] : [])])];
+  return historyTaskIds.map((id): Task | undefined => tasks.find((item): boolean => item.id === id)).filter((item): item is Task => !!item && item.id !== task?.id);
+}
+function productionImageTarget(step: PetStoryProductionStep | undefined): PetStoryImageTarget | undefined {
+  if (step?.materialId) return { materialId: step.materialId };
+  if (step?.shotId && (step.kind === 'firstFrame' || step.kind === 'lastFrame')) return { shotId: step.shotId, kind: step.kind };
+  if (step?.kind === 'character' && step.characterId) return { materialId: `character:${step.characterId}` };
+  return undefined;
+}
+
 const PetStoryProductionRecovery: React.FC<{ project: PetStoryProject }> = ({ project }): React.ReactElement | null => {
-  const state = usePetStoryStore(); const tasks = useTaskStore((store) => store.tasks);
+  const state = usePetStoryStore(); const taskState = useTaskStore(); const tasks = taskState.tasks;
   const production = project.production;
   if (!production || production.state === 'complete') return null;
   const step = production.steps.find((item): boolean => item.status !== 'complete');
   const task = tasks.find((item): boolean => item.id === step?.taskId);
-  const material = project.materials?.find((item): boolean => item.id === step?.materialId);
+  const imageTarget = productionImageTarget(step);
+  const material = project.materials?.find((item): boolean => item.id === imageTarget?.materialId);
   const shot = project.plan?.shots.find((item): boolean => item.id === step?.shotId);
-  const awaitingImage = !!step && step.kind !== 'video' && project.assets.some((asset): boolean => asset.imageReview?.state === 'candidate' && (step?.materialId ? asset.imageReview.target.materialId === step.materialId : asset.imageReview.target.shotId === step?.shotId));
-  const inspectImages = (): void => { const stage = step?.materialId ? 'materials' : 'keyframes'; const id = step?.materialId ? `material-${step.materialId}` : `shot-media-${step?.shotId}-${step?.kind}`; window.dispatchEvent(new CustomEvent('petstory-locate-draft', { detail: { stage, id, objectId: step?.shotId } })); requestAnimationFrame((): void => document.getElementById(id)?.scrollIntoView({ block: 'center', behavior: 'smooth' })); };
+  const awaitingImage = !!imageTarget && pendingImageCandidates(project, imageTarget).length > 0;
+  const inspectImages = (): void => { const stage = imageTarget?.materialId ? 'materials' : 'keyframes'; const id = imageTarget?.materialId ? `material-${imageTarget.materialId}` : `shot-media-${step?.shotId}-${step?.kind}`; window.dispatchEvent(new CustomEvent('petstory-locate-draft', { detail: { stage, id, objectId: step?.shotId } })); requestAnimationFrame((): void => document.getElementById(id)?.scrollIntoView({ block: 'center', behavior: 'smooth' })); };
+  const resubmissionTask = petStoryResubmissionTask(project, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]);
+  const productionMessage = resubmissionTask ? '受理仍未确认，可检查原结果或确认重发一次' : production.message;
+  const stepError = resubmissionTask && /只读.*(?:禁止|不能).*重发|禁止重发/.test(step?.error || '') ? undefined : step?.error;
   return <section className="py-3" aria-label="当前媒体制作任务">
       <strong>{material?.name || (shot ? `镜头 ${shot.order}` : '当前素材制作')}</strong> <Tag color={production.state === 'paused' ? 'orange' : 'blue'}>{production.state === 'paused' ? '制作已暂停' : '正在制作'}</Tag>
-      <p className="my-2">{production.message}</p>{step?.error && <Alert type="warning" message={step.error} />}
+      <p className="my-2">{productionMessage}</p>{stepError && <Alert type="warning" message={stepError} />}
       <Space wrap>{awaitingImage && <Button size="small" type="primary" onClick={inspectImages}>查看待确认图片</Button>}{task && <Button size="small" onClick={(): void => openOriginalTask(task)}>打开对应豆包会话</Button>}{production.state === 'running' ? <Button size="small" disabled={state.busy} onClick={(): void => { void state.pauseProduction(); }}>暂停后续制作</Button> : <>
         <Button size="small" disabled={state.busy} onClick={(): void => { void state.resumeProduction(); }}>继续原制作任务</Button>
-        {task?.runtime?.submittedAt && <Button size="small" disabled={state.busy} onClick={(): void => { window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id } })); revealBrowser(); }}>检查原制作结果（不重复发送）</Button>}
-      </>}</Space>
+        {task?.runtime?.submittedAt && <PetStoryProductionResultCheck task={task} disabled={state.busy} />}
+        {resubmissionTask && <PetStoryResubmissionActions projectId={project.id} task={resubmissionTask} />}
+      </>}{productionHistoryTasks(step, task, tasks).map((original, index): React.ReactNode => <Button size="small" key={original.id} onClick={(): void => openOriginalTask(original)}>{index === 0 ? '打开原制作任务' : `打开更早制作任务 ${index + 1}`}</Button>)}</Space>
     </section>;
 };
 

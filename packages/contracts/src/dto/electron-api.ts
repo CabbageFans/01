@@ -199,7 +199,6 @@ export interface ElectronAPI {
     checkUpdate: () => Promise<CheckUpdateResult>;
     minimize: () => void;
     toggleMaximize: () => void;
-    prepareNativeInput: () => Promise<boolean>;
     close: () => void;
   };
 }

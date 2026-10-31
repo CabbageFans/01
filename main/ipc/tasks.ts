@@ -93,6 +93,12 @@ export function retryPetStoryTask(taskId: string): Task {
   if (!result.success) throw new Error(result.error);
   return result.data;
 }
+/** 用户对具体不明提交的单次授权；原任务保留，新任务仍等待制作门禁。 */
+export function resubmitPetStoryTask(params: import('@doubao-studio/contracts').TaskResubmitUncertainParams): Task {
+  const result = taskService.resubmitUncertain(params);
+  if (!result.success) throw new Error(result.error);
+  return result.data;
+}
 /** 同进程短剧对话保护接线，复用正式 Repository 并在失败时停止。 */
 export function setPetStoryConversationGuard(taskId: string, projectId: string, adjustmentId: string, active: boolean, allowedTaskId?: string): void {
   taskService.setConversationGuard(taskId, projectId, adjustmentId, active, allowedTaskId);

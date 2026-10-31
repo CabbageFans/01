@@ -5,7 +5,9 @@ import { usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { petStoryMaterialPromptBlock } from '../utils/petstoryCandidate';
 import { petStoryImageProgress } from '../utils/petstoryImageFlow';
-import { PetStoryImageReview, imageBelongsToTarget } from './PetStoryImageReview';
+import { PetStoryImageReview } from './PetStoryImageReview';
+import { imageBelongsToTarget, pendingImageCandidates } from '../utils/petstoryImageCandidates';
+import { journeyMaterialImageApproved } from '../utils/petstoryJourney';
 import '../styles/petstory-materials.css';
 
 const labels = { character: '人物', prop: '道具', scene: '场景' };
@@ -15,17 +17,11 @@ function reviewMaterialPlan(onNavigate?: PetStoryMaterialNavigate): void {
   else window.dispatchEvent(new CustomEvent('petstory-journey-focus', { detail: { target: 'plan' } }));
 }
 function materialCandidateCount(project: PetStoryProject, material: PetStoryMaterial): number {
-  return project.assets.filter((asset): boolean => imageBelongsToTarget(project, asset, { materialId: material.id }) && asset.id !== material.selectedAssetId && asset.imageReview?.state !== 'adopted').length
-    + (project.assets.some((asset): boolean => asset.id === material.selectedAssetId && imageBelongsToTarget(project, asset, { materialId: material.id }) && asset.imageReview?.state !== 'adopted') && !isPetStoryMaterialImageApproved(project, material) ? 1 : 0);
+  return pendingImageCandidates(project, { materialId: material.id }).length;
 }
 /** 仅投影已保存的选图及确认记录用于数量展示；采用仍经过正式服务。 */
 export function isPetStoryMaterialImageApproved(project: PetStoryProject, material: PetStoryMaterial): boolean {
-  const asset = project.assets.find((item): boolean => item.id === material.selectedAssetId);
-  if (!asset?.validation?.decoded || asset.needsReview || asset.imageReview?.state === 'candidate' || material.approved?.assetId !== asset.id || material.approved.sha256 !== asset.validation.sha256) return false;
-  if (asset.imageReview?.state === 'adopted' && (asset.imageReview.sha256 !== asset.validation.sha256 || !asset.imageReview.adoptedAt)) return false;
-  if (material.kind !== 'character') return true;
-  const character = project.plan?.characters.find((item): boolean => item.id === material.entityId);
-  return !!character && material.approved.identity?.assetId === asset.id && material.approved.identity.description === character.description;
+  return journeyMaterialImageApproved(project, material);
 }
 function materialImageStatus(progress: ReturnType<typeof petStoryImageProgress>, candidates: number, hasCurrent: boolean, approved: boolean): string {
   if (progress.resumable) return '待继续';

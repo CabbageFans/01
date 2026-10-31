@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { DownloadJob, PetStoryAsset, PetStoryCapability, PetStoryExecutionGuard, PetStoryPlan, PetStoryProductionCounts, PetStoryProductionResult, PetStoryProductionStep, PetStoryProject, Task, TaskAddParams, TaskDownloadOutputsParams, TaskDownloadOutputsResult, PetStoryCompiledPrompt, PetStoryPromptKind, PetStoryShot, PetStoryShotMedia } from '@doubao-studio/contracts';
+import type { DownloadJob, PetStoryAsset, PetStoryCapability, PetStoryExecutionGuard, PetStoryPlan, PetStoryProductionCounts, PetStoryProductionResult, PetStoryProductionStep, PetStoryProject, Task, TaskAddParams, TaskDownloadOutputsParams, TaskDownloadOutputsResult, TaskResubmitUncertainParams, PetStoryCompiledPrompt, PetStoryPromptKind, PetStoryShot, PetStoryShotMedia } from '@doubao-studio/contracts';
 import { PetStoryProjects, projectPath } from './petstoryProject';
 import { compilePrompt, compileMaterialPrompt, checkPromptReferences, assetCharacterIds } from './petstoryPromptQuality';
 import { bindReferenceText } from './petstoryReferenceText';
@@ -49,6 +49,7 @@ interface ProductionPort {
   create: (params: TaskAddParams, accountId: string) => Task;
   adopt: (taskId: string, binding: NonNullable<Task['petstory']>, compiledPrompt?: string) => Task;
   retryUnsubmitted: (taskId: string) => Task;
+  resubmitUncertain?: (params: TaskResubmitUncertainParams) => Task;
   downloads: () => DownloadJob[];
   download: (params: TaskDownloadOutputsParams) => Promise<TaskDownloadOutputsResult>;
 }
@@ -302,6 +303,57 @@ export class PetStoryProductionService {
     const saved = await this.projects.write(p);
     this.authorized.add(id);
     return { success: true, project: saved };
+  }
+  /** 不明提交只能由用户针对原运行另行授权；新 hold 任务绑定成功后才进入正式调度。 */
+  async resubmit(id: string, revision: number, request: TaskResubmitUncertainParams, capability?: PetStoryCapability): Promise<PetStoryProductionResult> {
+    const p = await this.projects.read(id);
+    const production = this.checked(p);
+    if (!request || request.acceptDuplicateRisk !== true || !this.tasks.resubmitUncertain) throw new Error('请明确确认本次重发及可能重复生成的风险');
+    // 项目写入已成功而回复丢失时只返回关联结果，绝不再次启动已运行的新任务。
+    const linked = production.steps.find((step): boolean => !!step.taskId && this.tasks.list().some((task): boolean => task.id === step.taskId
+      && task.resubmissionOf?.taskId === request.taskId && task.resubmissionOf.runId === request.runId && task.resubmissionOf.submittedAt === request.submittedAt));
+    if (linked?.taskId) {
+      const task = this.tasks.resubmitUncertain(request);
+      if (task.id !== linked.taskId) throw new Error('重发关联已变化，请刷新原制作任务');
+      if (task.status === 'queued' && task.executionIntent === 'hold' && !task.runtime && linked.status === 'bound' && !linked.runId) {
+        capability = productionCapability(p, capability);
+        this.originalTask(p, linked);
+        this.validateRequestContext(p, capability, productionResumeTarget(production, linked));
+        await this.validateStepInputs(p, linked, task);
+        if (production.state === 'complete') throw new Error('原制作已结束，请核对关联任务');
+        production.capability = capability; production.state = 'running'; production.message = '继续本次已确认的重发请求；保留原任务';
+        const saved = await this.projects.write(p);
+        this.authorized.add(id);
+        return { success: true, project: saved, taskId: task.id, action: 'start' };
+      }
+      return { success: true, project: p, taskId: task.id, action: 'wait' };
+    }
+    if (p.revision !== revision) throw new Error('项目版本已变化，请刷新后确认本次重发');
+    if (production.state !== 'paused') throw new Error('请先暂停原制作，再确认重发');
+    const pending = requireValue(production.steps.find((step): boolean => step.status !== 'complete'), '原制作步骤已经结束');
+    const original = this.originalTask(p, pending);
+    if (original.id !== request.taskId || pending.runId !== request.runId || original.runtime?.submittedAt !== request.submittedAt) throw new Error('原提交已变化，请刷新后重新核对');
+    capability = productionCapability(p, capability);
+    this.validateRequestContext(p, capability, productionResumeTarget(production, pending));
+    await this.validateStepInputs(p, pending, original);
+    const history = { taskId: original.id, runId: request.runId, submittedAt: request.submittedAt, authorizationId: request.authorizationId,
+      authorizedAt: '', inputHash: pending.inputHash, attachmentAssetIds: [...pending.attachmentAssetIds],
+      compiledPrompt: pending.compiledPrompt ? structuredClone(pending.compiledPrompt) : undefined,
+      pageBindings: pending.pageBindings ? structuredClone(pending.pageBindings) : undefined };
+    const source = this.resetPageBindingForRetry(p, pending) || pending.compiledPrompt;
+    const created = this.tasks.resubmitUncertain(request);
+    // Core 已持久化原记录和唯一关联任务；后续写盘失败时该任务保持 hold，可幂等接续。
+    if (created.status !== 'queued' || created.executionIntent !== 'hold' || created.runtime) throw new Error('关联重发任务已开始，请核对现有任务，不重复启动');
+    const adopted = this.tasks.adopt(created.id, { projectId: p.id, stepId: pending.id }, source?.text);
+    if (adopted.status !== 'queued' || adopted.executionIntent !== 'hold' || adopted.runtime || hash(adopted.prompt) !== pending.inputHash) throw new Error('重发输入绑定不符，新任务保持暂停');
+    history.authorizedAt = this.tasks.list().find((task): boolean => task.id === original.id)?.resubmittedAs?.find((record): boolean => record.authorizationId === request.authorizationId)?.authorizedAt
+      || requireValue(created.resubmissionOf).authorizedAt;
+    pending.resubmissionHistory = [...(pending.resubmissionHistory || []), history];
+    pending.taskId = adopted.id; pending.runId = undefined; pending.status = 'bound'; pending.error = undefined;
+    production.capability = capability; production.state = 'running'; production.message = '已确认重发一次；保留原任务，新请求完成后继续制作';
+    const saved = await this.projects.write(p);
+    this.authorized.add(id);
+    return { success: true, project: saved, taskId: adopted.id, action: 'start' };
   }
   private resetPageBindingForRetry(p: PetStoryProject, pending: PetStoryProductionStep): PetStoryCompiledPrompt | undefined {
     if (!pending.pageBindings) return undefined;
@@ -625,11 +677,10 @@ export class PetStoryProductionService {
         }
         // 活跃原控制器可能先写 submittedAt、再写受理证据。这里只等待同一绑定运行，
         // 不发送、重试或创建观察器；停止后的不明提交仍必须走下方原会话核对。
-        if (task.runtime?.acceptanceObservation?.outcome === 'manual_review') throw new Error('提交受理状态不明，只读核对原会话，禁止重发');
+        if (task.runtime?.acceptanceObservation?.outcome === 'manual_review'
+          && ['executing', 'generating', 'manual_submission_observing'].includes(task.status)) throw new Error('提交受理状态不明，请先结束当前观察，再检查原结果或确认重发一次');
         if (['executing', 'generating', 'manual_submission_observing'].includes(task.status)) return { success: true, project: p, action: 'wait' };
         if (task.runtime?.submittedAt) {
-          const observation = task.runtime.acceptanceObservation;
-          if (!observation || observation.runId !== pending.runId || observation.accountId !== p.accountId || observation.expectedArtifact.runId !== pending.runId || !task.runtime.conversationUrl || observation.conversationUrl !== task.runtime.conversationUrl) throw new Error('提交受理状态不明，只读核对原会话，禁止重发');
           return { success: true, project: p, taskId: task.id, action: 'observe' };
         }
         if (task.status !== 'queued') throw new Error(task.errorInfo?.message || '原任务已停止，请处理后显式继续');
