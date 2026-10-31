@@ -1,5 +1,6 @@
 import type { PetStoryChatAdjustment, PetStoryConversationReply, PetStoryAdjustmentResult, PetStoryAdjustmentPreviewResult } from './petstoryAdjustment';
 import type { Task } from '../domain';
+import type { TaskResubmitUncertainParams } from './tasks';
 
 /** PetStory 桌面内部契约；路径和任务绑定只由主进程生成。 */
 export type PetStoryMode = 'auto' | 'first_frame' | 'first_last_frame' | 'reference';
@@ -199,6 +200,8 @@ export interface PetStoryImageReview {
   basisHash: string;
   adoptedAt?: string;
   sha256?: string;
+  /** 本次明确采用时已结束待选的同目标图片；仅保留历史备选，不代表采用这些图片。 */
+  resolvedCandidateIds?: string[];
   sourceReply?: { adjustmentId: string; replyKey: string; urlHash: string };
 }
 export interface PetStoryAsset {
@@ -275,6 +278,8 @@ export interface PetStoryProductionStep {
   compiledPrompt?: PetStoryCompiledPrompt;
   pageBindings?: PetStoryPageBinding[];
   pageBindingHistory?: { runId?: string; compiledPrompt: PetStoryCompiledPrompt; bindings: PetStoryPageBinding[] }[];
+  /** 明确重发时保留原任务与页面绑定，迟到结果仍归属原任务。 */
+  resubmissionHistory?: { taskId: string; runId: string; submittedAt: string; authorizationId: string; authorizedAt: string; inputHash: string; attachmentAssetIds: string[]; compiledPrompt?: PetStoryCompiledPrompt; pageBindings?: PetStoryPageBinding[] }[];
   error?: string;
 }
 export interface PetStoryShotMedia extends PetStoryModeResolution {
@@ -553,6 +558,7 @@ export interface PetStoryAPI {
   advanceProduction: (projectId: string) => Promise<PetStoryProductionResult>;
   pauseProduction: (projectId: string) => Promise<PetStoryProductionResult>;
   resumeProduction: (projectId: string, capability?: PetStoryCapability) => Promise<PetStoryProductionResult>;
+  resubmitProduction: (projectId: string, revision: number, request: TaskResubmitUncertainParams, capability?: PetStoryCapability) => Promise<PetStoryProductionResult>;
   bindProductionRun: (projectId: string, taskId: string, runId: string) => Promise<PetStoryProductionResult>;
   guardProductionTask: (taskId: string) => Promise<PetStoryProductionResult>;
 

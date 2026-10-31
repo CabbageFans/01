@@ -1,6 +1,6 @@
 import { pendingPetStoryDrafts } from '../utils/petstoryDraftPresence';
 import { create } from 'zustand';
-import type { Task, PetStoryPlan, PetStoryProject, PetStoryPromptKind, PetStoryResult, PetStoryChatJob, PetStoryCapability, PetStoryMaterialEditIntent, PetStoryProductionCounts, PetStoryModeResolution, PetStoryPromptProfile, PetStoryRuntimeTarget, PetStoryPromptBatch, PetStoryConversationReply, PetStoryAdjustmentPreview, PetStoryImageTarget, PetStoryImageOperation, PetStoryImageOperationResult } from '@doubao-studio/contracts';
+import type { Account, Task, TaskResubmitUncertainParams, PetStoryPlan, PetStoryProject, PetStoryPromptKind, PetStoryResult, PetStoryChatJob, PetStoryCapability, PetStoryMaterialEditIntent, PetStoryProductionCounts, PetStoryModeResolution, PetStoryPromptProfile, PetStoryRuntimeTarget, PetStoryPromptBatch, PetStoryConversationReply, PetStoryAdjustmentPreview, PetStoryImageTarget, PetStoryImageOperation, PetStoryImageOperationResult } from '@doubao-studio/contracts';
 import { useTaskStore } from './useTaskStore';
 import { useAccountStore } from './useAccountStore';
 import { useProjectStore } from './useProjectStore';
@@ -66,6 +66,7 @@ interface PetStoryState {
   startProduction: () => Promise<void>;
   pauseProduction: () => Promise<void>;
   resumeProduction: () => Promise<void>;
+  resubmitProduction: (request: TaskResubmitUncertainParams) => Promise<void>;
 
   busy: boolean;
   error: string;
@@ -196,6 +197,28 @@ export async function tickPetStoryImageOperation(): Promise<void> {
 function canTickProduction(state: PetStoryState, id: string | null): id is string {
   return !!id && state.project?.id === id && !state.busy && !isChatAdjusting(state.project) && !productionTickRunning;
 }
+/** 明确受理或仍在观察的任务只能继续读取；新发送必须单独取得本次用户授权。 */
+export function petStoryResubmissionTask(project: PetStoryProject, tasks: Task[], activeTaskIds: string[] = []): Task | undefined {
+  if (project.production?.state !== 'paused') return undefined;
+  const step = project.production.steps.find((item): boolean => item.status !== 'complete');
+  const task = tasks.find((item): boolean => item.id === step?.taskId);
+  const runtime = task?.runtime;
+  if (!task || !runtime?.runId || !runtime.submittedAt || !['paused', 'fail', 'cancelled', 'waiting_verification', 'waiting_generation_confirmation'].includes(task.status)
+    || activeTaskIds.includes(task.id) || step?.runId && step.runId !== runtime.runId
+    || runtime.stage === 'completed' || runtime.chatAdjustmentGuard?.active || task.outputs.length || runtime.chatResponse || task.artifacts?.length
+    || ['observing', 'completed'].includes(runtime.acceptanceObservation?.outcome || '')
+    || ['observing', 'completed'].includes(runtime.manualObservation?.outcome || '')
+    || task.lock && Date.parse(task.lock.expiresAt) > Date.now()) return undefined;
+  return task;
+}
+/** 登录和验证必须在原账号解决，确认重复风险不能代替平台验证。 */
+export function petStoryResubmissionAccountBlock(account: Account | undefined): string | undefined {
+  if (!account) return '原执行账号不存在，请先在账号与浏览器中处理。';
+  const availability = account.health?.availability;
+  if (availability?.state === 'login_required' || account.health?.loginState === 'expired') return '请打开原账号豆包完成登录，再重新检测账号状态后确认重发。';
+  if (account.health?.verificationRequired || availability?.state === 'action_required' && /human|verification|captcha|验证/.test(availability.reason)) return '请打开原账号豆包完成人机验证，再重新检测账号状态后确认重发。';
+  return undefined;
+}
 /** 打开清单不启用接力；只在本会话一次确认或显式继续后推进。 */
 export async function tickPetStoryProduction(): Promise<void> {
   const id = activeProductionId;
@@ -226,6 +249,16 @@ export async function tickPetStoryProduction(): Promise<void> {
         usePetStoryStore.setState({ ...(paused.project ? { project: paused.project } : {}), error: useTaskStore.getState().error || '原任务未启动，请处理后继续' });
       }
     } else if (result.taskId && result.action === 'observe') {
+      await refreshTasks();
+      if (activeProductionId !== id) return;
+      const originalTask = useTaskStore.getState().tasks.find((task): boolean => task.id === result.taskId);
+      if (!resolveTaskConversationTarget(originalTask).ok) {
+        // 缺少原会话定位不能开启观察状态，否则页面执行器退出后会留下永久活跃的假观察。
+        activeProductionId = null;
+        const paused = await window.electronAPI.petstory.pauseProduction(id);
+        usePetStoryStore.setState({ ...(paused.project ? { project: paused.project } : {}), error: '原任务未保存可核对的具体会话。请打开原账号，在历史对话中找到原请求后检查原结果；受理仍不明时可确认重发一次。' });
+        return;
+      }
       if (observingProductionTasks.has(result.taskId)) {
         activeProductionId = null;
         const paused = await window.electronAPI.petstory.pauseProduction(id);
@@ -922,6 +955,25 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
         await refreshTasks();
       });
       await tickPetStoryProduction();
+    },
+    resubmitProduction: async (request: TaskResubmitUncertainParams): Promise<void> => {
+      let authorized = false;
+      await run(async (): Promise<void> => {
+        const p = get().project; const taskState = useTaskStore.getState();
+        if (!p) throw new Error('请先打开原项目');
+        const task = petStoryResubmissionTask(p, taskState.tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]);
+        if (!task || task.id !== request.taskId || task.runtime?.runId !== request.runId || task.runtime.submittedAt !== request.submittedAt || request.acceptDuplicateRisk !== true) throw new Error('原任务状态已变化，请重新检查制作结果后确认');
+        const block = petStoryResubmissionAccountBlock(useAccountStore.getState().accounts.find((account): boolean => account.id === task.assignedAccountId));
+        if (block) throw new Error(block);
+        const result = await window.electronAPI.petstory.resubmitProduction(p.id, p.revision, request, get().capability || undefined);
+        if (get().project?.id !== p.id) return;
+        accept(result);
+        if (result.success) {
+          activeProductionId = p.id; observingProductionTasks.clear(); authorized = true;
+          await refreshTasks();
+        }
+      });
+      if (authorized) await tickPetStoryProduction();
     },
     busy: false, error: '', autoRepair: true,
     setAutoRepair: (value: boolean): void => set({ autoRepair: value }),

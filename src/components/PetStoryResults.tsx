@@ -6,6 +6,7 @@ import { usePetStoryStore } from '../store/usePetStoryStore';
 import { journeyAssetMatchesPrompt, selectPetStoryJourney } from '../utils/petstoryJourney';
 import type { PetStoryJourneyStage } from '../utils/petstoryJourney';
 import { navigateWorkspace } from '../utils/workspace';
+import { pendingImageCandidates } from '../utils/petstoryImageCandidates';
 import { CanvasMediaPreview } from './PetStoryCanvasMedia';
 
 type ResultNavigate = (stage: PetStoryJourneyStage, shotId?: string, kind?: PetStoryPromptKind) => void;
@@ -43,7 +44,7 @@ const ResultAsset: React.FC<{ project: PetStoryProject; shotId: string; kind: Pe
   const [feedback, setFeedback] = React.useState('');
   const tasks = useTaskStore((store) => store.tasks);
   const task = resultTask(project, shotId, kind, asset, tasks);
-  const candidate = kind !== 'video' && project.assets.some((item): boolean => item.shotId === shotId && item.kind === (kind === 'lastFrame' ? 'plannedEndImage' : kind) && item.imageReview?.state === 'candidate');
+  const candidate = kind !== 'video' && pendingImageCandidates(project, { shotId, kind }, asset?.id).length > 0;
   const current = journeyAssetMatchesPrompt(asset, prompt);
   const hasTaskRecord = [...(project.productionHistory || []).flatMap((production) => production.steps), ...(project.production?.steps || [])].some((step): boolean => step.shotId === shotId && step.kind === kind && !!step.taskId);
   const generation = resultGenerationLabel(asset, task, candidate, hasTaskRecord);

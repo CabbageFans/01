@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryChatJob, PetStoryPromptBatch, PetStoryImageTarget } from '@doubao-studio/contracts';
+import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryChatJob, PetStoryPromptBatch, PetStoryImageTarget, PetStoryProductionStep } from '@doubao-studio/contracts';
 import { assetCharacterIds, defaultPromptProfile } from './petstoryPromptQuality';
 import { extractDouyinLink, record, validatePetStoryPlan, validatePromptTask } from './petstoryValidation';
 import { invalidateMaterialDependents, materialAsset, syncMaterials, storyHash, requireMaterialInventory } from './petstoryMaterials';
@@ -161,16 +161,20 @@ function validateAssets(result: PetStoryProject): Set<string> {
     if (asset.kind === 'video' && (!asset.taskId || !asset.runId || !asset.validation || !asset.downloadJobId || !asset.artifactId)) throw new Error('视频素材缺少真实产物归属');
     if (asset.validation && (asset.validation.decoded !== true || !/^[a-f0-9]{64}$/.test(asset.validation.sha256) || !(asset.validation.bytes > 0) || !(asset.validation.width > 0) || !(asset.validation.height > 0))) throw new Error('媒体校验记录无效');
     if (asset.kind === 'actualEndFrame' && (!asset.sourceVideo || !(asset.sourceVideo.atSeconds >= 0))) throw new Error('真实末帧缺少源视频信息');
-    validateImageReview(asset);
+    validateImageReview(asset, result);
   }
   return ids;
 }
-function validateImageReview(asset: PetStoryAsset): void {
+function validateImageReview(asset: PetStoryAsset, project: PetStoryProject): void {
     if (asset.imageReview) {
       const review = asset.imageReview;
       if (!['candidate', 'adopted'].includes(review.state) || !/^[a-f0-9]{64}$/.test(review.basisHash) || !imageTargetMatches(asset, review.target)
         || review.state === 'adopted' && (!review.adoptedAt || !Number.isFinite(Date.parse(review.adoptedAt)) || review.sha256 !== asset.validation?.sha256)) throw new Error('图片候选或采用记录无效');
       if (review.sourceReply && (!/^[a-f0-9-]{36}$/i.test(review.sourceReply.adjustmentId) || !/^[a-f0-9]{64}$/.test(review.sourceReply.replyKey) || !/^[a-f0-9]{64}$/.test(review.sourceReply.urlHash))) throw new Error('图片回复来源记录无效');
+      if (review.resolvedCandidateIds !== undefined && (review.state !== 'adopted' || !Array.isArray(review.resolvedCandidateIds)
+        || new Set(review.resolvedCandidateIds).size !== review.resolvedCandidateIds.length
+        || review.resolvedCandidateIds.some((id): boolean => typeof id !== 'string' || id === asset.id
+          || !project.assets.some((other): boolean => other.id === id && other.kind === asset.kind && imageTargetMatches(other, review.target))))) throw new Error('图片选图决定的候选归属无效');
     }
 }
 function validateProduction(result: PetStoryProject, ids: Set<string>): void {
@@ -187,6 +191,50 @@ function validateProduction(result: PetStoryProject, ids: Set<string>): void {
     }
     if (production.phase !== 'materials') validateShotMedia(result);
   }
+  if (result.productionHistory !== undefined && !Array.isArray(result.productionHistory)) throw new Error('历史制作清单无效，原文件已保留');
+  for (const production of [result.production, ...(result.productionHistory || [])]) {
+    for (const step of production?.steps || []) validateResubmissionHistory(step, ids);
+  }
+}
+
+function invalidResubmissionHistory(): never { throw new Error('重发历史记录不完整或绑定无效，原文件已保留，请核对原任务'); }
+function validResubmissionHistoryId(value: unknown): value is string {
+  return typeof value === 'string' && !!value.trim() && value === value.trim() && value.length <= 200;
+}
+function validateResubmissionHistory(step: PetStoryProductionStep, assetIds: Set<string>): void {
+  if (step.resubmissionHistory === undefined) return;
+  if (!Array.isArray(step.resubmissionHistory)) invalidResubmissionHistory();
+  const attempts = new Set<string>(); const authorizations = new Set<string>();
+  for (const history of step.resubmissionHistory) {
+    if (!history || typeof history !== 'object' || !validResubmissionHistoryId(history.taskId) || !validResubmissionHistoryId(history.runId)
+      || !validResubmissionHistoryId(history.authorizationId) || history.taskId === step.taskId
+      || typeof history.submittedAt !== 'string' || !Number.isFinite(Date.parse(history.submittedAt))
+      || typeof history.authorizedAt !== 'string' || !Number.isFinite(Date.parse(history.authorizedAt))
+      || !/^[a-f0-9]{64}$/.test(history.inputHash) || !Array.isArray(history.attachmentAssetIds)
+      || history.attachmentAssetIds.some((id: string): boolean => typeof id !== 'string' || !assetIds.has(id))) invalidResubmissionHistory();
+    const key = `${history.taskId}:${history.runId}:${history.submittedAt}`;
+    if (attempts.has(key) || authorizations.has(history.authorizationId)) invalidResubmissionHistory();
+    attempts.add(key); authorizations.add(history.authorizationId);
+    validateResubmissionCompiled(history, step.kind);
+    validateResubmissionPageBindings(history);
+  }
+}
+function validateResubmissionCompiled(history: NonNullable<PetStoryProductionStep['resubmissionHistory']>[number], kind: PetStoryProductionStep['kind']): void {
+  const compiled = history.compiledPrompt;
+  if (compiled === undefined) return;
+  if (!compiled || typeof compiled !== 'object' || compiled.kind !== kind || typeof compiled.text !== 'string' || !compiled.text.trim()
+    || typeof compiled.final !== 'string' || !compiled.final.trim() || typeof compiled.rulesVersion !== 'string' || !Array.isArray(compiled.references)
+    || createHash('sha256').update(JSON.stringify(compiled.text)).digest('hex') !== history.inputHash
+    || compiled.references.length !== history.attachmentAssetIds.length
+    || compiled.references.some((reference, index): boolean => !reference || reference.assetId !== history.attachmentAssetIds[index] || reference.order !== index + 1)) invalidResubmissionHistory();
+}
+function validateResubmissionPageBindings(history: NonNullable<PetStoryProductionStep['resubmissionHistory']>[number]): void {
+  if (history.pageBindings === undefined) return;
+  if (!Array.isArray(history.pageBindings) || history.pageBindings.length !== history.attachmentAssetIds.length) invalidResubmissionHistory();
+  if (history.pageBindings.some((binding, index): boolean => !binding || binding.assetId !== history.attachmentAssetIds[index] || binding.order !== index + 1
+    || !['reference', 'first_frame', 'last_frame'].includes(binding.slot) || !['plain', 'mention', 'slot'].includes(binding.reference)
+    || typeof binding.label !== 'string' || !binding.label.trim() || binding.label.length > 40 || !/^[a-f0-9]{64}$/.test(binding.previewHash)
+    || binding.fileSha256 !== undefined && !/^[a-f0-9]{64}$/.test(binding.fileSha256))) invalidResubmissionHistory();
 }
 function validateShotMedia(result: PetStoryProject): void {
   const production = result.production;
@@ -471,7 +519,11 @@ export class PetStoryProjects {
     asset.validation = validation;
     const oldId = material?.selectedAssetId || (target.shotId && target.kind ? selectedShotImageId(p, target.shotId, target.kind) : undefined);
     const adoptedAt = new Date().toISOString();
-    asset.imageReview = { state: 'adopted', target, basisHash, adoptedAt, sha256: validation.sha256, ...(asset.imageReview?.sourceReply ? { sourceReply: asset.imageReview.sourceReply } : {}) };
+    // 一次选图结束当前目标已知备选的待选状态；保留文件及原采用事实，供历史预览和再次修改。
+    // 包含旧采用图，使其同运行迟到下载的兄弟图片也能沿用已完成的选择。
+    const resolvedCandidateIds = p.assets.filter((other): boolean => other.id !== asset.id && other.kind === asset.kind && imageTargetMatches(other, target)).map((other): string => other.id);
+    asset.imageReview = { state: 'adopted', target, basisHash, adoptedAt, sha256: validation.sha256, resolvedCandidateIds,
+      ...(asset.imageReview?.sourceReply ? { sourceReply: asset.imageReview.sourceReply } : {}) };
     asset.needsReview = undefined;
     this.applyImageSelection(p, target, asset, oldId, adoptedAt, validation.sha256);
   }

@@ -28,6 +28,13 @@ import { isSameDoubaoConversation } from './taskConversationLocator';
 import { uploadChatImages } from './chatAttachments';
 import { appendExactComposerText, insertExactComposerText, readExactComposerText } from './exactComposer';
 import { petStoryComposerProbe } from './petstoryControls';
+import { pageSubmissionProbe } from './submissionControls';
+import { setVideoDurationFromPage } from './videoDurationControl';
+import { clickWhitelistedPopupControl } from './popupControlClick';
+import { hasHumanVerificationEvidence, HumanVerificationRequiredError, readHumanVerificationEvidence } from './humanVerification';
+import type { PopupControlTarget } from './popupControlClick';
+import type { SendButtonTarget } from './submissionControls';
+export type { SendButtonTarget } from './submissionControls';
 import type { ChatPageSnapshot, ChatReadbackContext, ChatReadbackResult } from './chatReadback';
 
 // ==================== 类型 ====================
@@ -149,14 +156,6 @@ export function isExactPromptInComposer(expected: string, actual: string): boole
   return normalizePromptForComposer(expected) === normalizePromptForComposer(actual);
 }
 
-/**
- * Electron 逐字符键盘只用于单行 ASCII；中文、弯引号及多行文本走整段编辑器输入，
- * 避免 keyCode 不支持时在英文台词前静默截断。
- */
-export function canUseNativePerCharacterInput(prompt: string): boolean {
-  return prompt.length <= 500 && /^[\x20-\x7e]*$/.test(prompt);
-}
-
 // ==================== 注入提示词 ====================
 
 /**
@@ -176,14 +175,14 @@ export async function injectPrompt(
 ): Promise<boolean> {
   console.log(`[doubaoBridge] injectPrompt 提示词长度=${prompt.length}`);
 
-  if (strictParagraphs) {
-    // 精确多段落走编辑器原生插入；textContent + Fiber 路径会把换行折成空格。
-    // 不允许该兼容路径以“空白等值”冒充全文相同，也不模拟 Enter。
-    const inserted = await safeExecuteJS<boolean>(webview, `(${insertExactComposerText.toString()})(${JSON.stringify(prompt)})`, 5000, 'insertExactComposerText');
-    if (!inserted) return false;
+  // 直接写入当前 guest 的编辑器，不向宿主或其他应用派发键盘输入。
+  const inserted = await safeExecuteJS<boolean>(webview, `(${insertExactComposerText.toString()})(${JSON.stringify(prompt)})`, 5000, 'insertExactComposerText').catch((): boolean => false);
+  if (inserted) {
     await sleep(100);
-    return verifyPromptReadyForSubmission(webview, prompt, true);
+    if (await verifyPromptReadyForSubmission(webview, prompt, strictParagraphs)) return true;
   }
+  // 精确正文不能降级成折叠段落的兼容写入，更不能通过 Enter 触发提交。
+  if (strictParagraphs) return false;
 
   // 注入前先检查按钮初始状态
   const initialBtnReady = await checkSendButtonReady(webview);
@@ -220,18 +219,8 @@ export async function injectPrompt(
   const wasVideoMode = await videoModeGuard();
   console.log(`[doubaoBridge] 注入前按钮状态: ${initialBtnReady ? '已激活' : '未激活'}`);
 
-  // 普通对话的 contenteditable 是 React 受控节点。先用真实键盘写入，避免
-  // DOM 注入只改变可见文字、却没有更新 React 提交状态，造成“按钮清空但未发送”。
+  // 兼容输入也只在当前 guest 内派发编辑器事件，不使用原生键盘。
   let charByCharTried = false;
-  if (typeof webview.sendInputEvent === 'function' && prompt.length <= 500) {
-    charByCharTried = true;
-    const nativeResult = await injectCharByChar(webview, prompt);
-    if (nativeResult) {
-      console.log('[doubaoBridge] 优先真实键盘注入成功');
-      return true;
-    }
-    console.warn('[doubaoBridge] 优先真实键盘注入失败，回退兼容注入');
-  }
 
   // 如果按钮本来就激活（如视频模式有图就激活），按钮状态不能作为验证标准
   // 直接走逐字输入（模拟真实按键，React 100% 捕获）
@@ -466,136 +455,6 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
     return false;
   }
   console.log(`[doubaoBridge] 输入框已就绪: type=${prepareResult.inputType}, tag=${prepareResult.tag}`);
-
-  // ========== 第二步：优先使用真实键盘事件（sendInputEvent）==========
-  // 短文本用真实键盘更可靠，长文本直接走 JS 批量注入更快（避免数千事件卡死页面）
-  const wv = webview as any;
-  const useRealKeyboard = typeof wv.sendInputEvent === 'function' && canUseNativePerCharacterInput(promptText);
-  if (useRealKeyboard) {
-    try {
-      console.log('[doubaoBridge] 使用真实键盘事件输入 (sendInputEvent)');
-      // 裸 Enter 在豆包 composer 中等价于“发送”。输入阶段必须把换行规范为
-      // 空格，绝不能用 Enter/回车模拟多行文本，否则会把一条提示词拆成多次提交。
-      const nativePromptText = promptText.replace(/\r\n?|\n/g, ' ');
-      const chars = nativePromptText.split('');
-      for (let i = 0; i < chars.length; i++) {
-        const ch = chars[i];
-        if (ch === '\b') {
-          wv.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' });
-          wv.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' });
-        } else {
-          wv.sendInputEvent({ type: 'keyDown', keyCode: ch, key: ch });
-          wv.sendInputEvent({ type: 'char', keyCode: ch, key: ch });
-          wv.sendInputEvent({ type: 'keyUp', keyCode: ch, key: ch });
-        }
-        // 每50个字符稍作停顿
-        if (i > 0 && i % 50 === 0) {
-          await sleep(15);
-        }
-      }
-      // 等待 React 状态完全同步
-      await sleep(300);
-
-      // 验证：读取 DOM 内容长度
-      const expectedNormalized = JSON.stringify(normalizePromptForComposer(nativePromptText));
-      const verifyCode = `
-        (function() {
-          try {
-            var inputType = '${prepareResult.inputType}';
-            var expectedLen = ${nativePromptText.length};
-            var expectedNormalized = ${expectedNormalized};
-            var normalize = function(value) {
-              return String(value || '')
-                .replace(/\u00a0/g, ' ')
-                .replace(/[\u200b-\u200d\ufeff]/g, '')
-                .replace(/\\s+/g, ' ')
-                .trim();
-            };
-            var input = null;
-
-            var placeholderKeywords = ['描述你想要的视频', '描述你想要的图片', '描述你想要的图像', '输入消息', '请输入', '说点什么', '发消息', '输入内容'];
-            var allEls = inputType === 'textarea'
-              ? document.querySelectorAll('textarea')
-              : document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
-
-            for (var i = 0; i < allEls.length; i++) {
-              var el = allEls[i];
-              if (inputType === 'textarea' && el.disabled) continue;
-              if (inputType !== 'textarea' && el.offsetParent === null) continue;
-              var ph = inputType === 'textarea'
-                ? el.placeholder || ''
-                : (el.getAttribute('aria-label') || el.getAttribute('data-placeholder') || '');
-              var rect = el.getBoundingClientRect();
-              if (rect.width < 50 || rect.height < 20) continue;
-              for (var k = 0; k < placeholderKeywords.length; k++) {
-                if (ph.indexOf(placeholderKeywords[k]) >= 0) {
-                  input = el;
-                  break;
-                }
-              }
-              if (input) break;
-            }
-
-            // 兜底：innerText 最长的那个
-            if (!input) {
-              var maxLen = 0;
-              for (var j = 0; j < allEls.length; j++) {
-                var el2 = allEls[j];
-                if (inputType !== 'textarea' && el2.offsetParent === null) continue;
-                var len = inputType === 'textarea' ? el2.value.length : (el2.textContent || '').length;
-                if (len > maxLen) { maxLen = len; input = el2; }
-              }
-            }
-
-            if (!input) return { ok: false, error: '验证时找不到输入框' };
-
-            var actualText = inputType === 'textarea' ? input.value : (input.innerText || '');
-            var actualLen = actualText.length;
-
-            // 检查 Fiber 节点是否存在（确认 React 接管）
-            var hasFiber = false;
-            try {
-              var targetEl = input;
-              for (var d = 0; d < 15 && targetEl; d++) {
-                var keys = Object.keys(targetEl);
-                for (var ki = 0; ki < keys.length; ki++) {
-                  if (keys[ki].startsWith('__reactFiber') || keys[ki].startsWith('__reactProps')) {
-                    hasFiber = true;
-                    break;
-                  }
-                }
-                if (hasFiber) break;
-                targetEl = targetEl.parentElement;
-              }
-            } catch(e) {}
-
-            return {
-              ok: normalize(actualText) === expectedNormalized,
-              actualLen: actualLen,
-              expectedLen: expectedLen,
-              hasFiber: hasFiber,
-              preview: actualText.substring(0, 60)
-            };
-          } catch(e) {
-            return { ok: false, error: e.message };
-          }
-        })()
-      `;
-
-      const verifyResult = await safeExecuteJS<{
-        ok: boolean; actualLen: number; expectedLen: number; hasFiber: boolean; preview?: string; error?: string;
-      }>(webview, verifyCode, 2000, 'verifyRealKeyboardInput');
-
-      if (verifyResult.ok) {
-        console.log(`[doubaoBridge] 真实键盘输入成功, len=${verifyResult.actualLen}/${verifyResult.expectedLen}, hasFiber=${verifyResult.hasFiber}`);
-        return true;
-      }
-      console.warn(`[doubaoBridge] 真实键盘输入验证失败: actualLen=${verifyResult.actualLen}, expected=${promptText.length}, error=${verifyResult.error || '内容长度不足'}`);
-      // 失败回退到 JS 模拟模式
-    } catch (e: unknown) {
-      console.warn('[doubaoBridge] sendInputEvent 模式异常，回退到JS模拟:', getErrorMessage(e));
-    }
-  }
 
   // ========== 第三步：回退 - JS 模拟逐字输入 + React Fiber 强制同步 ==========
   console.log('[doubaoBridge] 使用 JS 模拟逐字输入');
@@ -960,96 +819,11 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
 }
 
 
-export interface SendButtonTarget {
-  ok: boolean;
-  position?: string;
-  method?: string;
-  geometry?: string;
-  focused?: boolean;
-  hostGeometry?: string;
-}
-
-/**
- * 注入前检查与最终点击共用同一定位器，避免“检查放行、点击找不到”的矛盾。
- * 除旧版权威 ID 外，只接受当前可见编辑器所属 composer 内，具备发送语义或
- * 明确主色背景的右侧方形控件；语音、更多、下拉菜单均被排除。
- */
+/** 当前页面的输入区及发送控件只读回读，不依赖系统焦点或鼠标。 */
 export async function findSendButtonTarget(webview: WebviewHandle): Promise<SendButtonTarget> {
-  const code = `
-    (function() {
-      try {
-        var visible = function(el) {
-          if (!el || el.offsetParent === null) return false;
-          var style = window.getComputedStyle(el);
-          var rect = el.getBoundingClientRect();
-          return style.visibility !== 'hidden' && style.display !== 'none' &&
-            style.pointerEvents !== 'none' && parseFloat(style.opacity || '1') >= 0.5 &&
-            rect.width > 0 && rect.height > 0;
-        };
-        var enabled = function(el) {
-          return visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true' &&
-            el.getAttribute('data-disabled') !== 'true';
-        };
-        var finish = function(button, method) {
-          if (!enabled(button)) return { ok: false };
-          var rect = button.getBoundingClientRect();
-          var x = Math.round(rect.left + rect.width / 2);
-          var y = Math.round(rect.top + rect.height / 2);
-          if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return { ok: false };
-          var hit = document.elementFromPoint(x, y);
-          if (!hit || !(hit === button || button.contains(hit))) return { ok: false };
-          return { ok: true, method: method, position: x + ',' + y,
-            geometry: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height), window.innerWidth, window.innerHeight].join(','),
-            focused: document.hasFocus() && (document.activeElement === editor || editor.contains(document.activeElement)) };
-        };
-
-        var exact = document.querySelector('#flow-end-msg-send');
-
-        var editors = document.querySelectorAll('textarea, [contenteditable="true"]');
-        var editor = null;
-        for (var i = 0; i < editors.length; i++) {
-          if (visible(editors[i])) { editor = editors[i]; break; }
-        }
-        if (!editor) return { ok: false };
-        var editorRect = editor.getBoundingClientRect();
-        var root = editor.parentElement;
-        for (var depth = 0; depth < 12 && root; depth++, root = root.parentElement) {
-          if (root === document.body || root === document.documentElement) break;
-          if (enabled(exact) && root.contains(exact)) return finish(exact, 'exact-id');
-          var controls = root.querySelectorAll('button, [role="button"], [data-testid], [aria-label], [title]');
-          var matches = [];
-          for (var j = 0; j < controls.length; j++) {
-            var control = controls[j];
-            if (!enabled(control)) continue;
-            if (control.getAttribute('aria-haspopup')) continue;
-            var descriptor = [control.id, control.getAttribute('aria-label'), control.getAttribute('title'),
-              control.getAttribute('data-testid'), control.getAttribute('data-action'), control.innerText]
-              .filter(Boolean).join(' ').toLowerCase();
-            if (/麦克风|语音|voice|microphone|audio|更多|more/.test(descriptor)) continue;
-            var rect = control.getBoundingClientRect();
-            var nearRight = rect.left >= editorRect.right - 180 && rect.left <= editorRect.right + 120;
-            var nearVertical = rect.top <= editorRect.bottom + 80 && rect.bottom >= editorRect.top - 40;
-            var square = rect.width >= 24 && rect.width <= 64 && rect.height >= 24 && rect.height <= 64;
-            var semantic = /发送|提交|生成|send|submit|generate/.test(descriptor);
-            var rgb = (window.getComputedStyle(control).backgroundColor || '').match(/\\d+/g);
-            var accent = !!(rgb && rgb.length >= 3 && Number(rgb[2]) > Number(rgb[0]) && Number(rgb[2]) > Number(rgb[1]) && Number(rgb[2]) > 120);
-            if (nearRight && nearVertical && square && (semantic || accent)) {
-              matches.push({ el: control, semantic: semantic, accent: accent });
-            }
-          }
-          if (matches.length === 1) return finish(matches[0].el, matches[0].semantic ? 'composer-semantic' : 'composer-accent');
-        }
-        return { ok: false };
-      } catch(e) {
-        return { ok: false };
-      }
-    })();
-  `;
   try {
-    return await safeExecuteJS<SendButtonTarget>(webview, code, 5000, 'findSendButtonTarget');
-  } catch {
-    return { ok: false };
-  }
+    return await safeExecuteJS<SendButtonTarget>(webview, `(${pageSubmissionProbe.toString()})({}, ${readExactComposerText.toString()}, function() { return (${hasHumanVerificationEvidence.toString()})((${readHumanVerificationEvidence.toString()})(document,window)); })`, 5000, 'findSendButtonTarget');
+  } catch { return { ok: false }; }
 }
 
 /** 提交前要求发送控件可用且页面上传状态连续三次稳定，禁止固定 sleep 猜测。 */
@@ -1061,6 +835,7 @@ export async function waitForSubmissionControlsStable(
   let stable = 0;
   while (Date.now() - startedAt < timeoutMs) {
     const target = await findSendButtonTarget(webview);
+    if (target.humanVerification) throw new HumanVerificationRequiredError();
     let uploadPending = true;
     try {
       uploadPending = await safeExecuteJS<boolean>(webview, `
@@ -2141,39 +1916,18 @@ export async function injectGenerationMonitor(webview: WebviewHandle): Promise<b
   }
 }
 
-export interface BackgroundNativeInput {
+export interface BackgroundPageSubmission {
   taskId: string;
-  /** 执行器每次回读当前图片操作和账号控制器，不把历史任务当后台授权。 */
+  /** 执行器回读当前图片操作和账号控制器，不把历史任务当后台授权。 */
   isCurrent: () => boolean;
-}
-
-function nativeInputHostGeometry(webview: WebviewHandle, target?: SendButtonTarget, background?: BackgroundNativeInput): string | undefined {
-  if (!webview.getBoundingClientRect || webview.isConnected === false || typeof document === 'undefined') return undefined;
-  const rect = webview.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return undefined;
-  const points = [[rect.left + rect.width / 2, rect.top + rect.height / 2]];
-  if (target) {
-    const geometry = target.geometry?.split(',').map(Number); const position = target.position?.split(',').map(Number);
-    if (!geometry || geometry.length !== 6 || !geometry.every(Number.isFinite) || geometry[4] <= 0 || geometry[5] <= 0
-      || !position || position.length !== 2 || !position.every(Number.isFinite) || position[0] < 0 || position[1] < 0 || position[0] >= geometry[4] || position[1] >= geometry[5]) return undefined;
-    // guest DOM 看不到宿主遮挡；只映射可见命中检查，原生事件仍使用原 guest 坐标。
-    points.push([rect.left + position[0] * rect.width / geometry[4], rect.top + position[1] * rect.height / geometry[5]]);
-  }
-  // 原生事件直接交给同一个 guest，而非 OS 屏幕坐标。仅显式图片操作可使用
-  // 常驻屏外宿主；仍核对连接、非零尺寸、当前控制器、guest 命中和提交租约。
-  const parked = webview.closest?.('.browser-host.is-parked');
-  const backgroundOwned = !!background?.taskId && background.isCurrent() && !!parked && !parked.hasAttribute('inert');
-  if (!backgroundOwned && !points.every(([x, y]): boolean => {
-    if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return false;
-    const hit = document.elementFromPoint(x, y);
-    return hit === (webview as unknown as Element) || !!webview.contains?.(hit);
-  })) return undefined;
-  return [rect.left, rect.top, rect.width, rect.height, window.innerWidth, window.innerHeight, ...(backgroundOwned ? [background.taskId] : [])].join(',');
 }
 
 export interface SubmissionDispatchSafety {
   signal: AbortSignal;
   deadlineAt: number;
+  dispatchKey: string;
+  expectedPrompt: string;
+  strictParagraphs?: boolean;
   isCurrent: () => boolean;
   verifyLease: () => Promise<boolean>;
 }
@@ -2185,155 +1939,52 @@ function submissionDispatchAllowed(safety?: SubmissionDispatchSafety): boolean {
       && Date.now() < safety.deadlineAt && safety.isCurrent();
   } catch { return false; }
 }
-function sameNativeSubmissionTarget(current: SendButtonTarget, previous: SendButtonTarget): boolean {
-  return current.ok && previous.ok && current.focused === true && previous.focused === true && !!current.geometry && !!current.position && !!current.hostGeometry
-    && current.geometry === previous.geometry && current.position === previous.position && current.method === previous.method && current.hostGeometry === previous.hostGeometry;
+function pageSubmissionAvailable(webview: WebviewHandle, background?: BackgroundPageSubmission): boolean {
+  if (webview.isConnected === false || background && (!background.taskId || !background.isCurrent())) return false;
+  const bounds = webview.getBoundingClientRect?.();
+  return !bounds || bounds.width > 0 && bounds.height > 0;
+}
+function samePageSubmissionTarget(current: SendButtonTarget, previous: SendButtonTarget): boolean {
+  return current.ok && previous.ok && !!current.geometry && !!current.position && !!current.inputHash
+    && current.geometry === previous.geometry && current.position === previous.position && current.method === previous.method && current.inputHash === previous.inputHash;
 }
 
-/** 只准备焦点并回读两帧稳定命中；最终提交准备还必须受原运行及截止时间约束。 */
-export async function prepareNativeSubmission(webview: WebviewHandle, safety?: SubmissionDispatchSafety, background?: BackgroundNativeInput): Promise<SendButtonTarget> {
+/** 只读核对当前 guest 的输入与控件稳定；后台不等待焦点、鼠标位置或活跃渲染帧。 */
+export async function preparePageSubmission(webview: WebviewHandle, safety?: SubmissionDispatchSafety, background?: BackgroundPageSubmission): Promise<SendButtonTarget> {
   try {
-    if (!submissionDispatchAllowed(safety)) return { ok: false };
-    const prepare = typeof window !== 'undefined' ? window.electronAPI?.system?.prepareNativeInput : undefined;
-    if (!prepare || !await prepare() || !submissionDispatchAllowed(safety) || !nativeInputHostGeometry(webview, undefined, background)) return { ok: false };
-    webview.focus?.();
-    const focused = await safeExecuteJS<boolean>(webview, `
-      (async function() {
-        var editors = document.querySelectorAll('textarea, [contenteditable="true"]');
-        var editor = Array.from(editors).find(function(el) {
-          var rect = el.getBoundingClientRect(); var style = window.getComputedStyle(el);
-          return el.offsetParent !== null && !el.disabled && style.display !== 'none' && style.visibility !== 'hidden' &&
-            style.pointerEvents !== 'none' && rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 &&
-            rect.left < window.innerWidth && rect.top < window.innerHeight;
-        });
-        if (!editor) return false;
-        editor.focus({ preventScroll: true });
-        await new Promise(function(resolve) { requestAnimationFrame(resolve); });
-        return document.hasFocus() && (document.activeElement === editor || editor.contains(document.activeElement));
-      })()
-    `, 3000, 'focusNativeSubmissionEditor');
-    if (!focused || !submissionDispatchAllowed(safety)) return { ok: false };
     let previous: SendButtonTarget | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
-      await safeExecuteJS<boolean>(webview, 'new Promise(function(resolve) { requestAnimationFrame(function() { resolve(true); }); })', 3000, 'nativeSubmissionFrame');
-      if (!submissionDispatchAllowed(safety) || !nativeInputHostGeometry(webview, undefined, background)) return { ok: false };
+      if (!submissionDispatchAllowed(safety) || !pageSubmissionAvailable(webview, background)) return { ok: false };
       const target = await findSendButtonTarget(webview);
-      if (!submissionDispatchAllowed(safety)) return { ok: false };
-      const current = { ...target, hostGeometry: target.ok ? nativeInputHostGeometry(webview, target, background) : undefined };
-      if (previous && sameNativeSubmissionTarget(current, previous)) return current;
-      previous = current;
+      if (target.humanVerification) return target;
+      if (!submissionDispatchAllowed(safety) || !pageSubmissionAvailable(webview, background)) return { ok: false };
+      if (previous && samePageSubmissionTarget(target, previous)) return target;
+      previous = target;
+      await sleep(75);
     }
-  } catch { /* 焦点或只读探针不确定时不记录发送成功。 */ }
+  } catch { /* 真实输入或控件不稳定时保持未发送。 */ }
   return { ok: false };
 }
 
-/** 页内单次事件序列；策略须预先选定，不能在另一种提交失败后调用。 */
-async function dispatchVerifiedGuestClick(webview: WebviewHandle, target: SendButtonTarget, safety?: SubmissionDispatchSafety): Promise<boolean> {
-  if (!submissionDispatchAllowed(safety)) return false;
-  return safeExecuteJS<boolean>(webview, `
-    (function() {
-      var deadline = ${JSON.stringify(safety?.deadlineAt ?? null)};
-      if (deadline !== null && Date.now() >= deadline) return false;
-      var x = ${Number(target.position?.split(',')[0])}; var y = ${Number(target.position?.split(',')[1])};
-      if (!document.hasFocus()) return false;
-      var hit = document.elementFromPoint(x, y);
-      var expectedGeometry = ${JSON.stringify(target.geometry)};
-      var geometryOf = function(el) {
-        var r = el.getBoundingClientRect();
-        return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), window.innerWidth, window.innerHeight].join(',');
-      };
-      var button = ${JSON.stringify(target.method)} === 'exact-id' ? document.querySelector('#flow-end-msg-send') : hit;
-      if (${JSON.stringify(target.method)} !== 'exact-id') {
-        while (button && button !== document.body && button !== document.documentElement) {
-          if (button.matches('button, [role="button"], [data-testid], [aria-label], [title]') && geometryOf(button) === expectedGeometry) break;
-          button = button.parentElement;
-        }
-      }
-      if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true' || button.getAttribute('data-disabled') === 'true') return false;
-      if (geometryOf(button) !== expectedGeometry || !(hit === button || button.contains(hit))) return false;
-      var editor = Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).find(function(el) { return el === document.activeElement || el.contains(document.activeElement); });
-      var composer = editor && editor.parentElement; var sameComposer = false;
-      for (var depth = 0; depth < 12 && composer && composer !== document.body && composer !== document.documentElement; depth++, composer = composer.parentElement) {
-        if (composer.contains(button)) { sameComposer = true; break; }
-      }
-      if (!sameComposer) return false;
-      if (deadline !== null && Date.now() >= deadline) return false;
-      var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0, buttons: 0 };
-      var downOpts = Object.assign({}, opts, { buttons: 1 });
-      try { button.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, downOpts))); } catch (_) {}
-      button.dispatchEvent(new MouseEvent('mousedown', downOpts));
-      try { button.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
-      button.dispatchEvent(new MouseEvent('mouseup', opts));
-      button.dispatchEvent(new MouseEvent('click', opts));
-      return true;
-    })()
-  `, 5000, 'dispatchVerifiedGuestSubmission');
-}
-
-/** 一次运行只选择一种首次点击策略；返回值只表示事件派发，成功以原消息全文回执为准。 */
-export async function submitPromptWithNativeClick(webview: WebviewHandle, strategy: 'native' | 'guest' = 'native', safety?: SubmissionDispatchSafety, background?: BackgroundNativeInput): Promise<boolean> {
-  if (typeof webview.sendInputEvent !== 'function') return false;
+/** 原运行提交意图持久化后，仅激活一次当前真实发送控件；绝不切换输入策略重试。 */
+export async function submitPromptOnce(webview: WebviewHandle, safety: SubmissionDispatchSafety, background?: BackgroundPageSubmission): Promise<boolean> {
+  if (!safety || !safety.dispatchKey) return false;
   try {
-    // 后台仍只使用当前正式原生发送路径，不开放页内事件回退。
-    if (background && (strategy !== 'native' || !safety)) return false;
-    const target = await prepareNativeSubmission(webview, safety, background);
-    if (!target.ok || !target.position || !submissionDispatchAllowed(safety)) return false;
-    if (safety && !await safety.verifyLease()) return false;
-    if (!submissionDispatchAllowed(safety)) return false;
-    if (strategy === 'guest') {
-      const dispatched = await dispatchVerifiedGuestClick(webview, target, safety);
-      if (dispatched) console.log('[doubaoBridge] 已派发一次可见发送控件 pointer/mouse 事件，等待原消息回执');
-      return dispatched;
-    }
-    // 租约 IPC 期间焦点、页面或宿主布局可能变化；不沿用此前缓存坐标直接发送。
-    const current = await findSendButtonTarget(webview);
-    if (!submissionDispatchAllowed(safety)) return false;
-    if (!sameNativeSubmissionTarget({ ...current, hostGeometry: nativeInputHostGeometry(webview, current, background) }, target)) return false;
-    const [x, y] = target.position.split(',').map(Number);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
-    await webview.sendInputEvent({ type: 'mouseMove', x, y });
-    if (!submissionDispatchAllowed(safety)) return false;
-    await webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
-    if (!submissionDispatchAllowed(safety)) return false;
-    await sleep(35);
-    if (!submissionDispatchAllowed(safety)) return false;
-    await webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
-    console.log('[doubaoBridge] 已派发一次原生发送鼠标事件，等待原消息回执');
-    return true;
+    const target = await preparePageSubmission(webview, safety, background);
+    if (target.humanVerification) throw new HumanVerificationRequiredError();
+    if (!target.ok || !submissionDispatchAllowed(safety)) return false;
+    if (!await safety.verifyLease() || !submissionDispatchAllowed(safety) || !pageSubmissionAvailable(webview, background)) return false;
+    // guest 的权限先于 executeJavaScript 超时失效，防止队列在宿主报错后迟到激活。
+    const deadlineAt = Math.min(safety.deadlineAt, Date.now() + 4500);
+    const operation = { expected: target, dispatchKey: safety.dispatchKey, deadlineAt, expectedPrompt: safety.expectedPrompt, strictParagraphs: safety.strictParagraphs };
+    const dispatched = await safeExecuteJS<SendButtonTarget>(webview,
+      `(${pageSubmissionProbe.toString()})(${JSON.stringify(operation)}, ${readExactComposerText.toString()}, function() { return (${hasHumanVerificationEvidence.toString()})((${readHumanVerificationEvidence.toString()})(document,window)); })`, 5000, 'dispatchPageSubmission');
+    if (dispatched.humanVerification) throw new HumanVerificationRequiredError();
+    return dispatched.dispatched === true;
   } catch (error: unknown) {
-    // 原生事件可能已经部分送达；此处回退会形成第二次外部副作用。
-    console.warn('[doubaoBridge] 原生发送点击失败，禁止自动回退:', getErrorMessage(error));
-    return false;
-  }
-}
-
-/**
- * 原生 Enter 作为发送按钮点击没有获得页面回执时的单次兜底。
- * 只在调用方已经回读确认“点击未发送”后使用，避免把成功发送的任务重复提交。
- */
-export async function submitPromptWithNativeEnter(webview: WebviewHandle): Promise<boolean> {
-  if (typeof webview.sendInputEvent !== 'function') return false;
-  try {
-    const focused = await safeExecuteJS<boolean>(
-      webview,
-      `
-        (function() {
-          var editor = document.querySelector('[contenteditable="true"]:not([contenteditable="false"]), textarea:not([disabled])');
-          if (!editor || editor.offsetParent === null) return false;
-          editor.focus();
-          return document.activeElement === editor || editor.contains(document.activeElement);
-        })();
-      `,
-      5000,
-      'focusEditorForNativeEnter',
-    );
-    if (!focused) return false;
-    webview.sendInputEvent({ type: 'keyDown', keyCode: 'Enter', code: 'Enter' });
-    webview.sendInputEvent({ type: 'keyUp', keyCode: 'Enter', code: 'Enter' });
-    console.log('[doubaoBridge] 已发送原生 Enter 提交事件');
-    return true;
-  } catch (error: unknown) {
-    console.warn('[doubaoBridge] 原生 Enter 提交失败:', getErrorMessage(error));
+    if (error instanceof HumanVerificationRequiredError) throw error;
+    // 控件可能已激活；保留提交意图，禁止自动回退、补点或切换成 Enter。
+    console.warn('[doubaoBridge] 单次页面提交结果不明，禁止自动回退');
     return false;
   }
 }
@@ -3320,648 +2971,6 @@ export async function configureVideoOptions(
   // 2026-08 新版创作页把“比例 + 时长”收敛为同一个弹层；旧版三个
   // 独立下拉的兜底会在未回读时误报成功。统一走新版可见控件并逐项回读。
   return configureVideoOptionsV2(webview, config, options);
-
-  /* istanbul ignore next -- 保留旧版适配作为历史参考，V2 失败一律抛错而不回退。 */
-  // 模型名称映射（豆包页面显示的文本）
-  const modelLabels: Record<string, string[]> = {
-    'seedance-2.5': ['Seedance 2.5', '2.5'],
-    'seedance-2.0': ['Seedance 2.0', '2.0', '2.0 标准版', '标准', 'Standard'],
-    'seedance-2.0-fast': ['Seedance 2.0 Fast', '2.0 Fast', 'Fast', '2.0 极速', '极速', '极速版', '2.0 Fast 极速'],
-    'seedance-2.0-mini': ['Seedance 2.0 Mini', '2.0 Mini', 'Mini', '2.0 轻量', '轻量', '轻量版'],
-  };
-
-  const modelTexts = modelLabels[config.model] || [config.model];
-  const durationSec = config.duration.replace('s', '');
-  const durationTexts = [durationSec + ' 秒', durationSec + '秒', config.duration];
-
-  /**
-   * 当前豆包视频时长使用 Radix slider：aria-valuemin=0 对应 4 秒，
-   * aria-valuemax=11 对应 15 秒。必须使用真实键盘事件操作控件，不能改写请求。
-   */
-  const selectDurationSlider = async (): Promise<'selected' | 'membership_required' | 'not_found'> => {
-    if (typeof webview.sendInputEvent !== 'function') return 'not_found';
-    const targetSeconds = Number(durationSec);
-    if (!Number.isInteger(targetSeconds) || targetSeconds < 4 || targetSeconds > 15) return 'not_found';
-
-    const findSlider = async (): Promise<{ ok: boolean; clickPos?: string; triggerClickPos?: string }> => safeExecuteJS<{
-      ok: boolean;
-      clickPos?: string;
-      triggerClickPos?: string;
-    }>(webview, `
-        (function() {
-          var sliders = Array.from(document.querySelectorAll('[role="slider"]'));
-          var slider = sliders.find(function(el) {
-            var r = el.getBoundingClientRect();
-            return r.width > 0 && r.height > 0
-              && el.getAttribute('aria-valuemin') === '0'
-              && el.getAttribute('aria-valuemax') === '11';
-          });
-          if (!slider) {
-            var trigger = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(function(el) {
-              var r = el.getBoundingClientRect();
-              var text = (el.innerText || '').trim();
-              return r.width > 0 && r.height > 0 && /(?:自动|[0-9]+:[0-9]+)[ ]*·[ ]*[0-9]+s/.test(text);
-            });
-            if (!trigger) return { ok: false };
-            var tr = trigger.getBoundingClientRect();
-            return {
-              ok: false,
-              triggerClickPos: Math.round(tr.left + tr.width / 2) + ',' + Math.round(tr.top + tr.height / 2)
-            };
-          }
-          var r = slider.getBoundingClientRect();
-          slider.focus();
-          return {
-            ok: true,
-            clickPos: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2)
-          };
-        })()
-      `,
-      3000,
-      'find_video_duration_slider',
-    ).catch((): { ok: boolean } => ({ ok: false }));
-
-    let slider = await findSlider();
-    if (!slider.ok && slider.triggerClickPos) {
-      const [triggerX, triggerY] = slider.triggerClickPos.split(',').map(Number);
-      if (Number.isFinite(triggerX) && Number.isFinite(triggerY)) {
-        webview.sendInputEvent({ type: 'mouseMove', x: triggerX, y: triggerY });
-        webview.sendInputEvent({ type: 'mouseDown', x: triggerX, y: triggerY, button: 'left', clickCount: 1 });
-        webview.sendInputEvent({ type: 'mouseUp', x: triggerX, y: triggerY, button: 'left', clickCount: 1 });
-        await sleep(350);
-        slider = await findSlider();
-      }
-    }
-    if (!slider.ok || !slider.clickPos) return 'not_found';
-
-    const [x, y] = slider.clickPos.split(',').map(Number);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return 'not_found';
-    webview.sendInputEvent({ type: 'mouseMove', x, y });
-    webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
-    webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
-    webview.sendInputEvent({ type: 'keyDown', keyCode: 'Home' });
-    webview.sendInputEvent({ type: 'keyUp', keyCode: 'Home' });
-    for (let step = 0; step < targetSeconds - 4; step += 1) {
-      webview.sendInputEvent({ type: 'keyDown', keyCode: 'Right' });
-      webview.sendInputEvent({ type: 'keyUp', keyCode: 'Right' });
-    }
-    await sleep(500);
-
-    const result = await safeExecuteJS<{ selected: boolean; membershipRequired: boolean }>(
-      webview,
-      `
-        (function() {
-          var expected = ${JSON.stringify(targetSeconds - 4)};
-          var slider = Array.from(document.querySelectorAll('[role="slider"]')).find(function(el) {
-            return el.getAttribute('aria-valuemin') === '0' && el.getAttribute('aria-valuemax') === '11';
-          });
-          var subscription = Array.from(document.querySelectorAll('iframe')).some(function(frame) {
-            var title = (frame.getAttribute('title') || '').trim();
-            var src = frame.getAttribute('src') || '';
-            return title.indexOf('订阅') >= 0 || /subscribe|subscription|membership|upgrade/i.test(src);
-          });
-          return {
-            selected: !!slider && Number(slider.getAttribute('aria-valuenow')) === expected,
-            membershipRequired: subscription
-          };
-        })()
-      `,
-      3000,
-      'verify_video_duration_slider',
-    );
-
-    if (result.membershipRequired) {
-      // 关闭本次参数探测触发的订阅窗口，确保失败后不遗留购买界面。
-      webview.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
-      webview.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
-      return 'membership_required';
-    }
-    return result.selected ? 'selected' : 'not_found';
-  };
-
-  /**
-   * 点击下拉选项：先点击触发按钮展开下拉，再选择目标选项
-   * triggerTexts: 触发按钮的文本关键词（用于找到并点击展开）
-   * optionTexts: 下拉选项的文本
-   */
-  // ========== 辅助：确保视频配置栏可见 ==========
-  const ensureVideoConfigBar = async (): Promise<boolean> => {
-    const code = `
-      (function() {
-        try {
-          // 先找输入框并聚焦
-          var ta = document.querySelector('textarea');
-          var ce = document.querySelector('[contenteditable="true"]');
-          var input = ta || ce;
-          if (input) input.focus();
-
-          // 检查是否有模型/比例/时长相关配置按钮
-          var viewportH = window.innerHeight;
-          var all = document.querySelectorAll('button, [role="button"], div, span');
-          var hasModel = false, hasRatio = false, hasDuration = false;
-          for (var i = 0; i < all.length; i++) {
-            var el = all[i];
-            if (el.offsetParent === null) continue;
-            var rect = el.getBoundingClientRect();
-            if (rect.width < 20 || rect.height < 20) continue;
-            if (rect.top < viewportH * 0.5) continue;
-            var text = (el.innerText || '').trim();
-            if (!text || text.length > 30) continue;
-            if (text.indexOf('模型') >= 0 && text.length < 20) hasModel = true;
-            if (text.indexOf('比例') >= 0 && text.length < 10) hasRatio = true;
-            if ((text.indexOf('秒') >= 0 || text.indexOf('s ') >= 0 || /\\d+s$/.test(text)) && text.length < 10) hasDuration = true;
-          }
-          return { ok: hasModel || hasRatio, hasModel: hasModel, hasRatio: hasRatio, hasDuration: hasDuration };
-        } catch(e) {
-          return { ok: false, error: e.message };
-        }
-      })()
-    `;
-    try {
-      const r = await safeExecuteJS<{ ok: boolean; hasModel: boolean; hasRatio: boolean; hasDuration: boolean }>(
-        webview, code, 3000, 'ensure_config_bar'
-      );
-      return r.ok;
-    } catch {
-      return false;
-    }
-  };
-
-  // 先确保配置栏可见
-  await ensureVideoConfigBar();
-  await sleep(300);
-  await ensureVideoConfigBar(); // 二次确认
-
-  // ========== 下拉选择函数 ==========
-  const selectDropdownOption = async (
-    triggerTexts: string[],
-    optionTexts: string[],
-    label: string
-  ): Promise<boolean> => {
-    const canNativeClick = typeof webview.sendInputEvent === 'function';
-    const requireExactText = label === '视频时长' || label === '视频比例';
-    const nativeClick = async (clickPos?: string): Promise<boolean> => {
-      if (!canNativeClick || !clickPos) return false;
-      const parts = clickPos.split(',').map((n) => Number(n));
-      if (parts.length !== 2 || parts.some((n) => !Number.isFinite(n))) return false;
-      const [x, y] = parts;
-      webview.sendInputEvent!({ type: 'mouseMove', x, y });
-      webview.sendInputEvent!({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
-      await sleep(35);
-      webview.sendInputEvent!({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
-      return true;
-    };
-
-    // 操作前确保配置栏可见
-    await ensureVideoConfigBar();
-    await sleep(200);
-
-    // ---- 第一步：找到并点击触发按钮（点击右边缘 = 下拉箭头区域） ----
-    const triggerCode = `
-      (function() {
-        try {
-          var triggerTexts = ${JSON.stringify(triggerTexts)};
-          var triggerLabel = ${JSON.stringify(label)};
-          var useNativeClick = ${JSON.stringify(canNativeClick)};
-          var viewportH = window.innerHeight;
-          var candidates = [];
-
-          // 视频配置控件位于编辑器底部，优先只接受真实按钮，避免把聊天正文中
-          // 包含“比”“s”等字符的文本误判为下拉触发器。
-          var allClickable = document.querySelectorAll('button, [role="button"]');
-          for (var i = 0; i < allClickable.length; i++) {
-            var el = allClickable[i];
-            if (el.offsetParent === null) continue;
-            var rect = el.getBoundingClientRect();
-            if (rect.width < 20 || rect.height < 20) continue;
-            if (rect.top < viewportH * 0.55 || rect.left < window.innerWidth * 0.2) continue;
-            var text = (el.innerText || '').trim();
-            if (!text || text.length > 30) continue;
-
-            var matched = false;
-            for (var t = 0; t < triggerTexts.length; t++) {
-              var trigger = triggerTexts[t];
-              if (${JSON.stringify(requireExactText)}
-                ? text.replace(/\\s+/g, '') === trigger.replace(/\\s+/g, '')
-                : text.indexOf(trigger) >= 0) {
-                matched = true;
-                break;
-              }
-            }
-            if (!matched) continue;
-
-            if (el.tagName === 'TEXTAREA' || el.contentEditable === 'true') continue;
-            if (rect.width > 300) continue;
-
-            var bottomScore = rect.top > viewportH * 0.7 ? 100 : 0;
-            var sizeScore = rect.width * rect.height < 10000 ? 50 : 0;
-            var exactScore = triggerTexts.some(function(trigger) {
-              return text.replace(/\\s+/g, '') === trigger.replace(/\\s+/g, '');
-            }) ? 300 : 0;
-            candidates.push({ el: el, text: text, score: 1000 + exactScore + bottomScore + sizeScore, rect: rect });
-          }
-
-          if (candidates.length === 0) return { ok: false, error: '未找到触发按钮' };
-
-          candidates.sort(function(a, b) { return b.score - a.score; });
-          var best = candidates[0];
-          var r = best.rect;
-
-          // 点击右边缘（下拉箭头通常在按钮右侧）
-          var isModelTrigger = triggerLabel.indexOf('模型') >= 0 || triggerLabel.toLowerCase().indexOf('model') >= 0;
-          var clickX = isModelTrigger ? (r.left + r.width / 2) : (r.right - 8);
-          var clickY = r.top + r.height / 2;
-
-          // 用 MouseEvent 模拟精确位置点击
-          if (!useNativeClick) {
-            var evt1 = new MouseEvent('mousedown', {
-              bubbles: true, cancelable: true, view: window,
-              clientX: clickX, clientY: clickY, button: 0
-            });
-            var evt2 = new MouseEvent('mouseup', {
-              bubbles: true, cancelable: true, view: window,
-              clientX: clickX, clientY: clickY, button: 0
-            });
-            var evt3 = new MouseEvent('click', {
-              bubbles: true, cancelable: true, view: window,
-              clientX: clickX, clientY: clickY, button: 0
-            });
-            best.el.dispatchEvent(evt1);
-            best.el.dispatchEvent(evt2);
-            best.el.dispatchEvent(evt3);
-          }
-
-          return {
-            ok: true, text: best.text,
-            pos: Math.round(r.left) + ',' + Math.round(r.top),
-            clickPos: Math.round(clickX) + ',' + Math.round(clickY)
-          };
-        } catch(e) {
-          return { ok: false, error: e.message };
-        }
-      })()
-    `;
-
-    // 先拍点击前快照（所有包含选项关键词的可见元素）
-    const snapshotBefore = await safeExecuteJS<string[]>(
-      webview,
-      `(function(){
-        try {
-          var optTexts = ${JSON.stringify(optionTexts)};
-          var result = [];
-          var all = document.querySelectorAll('*');
-          for (var i = 0; i < all.length; i++) {
-            var el = all[i];
-            var r = el.getBoundingClientRect();
-            if (r.width < 10 || r.height < 10) continue;
-            var text = (el.innerText || '').trim();
-            if (!text || text.length > 60 || text.length < 2) continue;
-            for (var j = 0; j < optTexts.length; j++) {
-              if (text.indexOf(optTexts[j]) >= 0 || optTexts[j].indexOf(text) >= 0) {
-                result.push(text.substring(0, 40));
-                break;
-              }
-            }
-          }
-          return result.slice(0, 50);
-        } catch(e) { return []; }
-      })()`,
-      3000,
-      `snapshot_before_${label}`
-    ).catch(() => []);
-
-    const triggerResult = await safeExecuteJS<{ ok: boolean; text?: string; pos?: string; clickPos?: string; error?: string }>(
-      webview, triggerCode, 3000, `trigger_${label}`
-    );
-
-    if (!triggerResult.ok) {
-      console.warn(`[doubaoBridge] ${label} 触发按钮未找到:`, triggerResult.error, triggerTexts);
-    } else {
-      console.log(`[doubaoBridge] 已点击${label}触发按钮: "${triggerResult.text}", pos: ${triggerResult.pos}, clickPos: ${triggerResult.clickPos}`);
-      if (await nativeClick(triggerResult.clickPos)) {
-        console.log(`[doubaoBridge] ${label} 已发送真实鼠标点击: ${triggerResult.clickPos}`);
-      }
-      await sleep(1500); // 等待下拉/面板展开
-    }
-
-    // ---- 第二步：查找并点击选项 ----
-    const optionCode = `
-      (function() {
-        try {
-          var optionTexts = ${JSON.stringify(optionTexts)};
-          var requireExactText = ${JSON.stringify(requireExactText)};
-          var snapBefore = ${JSON.stringify(snapshotBefore)};
-          var useNativeClick = ${JSON.stringify(canNativeClick)};
-          var snapMap = {};
-          for (var sb = 0; sb < snapBefore.length; sb++) {
-            snapMap[snapBefore[sb]] = true;
-          }
-
-          var optLow = [];
-          for (var k = 0; k < optionTexts.length; k++) {
-            optLow.push(optionTexts[k].toLowerCase());
-          }
-
-          function textMatch(text) {
-            var t = (text || '').trim();
-            if (!t) return false;
-            if (requireExactText) {
-              var normalized = t.replace(/\\s+/g, '');
-              for (var exactIndex = 0; exactIndex < optionTexts.length; exactIndex++) {
-                if (normalized === optionTexts[exactIndex].replace(/\\s+/g, '')) return true;
-              }
-              return false;
-            }
-            var tl = t.toLowerCase();
-            for (var m = 0; m < optionTexts.length; m++) {
-              if (t === optionTexts[m] || tl === optLow[m]) return true;
-              if (t.indexOf(optionTexts[m]) >= 0 || tl.indexOf(optLow[m]) >= 0) return true;
-            }
-            return false;
-          }
-
-          function isVisible(el) {
-            if (!el) return false;
-            var r = el.getBoundingClientRect();
-            if (r.width < 10 || r.height < 10) return false;
-            if (r.top > window.innerHeight + 200 || r.bottom < -200) return false;
-            if (r.left > window.innerWidth + 100 || r.right < -100) return false;
-            return true;
-          }
-
-          function tryClick(el, text) {
-            if (!el || !isVisible(el)) return false;
-            var rect = el.getBoundingClientRect();
-            if (!useNativeClick) el.click();
-            return {
-              ok: true,
-              text: (text || el.innerText || '').trim().substring(0, 50),
-              tag: el.tagName,
-              pos: Math.round(rect.left) + ',' + Math.round(rect.top),
-              clickPos: Math.round(rect.left + rect.width / 2) + ',' + Math.round(rect.top + rect.height / 2)
-            };
-          }
-
-          // ---- 策略A：点击后新出现的元素（最可能是下拉选项） ----
-          var newCandidates = [];
-          var allElems = document.querySelectorAll('*');
-          for (var i = 0; i < allElems.length; i++) {
-            var el = allElems[i];
-            if (!isVisible(el)) continue;
-            var childCount = el.children ? el.children.length : 0;
-            if (childCount > 10) continue; // 跳过容器
-            var text = (el.innerText || '').trim();
-            if (!text || text.length > 60 || text.length < 2) continue;
-            if (!textMatch(text)) continue;
-            var shortText = text.substring(0, 40);
-            // 点击前不存在的元素 = 新出现的
-            if (!snapMap[shortText]) {
-              var r = el.getBoundingClientRect();
-              newCandidates.push({ el: el, text: text, rect: r, area: r.width * r.height });
-            }
-          }
-          if (newCandidates.length > 0) {
-            // 选面积最小的（选项通常比容器小），排除按钮本身
-            newCandidates.sort(function(a, b) { return a.area - b.area; });
-            for (var nc = 0; nc < newCandidates.length; nc++) {
-              var res = tryClick(newCandidates[nc].el, newCandidates[nc].text);
-              if (res && res.ok) return res;
-            }
-          }
-
-          // ---- 策略B：标准选项选择器 ----
-          var sels1 = '[role="option"], [role="menuitem"], div[class*="option"], div[class*="item"], li[class*="option"], li[class*="item"], [class*="popover"] button, [class*="dropdown"] *';
-          var all1 = document.querySelectorAll(sels1);
-          for (var i1 = 0; i1 < all1.length; i1++) {
-            var el1 = all1[i1];
-            if (!isVisible(el1)) continue;
-            var text1 = (el1.innerText || '').trim();
-            if (!text1 || text1.length > 60) continue;
-            if (textMatch(text1)) {
-              var r1 = tryClick(el1, text1);
-              if (r1) return r1;
-            }
-          }
-
-          // ---- 策略C：TreeWalker 全文匹配 ----
-          var candidates = [];
-          var tw = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
-            acceptNode: function(node) {
-              var tag = node.tagName;
-              if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
-              var childCount = node.children ? node.children.length : 0;
-              if (childCount > 5) return NodeFilter.FILTER_SKIP;
-              var txt = (node.innerText || '').trim();
-              if (!txt || txt.length > 60 || txt.length < 2) return NodeFilter.FILTER_SKIP;
-              if (!textMatch(txt)) return NodeFilter.FILTER_SKIP;
-              if (!isVisible(node)) return NodeFilter.FILTER_SKIP;
-              return NodeFilter.FILTER_ACCEPT;
-            }
-          });
-          var node;
-          while ((node = tw.nextNode())) {
-            candidates.push(node);
-            if (candidates.length > 30) break;
-          }
-
-          if (candidates.length > 0) {
-            var viewportH = window.innerHeight;
-            var scored = candidates.map(function(el) {
-              var r = el.getBoundingClientRect();
-              var area = r.width * r.height;
-              var sizeScore = area > 200 && area < 50000 ? 100 : 0;
-              var posScore = r.top > viewportH * 0.2 && r.top < viewportH * 0.95 ? 50 : 0;
-              return { el: el, score: sizeScore + posScore, area: area, rect: r };
-            });
-            scored.sort(function(a, b) { return b.score - a.score || a.area - b.area; });
-            var best = scored[0];
-            return tryClick(best.el, (best.el.innerText || '').trim());
-          }
-
-          // ---- 诊断：收集视口中下部所有可见文本元素 ----
-          var diag = [];
-          var diagTw = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
-            acceptNode: function(node) {
-              var tag = node.tagName;
-              if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
-              var childCount = node.children ? node.children.length : 0;
-              if (childCount > 3) return NodeFilter.FILTER_SKIP;
-              var txt = (node.innerText || '').trim();
-              if (!txt || txt.length > 30 || txt.length < 1) return NodeFilter.FILTER_SKIP;
-              var r = node.getBoundingClientRect();
-              if (r.width < 10 || r.height < 10) return NodeFilter.FILTER_SKIP;
-              if (r.top < 100 || r.top > window.innerHeight + 100) return NodeFilter.FILTER_SKIP;
-              if (r.left < 50 || r.left > window.innerWidth - 50) return NodeFilter.FILTER_SKIP;
-              return NodeFilter.FILTER_ACCEPT;
-            }
-          });
-          var dnode;
-          var dcount = 0;
-          while ((dnode = diagTw.nextNode()) && dcount < 40) {
-            var dr = dnode.getBoundingClientRect();
-            diag.push(dnode.tagName + '|' + (dnode.innerText || '').trim().substring(0, 25) + '|' + Math.round(dr.left) + ',' + Math.round(dr.top));
-            dcount++;
-          }
-          return { ok: false, diag: diag.join('; ') };
-        } catch(e) {
-          return { ok: false, error: e.message };
-        }
-      })()
-    `;
-
-    const optionResult = await safeExecuteJS<{ ok: boolean; text?: string; tag?: string; pos?: string; clickPos?: string; error?: string; diag?: string }>(
-      webview, optionCode, 6000, `select_${label}`
-    );
-
-    if (optionResult.ok) {
-      console.log(`[doubaoBridge] 已选择${label}: "${optionResult.text}", tag: ${optionResult.tag}, pos: ${optionResult.pos}`);
-      if (await nativeClick(optionResult.clickPos)) {
-        console.log(`[doubaoBridge] ${label} 选项已发送真实鼠标点击: ${optionResult.clickPos}`);
-      }
-      await sleep(300);
-      // 选择后重新确保配置栏可见
-      await ensureVideoConfigBar();
-      return true;
-    }
-
-    const isModelLabel = label.indexOf('模型') >= 0 || label.toLowerCase().indexOf('model') >= 0;
-    if (isModelLabel && triggerResult.ok) {
-      const targetIndex = optionTexts.some((t) => /fast/i.test(t)) ? 1 : optionTexts.some((t) => /mini/i.test(t)) ? 2 : 0;
-      type ModelFallbackResult = { ok: boolean; clickPos?: string; optionPos?: string; triggerText?: string; error?: string };
-      const fallbackOpen: ModelFallbackResult = await safeExecuteJS<ModelFallbackResult>(
-        webview,
-        `
-          (function() {
-            try {
-              var targetIndex = ${JSON.stringify(targetIndex)};
-              function visible(el) {
-                if (!el) return false;
-                var r = el.getBoundingClientRect();
-                return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.45 && r.bottom < window.innerHeight + 20;
-              }
-              function fire(el, x, y) {
-                var target = document.elementFromPoint(x, y) || el;
-                var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
-                try { el.focus && el.focus(); } catch(e) {}
-                try { target.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch(e) {}
-                try { target.dispatchEvent(new MouseEvent('mousedown', opts)); } catch(e) {}
-                try { target.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch(e) {}
-                try { target.dispatchEvent(new MouseEvent('mouseup', opts)); } catch(e) {}
-                try { target.dispatchEvent(new MouseEvent('click', opts)); } catch(e) {}
-              }
-              var all = Array.from(document.querySelectorAll('button, [role="button"], div'));
-              var candidates = [];
-              for (var i = 0; i < all.length; i++) {
-                var el = all[i];
-                if (!visible(el)) continue;
-                var text = (el.innerText || '').trim();
-                if (!text || text.length > 35) continue;
-                if (text.indexOf('模型') < 0) continue;
-                var r = el.getBoundingClientRect();
-                if (r.width > 260) continue;
-                var score = (el.tagName === 'BUTTON' ? 100 : 0) + (text.indexOf('Mini') >= 0 || text.indexOf('Fast') >= 0 || text.indexOf('2.0') >= 0 ? 60 : 0) + (r.top > window.innerHeight * 0.7 ? 40 : 0);
-                candidates.push({ el: el, rect: r, text: text, score: score });
-              }
-              if (!candidates.length) return { ok: false, error: 'model trigger not found' };
-              candidates.sort(function(a, b) { return b.score - a.score; });
-              var best = candidates[0];
-              var r = best.rect;
-
-              var points = [
-                [r.right - 12, r.top + r.height / 2],
-                [r.left + r.width / 2, r.top + r.height / 2],
-                [r.left + 24, r.top + r.height / 2]
-              ];
-              for (var p = 0; p < points.length; p++) {
-                fire(best.el, points[p][0], points[p][1]);
-              }
-
-              var optionX = Math.round(r.left + Math.min(Math.max(r.width * 0.75, 100), 170));
-              var rowCentersFromTriggerTop = [-190, -120, -50];
-              var optionY = Math.round(r.top + rowCentersFromTriggerTop[targetIndex]);
-              optionY = Math.max(80, Math.min(window.innerHeight - 40, optionY));
-              return {
-                ok: true,
-                triggerText: best.text,
-                clickPos: Math.round(r.right - 12) + ',' + Math.round(r.top + r.height / 2),
-                optionPos: optionX + ',' + optionY
-              };
-            } catch(e) {
-              return { ok: false, error: e.message };
-            }
-          })()
-        `,
-        4000,
-        `model_fallback_open_${label}`
-      ).catch((err) => ({ ok: false, error: err.message }));
-
-      if (fallbackOpen.ok) {
-        console.log(`[doubaoBridge] ${label} 模型专用兜底已触发: "${fallbackOpen.triggerText}", optionPos=${fallbackOpen.optionPos}`);
-        await sleep(900);
-
-        const retryResult = await safeExecuteJS<{ ok: boolean; text?: string; tag?: string; pos?: string; clickPos?: string; error?: string; diag?: string }>(
-          webview, optionCode, 6000, `select_${label}_fallback`
-        );
-        if (retryResult.ok) {
-          console.log(`[doubaoBridge] 兜底已选择${label}: "${retryResult.text}", tag: ${retryResult.tag}, pos: ${retryResult.pos}`);
-          if (await nativeClick(retryResult.clickPos)) {
-            console.log(`[doubaoBridge] ${label} 兜底选项已发送真实鼠标点击: ${retryResult.clickPos}`);
-          }
-          await sleep(300);
-          await ensureVideoConfigBar();
-          return true;
-        }
-
-        if (await nativeClick(fallbackOpen.optionPos)) {
-          console.log(`[doubaoBridge] ${label} 按截图结构点击模型选项坐标: ${fallbackOpen.optionPos}`);
-          await sleep(500);
-          await ensureVideoConfigBar();
-          return true;
-        }
-      } else {
-        console.warn(`[doubaoBridge] ${label} 模型专用兜底失败:`, fallbackOpen.error);
-      }
-    }
-
-    if (optionResult.diag) {
-      console.warn(`[doubaoBridge] ${label} 下拉诊断(可见元素):`, optionResult.diag);
-    }
-    console.warn(`[doubaoBridge] ${label} DOM查找失败, 候选文本:`, optionTexts);
-    return false;
-  };
-
-  // 1. 选择模型
-  console.log(`[doubaoBridge] 配置视频模型: ${config.model}`);
-  const modelTriggers = ['模型', 'Mini', 'Fast', '2.5', '2.0'];
-  if (!await selectDropdownOption(modelTriggers, modelTexts, '视频模型')) {
-    throw new Error(`视频模型配置失败: ${config.model}`);
-  }
-  await sleep(400);
-
-  // 2. 选择时长
-  console.log(`[doubaoBridge] 配置视频时长: ${config.duration}（仅使用页面可见控件）`);
-  const sliderResult = await selectDurationSlider();
-  if (sliderResult === 'membership_required') {
-    throw new Error(`membership_required: ${config.duration} 需要会员操作，已停止提交`);
-  }
-  if (sliderResult === 'not_found') {
-    // 兼容尚未切换到滑杆 UI 的旧页面；仍只允许页面可见控件。
-    const durationTriggers = ['4s', '5s', '10s', '15s', '时长'];
-    if (!await selectDropdownOption(durationTriggers, durationTexts, '视频时长')) {
-      throw new Error(`视频时长配置失败: ${config.duration}`);
-    }
-  }
-  await sleep(300);
-
-  // 3. 选择比例
-  console.log(`[doubaoBridge] 配置视频比例: ${config.aspectRatio}`);
-  if (!await selectDropdownOption(['比例'], [config.aspectRatio], '视频比例')) {
-    throw new Error(`视频比例配置失败: ${config.aspectRatio}`);
-  }
-  await sleep(400);
-
-  // 最后确保在视频模式且配置栏正常
-  await ensureVideoConfigBar();
 }
 
 /** 新版页面显示名的唯一权威映射；禁止以 Fast/Mini 之类片段做宽松匹配。 */
@@ -3982,7 +2991,7 @@ export function getVideoCompositeLabel(aspectRatio: string, duration: string): s
 
 export type KnownPopupDismissResult = 'none' | 'dismissed' | 'failed';
 
-export interface DesktopDownloadPromotionSnapshot { present: boolean; position?: string; method?: string }
+export interface DesktopDownloadPromotionSnapshot { present: boolean; position?: string; method?: string; geometry?: string; fingerprint?: string }
 
 /** 自包含 DOM 白名单：正文、侧栏或整页中出现宣传文字均不能冒充推广弹窗。 */
 export function inspectDesktopDownloadPromotion(doc: Document, win: Window): DesktopDownloadPromotionSnapshot {
@@ -4025,10 +3034,16 @@ export function inspectDesktopDownloadPromotion(doc: Document, win: Window): Des
   // 没有唯一明确关闭控件时保留暂停；不把角落方块或授权按钮猜作 X。
   if (candidates.length !== 1) return { present: true };
   const target = candidates[0]; const rect = target.getBoundingClientRect();
+  if ((target as HTMLButtonElement).disabled || target.getAttribute('aria-disabled') === 'true' || target.getAttribute('data-disabled') === 'true') return { present: true };
   const x = Math.round(rect.left + rect.width / 2); const y = Math.round(rect.top + rect.height / 2);
   const hit = doc.elementFromPoint(x, y);
   if (!hit || hit !== target && !target.contains(hit)) return { present: true };
-  return { present: true, method: snooze.length ? 'snooze' : 'close', position: `${x},${y}` };
+  const text = normalize((root as HTMLElement).innerText || root.textContent); let hash = 2166136261;
+  for (let index = 0; index < text.length; index++) hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
+  const method = snooze.length ? 'snooze' : 'close';
+  return { present: true, method, position: `${x},${y}`,
+    geometry: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)].join(','),
+    fingerprint: `${method}:${hash >>> 0}` };
 }
 
 /**
@@ -4045,21 +3060,24 @@ export async function dismissKnownDesktopDownloadPromotion(
     'inspectDesktopDownloadPromotion',
   );
 
-  let target: { present: boolean; position?: string; method?: string };
+  let target: DesktopDownloadPromotionSnapshot;
   try {
     target = await inspect();
   } catch {
     return 'failed';
   }
   if (!target.present) return 'none';
-  if (!target.position || typeof webview.sendInputEvent !== 'function') return 'failed';
-  const [x, y] = target.position.split(',').map(Number);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return 'failed';
+  if (!target.position || !target.geometry || !target.fingerprint) return 'failed';
+  const expectedUrl = webview.getURL(); const deadlineAt = Date.now() + 5000;
   try {
-    webview.sendInputEvent({ type: 'mouseMove', x, y });
-    webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
-    await sleep(35);
-    webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+    const expected: PopupControlTarget = { allowed: true, position: target.position, geometry: target.geometry, fingerprint: target.fingerprint };
+    const clicked = await safeExecuteJS<boolean>(webview, `
+      (${clickWhitelistedPopupControl.toString()})(${JSON.stringify({ expected, expectedUrl, deadlineAt, dispatchKey: `promotion:${expectedUrl}:${target.fingerprint}:${target.geometry}` })}, function() {
+        var current = (${inspectDesktopDownloadPromotion.toString()})(document,window);
+        return { allowed: current.present && !!current.position, position: current.position, geometry: current.geometry, fingerprint: current.fingerprint };
+      })
+    `, 5000, 'dismiss_desktop_promotion_once');
+    if (!clicked) return 'failed';
     for (let attempt = 0; attempt < 5; attempt += 1) {
       await sleep(250);
       if (!(await inspect()).present) {
@@ -4087,61 +3105,98 @@ export async function inspectMaterialAuthorization(
 interface MaterialAuthorizationTarget {
   state: MaterialAuthorizationState;
   confirmPosition?: string;
+  geometry?: string;
+  fingerprint?: string;
   visibleAttachmentCount: number;
   pending: boolean;
 }
 
+interface MaterialAuthorizationPageSnapshot {
+  title: string;
+  body: string;
+  actions: string[];
+  confirmPosition?: string;
+  geometry?: string;
+  fingerprint?: string;
+  visibleAttachmentCount: number;
+  pending: boolean;
+  whitelisted: boolean;
+}
+
+/** 自包含只读探针：唯一真实授权浮层、唯一确认／拒绝及素材状态共同定位。 */
+function readMaterialAuthorizationDialog(doc: Document, win: Window): MaterialAuthorizationPageSnapshot {
+  const normalize = (value: string | null | undefined): string => String(value || '').replace(/\s+/g, ' ').trim();
+  const visible = (element: Element): boolean => {
+    const bounds = element.getBoundingClientRect();
+    if ((element as HTMLElement).offsetParent === null || bounds.width <= 20 || bounds.height <= 20) return false;
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const style = win.getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || current.getAttribute('aria-hidden') === 'true' || current.hasAttribute('inert')) return false;
+    }
+    return true;
+  };
+  const outsideMessage = (element: Element): boolean => !element.closest('[data-testid="send_message"],[data-testid="receive_message"],textarea,[contenteditable="true"],[contenteditable=""]');
+  const actionText = (element: Element): string => normalize((element as HTMLElement).innerText || element.textContent);
+  const actionButtons = Array.from(doc.querySelectorAll('button,[role="button"]')).filter((element): boolean => visible(element) && outsideMessage(element) && ['确认', '拒绝'].includes(actionText(element)));
+  const isOverlay = (element: Element): boolean => {
+    for (let current: Element | null = element, depth = 0; current && depth < 8; current = current.parentElement, depth++) {
+      if (['BODY', 'HTML'].includes(current.tagName)) return false;
+      if (current.getAttribute('role') === 'dialog' || current.getAttribute('aria-modal') === 'true' || ['fixed', 'absolute'].includes(win.getComputedStyle(current).position)) return true;
+    }
+    return false;
+  };
+  const roots = [...new Set(actionButtons.flatMap((button): Element[] => {
+    for (let root = button.parentElement, depth = 0; root && depth < 10; root = root.parentElement, depth++) {
+      if (['BODY', 'HTML'].includes(root.tagName)) break;
+      const text = actionText(root);
+      if (text.includes('安全确认') && text.length < 1200 && isOverlay(root)) return [root];
+    }
+    return [];
+  }))];
+  const attachments = Array.from(doc.querySelectorAll('img,[class*="thumb"],[class*="preview"],[class*="attachment"],[class*="upload-item"]')).filter(visible);
+  const pending = Array.from(doc.querySelectorAll('[aria-busy="true"],[class*="uploading"],[class*="progress"],[data-status="uploading"]')).some(visible);
+  const empty: MaterialAuthorizationPageSnapshot = { title: '', body: '', actions: [], visibleAttachmentCount: attachments.length, pending, whitelisted: false };
+  if (!roots.length) {
+    // 仅有正文引用不会被当成可自动操作的授权弹窗。
+    const unmatched = Array.from(doc.querySelectorAll('h1,h2,h3,div,span')).find((element): boolean => {
+      const text = actionText(element);
+      return visible(element) && outsideMessage(element) && isOverlay(element) && text.length < 1200 && /安全确认|上传、使用的素材/.test(text);
+    });
+    return unmatched ? { ...empty, title: '安全确认', body: actionText(unmatched) } : empty;
+  }
+  if (roots.length !== 1) return { ...empty, title: '安全确认' };
+  const root = roots[0]; const body = actionText(root);
+  const scoped = actionButtons.filter((element): boolean => root.contains(element));
+  const actions = scoped.map(actionText);
+  const confirms = scoped.filter((element): boolean => actionText(element) === '确认');
+  const refusals = scoped.filter((element): boolean => actionText(element) === '拒绝');
+  const base = { ...empty, title: '安全确认', body, actions };
+  if (confirms.length !== 1 || refusals.length !== 1 || scoped.length !== 2) return base;
+  const confirm = confirms[0] as HTMLElement; const refusal = refusals[0] as HTMLElement;
+  if ([confirm, refusal].some((element): boolean => (element as HTMLButtonElement).disabled || element.getAttribute('aria-disabled') === 'true' || element.getAttribute('data-disabled') === 'true')) return base;
+  const bounds = confirm.getBoundingClientRect();
+  const x = Math.round(bounds.left + bounds.width / 2); const y = Math.round(bounds.top + bounds.height / 2);
+  const hit = doc.elementFromPoint(x, y);
+  if (x < 0 || y < 0 || x >= win.innerWidth || y >= win.innerHeight || !hit || !(hit === confirm || confirm.contains(hit))) return base;
+  const forbidden = /视频生成参数确认|确认后.{0,24}(?:开始|进行|为你)?生成视频|验证码|人机验证|登录|支付|购买|订阅|额度|开通会员/;
+  const whitelisted = !pending && body.includes('上传、使用的素材') && body.includes('充分授权') && !forbidden.test(body);
+  const identity = `${body}\u0000${actions.join('|')}\u0000${attachments.length}`; let hash = 2166136261;
+  for (let index = 0; index < identity.length; index++) hash = Math.imul(hash ^ identity.charCodeAt(index), 16777619);
+  return { ...base, whitelisted, confirmPosition: `${x},${y}`,
+    geometry: [Math.round(bounds.left), Math.round(bounds.top), Math.round(bounds.width), Math.round(bounds.height)].join(','),
+    fingerprint: `material:${hash >>> 0}` };
+}
+
 async function inspectMaterialAuthorizationTarget(webview: WebviewHandle): Promise<MaterialAuthorizationTarget> {
   try {
-    const snapshot = await safeExecuteJS<{
-      title: string; body: string; actions: string[]; confirmPosition?: string;
-      visibleAttachmentCount: number; pending: boolean;
-    }>(webview, `
-      (function () {
-        var visible = function (el) {
-          var r = el.getBoundingClientRect();
-          return r.width > 20 && r.height > 20 && el.offsetParent !== null;
-        };
-        var buttons = Array.from(document.querySelectorAll('button,[role="button"]')).filter(visible);
-        var actionButtons = buttons.filter(function (el) {
-          var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-          return text === '确认' || text === '拒绝';
-        });
-        var root = actionButtons[0] || null;
-        var matched = null;
-        for (var depth = 0; root && depth < 10; depth++, root = root.parentElement) {
-          var text = (root.innerText || '').replace(/\\s+/g, ' ').trim();
-          if (text.indexOf('安全确认') !== -1 && text.length < 1200) {
-            matched = root;
-            break;
-          }
-        }
-        var pageText = (document.body.innerText || '').replace(/\\s+/g, ' ').trim();
-        var attachments = Array.from(document.querySelectorAll('img,[class*="thumb"],[class*="preview"],[class*="attachment"],[class*="upload-item"]')).filter(visible);
-        var pending = Array.from(document.querySelectorAll('[aria-busy="true"],[class*="uploading"],[class*="progress"],[data-status="uploading"]')).some(visible);
-        if (!matched && pageText.indexOf('安全确认') === -1 &&
-            pageText.indexOf('上传、使用的素材') === -1) {
-          return { title: '', body: '', actions: [], visibleAttachmentCount: attachments.length, pending: pending };
-        }
-        var body = matched ? (matched.innerText || '') : pageText;
-        var scopedButtons = actionButtons
-          .filter(function (el) { return !matched || matched.contains(el); })
-        var actions = scopedButtons.map(function (el) { return (el.innerText || '').replace(/\\s+/g, ' ').trim(); });
-        var confirm = scopedButtons.find(function (el) { return (el.innerText || '').replace(/\\s+/g, ' ').trim() === '确认'; });
-        var rect = confirm ? confirm.getBoundingClientRect() : null;
-        return {
-          title: body.indexOf('安全确认') !== -1 ? '安全确认' : '',
-          body: body,
-          actions: actions,
-          confirmPosition: rect ? (Math.round(rect.left + rect.width / 2) + ',' + Math.round(rect.top + rect.height / 2)) : undefined,
-          visibleAttachmentCount: attachments.length,
-          pending: pending,
-        };
-      })()
-    `, 5000, 'inspect_material_authorization');
+    const snapshot = await safeExecuteJS<MaterialAuthorizationPageSnapshot>(webview,
+      `(${readMaterialAuthorizationDialog.toString()})(document,window)`, 5000, 'inspect_material_authorization');
+    const classified = classifyMaterialAuthorizationSnapshot(snapshot);
     return {
-      state: classifyMaterialAuthorizationSnapshot(snapshot),
+      state: classified === 'present' && !snapshot.whitelisted ? 'blocked' : classified,
       confirmPosition: snapshot.confirmPosition,
+      geometry: snapshot.geometry,
+      fingerprint: snapshot.fingerprint,
       visibleAttachmentCount: snapshot.visibleAttachmentCount,
       pending: snapshot.pending,
     };
@@ -4159,7 +3214,7 @@ export interface MaterialAuthorizationConfirmResult {
   verifiedAt?: string;
 }
 
-/** 精确白名单的单次原生点击；点击后只回读，不做任何提交补偿。 */
+/** 精确白名单的单次页内激活；点击后只回读，不做任何提交补偿。 */
 export async function confirmMaterialAuthorizationIfAllowed(
   webview: WebviewHandle,
   input: { enabled: boolean; expectedConversationUrl: string; assetsValidated: boolean },
@@ -4175,21 +3230,26 @@ export async function confirmMaterialAuthorizationIfAllowed(
     confirmPosition: before.confirmPosition,
   });
   if (!decision.allowed) return { status: 'not_allowed', reason: decision.reason, detectedAt };
-  if (typeof webview.sendInputEvent !== 'function') {
-    return { status: 'not_allowed', reason: 'native_input_unavailable', detectedAt, fingerprint: decision.fingerprint };
+  if (before.pending || !before.geometry || !before.fingerprint) return { status: 'not_allowed', reason: 'target_unverified', detectedAt };
+  const clickedAt = new Date().toISOString(); const deadlineAt = Date.now() + 5000;
+  const expected: PopupControlTarget = { allowed: true, position: before.confirmPosition, geometry: before.geometry, fingerprint: before.fingerprint };
+  try {
+    const clicked = await safeExecuteJS<boolean>(webview, `
+      (${clickWhitelistedPopupControl.toString()})(${JSON.stringify({ expected, expectedUrl: input.expectedConversationUrl, deadlineAt, dispatchKey: `material:${input.expectedConversationUrl}:${before.fingerprint}` })}, function() {
+        var current = (${readMaterialAuthorizationDialog.toString()})(document,window);
+        return { allowed: current.whitelisted && !current.pending, position: current.confirmPosition, geometry: current.geometry, fingerprint: current.fingerprint };
+      })
+    `, 5000, 'confirm_material_authorization_once');
+    if (!clicked) return { status: 'uncertain', reason: 'target_changed_or_click_uncertain', fingerprint: decision.fingerprint, detectedAt, clickedAt };
+  } catch {
+    return { status: 'uncertain', reason: 'click_uncertain', fingerprint: decision.fingerprint, detectedAt, clickedAt };
   }
-  const [x, y] = before.confirmPosition!.split(',').map(Number);
-  const clickedAt = new Date().toISOString();
-  webview.sendInputEvent({ type: 'mouseMove', x, y });
-  webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
-  await sleep(35);
-  webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
   for (let attempt = 0; attempt < 8; attempt += 1) {
     await sleep(250);
     const after = await inspectMaterialAuthorizationTarget(webview);
     if (after.state === 'absent') {
       const sameConversation = webview.getURL() === input.expectedConversationUrl;
-      const attachmentStable = after.visibleAttachmentCount === before.visibleAttachmentCount;
+      const attachmentStable = after.visibleAttachmentCount === before.visibleAttachmentCount && !after.pending;
       return {
         status: sameConversation && attachmentStable ? 'confirmed' : 'uncertain',
         reason: sameConversation ? (attachmentStable ? undefined : 'attachment_count_changed') : 'conversation_changed',
@@ -4282,8 +3342,7 @@ async function configureVideoOptionsV2(
     if (!position) return fail();
     const [x, y] = position.split(',').map(Number);
     if (!Number.isFinite(x) || !Number.isFinite(y)) fail();
-    // webview.sendInputEvent 的坐标在新版嵌套页面会落到宿主视口而非创作页。
-    // 这里按页面内命中元素派发完整指针/鼠标序列，仍只触发用户可见控件。
+    // 只激活当前 guest 中已经定位的实际控件，不向系统派发鼠标事件。
     const activated = await safeExecuteJS<boolean>(webview, `
       (function () {
         var x = ${x}; var y = ${y};
@@ -4291,12 +3350,9 @@ async function configureVideoOptionsV2(
         if (!target) return false;
         var r = target.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) return false;
-        var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
-        try { target.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
-        target.dispatchEvent(new MouseEvent('mousedown', opts));
-        try { target.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
-        target.dispatchEvent(new MouseEvent('mouseup', opts));
-        target.dispatchEvent(new MouseEvent('click', opts));
+        while (target && typeof target.click !== 'function') target = target.parentElement;
+        if (!target || target.disabled || target.getAttribute('aria-disabled') === 'true') return false;
+        target.click();
         return true;
       })()
     `, 5000, `activate_${label}`);
@@ -4469,7 +3525,6 @@ async function configureVideoOptionsV2(
         var el = buttons[0];
         if (!el) return {};
         var r = el.getBoundingClientRect();
-        if (!${JSON.stringify(typeof webview.sendInputEvent === 'function')}) el.click();
         return { position: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2) };
       })()
     `, 'find_video_composite_trigger');
@@ -4557,22 +3612,8 @@ async function configureVideoOptionsV2(
     return;
   }
 
-  const findDurationSlider = async (): Promise<{ position?: string }> => page<{ position?: string }>(`
-      (function () {
-        var el = Array.from(document.querySelectorAll('[role="slider"]')).find(function (node) {
-          var r = node.getBoundingClientRect();
-          return r.width > 0 && r.height > 0 && node.getAttribute('aria-valuemin') === '0' && node.getAttribute('aria-valuemax') === '11';
-        });
-        if (!el) return {};
-        var r = el.getBoundingClientRect();
-        el.focus();
-        if (!${JSON.stringify(typeof webview.sendInputEvent === 'function')}) {
-          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
-          for (var i = 0; i < ${durationSeconds - 4}; i++) el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
-        }
-        return { position: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2) };
-      })()
-    `, 'find_video_duration_slider');
+  const findDurationSlider = async (): Promise<{ position?: string }> => page<{ position?: string }>(
+    `(${setVideoDurationFromPage.toString()})(${durationSeconds}, ${Date.now() + 4500})`, 'set_video_duration_slider');
   let slider = await findDurationSlider();
   if (!slider.position) {
     await openComposite();
@@ -4583,15 +3624,6 @@ async function configureVideoOptionsV2(
       ready: false, failureStage: 'duration', missingControl: 'duration_control', attempts: 2, elapsedMs: 700,
       pageStructureVersion: readiness.pageStructureVersion,
     });
-  }
-  if (typeof webview.sendInputEvent === 'function') {
-    await click(slider.position, '视频时长控件');
-    webview.sendInputEvent({ type: 'keyDown', keyCode: 'Home' });
-    webview.sendInputEvent({ type: 'keyUp', keyCode: 'Home' });
-    for (let index = 0; index < durationSeconds - 4; index += 1) {
-      webview.sendInputEvent({ type: 'keyDown', keyCode: 'Right' });
-      webview.sendInputEvent({ type: 'keyUp', keyCode: 'Right' });
-    }
   }
   await sleep(350);
   const configured = await page<{ slider: boolean; composite: boolean }>(`
@@ -5475,32 +4507,10 @@ export async function startNewConversation(
 
 /** 检测提交后出现的机器人/安全验证界面。 */
 export async function detectRobotVerification(webview: WebviewHandle): Promise<boolean> {
-  const code = `
-    (function() {
-      var frames = document.querySelectorAll('iframe');
-      for (var i = 0; i < frames.length; i++) {
-        var src = (frames[i].src || '').toLowerCase();
-        if (src.indexOf('captcha') >= 0 || src.indexOf('verify') >= 0 ||
-            src.indexOf('challenge') >= 0 || src.indexOf('secsdk') >= 0) {
-          var frameRect = frames[i].getBoundingClientRect();
-          if (frameRect.width > 100 && frameRect.height > 80) return true;
-        }
-      }
-      var phrases = ['请完成验证', '安全验证', '机器人验证', '拖动滑块', '点击进行验证', '验证后继续'];
-      var nodes = document.querySelectorAll('[role="dialog"], [role="alert"], [class*="captcha"], [class*="verify"], [class*="Verify"]');
-      for (var j = 0; j < nodes.length; j++) {
-        var rect = nodes[j].getBoundingClientRect();
-        if (rect.width < 100 || rect.height < 60) continue;
-        var text = nodes[j].innerText || '';
-        for (var p = 0; p < phrases.length; p++) {
-          if (text.indexOf(phrases[p]) >= 0) return true;
-        }
-      }
-      return false;
-    })();
-  `;
   try {
-    return !!(await safeExecuteJS<boolean>(webview, code, 5000, 'detectRobotVerification'));
+    return !!(await safeExecuteJS<boolean>(webview,
+      `(${hasHumanVerificationEvidence.toString()})((${readHumanVerificationEvidence.toString()})(document,window))`,
+      5000, 'detectRobotVerification'));
   } catch {
     return false;
   }

@@ -64,6 +64,7 @@ function makeService(storage: PetStoryProjects = projects): PetStoryProductionSe
     bindPageInput: (id, runId, body): Task => { const result = core.bindPetStoryPageInput(id, runId, body); if (!result.success) throw new Error(result.error); return result.data; },
     adopt: (id, binding, compiledPrompt): Task => { const result = core.bindPetStory(id, binding, compiledPrompt); if (!result.success) throw new Error(result.error); return result.data; },
     retryUnsubmitted: (id): Task => { const result = core.retry(id, 'hold'); if (!result.success) throw new Error(result.error); return result.data; },
+    resubmitUncertain: (request): Task => { const result = core.resubmitUncertain(request); if (!result.success) throw new Error(result.error); return result.data; },
     downloads: (): DownloadJob[] => structuredClone(jobs), download });
 }
 async function start(taskId: string): Promise<Task> {
@@ -371,7 +372,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
     await service.advance(p.id); const before = list();
     await service.resume(p.id, capability());
     const continued = await service.advance(p.id);
-    expect(continued.success).toBe(false); expect(continued.error).toContain('提交受理状态不明'); expect(continued.action).toBeUndefined();
+    expect(continued).toMatchObject({ success: true, action: 'observe', taskId: original.id });
     expect(list()).toEqual(before); expect(tasks).toHaveLength(1); expect(download).not.toHaveBeenCalled();
   });
   it('already generated assets download without any page inspection record', async (): Promise<void> => {
@@ -489,7 +490,88 @@ describe('P4 顺序素材接力与持久化', (): void => {
     // 明确删除该受理凭证，模拟“发送过但平台受理不明”。
     tasks[0].runtime = { ...tasks[0].runtime as NonNullable<Task['runtime']>, acceptanceObservation: undefined };
     const uncertain = await service.advance(p.id);
-    expect(uncertain.success).toBe(false); expect(uncertain.error).toContain('受理状态不明'); expect(tasks).toHaveLength(1);
+    expect(uncertain).toMatchObject({ success: true, action: 'observe', taskId: task.id }); expect(tasks).toHaveLength(1);
+  });
+  async function uncertainProduction(): Promise<{ task: Task; request: import('@doubao-studio/contracts').TaskResubmitUncertainParams; current: PetStoryProject }> {
+    await approve(); const next = await service.advance(p.id); const task = await start(next.taskId || '');
+    const submittedAt = new Date().toISOString();
+    expect(core.updateRuntime({ taskId: task.id, status: 'waiting_verification', runtime: { submittedAt }, errorInfo: { code: 'human_verification', message: 'TEST 验证阻断', recoverable: true, detectedAt: submittedAt } }).success).toBe(true);
+    await service.pause(p.id);
+    return { task: list().find((item): boolean => item.id === task.id)!, current: await projects.read(p.id),
+      request: { taskId: task.id, runId: task.runtime!.runId, submittedAt, authorizationId: `TEST-authorization-${task.id}`, acceptDuplicateRisk: true } };
+  }
+  it('explicit resubmission binds one new hold task, retains source evidence, and starts only after normal run guard', async (): Promise<void> => {
+    const { task, current, request } = await uncertainProduction();
+    const result = await service.resubmit(p.id, current.revision, request, capability());
+    expect(result).toMatchObject({ success: true, action: 'start' });
+    expect(tasks).toHaveLength(2);
+    const replacement = list().find((item): boolean => item.id === result.taskId)!;
+    expect(replacement).toMatchObject({ executionIntent: 'hold', status: 'queued', resubmissionOf: { taskId: task.id, runId: request.runId } });
+    expect(replacement.runtime).toBeUndefined();
+    expect(list().find((item): boolean => item.id === task.id)?.runtime).toEqual(task.runtime);
+    const step = result.project!.production!.steps[0];
+    expect(step).toMatchObject({ taskId: replacement.id, status: 'bound', resubmissionHistory: [{ taskId: task.id, runId: request.runId, submittedAt: request.submittedAt, inputHash: current.production!.steps[0].inputHash }] });
+    expect(step.runId).toBeUndefined();
+    await expect(service.guard(replacement.id)).rejects.toThrow('运行尚未绑定');
+    expect((await start(replacement.id)).runtime?.runId).not.toBe(request.runId);
+    const duplicate = await service.resubmit(p.id, current.revision, request, capability());
+    expect(duplicate).toMatchObject({ success: true, action: 'wait', taskId: replacement.id }); expect(tasks).toHaveLength(2);
+  });
+  it('project write failure leaves one held replacement and retries the same authorization without another task', async (): Promise<void> => {
+    const { task, current, request } = await uncertainProduction();
+    const write = vi.spyOn(projects, 'write'); write.mockRejectedValueOnce(new Error('TEST project disk failure'));
+    await expect(service.resubmit(p.id, current.revision, request, capability())).rejects.toThrow('TEST project disk failure');
+    write.mockRestore();
+    expect(tasks).toHaveLength(2);
+    const replacement = tasks.find((item): boolean => item.id !== task.id)!;
+    expect(replacement).toMatchObject({ executionIntent: 'hold', status: 'queued' });
+    expect((await projects.read(p.id)).production!.steps[0].taskId).toBe(task.id);
+    await expect(service.guard(replacement.id, false)).rejects.toThrow('制作已暂停');
+    const recovered = await service.resubmit(p.id, current.revision, request, capability());
+    expect(recovered).toMatchObject({ success: true, action: 'start', taskId: replacement.id }); expect(tasks).toHaveLength(2);
+  });
+  it('lost success response and reopened service reauthorize the same unstarted replacement, never another task', async (): Promise<void> => {
+    const { current, request } = await uncertainProduction();
+    const result = await service.resubmit(p.id, current.revision, request, capability());
+    const reopened = new PetStoryProjects(); await reopened.open(projects.directory(p.id));
+    const recovered = makeService(reopened);
+    await expect(recovered.guard(result.taskId!, false)).rejects.toThrow('尚未显式继续');
+    const replay = await recovered.resubmit(p.id, current.revision, request, capability());
+    expect(replay).toMatchObject({ success: true, action: 'start', taskId: result.taskId });
+    expect((await recovered.guard(result.taskId!, false)).success).toBe(true); expect(tasks).toHaveLength(2);
+  });
+  it('resubmission archives original page references and requires fresh bindings for the new task', async (): Promise<void> => {
+    await approve(); const next = await service.advance(p.id); const task = await start(next.taskId!);
+    const before = await projects.read(p.id); const step = before.production!.steps[0];
+    const bindings = step.compiledPrompt!.references.map((reference, index): import('@doubao-studio/contracts').PetStoryPageBinding => ({
+      assetId: reference.assetId, order: index + 1, slot: 'reference', label: `@图片${index + 1}`, previewHash: String(index + 1).padStart(64, '0'),
+      reference: 'mention', targetId: `TEST-old-target-${index}`, fileSha256: before.assets.find((asset): boolean => asset.id === reference.assetId)!.validation!.sha256,
+      nodeIds: [], occurrenceCount: 0,
+    }));
+    await service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings);
+    const submittedAt = new Date().toISOString();
+    core.updateRuntime({ taskId: task.id, status: 'paused', runtime: { submittedAt } });
+    await service.pause(p.id); const current = await projects.read(p.id); const originalRuntime = list()[0].runtime;
+    const result = await service.resubmit(p.id, current.revision, { taskId: task.id, runId: task.runtime!.runId, submittedAt, authorizationId: 'TEST-page-binding-retry', acceptDuplicateRisk: true }, capability());
+    const replacementStep = result.project!.production!.steps[0];
+    expect(replacementStep.pageBindings).toBeUndefined(); expect(replacementStep.pageBindingHistory?.[0].bindings).toEqual(bindings);
+    expect(replacementStep.resubmissionHistory?.[0]).toMatchObject({ taskId: task.id, runId: task.runtime!.runId, pageBindings: bindings });
+    expect(list().find((item): boolean => item.id === task.id)?.runtime).toEqual(originalRuntime);
+    expect(list().find((item): boolean => item.id === result.taskId)?.runtime).toBeUndefined();
+    expect((await service.guard(result.taskId!, false)).success).toBe(true);
+  });
+  it('resubmission rejects stale run, changed revision and unacknowledged risk before creating a task', async (): Promise<void> => {
+    const { current, request } = await uncertainProduction();
+    await expect(service.resubmit(p.id, current.revision, { ...request, runId: 'TEST-stale' }, capability())).rejects.toThrow('原提交已变化');
+    await expect(service.resubmit(p.id, current.revision - 1, request, capability())).rejects.toThrow('项目版本已变化');
+    await expect(service.resubmit(p.id, current.revision, { ...request, acceptDuplicateRisk: false as true }, capability())).rejects.toThrow('请明确确认');
+    expect(tasks).toHaveLength(1);
+  });
+  it('late original completion prevents a new request while existing results remain available', async (): Promise<void> => {
+    const { task, current, request } = await uncertainProduction();
+    expect(core.updateStatus({ taskId: task.id, status: 'done', outputs: ['https://TEST.invalid/late.png'] }).success).toBe(true);
+    await expect(service.resubmit(p.id, current.revision, request, capability())).rejects.toThrow('原任务仍在运行或已有回复');
+    expect(tasks).toHaveLength(1); expect(tasks[0].outputs).toEqual(['https://TEST.invalid/late.png']);
   });
   it('reopening alone never authorizes a queued task or creates another generation', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id);

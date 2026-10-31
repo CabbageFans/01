@@ -9,10 +9,12 @@ class Node {
   parentElement: Node | null = null;
   children: Node[] = [];
   accept = 'image/*'; files: File[] = []; disabled = false; display = 'block'; text = ''; width = 200; height = 100;
-  complete = true; naturalWidth = 64; src = ''; pending = false; loading = 'lazy';
+  complete = true; naturalWidth = 64; naturalHeight = 96; pending = false; loading = 'lazy';
+  declare src: string;
   received: string[] = [];
   clicks = 0;
-  constructor(readonly tag: string, readonly attributes: Record<string, string> = {}) {}
+  constructor(readonly tag: string, readonly attributes: Record<string, string> = {}) { if (tag === 'img') this.src = ''; }
+  get tagName(): string { return this.tag.toUpperCase(); }
   add(node: Node): Node { this.children.push(node); node.parentElement = this; return node; }
   get textContent(): string { return [this.text, ...this.children.map((n): string => n.textContent)].join(' '); }
   getBoundingClientRect(): { width: number; height: number } { return { width: this.width, height: this.height }; }
@@ -140,6 +142,44 @@ describe('P4 current composer and actual slot readback', (): void => {
       await verifyPetStoryUploads(test.view, guard('reference', 2), true);
     } finally { vi.useRealTimers(); }
   });
+  it.each([false, true])('binds distinct uploaded files to their decoded images instead of a shared first placeholder (decoded=%s)', async (placeholderDecoded): Promise<void> => {
+    vi.useFakeTimers();
+    try {
+      const test = fixture(false);
+      vi.spyOn(test.first, 'dispatchEvent').mockImplementation((): boolean => {
+        for (const file of test.first.files) {
+          test.first.received.push(file.name);
+          const card = test.surface.add(new Node('div', { 'data-testid': 'mdbox_image' }));
+          const placeholder = card.add(new Node('img')); placeholder.src = 'data:image/png;base64,TEST-shared-placeholder';
+          placeholder.complete = placeholderDecoded; placeholder.naturalWidth = placeholderDecoded ? 64 : 0;
+          const image = card.add(new Node('img')); image.src = `blob:TEST-${file.name}`; image.naturalWidth = 512; image.naturalHeight = 768;
+        }
+        return true;
+      });
+      const upload = uploadPetStoryImages(test.view, materials, 'image', new AbortController().signal)
+        .then((receipts): { receipts: typeof receipts; error?: undefined } => ({ receipts }), (error: unknown): { error: unknown; receipts?: undefined } => ({ error }));
+      await vi.waitFor((): void => expect(test.first.received).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(5000);
+      const outcome = await upload;
+      expect(outcome.error).toBeUndefined();
+      const receipts = outcome.receipts!;
+      expect(test.first.received).toEqual(materials.map((file): string => file.name));
+      expect(receipts.map((receipt): number => receipt.fileIndex)).toEqual([0, 1]);
+      expect(new Set(receipts.map((receipt): string => receipt.key)).size).toBe(2);
+      const snapshot = await readPetStoryComposer(test.view, { slot: 'reference' });
+      expect(snapshot.count).toBe(2);
+      expect(snapshot.previews?.map((preview): string => preview.key)).toEqual(receipts.map((receipt): string => receipt.key));
+      const bindings = receipts.map((receipt, index): import('@doubao-studio/contracts').PetStoryPageBinding => ({ assetId: `TEST-asset-${index}`, order: index + 1, slot: receipt.slot, reference: 'plain', label: receipt.label,
+        previewHash: createHash('sha256').update(receipt.key).digest('hex'), fileSha256: receipt.fileSha256 }));
+      await verifyPetStoryReferenceBindings(test.view, bindings);
+      const images = test.surface.querySelectorAll('img').filter((image): boolean => image.src.startsWith('blob:'));
+      [images[0].src, images[1].src] = [images[1].src, images[0].src];
+      await expect(verifyPetStoryReferenceBindings(test.view, bindings)).rejects.toThrow('素材或引用节点已变化');
+      [images[0].src, images[1].src] = [images[1].src, images[0].src];
+      test.surface.children = test.surface.children.filter((node): boolean => node !== images[0].parentElement);
+      await expect(verifyPetStoryReferenceBindings(test.view, bindings)).rejects.toThrow('素材丢失');
+    } finally { vi.useRealTimers(); }
+  });
   it('rejects wrong file bytes before any upload and detects actual first/last preview swaps', async (): Promise<void> => {
     const test = fixture(true);
     await expect(uploadPetStoryImages(test.view, materials, 'first_last_frame', new AbortController().signal, ['0'.repeat(64), '0'.repeat(64)])).rejects.toThrow('摘要不符');
@@ -171,9 +211,75 @@ describe('P4 current composer and actual slot readback', (): void => {
   it('counts two rendered img nodes in one actual upload card once', async (): Promise<void> => {
     const test = fixture(false);
     const card = test.surface.add(new Node('div', { 'data-testid': 'mdbox_image' }));
-    const image = card.add(new Node('img')); image.src = 'blob:TEST-real'; image.width = 64; image.height = 96;
+    const image = card.add(new Node('img')); image.src = 'blob:TEST-real'; image.width = 64; image.height = 96; image.naturalWidth = 512; image.naturalHeight = 768;
     const placeholder = card.add(new Node('img')); placeholder.src = 'blob:TEST-placeholder'; placeholder.width = 64; placeholder.height = 96;
+    const snapshot = await readPetStoryComposer(test.view, { slot: 'reference' });
+    expect(snapshot.count).toBe(1); expect(snapshot.previews?.[0].key).toBeTruthy();
+    image.complete = false;
+    placeholder.complete = false;
+    expect((await readPetStoryComposer(test.view, { slot: 'reference' })).count).toBe(0);
+  });
+  it('does not treat a decoded inline placeholder as a completed upload while its actual image is still loading', async (): Promise<void> => {
+    const test = fixture(false);
+    const card = test.surface.add(new Node('div', { 'data-testid': 'mdbox_image' }));
+    const placeholder = card.add(new Node('img')); placeholder.src = 'data:image/png;base64,TEST-placeholder';
+    const image = card.add(new Node('img')); image.src = 'blob:TEST-pending'; image.complete = false;
+    expect(await readPetStoryComposer(test.view, { slot: 'reference' })).toMatchObject({ count: 0, previews: [] });
+    image.complete = true;
     expect((await readPetStoryComposer(test.view, { slot: 'reference' })).count).toBe(1);
+  });
+  it('does not guess between equally sized distinct images in one card', async (): Promise<void> => {
+    const test = fixture(false);
+    const card = test.surface.add(new Node('div', { 'data-testid': 'mdbox_image' }));
+    card.add(new Node('img')).src = 'blob:TEST-A'; card.add(new Node('img')).src = 'blob:TEST-B';
+    expect(await readPetStoryComposer(test.view, { slot: 'reference' })).toMatchObject({ count: 0, previews: [] });
+  });
+  it('keeps a unique platform asset ID as the identity when two decoded card images have the same resolution', async (): Promise<void> => {
+    const test = fixture(false);
+    const card = test.surface.add(new Node('div', { 'data-testid': 'mdbox_image', 'data-asset-id': 'TEST-actual-asset' }));
+    card.add(new Node('img')).src = 'blob:TEST-thumbnail'; card.add(new Node('img')).src = 'blob:TEST-actual';
+    const first = await readPetStoryComposer(test.view, { slot: 'reference' });
+    expect(first.count).toBe(1); expect(first.previews?.[0].nodeId).toBe('TEST-actual-asset'); expect(first.previews?.[0].key).toBeTruthy();
+    card.querySelectorAll('img')[1].src = 'https://TEST.invalid/completed-preview.png';
+    const second = await readPetStoryComposer(test.view, { slot: 'reference' });
+    expect(second.previews?.[0].key).toBe(first.previews?.[0].key);
+  });
+  it('keeps duplicate actual uploads blocked instead of inventing distinct identities from card positions', async (): Promise<void> => {
+    vi.useFakeTimers();
+    try {
+      const test = fixture(false);
+      vi.spyOn(test.first, 'dispatchEvent').mockImplementation((): boolean => {
+        test.first.received.push(test.first.files[0].name);
+        const card = test.surface.add(new Node('div', { 'data-testid': 'mdbox_image' }));
+        card.add(new Node('img')).src = 'data:image/png;base64,TEST-placeholder';
+        card.add(new Node('img')).src = 'blob:TEST-same-actual-image';
+        return true;
+      });
+      const upload = uploadPetStoryImages(test.view, materials, 'image', new AbortController().signal).catch((error: unknown): unknown => error);
+      await vi.waitFor((): void => expect(test.first.received).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await upload).toMatchObject({ message: expect.stringContaining('无法逐文件核对实际素材') });
+      expect(test.first.received).toHaveLength(2);
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([false, true])('uses actual sources consistently for preview identities and exact reference menu selection (menu decoded=%s)', async (menuDecoded): Promise<void> => {
+    const test = fixture(false);
+    const card = test.surface.add(new Node('div', { 'data-testid': 'mdbox_image' }));
+    card.add(new Node('img')).src = 'data:image/png;base64,TEST-shared-placeholder';
+    card.add(new Node('img')).src = 'blob:TEST-actual-A';
+    const options = ['A', 'B'].map((id): Node => {
+      const option = test.surface.parentElement!.add(new Node('div', { role: 'option' })); option.text = '图片1';
+      option.add(new Node('img')).src = 'data:image/png;base64,TEST-shared-placeholder';
+      const image = option.add(new Node('img')); image.src = `blob:TEST-actual-${id}`;
+      image.complete = menuDecoded; image.naturalWidth = menuDecoded ? 64 : 0; image.naturalHeight = menuDecoded ? 96 : 0;
+      return option;
+    });
+    const snapshot = await readPetStoryComposer(test.view);
+    const key = snapshot.previews![0].key;
+    expect(key).toBeTruthy(); expect(snapshot.referenceOptions?.[0].key).toBe(key);
+    expect(snapshot.referenceOptions?.[1].key).not.toBe(key);
+    const selected = await readPetStoryComposer(test.view, { selectReference: '@图片1', selectReferenceKey: key });
+    expect(selected.selectedReference).toBe(true); expect(options.map((option): number => option.clicks)).toEqual([1, 0]);
   });
   it('serialized guest reads distinct node instance and target IDs and selects the matching real menu item', async (): Promise<void> => {
     const test = fixture(false); const textarea = test.surface.querySelector('textarea')!; const parent = textarea.parentElement!;

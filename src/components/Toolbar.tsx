@@ -23,27 +23,37 @@ import { ProjectOverviewModal } from './ProjectOverviewModal';
 import { useProjectStore } from '../store/useProjectStore';
 import { ProjectSwitcher } from './ProjectSwitcher';
 import { usePetStoryStore } from '../store/usePetStoryStore';
-import { PetStoryImageReview, imageBelongsToTarget } from './PetStoryImageReview';
+import { PetStoryImageReview } from './PetStoryImageReview';
+import { imageBelongsToTarget, pendingImageCandidates } from '../utils/petstoryImageCandidates';
 import { isPetStoryMaterialImageApproved } from './PetStoryMaterials';
-import type { PetStoryImageTarget } from '@doubao-studio/contracts';
+import type { PetStoryImageTarget, PetStoryMaterial, PetStoryProject } from '@doubao-studio/contracts';
 import type { WorkspacePage } from '../utils/workspace';
 import { calculatePlatformSuccessRate, getPlatformTaskStats } from '../utils/taskStats';
 
 interface ToolbarProps { page: WorkspacePage; }
 
+interface StoryImageLibraryItem { title: string; target: PetStoryImageTarget; currentAssetId?: string; currentNeedsReview?: boolean; identity?: string }
+function materialLibraryItem(project: PetStoryProject, material: PetStoryMaterial): StoryImageLibraryItem {
+  const target = { materialId: material.id };
+  const approved = isPetStoryMaterialImageApproved(project, material);
+  const selected = project.assets.find((asset): boolean => asset.id === material.selectedAssetId && imageBelongsToTarget(project, asset, target));
+  const current = selected && selected.imageReview?.state !== 'candidate' && (approved || selected.imageReview?.state === 'adopted' || material.approved?.assetId === selected.id) ? selected : undefined;
+  return { title: `${material.name} · ${material.kind === 'character' ? '人物' : material.kind === 'prop' ? '道具' : '场景'}`, target, currentAssetId: current?.id,
+    currentNeedsReview: !!current && !approved, identity: material.kind === 'character' ? project.plan?.characters.find((character): boolean => character.id === material.entityId)?.description : undefined };
+}
 
 /** 素材库与创作节点使用同一图片确认与采用入口。 */
 const StoryImageLibrary: React.FC<{ view: 'adopted' | 'candidates' }> = ({ view }): React.ReactElement => {
   const pet = usePetStoryStore();
   const project = pet.project;
-  const storyImages: Array<{ title: string; target: PetStoryImageTarget; currentAssetId?: string; identity?: string }> = [];
+  const storyImages: StoryImageLibraryItem[] = [];
   if (project) {
-    for (const material of project.materials || []) storyImages.push({ title: `${material.name} · ${material.kind === 'character' ? '人物' : material.kind === 'prop' ? '道具' : '场景'}`, target: { materialId: material.id }, currentAssetId: isPetStoryMaterialImageApproved(project, material) ? material.selectedAssetId : undefined, identity: material.kind === 'character' ? project.plan?.characters.find((character): boolean => character.id === material.entityId)?.description : undefined });
+    for (const material of project.materials || []) storyImages.push(materialLibraryItem(project, material));
     for (const shot of project.plan?.shots || []) for (const kind of ['firstFrame', 'lastFrame'] as const) storyImages.push({ title: `镜头 ${shot.order} · ${kind === 'firstFrame' ? '首帧' : '尾帧'}`, target: { shotId: shot.id, kind }, currentAssetId: kind === 'firstFrame' ? project.adoptedImages?.[shot.id]?.firstFrameId : project.adoptedImages?.[shot.id]?.plannedEndImageId });
   }
-  const visibleStoryImages = storyImages.filter((item): boolean => view === 'adopted' ? !!item.currentAssetId : !!project?.assets.some((asset): boolean => imageBelongsToTarget(project, asset, item.target) && asset.id !== item.currentAssetId && asset.imageReview?.state !== 'adopted'));
+  const visibleStoryImages = storyImages.filter((item): boolean => view === 'adopted' ? !!item.currentAssetId : !!project && pendingImageCandidates(project, item.target, item.currentAssetId).length > 0);
 
-  return project && visibleStoryImages.length ? <div className="story-library-grid">{visibleStoryImages.map((item): React.ReactNode => <section className="story-library-item" key={item.title}><div className="section-heading"><h3>{item.title}</h3><Tag color={view === 'adopted' ? 'success' : 'warning'}>{view === 'adopted' ? '已采用' : '待确认'}</Tag></div><PetStoryImageReview project={project} target={item.target} title={item.title} currentAssetId={item.currentAssetId} identity={item.identity} disabled={pet.busy || project.production?.state === 'running'}
+  return project && visibleStoryImages.length ? <div className="story-library-grid">{visibleStoryImages.map((item): React.ReactNode => <section className="story-library-item" key={item.title}><div className="section-heading"><h3>{item.title}</h3><Tag color={view === 'adopted' && !item.currentNeedsReview ? 'success' : 'warning'}>{view === 'adopted' ? item.currentNeedsReview ? '需要复核' : '已采用' : '待确认'}</Tag></div><PetStoryImageReview project={project} target={item.target} title={item.title} currentAssetId={item.currentAssetId} currentNeedsReview={item.currentNeedsReview} identity={item.identity} disabled={pet.busy || project.production?.state === 'running'}
           onUpload={async (): Promise<void> => { if (item.target.materialId) await pet.addMaterialImage(item.target.materialId); else if (item.target.shotId && item.target.kind) await pet.uploadShotImage(item.target.shotId, item.target.kind); }}
           onAdopt={async (assetId: string): Promise<void> => { if (item.target.materialId) await pet.approveMaterials([{ materialId: item.target.materialId, assetId }]); else if (item.target.shotId && item.target.kind) await pet.adoptShotImage(item.target.shotId, item.target.kind, assetId); }}
           onAdjust={async (): Promise<void> => { if (item.target.materialId) await pet.openChatAdjustment({ materialId: item.target.materialId }); else await pet.openChatAdjustment({ shotId: item.target.shotId, promptKind: item.target.kind }); }} />

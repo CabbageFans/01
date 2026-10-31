@@ -4,8 +4,8 @@ import { PlayCircleOutlined } from '@ant-design/icons';
 import type { PetStoryAsset, PetStoryCompiledPrompt, PetStoryPlan, PetStoryProductionStep, PetStoryProject, PetStoryPromptKind, PetStoryShot, Task } from '@doubao-studio/contracts';
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
-import { imageBelongsToTarget, PetStoryImageReview } from './PetStoryImageReview';
-import { PetStoryExistingMediaPicker } from './PetStoryExistingMediaPicker';
+import { PetStoryImageReview } from './PetStoryImageReview';
+import { pendingImageCandidates } from '../utils/petstoryImageCandidates';
 import { canvasJobLabel, isCanvasPlanLocked } from './petStoryCanvasShared';
 import { PetStoryGenerationBlockers } from './PetStoryGenerationBlockers';
 import { usePetStoryGenerationEligibility } from './usePetStoryGenerationEligibility';
@@ -67,9 +67,9 @@ const ExistingMedia: React.FC<{ project: PetStoryProject; shot: PetStoryShot; as
 </>;
 
 function mediaStatus(asset: PetStoryAsset | undefined, waiting: boolean, task: Task | undefined, hasCandidate: boolean): string {
+  if (hasCandidate) return '图片待确认';
   if (asset?.validation) return asset.needsReview ? '文件已校验 · 需要复核' : '文件校验通过';
   if (asset) return '已有文件 · 待校验';
-  if (hasCandidate) return '图片待确认';
   if (!waiting) return '未生成';
   return task?.status === 'done' ? '产物待下载 / 校验' : canvasJobLabel(task?.status);
 }
@@ -143,38 +143,23 @@ export function resolveMediaBlocker(blocker: PetStoryGenerationBlocker, shot: Pe
 
 const CanvasVideoResolution: React.FC<{ shot: PetStoryShot; eligibility?: PetStoryGenerationEligibility }> = ({ shot, eligibility }): React.ReactElement => <div className="canvas-mode"><span>请求 <b>{petStoryModeNames[shot.requestedMode]}</b></span><span>执行模式 <b>{eligibility?.resolvedMode ? petStoryModeNames[eligibility.resolvedMode] : '执行时读取'}</b></span>{eligibility?.modeReason && <p>{eligibility.modeReason}</p>}</div>;
 
-interface CanvasMediaFacts { asset?: PetStoryAsset; step?: PetStoryProductionStep; pendingTask?: Task; task?: Task; waiting: boolean; video: boolean; buttonText: string }
+interface CanvasMediaFacts { asset?: PetStoryAsset; step?: PetStoryProductionStep; pendingTask?: Task; waiting: boolean; video: boolean; buttonText: string }
 function mediaNodeFacts(project: PetStoryProject, shot: PetStoryShot, kind: PetStoryPromptKind, tasks: Task[]): CanvasMediaFacts {
   const asset = selectedPetStoryMedia(project, shot, kind);
   const step = [...(project.production?.steps || [])].reverse().find((item): boolean => item.shotId === shot.id && item.kind === kind);
   const pendingTask = tasks.find((item): boolean => item.id === step?.taskId);
-  const task = tasks.find((item): boolean => item.id === (asset?.taskId || step?.taskId));
   const waiting = !!step && step.status !== 'complete'; const video = kind === 'video';
   const buttonText = asset ? `重新生成${video ? '视频' : '图片'}` : video ? '生成视频' : '生成图片';
-  return { asset, step, pendingTask, task, waiting, video, buttonText };
+  return { asset, step, pendingTask, waiting, video, buttonText };
 }
 
 export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStoryShot; kind: PetStoryPromptKind; disabled: boolean; onNavigate?: PetStoryMediaNavigate }> = ({ project, shot, kind, disabled, onNavigate }): React.ReactElement => {
-  const state = usePetStoryStore(); const tasks = useTaskStore((store) => store.tasks); const [download, setDownload] = useState('');
+  const state = usePetStoryStore(); const tasks = useTaskStore((store) => store.tasks);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const readiness = usePetStoryGenerationEligibility(project, { shotId: shot.id, promptKind: kind });
-  const { asset, step, pendingTask, task, waiting, video, buttonText } = mediaNodeFacts(project, shot, kind, tasks);
-  const hasCandidate = !video && project.assets.some((item): boolean => item.id !== asset?.id && item.imageReview?.state !== 'adopted'
-    && imageBelongsToTarget(project, item, { shotId: shot.id, kind: kind as 'firstFrame' | 'lastFrame' }));
+  const { asset, step, pendingTask, waiting, video, buttonText } = mediaNodeFacts(project, shot, kind, tasks);
+  const hasCandidate = !video && pendingImageCandidates(project, { shotId: shot.id, kind: kind as 'firstFrame' | 'lastFrame' }, asset?.id).length > 0;
   const generationNeeded = !asset && !hasCandidate && !waiting;
-  const redownload = async (): Promise<void> => {
-    if (!task) return; setDownload('正在重新下载原产物…');
-    try {
-      const result = await window.electronAPI.tasks.downloadOutputs([{ taskId: task.id, prompt: task.prompt, outputs: task.outputs, accountId: task.assignedAccountId || null, mode: task.mode }]);
-      setDownload(result.success ? '原产物已重新下载' : '下载失败，请查看原任务；没有重新生成');
-    } catch { setDownload('下载失败；没有重新生成'); }
-  };
-  const openTask = (): void => { if (task) window.dispatchEvent(new CustomEvent('open-task-conversation', { detail: { task } })); };
-  const revealAsset = async (): Promise<void> => {
-    if (!asset) return;
-    try { const result = await window.electronAPI.petstory.revealAsset(project.id, asset.id); if (!result.success) setDownload(result.error || '暂时无法定位此文件'); }
-    catch { setDownload('暂时无法定位此文件，请检查文件是否仍在原位置。'); }
-  };
 
   return <div id={`shot-media-${shot.id}-${kind}`} tabIndex={-1} className="canvas-media-node" data-media-kind={kind}><div className="canvas-field-label"><strong>{mediaNames[kind]}</strong><span className={`canvas-state ${asset?.validation ? 'ready' : ''}`}>{mediaStatus(asset, waiting, pendingTask, hasCandidate)}</span></div>
     {video && <details className="petstory-secondary-tools"><summary>本镜制作设置</summary><CanvasVideoSettings project={project} shot={shot} onDirtyChange={setSettingsDirty} /></details>}
@@ -193,14 +178,7 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
     {!generationNeeded && <PetStoryGenerationBlockers blockers={readiness.eligibility?.blockers || []} onResolve={(blocker): void => resolveMediaBlocker(blocker, shot, kind, readiness.refresh, onNavigate)} />}
     {!generationNeeded && readiness.error && <Alert type="warning" message={readiness.error} action={<Button size="small" onClick={readiness.refresh}>重新核对</Button>} />}
     {video && <div className="canvas-media-actions">{!asset && <Button type="primary" size="small" loading={readiness.loading} icon={<PlayCircleOutlined />} disabled={disabled || waiting || settingsDirty || !readiness.eligibility?.ready} onClick={(): void => { void state.generateShotMedia(shot.id, kind); }}>{buttonText}</Button>}{asset && <Button size="small" onClick={(): void => { document.getElementById(`shot-media-${shot.id}-${kind}`)?.querySelector('video')?.focus(); }}>查看视频</Button>}</div>}
-    <details className="petstory-secondary-tools"><summary>更多媒体操作</summary><div className="canvas-media-actions">
-      {video && asset && <Button size="small" disabled={disabled || waiting || settingsDirty || !readiness.eligibility?.ready} onClick={(): void => { void state.generateShotMedia(shot.id, kind); }}>重新生成视频</Button>}
-      {asset && <Button size="small" onClick={(): void => { void revealAsset(); }}>在文件夹中定位</Button>}
-      {task && <Button size="small" disabled={!task.outputs.length || download === '正在重新下载原产物…'} onClick={(): void => { void redownload(); }}>重新下载</Button>}
-    </div><PetStoryExistingMediaPicker project={project} shot={shot} kind={kind} disabled={disabled || waiting} /></details>
-    {download && <p role="status">{download}</p>}
-    {task && <button className="canvas-text-button" type="button" onClick={openTask}>打开对应豆包原会话 · {canvasJobLabel(task.status)}</button>}{step?.error && <p className="canvas-error">{step.error}</p>}
-    <details className="canvas-provenance"><summary>诊断：模式与任务记录</summary><p>请求模式：{shot.requestedMode}；实际记录：{canvasActualMode(project, shot, tasks)}</p>{task && <p>任务：{task.id}</p>}</details>
+    {step?.error && <p className="canvas-error">{step.error}</p>}
   </div>;
 };
 

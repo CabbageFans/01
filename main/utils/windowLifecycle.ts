@@ -7,42 +7,7 @@ export interface RetainedWindow {
   focus(): void;
 }
 
-export interface NativeInputWindow extends RetainedWindow {
-  isFocused(): boolean;
-  once(event: 'focus', listener: () => void): unknown;
-  removeListener(event: 'focus', listener: () => void): unknown;
-}
-
-/** 原生输入前确认 OS 窗口焦点；第一次鼠标点击不能被拿来仅激活窗口。 */
-export function prepareWindowForNativeInput(
-  window: NativeInputWindow | null,
-  activate: () => void,
-  timeoutMs: number = 1500,
-): Promise<boolean> {
-  if (!window || window.isDestroyed()) return Promise.resolve(false);
-  return new Promise<boolean>((resolve: (focused: boolean) => void): void => {
-    let settled = false;
-    const finish = (focused: boolean): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      window.removeListener('focus', onFocus);
-      resolve(focused);
-    };
-    const onFocus = (): void => finish(!window.isDestroyed() && window.isFocused());
-    const timer = setTimeout((): void => finish(false), timeoutMs);
-    window.once('focus', onFocus);
-    try {
-      activate();
-      revealRetainedWindow(window);
-      if (!window.isDestroyed() && window.isFocused()) finish(true);
-    } catch {
-      finish(false);
-    }
-  });
-}
-
-/** 保留原 renderer/Webview 实例，Dock 重开时只恢复可见性。 */
+/** 仅供用户显式重开窗口；保留原 renderer/Webview 实例并恢复可见性。 */
 export function revealRetainedWindow(window: RetainedWindow | null): void {
   if (!window || window.isDestroyed()) return;
   if (window.isMinimized()) window.restore();

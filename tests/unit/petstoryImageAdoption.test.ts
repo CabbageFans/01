@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { PetStoryPlan, PetStoryProject, PetStoryPrompt } from '@doubao-studio/contracts';
-import { PetStoryProjects } from '../../main/utils/petstoryProject';
+import { PetStoryProjects, validateProject } from '../../main/utils/petstoryProject';
 import { mediaCommand } from '../../main/utils/petstoryMedia';
 import { isPetStoryImageAdopted, selectedShotImageId } from '../../main/utils/petstoryImageReview';
 import { materialAsset } from '../../main/utils/petstoryMaterials';
@@ -31,6 +31,52 @@ beforeAll(async (): Promise<void> => {
 afterAll(async (): Promise<void> => { await fs.rm(root, { recursive: true, force: true }); });
 
 describe('图片候选与明确采用', (): void => {
+  it('多图选一只确认所选图，其余同目标图片结束待选并在重开后保持为历史备选', async (): Promise<void> => {
+    const f = await fixture(); let p = await f.projects.addMaterialImage(f.p.id, f.p.revision, 'prop:box', red);
+    const first = p.assets.at(-1)!;
+    p = await f.projects.addMaterialImage(p.id, p.revision, 'prop:box', blue); const second = p.assets.at(-1)!;
+    p = await f.projects.addMaterialImage(p.id, p.revision, 'scene:room', blue); const otherTarget = p.assets.at(-1)!;
+    p = await f.projects.approveMaterials(p.id, p.revision, [{ materialId: 'prop:box', assetId: first.id }]);
+    const chosen = p.assets.find((asset): boolean => asset.id === first.id)!;
+    expect(chosen.imageReview).toMatchObject({ state: 'adopted', resolvedCandidateIds: [second.id] });
+    expect(p.assets.find((asset): boolean => asset.id === second.id)?.imageReview?.state).toBe('candidate');
+    expect(isPetStoryImageAdopted(p, p.assets.find((asset): boolean => asset.id === second.id)!)).toBe(false);
+    expect(p.assets.find((asset): boolean => asset.id === otherTarget.id)?.imageReview?.state).toBe('candidate');
+    expect((await f.projects.open(f.projects.directory(p.id))).assets).toEqual(p.assets);
+    // 后续新上传不篡改原决定，只有下一次明确采用才结束它的待选。
+    p = await f.projects.addMaterialImage(p.id, p.revision, 'prop:box', red); const fresh = p.assets.at(-1)!;
+    expect(p.assets.find((asset): boolean => asset.id === first.id)?.imageReview?.resolvedCandidateIds).toEqual([second.id]);
+    p = await f.projects.adoptImage(p.id, p.revision, { materialId: 'prop:box' }, second.id);
+    expect(p.assets.find((asset): boolean => asset.id === second.id)?.imageReview?.resolvedCandidateIds).toEqual([first.id, fresh.id]);
+    expect(p.materials!.find((material): boolean => material.id === 'prop:box')?.selectedAssetId).toBe(second.id);
+    expect(p.assets).toHaveLength(4);
+  });
+  it('首帧选图决定不混入同镜尾帧和其他镜头，连续采用保留旧批次记录', async (): Promise<void> => {
+    const f = await fixture(); let p = await f.projects.addShotImage(f.p.id, f.p.revision, 'shot-1', 'firstFrame', red);
+    const first = p.assets.at(-1)!;
+    p = await f.projects.addShotImage(p.id, p.revision, 'shot-1', 'firstFrame', blue); const alternative = p.assets.at(-1)!;
+    p = await f.projects.addShotImage(p.id, p.revision, 'shot-1', 'lastFrame', red);
+    p = await f.projects.addShotImage(p.id, p.revision, 'shot-2', 'firstFrame', red);
+    p = await f.projects.adoptImage(p.id, p.revision, { shotId: 'shot-1', kind: 'firstFrame' }, first.id);
+    expect(p.assets.find((asset): boolean => asset.id === first.id)?.imageReview?.resolvedCandidateIds).toEqual([alternative.id]);
+    p = await f.projects.addShotImage(p.id, p.revision, 'shot-1', 'firstFrame', blue); const revised = p.assets.at(-1)!;
+    p = await f.projects.adoptImage(p.id, p.revision, { shotId: 'shot-1', kind: 'firstFrame' }, revised.id);
+    expect(p.assets.find((asset): boolean => asset.id === revised.id)?.imageReview?.resolvedCandidateIds).toEqual([first.id, alternative.id]);
+    expect(p.assets.find((asset): boolean => asset.id === first.id)?.imageReview?.state).toBe('adopted');
+    expect(p.assets.find((asset): boolean => asset.id === alternative.id)?.imageReview?.state).toBe('candidate');
+  });
+  it('无效选图决定不能跨目标、引用缺失图片、重复或伪装为候选确认', async (): Promise<void> => {
+    const f = await fixture(); let p = await f.projects.addMaterialImage(f.p.id, f.p.revision, 'prop:box', red); const first = p.assets.at(-1)!;
+    p = await f.projects.addMaterialImage(p.id, p.revision, 'prop:box', blue); const alternative = p.assets.at(-1)!;
+    p = await f.projects.addMaterialImage(p.id, p.revision, 'scene:room', red); const foreign = p.assets.at(-1)!;
+    p = await f.projects.adoptImage(p.id, p.revision, { materialId: 'prop:box' }, first.id);
+    for (const ids of [[foreign.id], ['TEST-missing'], [first.id], [alternative.id, alternative.id]]) {
+      const invalid = structuredClone(p); invalid.assets.find((asset): boolean => asset.id === first.id)!.imageReview!.resolvedCandidateIds = ids;
+      expect((): PetStoryProject => validateProject(invalid)).toThrow('候选归属无效');
+    }
+    const invalid = structuredClone(p); invalid.assets.find((asset): boolean => asset.id === alternative.id)!.imageReview!.resolvedCandidateIds = [];
+    expect((): PetStoryProject => validateProject(invalid)).toThrow('候选归属无效');
+  });
   it.each(['character:actor', 'prop:box', 'scene:room'])('%s 上传只保存候选，明确采用才更新归属，替换前保留当前图', async (materialId): Promise<void> => {
     const f = await fixture(); let p = await f.projects.addMaterialImage(f.p.id, f.p.revision, materialId, red);
     const first = p.assets.at(-1)!;

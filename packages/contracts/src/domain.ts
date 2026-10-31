@@ -347,6 +347,10 @@ export interface Task {
   runtime?: TaskRunSnapshot;
   /** 结构化失败原因，供恢复、筛选和统计使用 */
   errorInfo?: TaskErrorInfo;
+  /** 显式接受重复生成风险后建立的新任务；原任务与原提交证据保持不变。 */
+  resubmissionOf?: { taskId: string; runId: string; submittedAt: string; authorizationId: string; authorizedAt: string };
+  /** taskId 指向替代任务；runId/submittedAt 始终标识本任务的原提交。 */
+  resubmittedAs?: { taskId: string; runId: string; submittedAt: string; authorizationId: string; authorizedAt: string }[];
   runHistory?: TaskRunRecord[];
   lock?: TaskLock;
   batchId?: string;

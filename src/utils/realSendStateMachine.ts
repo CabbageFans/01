@@ -39,8 +39,6 @@ export interface SubmissionRecoveryTask {
   result?: string | null;
 }
 
-const LEGACY_UNCERTAIN_SUBMISSION = /发送按钮不可用|点击结果不确定|发送动作结果不确定|发送状态不确定|人工核对豆包会话/;
-
 /**
  * 已留下提交意图且结果不确定的任务只能回读平台，绝不能重新进入发送流程。
  * 兼容修复前被错误记录为 cancelled 的任务，确保现场中的 C01-A 也被保护。
@@ -49,11 +47,8 @@ export function requiresSubmissionReconciliation(task: SubmissionRecoveryTask | 
   if (task?.runtime?.acceptanceObservation?.outcome === 'observing') return true;
   if (task?.status === 'waiting_generation_confirmation' || task?.status === 'manual_submission_observing') return true;
   if (!task?.runtime?.submittedAt) return false;
-  if (!['paused', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing', 'fail', 'cancelled'].includes(task.status || '')) return false;
-  // 显式 Chat 恢复不应受后续异常文案分类影响；原账号、运行、会话及消息仍在回读器逐项核对。
-  if (task.mode === 'chat') return true;
-  if (task.errorInfo?.code === 'submission_uncertain' || task.errorInfo?.code === 'generation_confirmation_required') return true;
-  return LEGACY_UNCERTAIN_SUBMISSION.test(`${task.errorInfo?.message || ''} ${task.result || ''}`);
+  // 媒体与 Chat 均以提交意图为准；验证、下载或未知错误文案不能恢复同一运行的发送权限。
+  return !['executing', 'generating', 'done'].includes(task.status || '');
 }
 
 function canonicalizeSubmissionText(value: string): string {

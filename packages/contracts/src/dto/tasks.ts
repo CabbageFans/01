@@ -61,6 +61,15 @@ export interface TaskAssignParams {
   accountId: string;
 }
 
+/** 单次明确授权重发未知提交；只创建关联 hold 任务，不代表通过平台验证或执行授权。 */
+export interface TaskResubmitUncertainParams {
+  taskId: string;
+  runId: string;
+  submittedAt: string;
+  authorizationId: string;
+  acceptDuplicateRisk: true;
+}
+
 export interface TaskUpdateStatusParams {
   taskId: string;
   status: TaskStatus;

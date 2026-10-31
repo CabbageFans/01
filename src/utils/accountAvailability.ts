@@ -3,6 +3,7 @@ import type {
   AccountAvailabilitySource,
   AccountPlatform,
 } from '../types';
+import { hasHumanVerificationEvidence, readHumanVerificationEvidence } from './humanVerification';
 
 export interface AccountAvailabilityEvidence {
   platform: AccountPlatform;
@@ -15,17 +16,13 @@ export interface AccountAvailabilityEvidence {
   hasAuthenticatedControl?: boolean;
   documentReady?: boolean;
   loadError?: boolean;
+  humanVerification?: boolean;
 }
 
 interface AvailabilityWebview {
   getURL: () => string;
   executeJavaScript: (code: string) => Promise<unknown>;
 }
-
-const VERIFICATION_PHRASES = [
-  '请完成验证', '安全验证', '机器人验证', '拖动滑块', '点击进行验证',
-  '验证后继续', '人机验证', 'verify to continue', 'security verification',
-];
 
 const LOGIN_PHRASES = [
   '请先登录', '登录后继续', '登录即可使用', '扫码登录', '手机号登录',
@@ -99,7 +96,6 @@ export function classifyAccountAvailability(
 
   const allText = `${evidence.visibleLayerText || ''}\n${evidence.bodyText || ''}`;
   const path = `${parsed.pathname}${parsed.search}`.toLowerCase();
-  const iframeSources = (evidence.iframeSources || []).join('\n').toLowerCase();
 
   if (
     path.includes('region-restricted') || path.includes('region_restricted') ||
@@ -109,8 +105,7 @@ export function classifyAccountAvailability(
   }
 
   if (
-    includesAny(iframeSources, ['captcha', 'verify', 'challenge', 'secsdk']) ||
-    includesAny(evidence.visibleLayerText || '', VERIFICATION_PHRASES)
+    evidence.humanVerification ?? hasHumanVerificationEvidence(evidence)
   ) {
     return result('action_required', 'human_verification', '需要在右侧页面完成人机验证，然后重新检测', checkedAt, source);
   }
@@ -148,6 +143,8 @@ export function classifyAccountAvailability(
 
 const PAGE_EVIDENCE_SCRIPT = `
   (function() {
+    var verification = (${readHumanVerificationEvidence.toString()})(document,window);
+    var humanVerification = (${hasHumanVerificationEvidence.toString()})(verification);
     function visible(node) {
       if (!node) return false;
       var rect = node.getBoundingClientRect();
@@ -191,6 +188,7 @@ const PAGE_EVIDENCE_SCRIPT = `
       bodyText: String(document.body ? document.body.innerText || '' : '').slice(0, 6000),
       visibleLayerText: layerTexts.join('\\n'),
       iframeSources: frameSources,
+      humanVerification: humanVerification,
       hasUsableEditor: !!editor,
       hasLoginControl: hasLoginControl,
       hasAuthenticatedControl: hasAuthenticatedControl,

@@ -5,20 +5,9 @@ import type { PetStoryAsset, PetStoryImageTarget, PetStoryProject } from '@douba
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { imageConversationTask, petStoryImageProgress } from '../utils/petstoryImageFlow';
+import { imageBelongsToTarget, pendingImageCandidates } from '../utils/petstoryImageCandidates';
 
-/** 预览只读取文件；选中候选、打开历史和关闭弹窗都不改变正式采用关系。 */
-export function imageBelongsToTarget(project: PetStoryProject, asset: PetStoryAsset, target: PetStoryImageTarget): boolean {
-  if (asset.kind === 'video' || asset.kind === 'actualEndFrame') return false;
-  const reviewTarget = asset.imageReview?.target;
-  if (reviewTarget) return target.materialId ? reviewTarget.materialId === target.materialId
-    : reviewTarget.shotId === target.shotId && reviewTarget.kind === target.kind;
-  if (target.materialId) {
-    const material = project.materials?.find((item): boolean => item.id === target.materialId);
-    return !!material && asset.kind === material.kind && (asset.materialId === material.id
-      || (material.kind === 'character' && (asset.characterIds || [asset.characterId]).includes(material.entityId)));
-  }
-  return asset.shotId === target.shotId && asset.kind === (target.kind === 'firstFrame' ? 'firstFrame' : 'plannedEndImage');
-}
+export { imageBelongsToTarget } from '../utils/petstoryImageCandidates';
 interface ReviewImageProps { projectId: string; asset: PetStoryAsset; name: string; onReadable?: (value: boolean) => void }
 const ReviewImage: React.FC<ReviewImageProps> = ({ projectId, asset, name, onReadable }): React.ReactElement => {
   const [source, setSource] = useState(''); const [error, setError] = useState('');
@@ -78,12 +67,13 @@ interface ImagePreviewBodyProps {
   onReadable: (value: boolean) => void; select: (assetId: string) => void; upload: () => Promise<void>; openConversation: () => void;
 }
 const ImagePreviewBody: React.FC<ImagePreviewBodyProps> = ({ project, title, images, candidates, current, selected, reviewingCurrent, confirmingCurrent, identity, locked, readable, batchSelectedId, onBatchSelection, hasConversation, onReadable, select, upload, openConversation }): React.ReactElement => <div className="petstory-image-preview-layout"><div>
-  {selected ? <div className="petstory-large-image"><ReviewImage projectId={project.id} asset={selected} name={`${title} · ${reviewingCurrent ? '当前采用' : '待确认图片'}`} onReadable={onReadable} /></div> : <p>当前没有可预览的图片。</p>}
+  {selected ? <div className="petstory-large-image"><ReviewImage projectId={project.id} asset={selected} name={`${title} · ${reviewingCurrent ? '当前采用' : candidates.some((asset): boolean => asset.id === selected.id) ? '待确认图片' : selected.imageReview?.state === 'adopted' ? '历史采用' : '历史备选'}`} onReadable={onReadable} /></div> : <p>当前没有可预览的图片。</p>}
   <div className="petstory-image-options">{images.map((asset): React.ReactNode => {
     const candidateIndex = candidates.findIndex((item): boolean => item.id === asset.id);
-    return <button type="button" key={asset.id} className={selected?.id === asset.id ? 'selected' : ''} aria-label={candidateIndex >= 0 ? `选择候选图片 ${candidateIndex + 1}` : `查看历史图片 ${images.indexOf(asset) + 1}`} onClick={(): void => select(asset.id)}><ReviewImage projectId={project.id} asset={asset} name={`${title} · ${candidateIndex >= 0 ? `候选 ${candidateIndex + 1}` : '已采用版本'}`} /><span>{asset.id === current?.id ? '当前采用' : candidateIndex >= 0 ? `候选 ${candidateIndex + 1}` : '历史采用'}</span></button>;
+    const caption = asset.id === current?.id ? '当前采用' : candidateIndex >= 0 ? `候选 ${candidateIndex + 1}` : asset.imageReview?.state === 'adopted' ? '历史采用' : '历史备选';
+    return <button type="button" key={asset.id} className={selected?.id === asset.id ? 'selected' : ''} aria-label={candidateIndex >= 0 ? `选择候选图片 ${candidateIndex + 1}` : `查看历史图片 ${images.indexOf(asset) + 1}`} onClick={(): void => select(asset.id)}><ReviewImage projectId={project.id} asset={asset} name={`${title} · ${caption}`} /><span>{caption}</span></button>;
   })}</div>
-</div><aside><h3>图片用途</h3><p>{title}</p><Tag>{confirmingCurrent ? '需要复核' : reviewingCurrent ? '已采用' : '待确认'}</Tag>
+</div><aside><h3>图片用途</h3><p>{title}</p><Tag>{confirmingCurrent ? '需要复核' : reviewingCurrent ? '已采用' : candidates.some((asset): boolean => asset.id === selected?.id) ? '待确认' : selected?.imageReview?.state === 'adopted' ? '历史采用' : '历史备选'}</Tag>
   {selected && <p className="petstory-image-source">{selected.taskId ? '豆包图片' : '本地上传'}</p>}
   {identity && <p>人物外观：{identity}</p>}
   {current && !reviewingCurrent && <div className="petstory-current-comparison"><strong>当前采用图片</strong><ReviewImage projectId={project.id} asset={current} name={`${title} · 替换前`} /><p>新图片采用前，当前图片保持不变。</p></div>}
@@ -127,7 +117,7 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
   const progress = petStoryImageProgress(project, target, tasks, state.activeImageOperationId);
   const images = project.assets.filter((asset): boolean => imageBelongsToTarget(project, asset, target));
   const current = images.find((asset): boolean => asset.id === currentAssetId);
-  const candidates = images.filter((asset): boolean => asset.id !== currentAssetId && asset.imageReview?.state !== 'adopted');
+  const candidates = pendingImageCandidates(project, target, currentAssetId);
   const selected = images.find((asset): boolean => asset.id === selectedId);
   const feedbackBase = images.find((asset): boolean => asset.id === feedbackBaseId);
   const { reviewingCurrent, needsReview, confirmingCurrent } = currentReviewState(current, selected, currentNeedsReview);

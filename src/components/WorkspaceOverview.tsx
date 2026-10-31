@@ -9,6 +9,7 @@ import { PetStoryOpenProject } from './PetStoryOpenProject';
 import { PetStoryCreateProject } from './PetStoryCreateProject';
 import { navigateWorkspace, needsTaskAttention, taskNextAction } from '../utils/workspace';
 import { petStoryJourneyStages, selectPetStoryJourney } from '../utils/petstoryJourney';
+import { pendingImageCandidates } from '../utils/petstoryImageCandidates';
 import type { Task } from '../types';
 
 /** 总览只展示当前真实打开的短剧；不虚构最近项目或已完成的制作结果。 */
@@ -21,7 +22,7 @@ export const WorkspaceOverview: React.FC = (): React.ReactElement => {
   const journey = project ? selectPetStoryJourney(project, tasks) : null;
   const attention = tasks.filter((task: Task): boolean => (task.projectId || 'default-project') === (project?.studioProjectId || activeProjectId) && needsTaskAttention(task));
   const accountAttention = accounts.filter((account): boolean => ['login_required', 'action_required', 'unavailable'].includes(account.health?.availability?.state || ''));
-  const candidateMaterials = project?.materials?.filter((material): boolean => !material.approved && project.assets.some((asset): boolean => asset.materialId === material.id && asset.imageReview?.state === 'candidate')) || [];
+  const candidateMaterials = project?.materials?.filter((material): boolean => pendingImageCandidates(project, { materialId: material.id }).length > 0) || [];
   const [preview, setPreview] = useState('');
   const previewAssetId = project?.materials?.find((material): boolean => !!material.approved)?.approved?.assetId;
   const previewProjectId = project?.id;

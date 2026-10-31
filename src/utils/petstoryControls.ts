@@ -89,10 +89,23 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
   const last = slotRoot(/(?:^|\s)(?:尾帧|结束帧|last[_ -]?frame|end[_ -]?frame)(?:\s|$)/i);
   const generic = inputs.length === 1 && !first && !last;
   const target = operation.slot === 'first_frame' ? first : operation.slot === 'last_frame' ? last : generic ? root : undefined;
-  const images = (container: Element): Element[] => [...new Set(Array.from(container.querySelectorAll<HTMLImageElement>('img')).filter((img): boolean => {
-    const rect = img.getBoundingClientRect();
-    return visible(img) && rect.width >= 40 && rect.height >= 40 && img.complete && img.naturalWidth > 32 && !/svg|icon|avatar/i.test(img.src);
-  }).map((img): Element => img.closest('[data-testid="mdbox_image"],[data-testid="image-upload-item"],[data-testid="reference-image"]') || img))];
+  const imageSource = (image: HTMLImageElement): string => image.currentSrc || image.src || '';
+  // 同一卡片会同时渲染模糊占位和实际图片。计数、指纹与引用菜单必须读取同一张
+  // 已解码实图，不能重新 querySelector('img') 取到共用占位；同尺寸身份不明仍停止。
+  const referenceImage = (node: Element, minimumSize: number = 40, requireDecoded: boolean = true): HTMLImageElement | undefined => {
+    const candidates = (node.tagName?.toLowerCase() === 'img' ? [node as HTMLImageElement] : Array.from(node.querySelectorAll<HTMLImageElement>('img'))).filter((image): boolean => {
+      const rect = image.getBoundingClientRect(); const source = imageSource(image);
+      return !!source && !/^data:|svg|icon|avatar/i.test(source) && visible(image) && rect.width >= minimumSize && rect.height >= minimumSize
+        && (!requireDecoded || image.complete && image.naturalWidth > 32 && image.naturalHeight > 0);
+    }).sort((a, b): number => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight);
+    const best = candidates[0];
+    if (!best) return undefined;
+    if (!node.getAttribute('data-asset-id') && !node.getAttribute('data-file-id')
+      && candidates.some((image): boolean => image.naturalWidth * image.naturalHeight === best.naturalWidth * best.naturalHeight && imageSource(image) !== imageSource(best))) return undefined;
+    return best;
+  };
+  const images = (container: Element): Element[] => [...new Set(Array.from(container.querySelectorAll<HTMLImageElement>('img'))
+    .map((image): Element => image.closest('[data-testid="mdbox_image"],[data-testid="image-upload-item"],[data-testid="reference-image"]') || image))].filter((node): boolean => !!referenceImage(node));
   const pending = (container: Element): boolean => Array.from(container.querySelectorAll('[aria-busy="true"],[data-status="uploading"],[class*="uploading"],[class*="progress"]')).some(visible);
   // 指纹只在当前会话内关联顺序上传与实际预览；不持久化预览 URL。
   const fingerprint = (value: string): string => {
@@ -102,10 +115,10 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
   };
   const readReferences = (): Pick<PetStoryComposerSnapshot, 'previews' | 'referenceSyntax' | 'referenceNodes' | 'referenceOptions' | 'selectedReference'> => {
   const previews = images(target || root).map((node: Element, index: number): { key: string; label: string; nodeId?: string } => {
-    const image = ('src' in node || node.tagName?.toLowerCase() === 'img') ? node as HTMLImageElement : node.querySelector<HTMLImageElement>('img');
+    const image = referenceImage(node);
     const rawLabel = [node.getAttribute('data-reference-label'), node.getAttribute('aria-label'), text(node)].filter(Boolean).join(' ');
     const numbered = rawLabel.match(/@?图片\s*(\d+)/);
-    const key = node.getAttribute('data-asset-id') || node.getAttribute('data-file-id') || image?.currentSrc || image?.src || '';
+    const key = node.getAttribute('data-asset-id') || node.getAttribute('data-file-id') || (image ? imageSource(image) : '');
     return { key: key ? fingerprint(key) : '', label: numbered ? `@图片${numbered[1]}` : `第 ${index + 1} 张图`, nodeId: node.getAttribute('data-asset-id') || node.getAttribute('data-file-id') || undefined };
   });
   const referenceNodes = Array.from(editor?.querySelectorAll('[data-type="mention"],[data-mention-id],[data-reference-id],[contenteditable="false"]') || []).flatMap((node: Element): { label: string; nodeId: string; targetId?: string }[] => {
@@ -115,15 +128,16 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
   });
   const referenceOptions = Array.from(document.querySelectorAll<HTMLElement>('[role="option"],[role="menuitem"],[data-reference-option]')).filter(visible).flatMap((node): { label: string; key: string; nodeId?: string }[] => {
     const label = text(node).match(/@?图片\s*(\d+)/); if (!label) return [];
-    const img = node.querySelector<HTMLImageElement>('img'); const key = node.getAttribute('data-asset-id') || node.getAttribute('data-file-id') || img?.currentSrc || img?.src || '';
+    // 菜单只匹配已验证附件的身份；缩略图可尚未解码，不能把它当成附件未上传。
+    const image = referenceImage(node, 0, false); const key = node.getAttribute('data-asset-id') || node.getAttribute('data-file-id') || (image ? imageSource(image) : '');
     return [{ label: `@图片${label[1]}`, key: key ? fingerprint(key) : '', nodeId: node.getAttribute('data-asset-id') || node.getAttribute('data-file-id') || undefined }];
   });
   const referenceSyntax = referenceOptions.length || previews.some((p): boolean => p.label.startsWith('@')) || Array.from(root.querySelectorAll('button,[role="button"]')).some((node: Element): boolean => visible(node) && /引用素材|@素材|插入引用/.test(text(node))) ? 'mention' : 'plain';
   let selectedReference = false;
   if (operation.selectReference) {
     const options = Array.from(document.querySelectorAll<HTMLElement>('[role="option"],[role="menuitem"],[data-reference-option]')).filter((node): boolean => {
-      const img = node.querySelector<HTMLImageElement>('img');
-      const key = node.getAttribute('data-asset-id') || node.getAttribute('data-file-id') || img?.currentSrc || img?.src || '';
+      const image = referenceImage(node, 0, false);
+      const key = node.getAttribute('data-asset-id') || node.getAttribute('data-file-id') || (image ? imageSource(image) : '');
       return visible(node) && `@图片${text(node).match(/@?图片\s*(\d+)/)?.[1]}` === operation.selectReference && (!operation.selectReferenceKey || (!!key && fingerprint(key) === operation.selectReferenceKey));
     });
     if (options.length === 1) { options[0].click(); selectedReference = true; }

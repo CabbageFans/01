@@ -53,6 +53,7 @@ const electronAPI = {
     advanceProduction: (id: string): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:advanceProduction', { id }),
     pauseProduction: (id: string): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:pauseProduction', { id }),
     resumeProduction: (id: string, capability?: import('@doubao-studio/contracts').PetStoryCapability): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:resumeProduction', { id, capability }),
+    resubmitProduction: (id: string, revision: number, request: import('@doubao-studio/contracts').TaskResubmitUncertainParams, capability?: import('@doubao-studio/contracts').PetStoryCapability): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:resubmitProduction', { id, revision, request, capability }),
     bindProductionRun: (id: string, taskId: string, runId: string): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:bindProductionRun', { id, taskId, runId }),
     guardProductionTask: (taskId: string): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:guardProductionTask', { taskId }),
     readReference: (id: string, assetId: string): Promise<{ success: boolean; data?: string; error?: string }> => ipcRenderer.invoke('petstory:readReference', { id, assetId }),
@@ -220,7 +221,6 @@ const electronAPI = {
     minimize: (): void => ipcRenderer.send('window:minimize'),
     toggleMaximize: (): void => ipcRenderer.send('window:toggleMaximize'),
     close: (): void => ipcRenderer.send('window:close'),
-    prepareNativeInput: (): Promise<boolean> => ipcRenderer.invoke('window:prepareNativeInput'),
   },
 } satisfies ElectronAPI;
 
