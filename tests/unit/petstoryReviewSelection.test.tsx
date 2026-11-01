@@ -38,13 +38,13 @@ beforeEach((): void => {
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
 
 describe('C12显式选择同一目标的修订问题', (): void => {
-  it('素材页隐藏文字诊断，单镜和全局仍保留原修订选择规则', (): void => {
+  it('素材与画布隐藏文字诊断，全局仍保留原修订选择规则', (): void => {
     const material = renderToStaticMarkup(<PetStoryMaterials project={project} disabled={false} />);
     expect(material).not.toContain('修订所选');
     expect(material).not.toContain('TEST证据material-error');
     expect(material).toContain('生成图片');
     const frame = renderToStaticMarkup(<CanvasPromptEditor project={project} shot={project.plan!.shots[0]} kind="firstFrame" disabled={false} generationBlocked={false} dirtyChanged={(): void => undefined} />);
-    expect(frame).toContain('修订所选 0 项问题'); expect(frame).not.toContain('TEST影响video-error');
+    expect(frame).not.toContain('修订所选'); expect(frame).not.toContain('TEST影响video-error'); expect(frame).toContain('修改要求');
     const runtime = renderToStaticMarkup(<PetStoryRuntime project={project} disabled={false} />);
     // 同一素材的错误和建议合并为一个选择组；首帧、视频分别修订。
     expect(runtime.match(/修订所选 1 项问题/g)).toHaveLength(2);
@@ -141,7 +141,7 @@ describe('审查逐目标送审正文快照', (): void => {
     expect(currentReviewPrompt(project, 'shot:firstFrame')).toBe('TEST');
     expect(reviewMatchesPrompt(project.jobs[0], 'shot:firstFrame', currentReviewPrompt(project, 'shot:firstFrame'))).toBe(true);
     const before = renderToStaticMarkup(<CanvasPromptEditor project={project} shot={project.plan!.shots[0]} kind="firstFrame" disabled={false} generationBlocked={false} dirtyChanged={(): void => undefined} />);
-    expect(before).toContain('TEST证据frame-suggestion');
+    expect(before).not.toContain('TEST证据frame-suggestion'); expect(before).toContain('当前使用 · 手改正文');
     prompt.final = prompt.optimized;
     expect(reviewMatchesPrompt(project.jobs[0], 'shot:firstFrame', currentReviewPrompt(project, 'shot:firstFrame'))).toBe(false);
   });

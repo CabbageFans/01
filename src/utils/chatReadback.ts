@@ -1,11 +1,15 @@
 import { isSameDoubaoConversation } from './taskConversationLocator';
+import { classifyGenerationConfirmationText } from './generationConfirmation';
 
 /** 普通 Chat 只读取消息区；不把侧栏、编辑器或页面脚本当成回复。 */
 export interface ChatPageSnapshot {
-  messages: { role: 'user' | 'assistant'; text: string; rawText?: string; renderedSource?: string; codeSpans?: number; fencedCode?: { language: string; text: string }[]; headingCount?: number; attachmentOnly?: boolean; turnId?: string; messageId?: string; imageUrls?: string[] }[];
+  messages: { role: 'user' | 'assistant'; text: string; rawText?: string; renderedSource?: string; codeSpans?: number; fencedCode?: { language: string; text: string }[]; headingCount?: number; attachmentOnly?: boolean; hasAttachments?: boolean; turnId?: string; messageId?: string; replyId?: string; imageUrls?: string[]; videoReady?: boolean }[];
   editorPresent: boolean;
   editorText: string;
   generating: boolean;
+  /** 当前会话 dataList 的每条消息均由已挂载 provider DTO 逐条读取，不表示服务器没有更早分页。 */
+  historyComplete?: boolean;
+  conversationId?: string;
 }
 
 /** 自包含函数，可序列化到隔离的 Webview 执行；正文仅用于内存比较，不写日志。 */
@@ -59,6 +63,14 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
     });
     return textPeers.length === 1;
   };
+  const hasGroupedAttachments = (node: Element): boolean => {
+    if (node.getAttribute('data-testid') !== 'send_message') return false;
+    if (node.querySelector('img')) return true;
+    const turn = node.closest?.('[data-testid="union_message"]');
+    const turnId = turn?.getAttribute('data-target-id');
+    return !!turn && messageNodes.some((peer: Element): boolean => peer !== node && !!peer.querySelector('img') && attachmentIsGrouped(peer)
+      && (turnId ? peer.closest?.('[data-testid="union_message"]')?.getAttribute('data-target-id') === turnId : peer.closest?.('[data-testid="union_message"]') === turn));
+  };
   const codeEvidence = (content: Element | null): Partial<ChatPageSnapshot['messages'][number]> => {
     const codeSpans = content?.querySelectorAll?.('code')?.length || 0;
     const fencedCode = Array.from(content?.querySelectorAll?.('pre') || []).flatMap((pre: Element): { language: string; text: string }[] => {
@@ -90,9 +102,11 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
       text: (content?.textContent || '').normalize('NFKC').replace(/\s+/g, ' ').trim(),
       ...codeEvidence(content),
       ...(attachmentOnly ? { attachmentOnly: true } : {}),
+      ...(hasGroupedAttachments(node) ? { hasAttachments: true } : {}),
       ...(turnId ? { turnId } : {}),
       ...(messageId ? { messageId } : {}),
       ...(imageUrls.length ? { imageUrls } : {}),
+      ...(node.getAttribute('data-testid') === 'receive_message' && node.querySelector('[class*="block-video"],video') ? { videoReady: true } : {}),
     };
   };
   for (const node of messageNodes) {
@@ -415,7 +429,162 @@ export function inspectChatReadback(
   };
 }
 
-/** 创作入口会封装已发布消息；只接受实测固定前缀及与原任务严格相等的视频参数后缀。 */
+export interface CreationReadbackResult extends ChatReadbackResult {
+  confirmationPublished: boolean;
+  /** 原消息在当前快照中的位置；仅用于本次只读定位，不能跨刷新持久化元素下标。 */
+  originalMessageIndex?: number;
+  /** 只属于原请求直接回复轮次的助手消息，不把后续聊天的回复冒充原产物。 */
+  originalAssistantMessageIndices?: number[];
+  followupUserMessageIndices?: number[];
+  /** 原助手明确提出参数确认后的有界续接助手；仍须核实真实视频卡身份。 */
+  generationContinuationMessageIndices?: number[];
+}
+
+/** 单个用户轮次内只沿已证明的消息父链前进；工具产物可以回复本轮助手，不能跨轮或猜测未知 ID。 */
+function associatedAssistantIndices(messages: ChatPageSnapshot['messages'], start: number, end: number): number[] {
+  const uniqueId = (id: string | undefined): id is string => !!id && messages.filter((message: ChatPageSnapshot['messages'][number]): boolean => message.messageId === id).length === 1;
+  const anchors = new Set<string>(); const originId = messages[start].messageId;
+  if (uniqueId(originId)) anchors.add(originId);
+  const indices: number[] = [];
+  for (let index = start + 1; index < end; index++) {
+    const message = messages[index];
+    if (message.role !== 'assistant' || message.replyId && !anchors.has(message.replyId)) continue;
+    indices.push(index);
+    if (uniqueId(message.messageId)) anchors.add(message.messageId);
+  }
+  return indices;
+}
+
+/** 只识别整个短句的原请求确认、状态询问和原样重试；不能凭生成关键词接纳新创作要求。 */
+function continuesOriginalVideoRequest(value: string): boolean {
+  const text = normalizePublishedChatPrompt(value).replace(/[。.!！?？]+$/u, '');
+  if (!text || text.length > 100) return false;
+  if (/^(?:确认|开始|开始生成|继续生成|按原要求开始生成)$/.test(text)) return true;
+  if (/^(?:好|好的),?按(?:上面|原要求)(?:来|生成)$/.test(text)) return true;
+  if (/^(?:(?:按原(?:请求|要求))?(?:重发|重试|再试|重新发)一次|按原(?:请求|要求)重新生成一次)$/.test(text)) return true;
+  const status = [
+    /^(?:视频)?(?:正在|在|还在|现在在|现在还在|目前在)生成(?:视频)?(?:吗|了吗)$/,
+    /^(?:视频)?(?:正在|在|还在|现在在|现在还在|目前在)排队(?:中)?吗$/,
+    /^开始生成(?:了)?吗$/,
+    /^还要排多久(?:的)?队$/,
+    /^(?:视频)?排队(?:还要|需要|要)?多久(?:了|啊|呢|吗)?$/,
+    /^还(?:要|需要)等多久$/,
+    /^视频(?:生成|做好|生成好|生成完|生成完成)了吗$/,
+    /^视频(?:好了|生成好了|生成完了)吗$/,
+    /^(?:为什么|怎么)(?:视频)?(?:生成好了|已经生成好了)(?:但|却)我?(?:看不到|没看到)$/,
+  ];
+  if (status.some((pattern: RegExp): boolean => pattern.test(text))) return true;
+  // 只允许时钟表达说明等待时间；秒数、比例、模型、素材或额外创作句均不匹配。
+  const clock = '(?:[01]?\\d|2[0-3])(?:点(?:[0-5]?\\d分?)?|:[0-5]\\d)';
+  return new RegExp('^我?' + clock + '确认,现在已经' + clock + '了,还没给我视频,(?:这正常吗|正常吗|还要多久)$').test(text);
+}
+
+function generationContinuationIndices(messages: ChatPageSnapshot['messages'], originalReplies: number[], followups: number[], recorded: boolean): number[] {
+  const terminal = (index: number): boolean => messages[index].role === 'assistant' && (messages[index].videoReady === true
+    || /(?:^|[。！!？?\n])\s*(?:你的视频|视频)(?:已经|已)?(?:生成好了|生成完成|生成成功|完成生成)(?:[。！!，,]|$)/.test(messages[index].text));
+  if (originalReplies.some(terminal)) return [];
+  if (!recorded || !followups.length || !originalReplies.some((index: number): boolean => classifyGenerationConfirmationText(messages[index].text).state === 'present')) return [];
+  const candidates: number[] = [];
+  for (let turn = 0; turn < followups.length; turn++) {
+    const start = followups[turn]; const end = followups[turn + 1] ?? messages.length;
+    if (messages[start].hasAttachments || !continuesOriginalVideoRequest(messages[start].text)) break;
+    const previous = turn === 0 ? originalReplies[0] : followups[turn - 1];
+    if (messages.some((message: ChatPageSnapshot['messages'][number], index: number): boolean => index > previous && index < end && message.role === 'user' && !!(message.attachmentOnly || message.hasAttachments))) break;
+    // 工具产物可以指回同轮已关联助手；整会话 union ID 或其它用户轮次不能成为父链依据。
+    const associated = associatedAssistantIndices(messages, start, end);
+    // 搜索等独立助手子链不进入本轮候选，也不使后续合法的原请求状态询问失去归属。
+    // 合法状态询问中出现闲聊或搜索不会改变原请求归属；续接依据始终来自用户完整短句。
+    candidates.push(...associated);
+    if (associated.some(terminal)) break;
+  }
+  return candidates;
+}
+
+/** 已提交视频按原消息身份回读；后续手机/桌面聊天不改变原请求是否已发布这一事实。 */
+function inspectOriginalVideoReadback(
+  snapshot: ChatPageSnapshot,
+  messages: ChatPageSnapshot['messages'],
+  prompt: string,
+  baselineMessageCount: number,
+  confirmationRecorded: boolean,
+  context: ChatReadbackContext,
+): CreationReadbackResult {
+  const initial = inspectChatReadback({ ...snapshot, messages }, prompt, baselineMessageCount, context);
+  if (!trustedReadbackContext(context)) return { ...initial, confirmationPublished: false };
+  // 现场 union_message 的 data-target-id 可能属于整会话，不能单独冒充原用户消息 ID。
+  const recorded = !!context.userMessageId;
+  const matches = messages.flatMap((message: ChatPageSnapshot['messages'][number], index: number): number[] => {
+    if (index < baselineMessageCount || message.role !== 'user' || message.attachmentOnly) return [];
+    const matched = recorded
+      ? message.messageId === context.userMessageId
+      : publishedPromptMatches(message, prompt);
+    return matched ? [index] : [];
+  });
+  if (matches.length !== 1) return { ...initial, promptPublished: false, confirmationPublished: false,
+    reason: recorded || matches.length > 1 ? 'user_ambiguous' : 'prompt_unmatched' };
+  const originalMessageIndex = matches[0];
+  const followupUserMessageIndices = messages.flatMap((message: ChatPageSnapshot['messages'][number], index: number): number[] => index > originalMessageIndex
+    && message.role === 'user' && !message.attachmentOnly ? [index] : []);
+  const end = followupUserMessageIndices[0] ?? messages.length;
+  const originalAssistantMessageIndices = associatedAssistantIndices(messages, originalMessageIndex, end);
+  // 只缩小原轮次回复的读取范围；不删除、改写或否定平台上的后续交互。
+  const readback = inspectChatReadback({ ...snapshot, messages: messages.slice(originalMessageIndex, end) }, prompt, 0, { ...context, userTurnId: undefined });
+  const confirmationPublished = confirmationRecorded && followupUserMessageIndices.length > 0
+    && normalizePublishedChatPrompt(messages[followupUserMessageIndices[0]].text) === '确认';
+  return { ...readback, messageCount: snapshot.messages.length, confirmationPublished, originalMessageIndex,
+    originalAssistantMessageIndices, followupUserMessageIndices,
+    generationContinuationMessageIndices: generationContinuationIndices(messages, originalAssistantMessageIndices, followupUserMessageIndices, confirmationRecorded),
+    candidates: readback.candidates.map((candidate: ChatReadbackCandidate): ChatReadbackCandidate => ({ ...candidate, messageIndex: candidate.messageIndex + originalMessageIndex })) };
+}
+
+function creationReadbackMessages(
+  snapshot: ChatPageSnapshot,
+  prompt: string,
+  mode: 'image' | 'video',
+  videoConfig?: { aspectRatio: string; duration: string },
+): ChatPageSnapshot['messages'] {
+  return snapshot.messages.map((message: ChatPageSnapshot['messages'][number]): ChatPageSnapshot['messages'][number] => {
+    if (message.role !== 'user' || publishedPromptMatches(message, prompt) || (mode === 'video' && !videoConfig)) return message;
+    const text = normalizePublishedChatPrompt(message.text);
+    const prefix = mode === 'image' ? '生成图片:' : '生成视频:';
+    const parameters = mode === 'video' && videoConfig ? `,${videoConfig.aspectRatio},${videoConfig.duration}` : '';
+    // 实页的视频创作回执可在原比例／时长后固定附加 720p；只接受这两种完整外壳。
+    const suffix = parameters ? [parameters, `${parameters},720p`].find((value: string): boolean => text.endsWith(value)) : '';
+    if (!text.startsWith(prefix) || suffix === undefined) return message;
+    const candidate = { ...message, text: text.slice(prefix.length, suffix ? -suffix.length : undefined) };
+    return publishedPromptMatches(candidate, prompt) ? candidate : message;
+  });
+}
+
+/** 仅输出数量、长度与比较结果，避免把提示词、图片地址、会话地址或人物名写入日志。 */
+export function diagnoseCreationReadback(snapshot: ChatPageSnapshot, prompt: string, mode: 'image' | 'video',
+  videoConfig?: { aspectRatio: string; duration: string }, context?: ChatReadbackContext): object {
+  const projected = creationReadbackMessages(snapshot, prompt, mode, videoConfig);
+  const outcome = inspectCreationReadback(snapshot, prompt, mode, 0, videoConfig, false, context);
+  return { ...diagnoseChatReadback({ ...snapshot, messages: projected }, prompt), reason: outcome.reason, promptPublished: outcome.promptPublished,
+    historyComplete: snapshot.historyComplete === true, contextCurrent: context ? trustedReadbackContext(context) : undefined,
+    inputs: snapshot.messages.map((message: ChatPageSnapshot['messages'][number], index: number): object => ({ role: message.role, attachmentOnly: !!message.attachmentOnly,
+      textLength: message.text.length, rawLength: message.rawText?.length, formattedLength: message.renderedSource?.length,
+      hasMessageId: !!message.messageId, hasTurnId: !!message.turnId, projectedLength: projected[index].text.length,
+      fullPromptMatches: publishedPromptMatches(projected[index], prompt),
+      ...(message.role === 'user' ? { comparison: diagnoseChatReadback({ ...snapshot, messages: [projected[index]] }, prompt) } : {}) })) };
+}
+
+/** 消息父链诊断只返回本次快照的顺序关系，不暴露消息 ID、会话地址、正文或图片地址。 */
+export function diagnoseVideoMessageChain(snapshot: ChatPageSnapshot, prompt: string, videoConfig: { aspectRatio: string; duration: string } | undefined,
+  confirmationRecorded: boolean, context: ChatReadbackContext): object {
+  const readback = inspectCreationReadback(snapshot, prompt, 'video', 0, videoConfig, confirmationRecorded, context);
+  return { promptPublished: readback.promptPublished, reason: readback.reason, historyComplete: snapshot.historyComplete === true, confirmationRecorded,
+    originalMessageIndex: readback.originalMessageIndex, originalAssistantMessageIndices: readback.originalAssistantMessageIndices,
+    followupUserMessageIndices: readback.followupUserMessageIndices, generationContinuationMessageIndices: readback.generationContinuationMessageIndices,
+    messages: snapshot.messages.map((message: ChatPageSnapshot['messages'][number], index: number): object => ({ index, role: message.role,
+      textLength: message.text.length, attachmentOnly: !!message.attachmentOnly, hasAttachments: !!message.hasAttachments, videoReady: !!message.videoReady, hasMessageId: !!message.messageId,
+      messageIdUnique: !!message.messageId && snapshot.messages.filter((item: ChatPageSnapshot['messages'][number]): boolean => item.messageId === message.messageId).length === 1,
+      hasReplyId: !!message.replyId, replyTargetIndices: message.replyId ? snapshot.messages.flatMap((item: ChatPageSnapshot['messages'][number], target: number): number[] => item.messageId === message.replyId ? [target] : []) : [],
+      parameterConfirmation: message.role === 'assistant' && classifyGenerationConfirmationText(message.text).state === 'present' })) };
+}
+
+/** 创作入口会封装已发布消息；发送回执默认严格，已受理视频只读恢复可另传正式任务上下文。 */
 export function inspectCreationReadback(
   snapshot: ChatPageSnapshot,
   prompt: string,
@@ -423,16 +592,10 @@ export function inspectCreationReadback(
   baselineMessageCount: number,
   videoConfig?: { aspectRatio: string; duration: string },
   confirmationRecorded: boolean = false,
-): ReturnType<typeof inspectChatReadback> & { confirmationPublished: boolean } {
-  const messages = snapshot.messages.map((message: ChatPageSnapshot['messages'][number]): ChatPageSnapshot['messages'][number] => {
-    if (message.role !== 'user' || publishedPromptMatches(message, prompt) || (mode === 'video' && !videoConfig)) return message;
-    const text = normalizePublishedChatPrompt(message.text);
-    const prefix = mode === 'image' ? '生成图片:' : '生成视频:';
-    const suffix = mode === 'video' && videoConfig ? `,${videoConfig.aspectRatio},${videoConfig.duration}` : '';
-    if (!text.startsWith(prefix) || (suffix && !text.endsWith(suffix))) return message;
-    const candidate = { ...message, text: text.slice(prefix.length, suffix ? -suffix.length : undefined) };
-    return publishedPromptMatches(candidate, prompt) ? candidate : message;
-  });
+  context?: ChatReadbackContext,
+): CreationReadbackResult {
+  const messages = creationReadbackMessages(snapshot, prompt, mode, videoConfig);
+  if (mode === 'video' && context) return inspectOriginalVideoReadback(snapshot, messages, prompt, baselineMessageCount, confirmationRecorded, context);
   // 已记录参数确认状态后，允许同一会话中唯一的一次精确“确认”回复；其他追加对话仍拒绝。
   type IndexedMessage = { message: ChatPageSnapshot['messages'][number]; index: number };
   const users = messages.map((message: ChatPageSnapshot['messages'][number], index: number): IndexedMessage => ({ message, index }))

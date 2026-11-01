@@ -84,7 +84,7 @@ describe('同轮方案审阅与明确采用', (): void => {
     expect(screen.getByText('需要复核')).toBeDefined(); expect(within(screen.getByRole('status')).getByText('TEST镜头时长不符合要求')).toBeDefined();
     expect(screen.queryByRole('button', { name: '确认并采用方案' })).toBeNull();
     const primary = screen.getByRole('article', { name: '方案审阅' }).querySelector('.petstory-plan-attention > button.ant-btn-primary');
-    expect(primary?.textContent).toBe('按具体缺项修订一次');
+    expect(primary?.textContent).toBe('继续处理具体缺项');
   });
   it.each(['captured', 'bound'] as const)('重开%s回复没有丢失收取入口，旧式任务也可从审阅卡恢复', async (status): Promise<void> => {
     const p = project([job('TEST-recover', { requestId: undefined, status, parsedResult: undefined })]);

@@ -1,6 +1,7 @@
 schema: spec-driven
 
 context: |
+  - 2026-10-31 画布模式以 docs/CANVAS_FIRST_PROMPT_WORKSPACE_CODEX.md 与 petstory-canvas-first-workspace 为准：删除顶部推荐/待处理/重复信息，剩余空间画布，连续文字候选后明确确认，自然语言修改与后台常驻执行；覆盖旧画布与journey冲突条款，素材页图片反馈不回退。
   - 基础素材页按 docs/PRODUCT_REQUIREMENTS.md v1.9 和 petstory-image-feedback-flow：生成图片自动衔接文字与候选，选中基图接受自然语言反馈，支持多轮修改后明确采用；不恢复提示词／更多／诊断，不强制原会话，不改画布与视频。
   - 当前业务需求以 docs/PRODUCT_REQUIREMENTS.md 顶部有效版本与 docs/REMOVE_FREE_GATES_CODEX.md 为准；2026-10-30 已取消免费确认、人工入口检查和素材引用免责声明，旧冲突条款作历史背景。
   - 支持直接剧本及抖音链接记录、手机豆包提取提示词和用户故事回填，桌面不再通过链接读取视频；不导入本地原视频。

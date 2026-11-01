@@ -2,15 +2,48 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryChatJob, PetStoryPromptBatch, PetStoryImageTarget, PetStoryProductionStep } from '@doubao-studio/contracts';
-import { assetCharacterIds, defaultPromptProfile } from './petstoryPromptQuality';
-import { extractDouyinLink, record, validatePetStoryPlan, validatePromptTask } from './petstoryValidation';
+import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryPromptEditBasis, PetStoryChatJob, PetStoryPromptBatch, PetStoryImageTarget, PetStoryProductionStep } from '@doubao-studio/contracts';
+import { assetCharacterIds, defaultPromptProfile, PROMPT_RULES_VERSION } from './petstoryPromptQuality';
+import { extractDouyinLink, record, runtimePromptIssues, validatePetStoryPlan, validatePromptTask } from './petstoryValidation';
 import { invalidateMaterialDependents, materialAsset, syncMaterials, storyHash, requireMaterialInventory } from './petstoryMaterials';
 import { mediaDigest, validatePetStoryMedia } from './petstoryMedia';
 import { archiveCompletedPetStoryProduction } from './petstoryProductionLifecycle';
 import { validateCastBindings } from './petstoryCast';
 import { validatePetStoryAdjustments } from './petstoryAdjustmentValidation';
 import { imageTargetBasis, imageTargetMatches, selectedShotImageId, reconcileAdoptedImages } from './petstoryImageReview';
+import { inspectPromptCandidate, inspectPromptEligibility, promptWritingTarget } from './petstoryEligibility';
+import { boundaryStillCurrent, frameStillCurrent, hasSupersedingJob, runtimeContextStillCurrent, settlePromptBatchTarget } from './petstoryChat';
+import { validateReferenceContinuationHistory } from './petstoryReferenceContinuation';
+
+/** 格式纠正继承原请求职责；审查结果不能被当作可采用的正文。 */
+function isPromptEditCreation(project: PetStoryProject, job: PetStoryChatJob, shotId: string, kind: PetStoryPromptKind): boolean {
+  if (job.materialId || job.shotId !== shotId || job.promptKind !== kind || !['optimize', 'revise', 'repair'].includes(job.kind)) return false;
+  let source = job; const seen = new Set<string>();
+  while (source.kind === 'repair' && source.parentJobId && !seen.has(source.id)) {
+    seen.add(source.id); const parent = project.jobs.find((item): boolean => item.id === source.parentJobId);
+    if (!parent) break; source = parent;
+  }
+  return source.kind !== 'review' && job.originKind !== 'review';
+}
+
+/** 复用采用前资格，并核对用户打开时选中的实际候选及首尾帧快照。 */
+function promptEditCandidate(project: PetStoryProject, shotId: string, kind: PetStoryPromptKind, jobId: string): PetStoryChatJob {
+  const prompt = project.plan?.shots.find((shot): boolean => shot.id === shotId)?.prompts[kind];
+  const job = project.jobs.find((item): boolean => item.id === jobId);
+  if (!job || !prompt || !isPromptEditCreation(project, job, shotId, kind) || !job.requestId || job.status !== 'applied'
+    || job.resultStatus !== 'candidate' || job.endedWaitingAt || job.sourceStoryId !== project.mobileStory?.id || !job.parsedResult?.optimized?.trim()
+    || (prompt.candidateJobId ? prompt.candidateJobId !== job.id : prompt.optimized !== job.parsedResult.optimized)) throw new Error('选定候选已变化，请重新打开当前提示词后修改');
+  if (hasSupersedingJob(project, job)) throw new Error('本项已有更新请求，请重新打开当前提示词后修改');
+  if (!frameStillCurrent(project, job)) throw new Error('本镜首尾帧正文已变化，请重新打开当前提示词后修改');
+  if (!boundaryStillCurrent(project, job)) throw new Error('前镜边界已变化，请重新打开当前提示词后修改');
+  const issues = runtimePromptIssues(project, job, job.parsedResult.optimized);
+  if (issues.length) throw new Error(`选定候选尚需修订：${issues.join('；')}`);
+  if (job.promptTask?.designHash) {
+    const qualification = inspectPromptCandidate(project, job);
+    if (!qualification.writingReady) throw new Error(`选定候选尚需修订：${qualification.reasons.join('；')}`);
+  } else if (!runtimeContextStillCurrent(project, job)) throw new Error('当前事实已变化，请重新打开当前提示词后修改');
+  return job;
+}
 
 /** 内部收取来源与候选一起原子保存，不出现“图片已存但回复来源未存”的中间状态。 */
 interface PetStoryImageImportSource {
@@ -68,6 +101,7 @@ export function validateProject(value: unknown, readHistorical: boolean = false)
   validateMaterials(result);
   validateImageOperations(result);
   validateAdoptedImages(result);
+  validateSelectedVideos(result);
   validateProduction(result, ids);
   return result;
 }
@@ -101,6 +135,16 @@ function validateAdoptedImages(result: PetStoryProject): void {
     for (const [field, kind] of [['firstFrameId', 'firstFrame'], ['plannedEndImageId', 'plannedEndImage']] as const) {
       if (selected[field] && !result.assets.some((asset): boolean => asset.id === selected[field] && asset.shotId === shotId && asset.kind === kind && asset.imageReview?.state === 'adopted')) throw new Error('正式镜头图片缺少明确采用记录');
     }
+  }
+}
+
+function validateSelectedVideos(result: PetStoryProject): void {
+  if (result.selectedVideos === undefined) return;
+  if (!result.selectedVideos || typeof result.selectedVideos !== 'object' || Array.isArray(result.selectedVideos)) throw new Error('镜头视频选择记录无效');
+  for (const [shotId, assetId] of Object.entries(result.selectedVideos)) {
+    // 删除镜头后的选择仅保留为历史，不参与当前投影，也不阻断新的方案保存。
+    if (!result.plan?.shots.some((shot): boolean => shot.id === shotId)) continue;
+    if (typeof assetId !== 'string' || !result.assets.some((asset): boolean => asset.id === assetId && asset.kind === 'video' && asset.shotId === shotId)) throw new Error('镜头选中视频缺失或归属不符');
   }
 }
 
@@ -194,6 +238,7 @@ function validateProduction(result: PetStoryProject, ids: Set<string>): void {
   if (result.productionHistory !== undefined && !Array.isArray(result.productionHistory)) throw new Error('历史制作清单无效，原文件已保留');
   for (const production of [result.production, ...(result.productionHistory || [])]) {
     for (const step of production?.steps || []) validateResubmissionHistory(step, ids);
+    if (production) validateReferenceContinuationHistory(result.id, production);
   }
 }
 
@@ -333,6 +378,13 @@ export class PetStoryProjects {
     const p = await this.read(id);
     if (p.revision !== revision) throw new Error('项目版本已变化，请刷新文字批次');
     validatePromptBatch(batch);
+    // 旧批次的当前候选补上批次归属，仅迁移明确保存的当前任务，不采用正文。
+    for (const jobId of batch.candidateJobIds || []) {
+      const job = p.jobs.find((item): boolean => item.id === jobId);
+      if (!job || job.status !== 'applied' || !['candidate', 'adopted'].includes(job.resultStatus || '')) throw new Error('批次候选尚未合法保存');
+      if (!job.promptBatchId && p.promptBatch?.jobId === jobId) job.promptBatchId = batch.id;
+      if (job.promptBatchId !== batch.id) throw new Error('候选不属于当前文字批次');
+    }
     p.promptBatch = structuredClone(batch);
     return this.write(p);
   }
@@ -412,14 +464,37 @@ export class PetStoryProjects {
     return this.write(p);
   }
   /** 只合并本项 final；候选回复与其他镜头可在等待保存期间继续回填。 */
-  async saveShotPrompt(id: string, revision: number, shotId: string, kind: PetStoryPromptKind, final: string): Promise<PetStoryProject> {
+  async saveShotPrompt(id: string, revision: number, shotId: string, kind: PetStoryPromptKind, final: string, basis?: PetStoryPromptEditBasis): Promise<PetStoryProject> {
     const p = await this.read(id);
     if (!Number.isInteger(revision) || revision > p.revision) throw new Error('项目版本无效，请刷新后操作');
     if (!['firstFrame', 'lastFrame', 'video'].includes(kind) || !final.trim() || final.length > 100_000) throw new Error('提示词用途或正文无效');
     const target = p.plan?.shots.find((s): boolean => s.id === shotId)?.prompts[kind];
     if (!target) throw new Error('镜头或提示词不存在');
+    if (basis !== undefined) {
+      const checked = record(basis);
+      if (typeof checked.expectedFinal !== 'string' || checked.baseJobId !== undefined && (typeof checked.baseJobId !== 'string' || !checked.baseJobId)) throw new Error('手动修改基准无效，请重新打开提示词');
+      if (target.final !== checked.expectedFinal) throw new Error('当前使用正文已变化，修改内容已保留，请重新打开提示词后保存');
+    }
     if (p.production && !archiveCompletedPetStoryProduction(p)) throw new Error('原制作尚未结束，请先处理原任务，保留已有输入与素材');
-    target.basisJobId = target.sourceJobId || target.basisJobId; target.final = final; target.edited = true; target.sourceJobId = undefined;
+    const source = basis?.baseJobId ? promptEditCandidate(p, shotId, kind, basis.baseJobId) : undefined;
+    if (source) {
+      // “确定”一次性采用选定候选的来源合同并保存手改；不会先写入未修改的候选。
+      source.replacedPrompt = structuredClone(target); source.resultStatus = 'adopted';
+      target.basisJobId = source.id; target.optimized = source.parsedResult!.optimized!;
+      target.rulesVersion = source.rulesVersion || PROMPT_RULES_VERSION; target.promptTask = source.promptTask ? structuredClone(source.promptTask) : undefined;
+      target.editIntent = source.editIntent ? structuredClone(source.editIntent) : undefined; target.needsReview = undefined;
+    } else target.basisJobId = target.sourceJobId || target.basisJobId;
+    target.final = final; target.edited = true; target.sourceJobId = undefined;
+    if (basis) {
+      target.candidateJobId = undefined;
+      // 旧回复留在历史中；明确确认的手改正文不能被此前未采用候选或坏回复遮挡。
+      for (const job of p.jobs) if (job !== source && isPromptEditCreation(p, job, shotId, kind)
+        && (job.resultStatus === 'candidate' || job.status === 'invalid' && job.resultStatus !== 'adopted')) {
+        job.resultStatus = 'stale'; job.staleReason = '用户已明确保存本项手改正文，此前回复保留为历史。';
+      }
+      const selection = { shotId, promptKind: kind };
+      if (inspectPromptEligibility(p, target, promptWritingTarget(p, selection), 'current').writingReady) settlePromptBatchTarget(p, selection, source?.id);
+    }
     return this.write(p);
   }
   async bindSharedReference(id: string, revision: number, characterId: string, assetId: string): Promise<PetStoryProject> {
@@ -542,7 +617,7 @@ export class PetStoryProjects {
       const media = p.production?.shots[target.shotId];
       if (media) media[target.kind === 'firstFrame' ? 'firstFrameId' : 'plannedEndImageId'] = asset.id;
       if (oldId && oldId !== asset.id) for (const item of p.assets) {
-        if (item.shotId === target.shotId && item.id !== asset.id && (item.kind === 'video' || target.kind === 'firstFrame' && item.kind === 'plannedEndImage')) item.needsReview = true;
+        if (item.shotId === target.shotId && item.id !== asset.id && item.kind === 'video') item.needsReview = true;
       }
     }
   }
@@ -596,15 +671,23 @@ export function validatePromptProfile(value: unknown): PetStoryPromptProfile {
   return structuredClone(value) as PetStoryPromptProfile;
 }
 
+function batchTargetCount(batch: Record<string, unknown>): number {
+  const targets = Array.isArray(batch.targets) ? batch.targets : [];
+  const failed = Array.isArray(batch.failedTargets) ? batch.failedTargets.map((item: unknown): unknown => record(item).target) : [];
+  return new Set([...targets, ...failed].map((item: unknown): string => { const target = record(item); return target.materialId ? `material:${String(target.materialId)}` : `shot:${String(target.shotId)}:${String(target.kind)}`; })).size;
+}
+
 /** 批次只保存文字目标和进度，不保存自动重启授权。 */
 function validatePromptBatch(value: unknown): void {
   const batch = record(value);
   if (!['running', 'paused', 'complete'].includes(String(batch.status)) || !Array.isArray(batch.targets)
     || !Number.isInteger(batch.total) || !Number.isInteger(batch.completed) || Number(batch.completed) < 0 || Number(batch.total) < Number(batch.completed)
-    || batch.targets.length + Number(batch.completed) !== batch.total) throw new Error('文字批次进度无效');
+    || batchTargetCount(batch) + Number(batch.completed) !== batch.total) throw new Error('文字批次进度无效');
   for (const item of batch.targets) {
     const t = record(item);
     if (!(typeof t.materialId === 'string' && !t.shotId && !t.kind || typeof t.shotId === 'string' && !t.materialId && ['firstFrame', 'lastFrame', 'video'].includes(String(t.kind)))) throw new Error('文字批次目标无效');
   }
+  if (batch.id !== undefined && (typeof batch.id !== 'string' || !batch.id.trim())) throw new Error('文字批次身份无效');
+  if (batch.candidateJobIds !== undefined && (!Array.isArray(batch.candidateJobIds) || batch.candidateJobIds.some((id: unknown): boolean => typeof id !== 'string') || new Set(batch.candidateJobIds).size !== batch.candidateJobIds.length)) throw new Error('文字候选关联无效');
   if (batch.jobId !== undefined && typeof batch.jobId !== 'string') throw new Error('文字批次运行无效');
 }

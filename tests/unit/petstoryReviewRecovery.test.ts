@@ -85,7 +85,7 @@ describe('素材实际图片与格式纠正后的内容审查', (): void => {
     const result = project.jobs.at(-1)!; expect(isSavedReviewResult(result, project.jobs)).toBe(true);
     clientRender();
     const html = kind === 'shot' ? renderToStaticMarkup(React.createElement(CanvasPromptEditor, { project, shot: project.plan!.shots[0], kind: 'firstFrame', disabled: false, generationBlocked: false, dirtyChanged: (): void => undefined })) : renderToStaticMarkup(React.createElement(PetStoryMaterials, { project, disabled: false }));
-    if (kind === 'shot') { expect(html).toContain('修订所选 0 项问题'); expect(html).toContain('TEST具体证据'); }
+    if (kind === 'shot') { expect(html).not.toContain('修订所选'); expect(html).not.toContain('TEST具体证据'); expect(html).toContain('修改要求'); }
     else { expect(html).not.toContain('修订所选'); expect(html).not.toContain('TEST具体证据'); expect(html).toContain('生成图片'); }
     // 隐藏素材文字入口不删除原回复；原修订服务继续使用真实问题归属。
     expect(result.parsedResult?.issues).toMatchObject([{ id: 'TEST-issue', targetId, evidence: 'TEST具体证据' }]);

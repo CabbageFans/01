@@ -115,7 +115,8 @@ describe('角色上下文与实际用途', (): void => {
     p.promptModel = 'seedance-2.0'; seedOfflinePromptContracts(p, { shotId: 's1', promptKind: 'video' });
     expect((): unknown => compilePrompt(p, 's1', 'video', 'reference')).toThrow('实际模式');
     p.production!.shots.s1.firstFrameId = 'last';
-    expect((): unknown => compilePreview(p, 's1', 'lastFrame')).toThrow('计划尾帧');
+    // 错误用途的历史指针被排除，只读创作计划保留缺首帧占位，绝不把计划尾图当首帧。
+    expect(compilePreview(p, 's1', 'lastFrame').references[0].assetId).toBe('pending:first');
   });
   it('continue 描述实际末帧来源，不混用计划尾图', (): void => {
     const p = fixture(); attachMedia(p);

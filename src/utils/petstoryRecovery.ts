@@ -6,3 +6,28 @@ export function petStoryReadOnlyProductionTask(project: PetStoryProject, tasks: 
   const task = tasks.find((item): boolean => item.id === pending?.taskId);
   return task?.status === 'done' || task?.runtime?.submittedAt ? task : undefined;
 }
+
+export interface PetStoryVideoReadOnlyRecovery {
+  task: Task;
+  action: 'confirm_parameters' | 'verify_account' | 'check_result';
+  label: string;
+  status: string;
+  reason: string;
+}
+/** 画布只暴露精确归属的原提交；平台参数确认与只读收取不授权新视频请求。 */
+export function petStoryVideoReadOnlyRecovery(project: PetStoryProject, shotId: string, tasks: Task[], activeTaskIds: string[] = []): PetStoryVideoReadOnlyRecovery | undefined {
+  const step = project.production?.steps.find((item): boolean => item.status !== 'complete');
+  const task = petStoryReadOnlyProductionTask(project, tasks); const runtime = task?.runtime;
+  if (!task || !runtime?.submittedAt || !step?.runId || step.kind !== 'video' || step.shotId !== shotId
+    || task.mode !== 'video' || runtime.input.mode !== 'video' || runtime.runId !== step.runId
+    || task.assignedAccountId !== project.accountId || task.projectId !== project.studioProjectId
+    || task.petstory?.projectId !== project.id || task.petstory.stepId !== step.id) return undefined;
+  if (task.status === 'waiting_generation_confirmation') return { task, action: 'confirm_parameters', label: '去豆包确认参数', status: '待确认视频参数',
+    reason: task.errorInfo?.message || '豆包要求确认视频生成参数，请在原会话完成确认。' };
+  if (activeTaskIds.includes(task.id)) return undefined;
+  if (task.status === 'waiting_verification') return { task, action: 'verify_account', label: '已完成验证，继续', status: '等待登录或验证',
+    reason: task.errorInfo?.message || '请在原执行账号完成人机验证或登录，再继续检查这次原视频请求。' };
+  if (['paused', 'fail', 'cancelled'].includes(task.status)) return { task, action: 'check_result', label: '检查原视频结果', status: '等待原视频结果',
+    reason: task.errorInfo?.message || runtime.message || '原视频请求已提交，请只读检查原会话中的生成结果。' };
+  return undefined;
+}

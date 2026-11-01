@@ -36,10 +36,12 @@ beforeEach((): void => {
 afterEach((): void => { usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); vi.restoreAllMocks(); });
 
 describe('媒体生成无需人工入口检查', (): void => {
-  it('画布等待只读业务资格时不发送；不存在检查区、声明和检查时间', (): void => {
+  it('图片等待资格；视频允许点击后给出实际缺项，渲染不会发送且无额外检查区', (): void => {
     for (const kind of ['firstFrame', 'video'] as const) {
       const html = renderToStaticMarkup(React.createElement(CanvasMediaNode, { project, shot: project.plan!.shots[0], kind, disabled: false }));
-      expect(buttonMarkup(html, kind === 'video' ? '生成视频' : '生成图片')).toContain('disabled');
+      const button = buttonMarkup(html, kind === 'video' ? '生成视频' : '生成图片');
+      if (kind === 'video') expect(button).not.toContain('disabled');
+      else expect(button).toContain('disabled');
       expect(html).not.toMatch(/入口检查|本人已|免费权益|检查时间|同意逐图/);
     }
     expect(generate).not.toHaveBeenCalled();

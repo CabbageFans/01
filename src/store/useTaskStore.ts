@@ -28,8 +28,12 @@ import { automationEngine } from '../automation/AutomationEngine';
 import { useProjectStore } from './useProjectStore';
 import { findInteractiveAccountId } from '../utils/interactiveAccount';
 import { completeAcceptedObservation, hasPlatformAcceptance, renewObservationLease, shouldResumeAcceptedObservation } from '../utils/acceptedObservation';
+import { canContinueUnsubmittedVerification, canRecoverTaskAfterVerification, hasVerificationRecoveryConflict, matchesVerificationRecoveryRun, verificationRecoveryInputMatches, type TaskVerificationRecoveryDetail, type UnsubmittedVerificationRecovery } from '../utils/verificationRecovery';
+import { resolveTaskConversationTarget } from '../utils/taskConversationLocator';
 
 let resumeAllInFlight: Promise<boolean> | null = null;
+const verificationRecoveryInFlight = new Map<string, Promise<boolean>>();
+const pendingCompletionWrites = new Map<string, { runId?: string; submittedAt?: string }>();
 
 // 账号启动复检可能仍处于 unknown；队列遇到这种软阻断时不能永久停在那里。
 // 只对已满足依赖的 queued 任务做有界退避复检，ready 后由现有调度继续。
@@ -96,11 +100,13 @@ interface TaskState {
   retryTask: (taskId: string) => Promise<boolean>;
   batchPause: () => Promise<boolean>;
   resumeAll: () => Promise<boolean>;
+  /** 验证解除只恢复同账号原等待任务；已记录提交的运行仅接续只读观察。 */
+  resumeAfterAccountVerification: (accountId: string, checkedAt: string) => Promise<boolean>;
   getCompletedOutputs: () => Promise<Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: GenerationMode }>>;
   clearError: () => void;
 
   // V3 自动化方法
-  startAutomation: (taskId: string, beforeDispatch?: (task: Task) => Promise<void>) => Promise<boolean>;
+  startAutomation: (taskId: string, beforeDispatch?: (task: Task) => Promise<void>, verificationRecovery?: UnsubmittedVerificationRecovery) => Promise<boolean>;
   setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage) => void;
   updateTaskRuntime: (taskId: string, patch: {
     status?: TaskStatus;
@@ -138,6 +144,35 @@ interface TaskState {
 
 const runtimePersistState = new Map<string, { stage?: TaskStage; savedAt: number }>();
 let queueProcessing = false;
+
+function verificationRecoveryDispatchBlocked(state: TaskState, accountId: string): boolean {
+  return state.schedulerPaused || Boolean(state.accountBusy[accountId] || state.executingTasks[accountId])
+    || Boolean(findInteractiveAccountId(state.accountAutomationState));
+}
+
+/** 完成写入回执不明时先回读，不能让异常恢复把实际已保存的 done 降为暂停。 */
+async function completionWriteBlocksDowngrade(taskId: string, status: TaskStatus | undefined): Promise<boolean> {
+  const pending = pendingCompletionWrites.get(taskId);
+  if (!pending || status === undefined || status === 'done') return false;
+  try {
+    const task = (await window.electronAPI.tasks.list()).find((item: Task): boolean => item.id === taskId);
+    if (task) useTaskStore.setState((state): Partial<TaskState> => ({ tasks: state.tasks.map((item: Task): Task => item.id === taskId ? task : item) }));
+    if (!task || task.runtime?.runId !== pending.runId || task.runtime?.submittedAt !== pending.submittedAt || task.status === 'done') pendingCompletionWrites.delete(taskId);
+    else { pendingCompletionWrites.delete(taskId); return false; }
+  } catch { /* 权威回读仍不可用，保留精确门闩；不假造 done，也不覆盖可能已经完成的任务。 */ }
+  return true;
+}
+
+function completionReadbackMatches(task: Task | undefined, original: Task, accountId: string, outputs: string[]): task is Task {
+  if (!task || task.id !== original.id || task.assignedAccountId !== accountId || task.status !== 'done'
+    || task.runtime?.runId !== original.runtime?.runId || task.runtime?.submittedAt !== original.runtime?.submittedAt) return false;
+  const expected = [...new Set(outputs)].sort(); const actual = [...new Set(task.outputs)].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
+  if (original.mode === 'chat') return !!task.runtime?.chatResponse?.text.trim() && task.runtime.chatResponse.text === original.runtime?.chatResponse?.text;
+  const kind = original.mode === 'video' ? 'video' : original.mode === 'image' ? 'image' : 'file';
+  return expected.length > 0 && expected.every((url: string): boolean => !!task.artifacts?.some((artifact): boolean => artifact.url === url
+    && artifact.runId === original.runtime?.runId && artifact.kind === kind && !['invalid', 'expired'].includes(artifact.validation?.state || '')));
+}
 
 /** 判断任务是否处于依赖阻断态；只用于展示与重试门禁，不改变任务状态 */
 export function isDependencyBlockedTask(task: Task | null | undefined): boolean {
@@ -523,6 +558,63 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     return resumeAllInFlight;
   },
 
+  resumeAfterAccountVerification: (accountId: string, checkedAt: string): Promise<boolean> => {
+    const pending = verificationRecoveryInFlight.get(accountId);
+    if (pending) return pending;
+    const operation = (async (): Promise<boolean> => {
+      try {
+        const state = get();
+        if (verificationRecoveryDispatchBlocked(state, accountId)) return false;
+        const waiting = state.tasks.filter((task: Task): boolean => task.assignedAccountId === accountId && task.status === 'waiting_verification');
+        if (waiting.length !== 1) return false;
+        const task = waiting[0];
+        const expectedRunId = task.runtime?.runId;
+        const expectedSubmittedAt = task.runtime?.submittedAt;
+        if (!expectedRunId) return false;
+        const expected = { taskId: task.id, accountId, runId: expectedRunId, submittedAt: expectedSubmittedAt };
+        const readyAccount = (): boolean => canRecoverTaskAfterVerification(task,
+          useAccountStore.getState().accounts.find((account): boolean => account.id === accountId), checkedAt);
+        // 回读真实任务后再次核对本地状态，不能用页面探测前的旧 task/run 恢复后来任务。
+        const storedTasks = await window.electronAPI.tasks.list();
+        const stored = storedTasks.find((item: Task): boolean => item.id === task.id);
+        const latest = get().tasks.find((item: Task): boolean => item.id === task.id);
+        const account = useAccountStore.getState().accounts.find((item): boolean => item.id === accountId);
+        const originalWaiting = (item: Task | undefined): item is Task => matchesVerificationRecoveryRun(item, expected)
+          && canRecoverTaskAfterVerification(item, account, checkedAt) && verificationRecoveryInputMatches(item);
+        if (!originalWaiting(stored) || !originalWaiting(latest) || verificationRecoveryDispatchBlocked(get(), accountId)
+          || automationEngine.isReserved(task.id)) return false;
+        if (hasVerificationRecoveryConflict(get().tasks, accountId, task.id) || hasVerificationRecoveryConflict(storedTasks, accountId, task.id)) return false;
+        const submitted = Boolean(stored.runtime?.submittedAt || stored.runtime?.acceptanceObservation);
+        const status = submitted ? 'manual_submission_observing' : 'executing';
+        const now = new Date().toISOString();
+        const recoveryMessage = '人工验证已解除，正在继续只读检查原结果，不会重新发送';
+        const saved = submitted ? await get().updateTaskRuntime(task.id, {
+          status: 'manual_submission_observing', errorInfo: null, result: recoveryMessage,
+          runtime: { stage: 'manual_submission_observing', message: recoveryMessage, stageStartedAt: now, lastHeartbeatAt: now },
+        }) : await get().startAutomation(task.id, undefined, { runId: expectedRunId, checkedAt });
+        const recovered = get().tasks.find((item: Task): boolean => item.id === task.id);
+        if (!saved || !readyAccount() || !matchesVerificationRecoveryRun(recovered, expected) || recovered.status !== status
+          || !verificationRecoveryInputMatches(recovered)) return false;
+        const detail: TaskVerificationRecoveryDetail = { taskId: task.id, accountId, runId: recovered.runtime.runId,
+          submittedAt: recovered.runtime.submittedAt, verificationCheckedAt: checkedAt };
+        window.dispatchEvent(new CustomEvent('task-verification-recovery-started', { detail }));
+        if (submitted) {
+          const target = resolveTaskConversationTarget(recovered);
+          window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: {
+            ...detail, useCurrentPage: !target.ok && target.reason === 'CONVERSATION_URL_MISSING',
+          } }));
+        }
+        return true;
+      } catch (error: unknown) {
+        set({ error: error instanceof Error ? error.message : '人工验证恢复状态暂未确认，原任务未重新发送' });
+        return false;
+      }
+    })();
+    verificationRecoveryInFlight.set(accountId, operation);
+    void operation.finally((): void => { if (verificationRecoveryInFlight.get(accountId) === operation) verificationRecoveryInFlight.delete(accountId); });
+    return operation;
+  },
+
   getCompletedOutputs: async () => {
     return window.electronAPI.tasks.getCompletedOutputs();
   },
@@ -531,7 +623,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   // ---- V3 自动化方法 ----
 
-  startAutomation: async (taskId: string, beforeDispatch?: (task: Task) => Promise<void>) => {
+  startAutomation: async (taskId: string, beforeDispatch?: (task: Task) => Promise<void>, verificationRecovery?: UnsubmittedVerificationRecovery) => {
     if (get().schedulerPaused) {
       set({ error: '任务调度已暂停' });
       return false;
@@ -547,10 +639,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       set({ error: task ? '任务尚未指派账号' : '任务不存在' });
       return false;
     }
-    if (task.status !== 'queued') {
+    const expectedStatus = verificationRecovery ? 'waiting_verification' : 'queued';
+    if (task.status !== expectedStatus) {
       set({ error: '只有排队中的任务可以启动' });
       return false;
     }
+    if (verificationRecovery && !canContinueUnsubmittedVerification(task,
+      useAccountStore.getState().accounts.find((account): boolean => account.id === task?.assignedAccountId), verificationRecovery)) return false;
 
     // 显式启动必须先持久化 armed，写失败则绝不进入账号与页面动作。
     if (task.executionIntent !== 'armed') {
@@ -586,7 +681,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       }
     }
     const refreshed = get().tasks.find((item) => item.id === taskId);
-    if (!refreshed || refreshed.status !== 'queued') {
+    if (!refreshed || refreshed.status !== expectedStatus) {
       set({ error: '任务状态在依赖清理后发生变化，已停止启动' });
       return false;
     }
@@ -622,12 +717,20 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       return false;
     }
 
-    const runId = `${taskId}-${Date.now()}`;
+    const runId = verificationRecovery?.runId || `${taskId}-${Date.now()}`;
     const reservation = await automationEngine.reserve(taskId, accountId, runId);
     if (!reservation.ok) {
       set({ error: reservation.error || '任务锁定失败' });
       return false;
     }
+    // 验证等待期间的原未发送运行只续用原租约标识；异步取锁后再查一次，不能接管已提交或后来运行。
+    const currentVerificationTask = get().tasks.find((item): boolean => item.id === taskId);
+    if (verificationRecovery && (!currentVerificationTask || !canContinueUnsubmittedVerification(currentVerificationTask,
+      useAccountStore.getState().accounts.find((account): boolean => account.id === accountId), verificationRecovery))) {
+      await automationEngine.release(taskId);
+      return false;
+    }
+    if (verificationRecovery && currentVerificationTask) task = currentVerificationTask;
 
     const now = new Date().toISOString();
     const startedTask: Task = {
@@ -636,7 +739,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       result: null,
       errorInfo: undefined,
       blockedByTaskIds: undefined,
-      runtime: {
+      runtime: verificationRecovery && task.runtime ? {
+        ...task.runtime,
+        stage: 'preparing_account', message: '人工验证已解除，继续原未发送运行', stageStartedAt: now, lastHeartbeatAt: now,
+      } : {
         runId,
         attempt: (task.runtime?.attempt || 0) + 1,
         stage: 'preparing_account',
@@ -801,6 +907,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   updateTaskRuntime: async (taskId, patch) => {
+    if (await completionWriteBlocksDowngrade(taskId, patch.status)) {
+      set({ error: '原完成写入尚待核对或已经完成，未覆盖为其他状态；不会重新发送' });
+      return false;
+    }
     const previous = get().tasks.find((task) => task.id === taskId);
     if (!previous) {
       set({ error: '任务不存在' });
@@ -869,15 +979,19 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   completeAutomation: async (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => {
     const finalOutputs = outputs && outputs.length > 0 ? outputs : resultUrl ? [resultUrl] : [];
     const current = get().tasks.find((task) => task.id === taskId);
+    if (!current || current.assignedAccountId !== accountId) throw new Error('原任务或账号已变化，未绑定完成结果');
     if (current?.mode === 'chat' && !current.runtime?.chatResponse?.text.trim()) throw new Error('Chat 最终正文尚未保存，不能标记完成');
     const completedAt = new Date().toISOString();
     const completedObservation = current?.runtime?.acceptanceObservation
       ? completeAcceptedObservation(current.runtime.acceptanceObservation, finalOutputs[0] ? artifactId(finalOutputs[0]) : undefined, completedAt)
       : undefined;
     void window.electronAPI.logs.append({ level: 'info', scope: 'automation', message: current?.mode === 'chat' ? 'Chat 最终正文已保存' : `任务完成，发现 ${finalOutputs.length} 个产物`, taskId, accountId });
-    const statusSaved = await window.electronAPI.tasks.updateStatus(taskId, 'done', resultUrl, finalOutputs);
-    if (!statusSaved.success) throw new Error('任务完成状态保存失败，保留原结果且不得重发');
-    const runtimeSaved = await window.electronAPI.tasks.updateRuntime(taskId, {
+    pendingCompletionWrites.set(taskId, { runId: current.runtime?.runId, submittedAt: current.runtime?.submittedAt });
+    let authoritative: Task | undefined;
+    try {
+      const statusSaved = await window.electronAPI.tasks.updateStatus(taskId, 'done', resultUrl, finalOutputs);
+      if (!statusSaved.success) throw new Error('任务完成状态保存失败，保留原结果且不得重发');
+      const runtimeSaved = await window.electronAPI.tasks.updateRuntime(taskId, {
       status: 'done',
       runtime: {
         stage: 'completed',
@@ -887,27 +1001,20 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         acceptanceObservation: completedObservation,
       },
       errorInfo: null,
-    });
-    if (!runtimeSaved.success) throw new Error('任务完成运行保存失败，保留原结果且不得重发');
-    const tasks = get().tasks.map((t) =>
-      t.id === taskId
-        ? {
-            ...t,
-            status: 'done' as TaskStatus,
-            result: resultUrl,
-            outputs: finalOutputs,
-            artifacts: mergeArtifacts(t, finalOutputs),
-            errorInfo: undefined,
-            runtime: t.runtime ? {
-              ...t.runtime,
-              stage: 'completed' as TaskStage,
-              message: '生成完成',
-              acceptanceObservation: completedObservation,
-            } : t.runtime,
-            updatedAt: completedAt,
-          }
-        : t
-    );
+      });
+      authoritative = runtimeSaved.task || (await window.electronAPI.tasks.list()).find((task: Task): boolean => task.id === taskId);
+      if (authoritative) { const readBack = authoritative; set({ tasks: get().tasks.map((task: Task): Task => task.id === taskId ? readBack : task) }); }
+      if (!runtimeSaved.success || !completionReadbackMatches(authoritative, current, accountId, finalOutputs)) throw new Error('任务完成结果与原运行的权威回读不一致，保留原结果且不得重发');
+      pendingCompletionWrites.delete(taskId);
+    } catch (error: unknown) {
+      try {
+        authoritative = (await window.electronAPI.tasks.list()).find((task: Task): boolean => task.id === taskId);
+        if (authoritative) { const readBack = authoritative; set({ tasks: get().tasks.map((task: Task): Task => task.id === taskId ? readBack : task) }); }
+        pendingCompletionWrites.delete(taskId);
+      } catch { /* 写入可能已经成功；门闩阻止随后异常恢复覆盖未知的完成状态。 */ }
+      throw error;
+    }
+    const tasks = get().tasks;
 
     // 清除该账号的执行状态
     const newExecuting = { ...get().executingTasks };
@@ -965,6 +1072,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       generationConfirmation?: NonNullable<TaskRunSnapshot['generationConfirmation']>;
     },
   ) => {
+    if (await completionWriteBlocksDowngrade(taskId, options?.status || 'paused')) return;
     void window.electronAPI.logs.append({ level: 'warn', scope: 'automation', message: pauseMessage, taskId, accountId });
     const now = new Date().toISOString();
     const targetStatus: TaskStatus = options?.status || 'paused';
@@ -1025,6 +1133,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   failAutomation: async (taskId: string, accountId: string, errorMsg: string, errorInfo?: TaskErrorInfo) => {
+    if (await completionWriteBlocksDowngrade(taskId, 'fail')) return;
     void window.electronAPI.logs.append({ level: 'error', scope: errorInfo?.code || 'automation', message: errorMsg, taskId, accountId });
     const now = new Date().toISOString();
     await window.electronAPI.tasks.updateStatus(taskId, 'fail', errorMsg);

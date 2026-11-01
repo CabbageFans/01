@@ -142,7 +142,7 @@ describe('正式 Chat 与产品导出', (): void => {
     const output = await writePetStoryPromptExport(directory, exported);
     const text = await fs.readFile(path.join(output, 'model-prompts.txt'), 'utf8'); const html = await fs.readFile(path.join(output, 'review.html'), 'utf8');
     expect(text).toContain('待修订 · 不可直接提交'); expect(text).toContain(original); expect(text).not.toContain('TEST失败完整候选'); expect(html).toContain('role="alert"');
-    if (kind === 'shot') expect((): unknown => compilePrompt(p, shot.id, 'video', 'reference')).toThrow('复核');
+    if (kind === 'shot') expect((): unknown => compilePrompt(p, shot.id, 'video', 'reference')).toThrow('当前视频正文存在对应原文的审查错误');
     else expect((): unknown => compileMaterialPrompt(p, material.id)).toThrow('复核');
     expect(current.final).toBe(original); expect(p.jobs[0].parsedResult?.optimized).toBe('TEST失败完整候选');
   });

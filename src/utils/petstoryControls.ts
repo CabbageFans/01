@@ -2,6 +2,8 @@
 export interface PetStoryComposerSnapshot {
   present: boolean;
   generic: boolean;
+  /** 统一上传入口是否明确允许多图；不把它冒充平台原生首尾槽。 */
+  referenceMultiple?: boolean;
   first: boolean;
   last: boolean;
   nativeLabel: boolean;
@@ -19,6 +21,7 @@ export interface PetStoryComposerSnapshot {
   referenceOptions?: { label: string; key: string; nodeId?: string }[];
   selectedReference?: boolean;
   uploadedFile?: { name: string; bytes: number; mime: string };
+  modeSelection?: 'selected' | 'missing' | 'ambiguous' | 'disabled';
 }
 export interface PetStoryComposerOperation {
   selectReference?: string;
@@ -73,17 +76,23 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
     for (const input of inputs) {
       let parent: Element | null = input.parentElement;
       for (let depth = 0; parent && root.contains(parent) && depth < 5; depth++, parent = parent.parentElement) {
-        if (parent.querySelectorAll('input[type="file"]').length !== 1) break;
+        // 整个创作栏和正文不是槽位证据，避免输入“首帧／尾帧”后反过来误识别上传方式。
+        if (parent === root || parent.querySelector('textarea,[contenteditable="true"],[contenteditable=""]') || parent.querySelectorAll('input[type="file"]').length !== 1) break;
         const ownLabel = [parent.getAttribute('aria-label'), parent.getAttribute('data-slot'), text(parent)].filter(Boolean).join(' ');
         if (label.test(ownLabel) && visible(parent)) { containers.push(parent); break; }
       }
     }
     return containers.length === 1 ? containers[0] : undefined;
   };
+  let modeSelection: PetStoryComposerSnapshot['modeSelection'];
   if (operation.selectMode) {
     const labels = operation.selectMode === 'first_last_frame' ? ['首尾帧'] : operation.selectMode === 'first_frame' ? ['首帧', '首帧生成'] : ['参考图', '参考图生成'];
     const controls = Array.from(root.querySelectorAll<HTMLElement>('button,[role="button"],[role="tab"],[role="radio"]')).filter((el): boolean => visible(el) && labels.includes(text(el)));
-    if (controls.length === 1) controls[0].click();
+    // 页面可能先挂载输入区，再挂载模式按钮。只有实际点击才消耗一次切换机会。
+    modeSelection = controls.length === 0 ? 'missing' : controls.length > 1 ? 'ambiguous' : 'disabled';
+    if (controls.length === 1 && !controls[0].matches(':disabled,[aria-disabled="true"]')) {
+      controls[0].click(); modeSelection = 'selected';
+    }
   }
   const first = slotRoot(/(?:^|\s)(?:首帧|起始帧|first[_ -]?frame)(?:\s|$)/i);
   const last = slotRoot(/(?:^|\s)(?:尾帧|结束帧|last[_ -]?frame|end[_ -]?frame)(?:\s|$)/i);
@@ -104,9 +113,11 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
       && candidates.some((image): boolean => image.naturalWidth * image.naturalHeight === best.naturalWidth * best.naturalHeight && imageSource(image) !== imageSource(best))) return undefined;
     return best;
   };
+  // 新版创作栏的一个 attachment-image-card 也可能包含缩略图和实图；按真实附件卡聚合，
+  // 再由 referenceImage 选择已解码实图，不能把卡内两张渲染图算作两个上传文件。
   const images = (container: Element): Element[] => [...new Set(Array.from(container.querySelectorAll<HTMLImageElement>('img'))
-    .map((image): Element => image.closest('[data-testid="mdbox_image"],[data-testid="image-upload-item"],[data-testid="reference-image"]') || image))].filter((node): boolean => !!referenceImage(node));
-  const pending = (container: Element): boolean => Array.from(container.querySelectorAll('[aria-busy="true"],[data-status="uploading"],[class*="uploading"],[class*="progress"]')).some(visible);
+    .map((image): Element => image.closest('[data-testid="mdbox_image"],[data-testid="image-upload-item"],[data-testid="reference-image"],[data-testid="attachment-image-card"][data-kind="image"]') || image))].filter((node): boolean => !!referenceImage(node));
+  const pending = (container: Element): boolean => Array.from(container.querySelectorAll('[aria-busy="true"],[data-status="uploading"],[role="progressbar"],[class*="uploading"],[class*="progress"]')).some(visible);
   // 指纹只在当前会话内关联顺序上传与实际预览；不持久化预览 URL。
   const fingerprint = (value: string): string => {
     let a = 2166136261; let b = 5381;
@@ -145,17 +156,24 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
     return { previews, referenceSyntax, referenceNodes, referenceOptions, selectedReference };
   };
   const readParameters = (): Pick<PetStoryComposerSnapshot, 'model' | 'duration' | 'aspectRatio' | 'durations' | 'nativeLabel' | 'firstLabel'> => {
-    const composite = Array.from(document.querySelectorAll('[data-creation-params-panel-id]')).find(visible);
-  if (operation.openDurations && composite && visible(composite)) (composite as HTMLElement).click();
-  const model = Array.from(document.querySelectorAll('[data-input-engine-actionbar-control-key="video-model"]')).find(visible);
-  const compositeMatch = composite && visible(composite) ? text(composite).match(/^(自动|[0-9]+:[0-9]+)\s*·\s*([0-9]+)s$/) : null;
-  const visibleText = Array.from(root.querySelectorAll('button,[role="button"],[role="tab"],label,span')).filter(visible).map(text).join(' ');
-  const durationNodes = Array.from(document.querySelectorAll('[role="option"],[role="menuitem"],[data-state],button')).filter(visible);
-  const durations = [...new Set([...(compositeMatch ? [Number(compositeMatch[2])] : []), ...durationNodes.flatMap((el): number[] => {
-    const match = text(el).match(/^(\d+)\s*(?:s|秒)$/);
-    return match && el.getAttribute('aria-disabled') !== 'true' ? [Number(match[1])] : [];
-  })])];
-    return { model: model && visible(model) ? text(model).replace(/^模型\s*/, '') : '', duration: compositeMatch ? Number(compositeMatch[2]) : 0, aspectRatio: compositeMatch?.[1] || '', durations, nativeLabel: /首尾帧/.test(visibleText), firstLabel: /首帧/.test(visibleText) };
+    const currentControl = (element: Element): boolean => visible(element) && !element.closest('[role="menu"],[role="listbox"],[role="dialog"],[role="option"],[role="menuitem"],[data-radix-popper-content-wrapper]');
+    const innermost = (elements: Element[]): Element[] => elements.filter((element): boolean => !elements.some((other): boolean => other !== element && element.contains(other)));
+    const compositeValue = (element: Element): RegExpMatchArray | null => text(element).normalize('NFKC').replace(/\s*:\s*/g, ':').match(/^(自动|[0-9]+:[0-9]+)\s*[·•∙|]\s*([0-9]+)\s*(?:s|秒)$/i);
+    // 只回读本次输入区的唯一实际控件。新版参数按钮改用 render-entry-key，
+    // 包装层与按钮可同时携带新旧标记，弹层／其他输入区不提供生成参数证据。
+    const composites = innermost(Array.from(root.querySelectorAll('[data-creation-params-panel-id],[data-input-engine-actionbar-render-entry-key="video-generation-params-panel"]')).filter((element): boolean => currentControl(element) && !!compositeValue(element)));
+    const composite = composites.length === 1 ? composites[0] : undefined;
+    if (operation.openDurations && composite) (composite as HTMLElement).click();
+    const models = innermost(Array.from(root.querySelectorAll('[data-input-engine-actionbar-control-key="video-model"]')).filter(currentControl));
+    const model = models.length === 1 ? models[0] : undefined;
+    const compositeMatch = composite ? compositeValue(composite) : null;
+    const visibleText = Array.from(root.querySelectorAll('button,[role="button"],[role="tab"],label,span')).filter(currentControl).map(text).join(' ');
+    const durationNodes = Array.from(root.querySelectorAll('[role="option"],[role="menuitem"],[data-state],button')).filter(currentControl);
+    const durations = [...new Set([...(compositeMatch ? [Number(compositeMatch[2])] : []), ...durationNodes.flatMap((element): number[] => {
+      const match = text(element).normalize('NFKC').match(/^(\d+)\s*(?:s|秒)$/);
+      return match && element.getAttribute('aria-disabled') !== 'true' ? [Number(match[1])] : [];
+    })])];
+    return { model: model ? text(model).replace(/^模型\s*/, '') : '', duration: compositeMatch ? Number(compositeMatch[2]) : 0, aspectRatio: compositeMatch?.[1] || '', durations, nativeLabel: /首尾帧/.test(visibleText), firstLabel: /首帧/.test(visibleText) };
   };
   const uploadFile = (): Pick<PetStoryComposerSnapshot, 'uploaded' | 'uploadedFile'> => {
   let uploaded = false; let uploadedFile: PetStoryComposerSnapshot['uploadedFile'];
@@ -176,5 +194,7 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
     return { uploaded, ...(uploadedFile ? { uploadedFile } : {}) };
   };
   return { ...readParameters(), present: true, generic, first: !!first, last: !!last && first !== last,
+    referenceMultiple: generic ? inputs[0].multiple : false,
+    ...(modeSelection ? { modeSelection } : {}),
     count: target ? images(target).length : images(root).length, pending: pending(target || root), ...uploadFile(), ...readReferences() };
 }

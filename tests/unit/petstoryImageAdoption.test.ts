@@ -108,10 +108,10 @@ describe('图片候选与明确采用', (): void => {
     p = await f.projects.addShotImage(p.id, p.revision, 'shot-1', 'firstFrame', blue); const replacement = p.assets.at(-1)!;
     expect(selectedShotImageId(p, 'shot-1', 'firstFrame')).toBe(first.id);
     p = await f.projects.adoptImage(p.id, p.revision, { shotId: 'shot-1', kind: 'firstFrame' }, replacement.id);
-    expect(p.assets.find((a): boolean => a.id === last.id)?.needsReview).toBe(true);
+    expect(p.assets.find((a): boolean => a.id === last.id)?.needsReview).toBeUndefined();
     expect(p.assets.some((a): boolean => a.id === first.id)).toBe(true);
     expect(selectedShotImageId(p, 'shot-1', 'firstFrame')).toBe(replacement.id);
-    expect(selectedShotImageId(p, 'shot-1', 'lastFrame')).toBeUndefined();
+    expect(selectedShotImageId(p, 'shot-1', 'lastFrame')).toBe(last.id);
   });
   it('过期版本、变更对象、篡改文件、跨目标采用均不改变正式图片', async (): Promise<void> => {
     const f = await fixture(); let p = await f.projects.addMaterialImage(f.p.id, f.p.revision, 'prop:box', red); const asset = p.assets.at(-1)!;
@@ -136,7 +136,7 @@ describe('图片候选与明确采用', (): void => {
     p = await f.projects.adoptImage(p.id, p.revision, { shotId: 'shot-1', kind: 'firstFrame' }, frame.id);
     expect(selectedShotImageId(p, 'shot-1', 'firstFrame')).toBe(frame.id);
   });
-  it('基础素材替换后相关关键帧保留但待复核，无关镜头文件不受影响', async (): Promise<void> => {
+  it('基础素材替换后保留已采用关键帧，无需重复复核', async (): Promise<void> => {
     const f = await fixture(); let p = await f.projects.addMaterialImage(f.p.id, f.p.revision, 'character:actor', red);
     p = await f.projects.approveMaterials(p.id, p.revision, [{ materialId: 'character:actor', assetId: p.assets.at(-1)!.id }]);
     p = await f.projects.addShotImage(p.id, p.revision, 'shot-1', 'firstFrame', red); const frame = p.assets.at(-1)!;
@@ -144,7 +144,8 @@ describe('图片候选与明确采用', (): void => {
     p = await f.projects.addMaterialImage(p.id, p.revision, 'character:actor', blue); const replacement = p.assets.at(-1)!;
     expect(p.assets.find((a): boolean => a.id === frame.id)?.needsReview).toBeUndefined();
     p = await f.projects.adoptImage(p.id, p.revision, { materialId: 'character:actor' }, replacement.id);
-    expect(p.assets.find((a): boolean => a.id === frame.id)?.needsReview).toBe(true); expect(p.assets).toHaveLength(3);
+    expect(p.assets.find((a): boolean => a.id === frame.id)?.needsReview).toBeUndefined(); expect(p.assets).toHaveLength(3);
+    expect(selectedShotImageId(p, 'shot-1', 'firstFrame')).toBe(frame.id);
   });
   it('新方案删除旧镜头时只清理当前采用指针，旧文件及记录仍可读取', async (): Promise<void> => {
     const f = await fixture(); let p = await f.projects.addShotImage(f.p.id, f.p.revision, 'shot-1', 'firstFrame', red);

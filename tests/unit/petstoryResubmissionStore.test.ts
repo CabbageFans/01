@@ -62,7 +62,7 @@ describe('显式重发沿既有制作绑定与执行链启动', (): void => {
     if (condition === 'generation-confirmation') tasks[0].status = 'waiting_generation_confirmation';
     await usePetStoryStore.getState().resubmitProduction(request); expect(resubmit).toHaveBeenCalledOnce(); expect(start).toHaveBeenCalledOnce();
   });
-  it('缺少具体原会话地址时不进入假观察，原停止记录仍可确认重发', async (): Promise<void> => {
+  it('缺少具体原会话地址可显式核对当前页；读取结束仍不明则暂停并保留确认重发', async (): Promise<void> => {
     const before = structuredClone(tasks[0]);
     const resume = vi.fn(async (): Promise<PetStoryProductionResult> => { project = structuredClone(project); project.production!.state = 'running'; return { success: true, project }; });
     window.electronAPI.petstory.resumeProduction = resume;
@@ -71,8 +71,11 @@ describe('显式重发沿既有制作绑定与执行链启动', (): void => {
     advance.mockImplementationOnce(async (): Promise<PetStoryProductionResult> => ({ success: true, project, taskId: before.id, action: 'observe' }));
     const updateRuntime = vi.fn(async (): Promise<boolean> => true); useTaskStore.setState({ updateTaskRuntime: updateRuntime });
     await usePetStoryStore.getState().resumeProduction();
-    expect(updateRuntime).not.toHaveBeenCalled(); expect(window.dispatchEvent).not.toHaveBeenCalled(); expect(tasks[0]).toEqual(before);
-    expect(project.production!.state).toBe('paused'); expect(usePetStoryStore.getState().error).toContain('具体会话');
+    expect(updateRuntime).toHaveBeenCalledTimes(1); expect(tasks[0]).toEqual(before); expect(resubmit).not.toHaveBeenCalled(); expect(start).not.toHaveBeenCalled();
+    const event = vi.mocked(window.dispatchEvent).mock.calls.find(([item]): boolean => item.type === 'reconcile-task-submission')?.[0] as CustomEvent<{ taskId: string; useCurrentPage: boolean; onSettled: () => Promise<void> }>;
+    expect(event.detail).toMatchObject({ taskId: before.id, useCurrentPage: true });
+    await event.detail.onSettled();
+    expect(project.production!.state).toBe('paused'); expect(pause).toHaveBeenCalledOnce();
     await usePetStoryStore.getState().resubmitProduction(request); expect(resubmit).toHaveBeenCalledOnce(); expect(start).toHaveBeenCalledOnce();
   });
   it.each(['tuple', 'accepted', 'observing', 'verification', 'login'] as const)('%s 状态变化在API前拒绝，不绕过原任务或验证', async (condition): Promise<void> => {

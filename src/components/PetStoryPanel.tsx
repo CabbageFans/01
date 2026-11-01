@@ -6,7 +6,7 @@ import { PetStoryPlanAssets } from './PetStoryPlanAssets';
 import { PetStoryMaterials } from './PetStoryMaterials';
 import { PetStoryCanvas } from './PetStoryCanvas';
 import { isTaskConversationMissing } from '../utils/taskConversationLocator';
-import { isCanvasPlanLocked } from './petStoryCanvasShared';
+import { isCanvasPlanLocked, petStoryVideoRecoveryMessage } from './petStoryCanvasShared';
 import { PetStoryOpenProject } from './PetStoryOpenProject';
 import { usePetStoryStore, petStoryPromptActionTargets } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
@@ -80,7 +80,7 @@ export const ProductionControls: React.FC<{ project: PetStoryProject; disabled: 
         <Select aria-label={`${shot.id}批准备选`} className="w-64" value={state.fallbacks[shot.id] || 'none'} disabled={disabled} options={[{ value: 'none', label: '不允许降级（必须首尾帧时保留此项）' }, { value: 'first_frame', label: '入口不可用时批准改为首帧' }, { value: 'reference', label: '入口不可用时批准改为参考图' }]} onChange={(mode: string): void => state.setFallback(shot.id, mode === 'none' ? undefined : mode as 'first_frame' | 'reference')} />
       </Space>)}
       {view === 'prepare' && readyForShots && <Button disabled={disabled || !materialsReady} onClick={(): void => { void state.previewProduction(); }}>查看本次实际制作数量</Button>}
-      {production?.phase === 'materials' && <Alert type={production.state === 'paused' ? 'warning' : 'info'} message={production.message} />}
+      {production?.phase === 'materials' && <Alert type={production.state === 'paused' ? 'warning' : 'info'} message={petStoryVideoRecoveryMessage(production.message)} />}
       {counts && <Alert type="info" message={`${counts.shots} 个镜头，${counts.supporting} 个必要配角；计划新增角色图 ${counts.newCharacters}、首帧 ${counts.firstFrames}、尾帧 ${counts.lastFrames}；视频请求 ${counts.videos}。复用素材不重复计入新增。`} />}
       <Space wrap>
         {view === 'prepare' && readyForShots && <Button type="primary" disabled={disabled || !counts || !materialsReady} onClick={(): void => { void state.startProduction(); }}>确认素材，继续镜头制作</Button>}
@@ -94,7 +94,7 @@ export const ProductionControls: React.FC<{ project: PetStoryProject; disabled: 
       </Space>
       {view === 'prepare' && showMaterials && <PetStoryMaterials project={project} disabled={disabled} />}
       {production && production.phase !== 'materials' && view === 'progress' && <>
-        <Alert type={production.state === 'paused' ? 'warning' : production.state === 'complete' ? 'success' : 'info'} message={`${production.state === 'complete' ? '当前批次已完成下载校验；全项目进度以逐镜成果为准' : `${production.state === 'paused' ? '制作已暂停' : '正在制作镜头素材'} · ${production.message}`}`} />
+        <Alert type={production.state === 'paused' ? 'warning' : production.state === 'complete' ? 'success' : 'info'} message={`${production.state === 'complete' ? '当前批次已完成下载校验；全项目进度以逐镜成果为准' : `${production.state === 'paused' ? '制作已暂停' : '正在制作镜头素材'} · ${petStoryVideoRecoveryMessage(production.message)}`}`} />
         {project.plan?.shots.map((shot): React.ReactNode => {
           const media = production.shots[shot.id];
           const video = project.assets.find((a): boolean => a.id === media?.videoId);
@@ -132,7 +132,19 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
   const [targetError, setTargetError] = useState(''); const [candidates, setCandidates] = useState<string[]>([]);
   const analysisBefore = useRef<string>();
   const journey = p ? selectPetStoryJourney(p) : undefined;
-  const navigate = (next: PetStoryJourneyStage, objectId?: string, kind?: import('@doubao-studio/contracts').PetStoryPromptKind): void => { setStage(JOURNEY_STAGES.indexOf(next)); if (!objectId) return; if (next !== 'materials') setSelectedShotId(objectId); requestAnimationFrame((): void => { const id = next === 'materials' ? `material-${objectId}` : kind ? `shot-media-${objectId}-${kind}` : ''; if (id) document.getElementById(id)?.scrollIntoView({block:'center',behavior:'smooth'}); }); };
+  const canvasMode = !!p && [3, 4, 6].includes(stage);
+  // 只有画布阶段使用剩余空间布局；其他业务页继续保留正常滚动。
+  useEffect((): (() => void) => {
+    window.dispatchEvent(new CustomEvent('petstory-canvas-mode', { detail: { active: canvasMode } }));
+    return (): void => { window.dispatchEvent(new CustomEvent('petstory-canvas-mode', { detail: { active: false } })); };
+  }, [canvasMode]);
+  const navigate = (next: PetStoryJourneyStage, objectId?: string, kind?: import('@doubao-studio/contracts').PetStoryPromptKind): void => {
+    setStage(JOURNEY_STAGES.indexOf(next)); if (!objectId) return;
+    if (next !== 'materials') setSelectedShotId(objectId);
+    // 画布镜头交给viewport hook定位，不能再滚动其裁剪容器而带走固定导航。
+    if (next === 'keyframes' || next === 'videos') return;
+    requestAnimationFrame((): void => { const id = next === 'materials' ? `material-${objectId}` : kind ? `shot-media-${objectId}-${kind}` : ''; if (id) document.getElementById(id)?.scrollIntoView({block:'center',behavior:'smooth'}); });
+  };
   useEffect((): void => {
     if (!p) return;
     if (stageProjectId.current !== p.id) {
@@ -151,7 +163,7 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
   }, []);
   useEffect(() => {
     let active = true; setPromptTargets([]); setCandidates([]); setTargetError('');
-    if (p?.plan) void window.electronAPI.petstory.promptStageTargets(p.id, p.revision).then((result): void => { if (!active) return; if (result.success) { setPromptTargets(result.promptTargets || []); setCandidates(result.pendingCandidateJobIds || []); } else setTargetError(result.error || '当前文字目标尚未核对'); }).catch((): void => { if (active) setTargetError('当前文字目标读取失败，请重新打开项目后核对'); });
+    if (p?.plan) void usePetStoryStore.getState().inspectPromptStageTargets().then((result): void => { if (!active) return; if (result.success) { setPromptTargets(result.promptTargets || []); setCandidates(result.pendingCandidateJobIds || []); } else setTargetError(result.error || '当前文字目标尚未核对'); }).catch((): void => { if (active) setTargetError('当前文字目标读取失败，请重新打开项目后核对'); });
     return (): void => { active = false; };
   }, [p?.id, p?.revision, p?.plan]);
   useEffect((): void => {
@@ -212,24 +224,24 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
   const mainBlocked = state.busy || (stage === 0 ? !sourceText.trim() || pending || planLocked(p) : stage === 1 ? !p?.plan || dirty || sourceDirty : runsText && !returningToMaterials ? drafts.length > 0 || state.promptBatch.status === 'running' : false);
   const stageReason = stage === 0 ? !sourceText.trim() ? '请先粘贴完整剧本。' : pending ? '正在处理原文字任务，请在下方查看进度或恢复原回复。' : '分析前会保存剧本，再向豆包发送本次请求。' : stage === 1 ? p?.storyApproval ? '当前采用方案已确认为制作依据，可继续准备基础素材。' : '在下方审阅本轮方案，确认并采用后进入素材准备。' : stage === 2 && p?.storyApproval ? '按素材状态准备图片，待确认的图片请先查看并采用。' : stage >= 2 && stage <= 4 ? !p?.storyApproval ? '请先查看并确认方案，再准备素材。' : targetError || (returningToMaterials ? '基础素材文字尚有缺项，请先进入素材准备补齐。' : candidates.length ? `有 ${candidates.length} 条新候选待选择；保留当前手改正文，采用与确认分开。` : runsText ? `还缺少${scopeText}提示词。生成后请查看并采用满意的回复。` : '生成或上传图片后，先查看，再采用。') : '逐镜检查图片、视频、下载与质量。';
   const openBound = (): void => { if (p && accounts.some((account): boolean => account.id === p.accountId)) { const interactiveId = findInteractiveAccountId(useTaskStore.getState().accountAutomationState); if (!canSelectAccount(p.accountId, interactiveId)) { message.warning(`任务正在 ${accounts.find((account): boolean => account.id === interactiveId)?.name || '当前账号'} 配置或提交，进入生成阶段后即可切换`); return; } useAccountStore.getState().selectAccount(p.accountId); revealBrowser(); } };
-  return <section className="petstory-panel space-y-4" aria-label="短剧创作">
+  return <section className={`petstory-panel ${canvasMode ? 'is-canvas-workspace' : 'space-y-4'}`} aria-label="短剧创作">
     {!p && <Space wrap><PetStoryCreateProject primary disabled={drafts.length > 0} /><PetStoryOpenProject disabled={state.busy || drafts.length > 0} /></Space>}
-    {state.error && stage !== 2 && <Alert type="error" showIcon message={state.error} />}{state.exportStatus && <Alert type="info" message={state.exportStatus} />}
+    {state.error && stage !== 2 && !canvasMode && <Alert type="error" showIcon message={petStoryVideoRecoveryMessage(state.error)} />}{state.exportStatus && !canvasMode && <Alert type="info" message={state.exportStatus} />}
     {!p && <Card title="从剧本开始制作"><p>新建短剧项目，在弹窗中选择执行账号、关联项目和保存目录，然后粘贴完整剧本。已有项目可直接打开继续。</p></Card>}
     {p && <>
-      <div className="petstory-project-heading"><div><h2>{state.projectName || '当前短剧'}</h2><p>{accountName} · {projects.find((project): boolean => project.id === p.studioProjectId)?.name || '请核对关联项目'}</p></div><div className="petstory-project-tools"><span>{drafts.length ? '有未保存修改' : '已保存'}</span>{stage === 2 ? <PetStoryOpenProject disabled={state.busy || drafts.length > 0} /> : <details className="petstory-more"><summary aria-label="项目更多操作">更多</summary><div>
+      {!canvasMode && <div className="petstory-project-heading"><div><h2>{state.projectName || '当前短剧'}</h2><p>{accountName} · {projects.find((project): boolean => project.id === p.studioProjectId)?.name || '请核对关联项目'}</p></div><div className="petstory-project-tools"><span>{drafts.length ? '有未保存修改' : '已保存'}</span>{stage === 2 ? <PetStoryOpenProject disabled={state.busy || drafts.length > 0} /> : <details className="petstory-more"><summary aria-label="项目更多操作">更多</summary><div>
         <PetStoryCreateProject disabled={drafts.length > 0} /><PetStoryOpenProject disabled={state.busy || drafts.length > 0} />
         <Button type="text" onClick={(): void => setStage(6)}>画布全景</Button><Button type="text" onClick={(): void => setStage(7)}>编辑故事与镜头</Button>
         <Button type="text" disabled={state.busy || drafts.length > 0} onClick={(): void => { void state.exportPrompts(); }}>导出提示词与素材清单</Button>
         <Button type="text" onClick={openBound}>查看账号浏览器</Button><span>当前浏览：{accounts.find((account): boolean => account.id === browsingId)?.name || '未选择'}</span>
-      </div></details>}</div></div>
+      </div></details>}</div></div>}
       <div className="journey-sticky" aria-label="当前步骤与推荐操作">
         <nav className="petstory-stages" aria-label="短剧制作阶段">{STAGE_LABELS.map((label: string,index: number): React.ReactNode => <button key={label} className={stage === index ? 'active' : ''} aria-current={stage === index ? 'step' : undefined} onClick={(): void => setStage(index)}><span>{index+1}</span>{label}</button>)}</nav>
-        <div className="journey-recommendation"><div><strong>当前：{STAGE_LABELS[stage] || (stage === 6 ? '画布全景' : '高级编辑')}</strong><p>{stageReason}</p><small>已确认基础图 {journey?.counts.materials.confirmed}/{journey?.counts.materials.total} · 正文匹配关键帧 {journey?.counts.keyframes.current}/{journey?.counts.keyframes.total} · 正文匹配视频 {journey?.counts.videos.current}/{journey?.counts.videos.total}</small></div>{stage < 5 && stage !== 1 && stage !== 2 && <Button type="primary" disabled={mainBlocked} loading={state.busy} onClick={(): void => { void runMain(); }}>{mainText}</Button>}</div>
+        {!canvasMode && <div className="journey-recommendation"><div><strong>当前：{STAGE_LABELS[stage] || (stage === 6 ? '画布全景' : '高级编辑')}</strong><p>{stageReason}</p><small>已确认基础图 {journey?.counts.materials.confirmed}/{journey?.counts.materials.total} · 正文匹配关键帧 {journey?.counts.keyframes.current}/{journey?.counts.keyframes.total} · 正文匹配视频 {journey?.counts.videos.current}/{journey?.counts.videos.total}</small></div>{stage < 5 && stage !== 1 && stage !== 2 && <Button type="primary" disabled={mainBlocked} loading={state.busy} onClick={(): void => { void runMain(); }}>{mainText}</Button>}</div>}
         {drafts.length >0 && <Alert type="warning" message="以下对象有未保存修改；草稿随页面保留" description={<Space direction="vertical">{drafts.map((draft): React.ReactNode => <Space wrap key={draft.id}><strong>{draft.label}</strong><Button size="small" disabled={state.busy} onClick={(): void => { void draft.actions.current.save(); }}>保存并继续</Button><Button size="small" onClick={(): void => draft.actions.current.locate()}>查看修改</Button><Button size="small" disabled={state.busy} onClick={(): void => draft.actions.current.discard()}>放弃修改</Button></Space>)}</Space>} />}
       </div>
-      {notice && <Alert type="info" message={notice} action={notice.includes('方案已就绪') ? <Button onClick={(): void => setStage(1)}>查看方案结果</Button> : undefined} />}
-      {stage !== 2 && <PetStoryCurrentTasks project={p} hidePlanRequests={stage === 1} onContinue={(): void => { void state.continuePromptStage(); }} />}
+      {notice && !canvasMode && <Alert type="info" message={notice} action={notice.includes('方案已就绪') ? <Button onClick={(): void => setStage(1)}>查看方案结果</Button> : undefined} />}
+      {stage !== 2 && !canvasMode && <PetStoryCurrentTasks project={p} hidePlanRequests={stage === 1} onContinue={(): void => { void state.continuePromptStage(); }} />}
       <div hidden={stage !== 0} className={stage === 0 ? 'stage-content space-y-4':'page-hidden'}>
         <Card title="完整剧本" className="petstory-script-card">
           <div className="petstory-script-field">
@@ -243,7 +255,7 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
         <PetStoryRuntime project={p} disabled={state.busy || dirty || sourceDirty || planLocked(p)} showPlanCandidates={false} />
       </div>
       <div id="petstory-materials" hidden={stage !== 2} className={stage === 2 ? 'stage-content':'page-hidden'}><PetStoryMaterials project={p} disabled={state.busy || dirty} generationBlocked={sourceDirty} onNavigate={(target,objectId): void => navigate(target==='plan'?'plan':'keyframes',objectId)} /></div>
-      <div hidden={![3,4,6].includes(stage)} className={[3,4,6].includes(stage)?'stage-content':'page-hidden'}><PetStoryCanvas key={p.id} project={p} legacyDirty={dirty || sourceDirty} onDirtyChange={setCanvasDirty} materials={null} controls={null} view={stage===3?'keyframes':stage===4?'videos':'panorama'} activeShotId={selectedShotId} onNavigate={navigate} /></div>
+      <div hidden={![3,4,6].includes(stage)} className={canvasMode?'stage-content canvas-stage-content':'page-hidden'}><PetStoryCanvas key={p.id} project={p} promptTargets={promptTargets} legacyDirty={dirty || sourceDirty} onDirtyChange={setCanvasDirty} materials={null} controls={null} view={stage===3?'keyframes':stage===4?'videos':'panorama'} activeShotId={selectedShotId} onNavigate={navigate} /></div>
       {stage === 5 && <PetStoryResults project={p} onNavigate={navigate} />}
       <div id="petstory-advanced" tabIndex={-1} className={stage === 7 ? 'stage-content space-y-4' : 'page-hidden'}>
       {!plan && <Empty description="保存完整剧本并生成制作方案后，在这里整理角色与分镜" />}

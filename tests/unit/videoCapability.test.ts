@@ -439,7 +439,8 @@ describe('新版视频控件适配契约', () => {
     expect(injected).toContain('data-valid-btn="mode-select-action-btn"');
     expect(injected).toContain('data-input-engine-actionbar-control-key="video-model"');
     expect(injected).toContain('data-creation-params-panel-id');
-    expect(injected).toContain('findVisibleModeMenuOption(5000)');
+    expect(injected).toContain('data-input-engine-actionbar-render-entry-key="video-generation-params-panel"');
+    expect(injected).toContain('findVisibleModeMenuOption(5000, initialElement)');
     expect(injected).toContain('waitForVideoControls(15000)');
   });
 
@@ -464,9 +465,9 @@ describe('新版视频控件适配契约', () => {
     expect(bridgeSource).toContain('{ timeoutMs: 30_000, stableSamples: 3 }');
     expect(bridgeSource).toContain('throw new VideoControlReadinessError');
     expect(bridgeSource).toContain("'submission_controls'");
-    expect(bridgeSource).toContain('const waitForExactOverlayOption = async');
-    expect(bridgeSource).toContain("waitForExactOverlayOption(modelLabel, 'video_model')");
-    expect(bridgeSource).toContain('const waitForModelVerification = async');
+    expect(bridgeSource).toContain('const activate = async');
+    expect(bridgeSource).toContain("await activate('model_option', modelLabel, 'model')");
+    expect(bridgeSource).toContain("await waitForValue('model', (snapshot): boolean => snapshot.model === modelLabel)");
   });
 
   it('页面控件延迟挂载时持续轮询并在出现后立即成功', async () => {

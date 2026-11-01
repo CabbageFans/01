@@ -11,7 +11,7 @@ export const ReviewIssueSelection: React.FC<{
   const selectedIssueIds = issues.filter((issue): boolean => choices[issue.id] ?? issue.severity === 'error').map((issue): string => issue.id);
   const blocked = disabled;
   return <div className="canvas-review-selection" aria-label={`${targetLabel}修订问题选择`}>
-    <p className="canvas-hint">{targetLabel} · 默认只选择错误；提醒与建议需主动勾选。本次修订只处理所选问题，每个原请求最多一次自动修订；主动新一轮会保留上轮记录。</p>
+    <p className="canvas-hint">{targetLabel} · 默认只选择错误；提醒与建议需主动勾选。本次修订只处理所选问题，可修复的校验缺项会在后台继续处理，直至取得合格候选；各轮记录保留。</p>
     {issues.map((issue): React.ReactNode => <div className="canvas-review-issue" key={issue.id}>
       <Checkbox data-issue-id={issue.id} checked={selectedIssueIds.includes(issue.id)} disabled={blocked} onChange={(event): void => setChoices((previous): Record<string, boolean> => ({ ...previous, [issue.id]: event.target.checked }))}>
         <Tag color={issue.severity === 'error' ? 'orange' : 'blue'}>{issue.severity === 'error' ? '错误' : issue.severity === 'warning' ? '提醒' : '建议'}</Tag>{issue.impact}

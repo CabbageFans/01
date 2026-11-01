@@ -8,7 +8,7 @@ import TaskConsole from './components/TaskConsole';
 import { AccountList } from './components/AccountList';
 import { WorkspaceOverview } from './components/WorkspaceOverview';
 import { observePetStoryTasks, usePetStoryStore } from './store/usePetStoryStore';
-import { hasBackgroundImageExecution, hasForegroundAccountInteraction, isBackgroundImageOperationTask } from './utils/petstoryBackground';
+import { hasBackgroundPetStoryExecution, hasForegroundAccountInteraction, isBackgroundPetStoryTask } from './utils/petstoryBackground';
 import { Toolbar } from './components/Toolbar';
 import { useAccountStore } from './store/useAccountStore';
 import { useTaskStore } from './store/useTaskStore';
@@ -28,6 +28,8 @@ const App: React.FC = (): React.ReactElement => {
   const [collapsed, setCollapsed] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [browserWide, setBrowserWide] = useState(false);
+  const [canvasMode, setCanvasMode] = useState(false);
+  const canvasWorkspace = page === 'create' && canvasMode;
   const pageBeforeBrowser = useRef<WorkspacePage>('create');
   const changePage = (next: WorkspacePage): void => {
     if (next === 'accounts' && page !== 'accounts') pageBeforeBrowser.current = page;
@@ -56,14 +58,17 @@ const App: React.FC = (): React.ReactElement => {
       setPage((current: WorkspacePage): WorkspacePage => { if (detail.page === 'accounts' && current !== 'accounts') pageBeforeBrowser.current = current; return detail.page; });
     };
     const reveal = (): void => setBrowserOpen(true);
+    const canvasModeChanged = (event: Event): void => setCanvasMode((event as CustomEvent<{ active?: boolean }>).detail?.active === true);
     const revealReconciliation = (event: Event): void => {
       const taskId = (event as CustomEvent<{ taskId?: string }>).detail?.taskId;
-      if (!isBackgroundImageOperationTask(usePetStoryStore.getState().project, taskId)) setBrowserOpen(true);
+      const task = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+      if (!isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, task)) setBrowserOpen(true);
     };
     const revealWide = (): void => { setBrowserWide(true); setBrowserOpen(true); };
     const escape = (event: KeyboardEvent): void => { if (event.key === 'Escape' && !document.querySelector('.ant-modal-wrap:not([style*="display: none"])')) setBrowserOpen(false); };
     window.addEventListener('navigate-workspace', navigate);
     window.addEventListener('reveal-workspace-browser', reveal);
+    window.addEventListener('petstory-canvas-mode', canvasModeChanged);
     // 原会话／人工处理仍由 BrowserPanel 执行；这里仅展开可见区域。
     window.addEventListener('open-task-conversation', reveal);
     window.addEventListener('reconcile-task-submission', revealReconciliation);
@@ -72,6 +77,7 @@ const App: React.FC = (): React.ReactElement => {
     return (): void => {
       window.removeEventListener('navigate-workspace', navigate);
       window.removeEventListener('reveal-workspace-browser', reveal);
+      window.removeEventListener('petstory-canvas-mode', canvasModeChanged);
       window.removeEventListener('open-task-conversation', reveal);
       window.removeEventListener('reconcile-task-submission', revealReconciliation);
       window.removeEventListener('adapter-self-check', revealWide);
@@ -84,16 +90,17 @@ const App: React.FC = (): React.ReactElement => {
   const activeImageOperationId = usePetStoryStore((s) => s.activeImageOperationId);
   const previousTaskStatuses = useRef<Map<string, Task['status']>>(new Map());
   useEffect((): void => {
-    // 只响应本次执行新出现的人工处理状态，历史等待项不随图片阶段刷新反复展开。
+    // 只有前台任务的新等待状态可以自动展开；画布／图片任务在节点提示，用户主动去处理。
     const enteredWaiting = tasks.some((task: Task): boolean => previousTaskStatuses.current.has(task.id)
       && previousTaskStatuses.current.get(task.id) !== task.status
-      && ['waiting_verification', 'waiting_generation_confirmation'].includes(task.status));
+      && ['waiting_verification', 'waiting_generation_confirmation'].includes(task.status)
+      && !isBackgroundPetStoryTask(usePetStoryStore.getState().project, task.id, task));
     previousTaskStatuses.current = new Map(tasks.map((task: Task): [string, Task['status']] => [task.id, task.status]));
     if (enteredWaiting) setBrowserOpen(true);
   }, [tasks]);
   const interactive = Object.values(autoStates).some((state): boolean => state === 'injecting' || state === 'submitting');
   const foregroundInteractive = hasForegroundAccountInteraction(petStoryProject, tasks, autoStates, executingTasks);
-  const backgroundInteractive = !foregroundInteractive && hasBackgroundImageExecution(petStoryProject, tasks, activeImageOperationId);
+  const backgroundInteractive = !foregroundInteractive && hasBackgroundPetStoryExecution(petStoryProject, tasks, activeImageOperationId);
   const browserVisible = browserOpen || foregroundInteractive;
 
   // ---- 初始化加载 ----
@@ -174,25 +181,25 @@ const App: React.FC = (): React.ReactElement => {
       <div className="studio-main">
         <header className="context-bar">
           <strong>创作工作台</strong>{page !== 'overview' && <><span className="context-divider">/</span><span className="context-page">{info.label}</span></>}
-          <div className="context-actions">{attention > 0 && <Button type="text" className="context-attention" onClick={(): void => { setPage('tasks'); window.dispatchEvent(new CustomEvent('filter-attention-tasks')); }}>待处理 {attention}</Button>}<span className="context-account"><span className="context-account-dot" />{activeAccount?.name || '尚未选择账号'}</span><Button icon={<MessageOutlined />} aria-pressed={browserVisible} onClick={(): void => { setBrowserWide(false); setBrowserOpen(!browserOpen); }}>豆包 Chat</Button>
+          <div className="context-actions">{attention > 0 && !canvasWorkspace && <Button type="text" className="context-attention" onClick={(): void => { setPage('tasks'); window.dispatchEvent(new CustomEvent('filter-attention-tasks')); }}>待处理 {attention}</Button>}<span className="context-account"><span className="context-account-dot" />{activeAccount?.name || '尚未选择账号'}</span><Button icon={<MessageOutlined />} aria-pressed={browserVisible} onClick={(): void => { setBrowserWide(false); setBrowserOpen(!browserOpen); }}>豆包 Chat</Button>
             {!isMac && <div className="window-controls"><Button type="text" aria-label="最小化" icon={<MinusOutlined />} onClick={(): void => window.electronAPI.system.minimize()} /><Button type="text" aria-label="最大化" icon={<BorderOutlined />} onClick={(): void => window.electronAPI.system.toggleMaximize()} /><Button type="text" aria-label="关闭" icon={<CloseOutlined />} onClick={(): void => window.electronAPI.system.close()} /></div>}
           </div>
         </header>
-        <div className={`workspace-body ${page === 'accounts' ? 'browser-full' : browserVisible ? 'browser-open' : ''}`}>
-          <main className="workspace-content">
+        <div className={`workspace-body ${canvasWorkspace ? 'is-canvas-workspace' : ''} ${page === 'accounts' ? 'browser-full' : browserVisible ? 'browser-open' : ''}`}>
+          <main className={`workspace-content ${canvasWorkspace ? 'is-canvas-workspace' : ''}`}>
             {page !== 'create' && <div className="page-heading"><div><h1>{page === 'overview' ? '创作工作台' : info.label}</h1><p>{page === 'overview' ? '从一个故事，开始下一部短剧。' : info.description}</p></div></div>}
             <Toolbar page={page} />
             {/* 新建弹窗的账号／目录选择与创作草稿一样，切去登录后仍保留。 */}
             <div className={page === 'overview' ? '' : 'page-hidden'}><WorkspaceOverview /></div>
             {/* 业务表单也保留在原位置，导航不会丢失未保存内容。 */}
             <div className={page === 'tasks' ? 'page-fill' : 'page-hidden'}><TaskConsole view="tasks" /></div>
-            <div className={page === 'create' ? 'page-fill' : 'page-hidden'}><PetStoryPanel /></div>
+            <div className={page === 'create' ? `page-fill ${canvasWorkspace ? 'is-canvas-workspace' : ''}` : 'page-hidden'}><PetStoryPanel /></div>
             <div className={page === 'accounts' ? 'account-workspace' : 'page-hidden'}><AccountList /><p className="account-note">选择账号后，在右侧处理登录或查看会话。正在配置或提交时，请先等待当前操作结束。</p></div>
           </main>
-          {/* 唯一常驻宿主。图片任务保留视口交集与原生输入，由不透明工作区覆盖；不卸载或改 partition。 */}
+          {/* 唯一常驻宿主。授权的图片／画布文字／正式镜头视频保留平台视口与输入，由工作区覆盖。 */}
           <aside className={`browser-host ${page === 'accounts' ? 'is-full' : browserVisible ? 'is-assist' : 'is-parked'} ${backgroundInteractive ? 'is-background-executing' : ''} ${browserVisible && (interactive || browserWide) ? 'is-engaged' : ''}`} aria-label="豆包常驻浏览器" aria-hidden={page !== 'accounts' && !browserVisible} {...(page !== 'accounts' && !browserVisible && !backgroundInteractive ? { inert: '' } : {})}>
             <div className="browser-host-header"><GlobalOutlined /><strong>{activeAccount?.name || '豆包浏览器'}</strong><span className="host-caption">豆包 Chat</span>{page !== 'accounts' && <Button type="text" aria-label="全宽浏览器" icon={<ExpandOutlined />} onClick={(): void => { changePage('accounts'); setBrowserOpen(false); }} />}<Button type="text" disabled={interactive} title={interactive ? '正在配置或提交，保持原账号可见' : undefined} aria-label={page === 'accounts' ? '返回之前的工作区' : '收起浏览器'} icon={<CloseOutlined />} onClick={(): void => { if (page === 'accounts') setPage(pageBeforeBrowser.current); setBrowserOpen(false); }} /></div>
-            <BrowserPanel accounts={accounts} activeAccount={activeAccount} refreshKey={0} />
+            <BrowserPanel accounts={accounts} activeAccount={activeAccount} refreshKey={0} visible={page === 'accounts' || browserVisible} />
             <PetStoryChatAdjustmentPanel />
           </aside>
         </div>

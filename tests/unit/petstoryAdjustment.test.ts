@@ -79,6 +79,77 @@ afterEach(async (): Promise<void> => {
 });
 
 describe('具体回复与目标保护', (): void => {
+  it.each(['requestId', 'targetIds'] as const)('可读正文的%s归属不符时不允许显式修复，不创建任务或改变正式正文', async (field: 'requestId' | 'targetIds'): Promise<void> => {
+    project = (await chats.prepareRuntime(project.id, project.revision, 'optimize', target)).project!;
+    const job = project.jobs.at(-1)!; const final = project.plan!.shots[0].prompts.firstFrame.final;
+    const answer = { optimized: originalBody, ...(field === 'requestId' ? { requestId: 'TEST-other-request' } : { targetIds: ['TEST-other-target'] }) };
+    const received = await receive(job, answer);
+    const invalid = project.jobs.find((item): boolean => item.id === job.id)!;
+    expect(received).toMatchObject({ success: false, needsRepair: false });
+    expect(invalid).toMatchObject({ status: 'invalid', parsedResult: { optimized: originalBody } });
+    expect(invalid.validationDetails).toBeUndefined();
+    const count = stored.length; const before = structuredClone(invalid);
+
+    await expect(chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: job.id, repairMode: 'explicit' })).rejects.toThrow('该问题需要恢复原任务或确认当前依据，不能交给豆包改写内容');
+
+    const saved = await projects.read(project.id);
+    expect(stored).toHaveLength(count); expect(saved.jobs.find((item): boolean => item.id === job.id)).toEqual(before);
+    expect(saved.plan!.shots[0].prompts.firstFrame.final).toBe(final);
+  });
+
+  it.each(['missing', 'empty', 'nonrepairable', 'unknown-code', 'other-target'] as const)('失败正文的明确校验问题为%s时显式修复保持关闭，保留原回复与正式正文', async (details: 'missing' | 'empty' | 'nonrepairable' | 'unknown-code' | 'other-target'): Promise<void> => {
+    project = (await chats.prepareRuntime(project.id, project.revision, 'optimize', target)).project!;
+    const job = project.jobs.at(-1)!; const final = project.plan!.shots[0].prompts.firstFrame.final;
+    await receive(job, { optimized: '{{ref:missing-material}}' });
+    const invalid = project.jobs.find((item): boolean => item.id === job.id)!;
+    expect(invalid.validationDetails?.length).toBeGreaterThan(0);
+    if (details === 'missing') { invalid.validationDetails = undefined; invalid.error = 'TEST 尚未分类的历史错误'; }
+    else if (details === 'empty') invalid.validationDetails = [];
+    else invalid.validationDetails = invalid.validationDetails!.map((issue): typeof issue => ({ ...issue,
+      ...(details === 'unknown-code' ? { code: 'TEST-unknown' } : details === 'other-target' ? { targetId: 'TEST-other-target' } : { repairable: false }) }));
+    project = await projects.write(project);
+    const count = stored.length; const before = structuredClone(project.jobs.find((item): boolean => item.id === job.id));
+
+    await expect(chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: job.id, repairMode: 'explicit' })).rejects.toThrow('该问题需要恢复原任务或确认当前依据，不能交给豆包改写内容');
+
+    const saved = await projects.read(project.id);
+    expect(stored).toHaveLength(count); expect(saved.jobs.find((item): boolean => item.id === job.id)).toEqual(before);
+    expect(saved.plan!.shots[0].prompts.firstFrame.final).toBe(final);
+  });
+
+  it('有明确可修复内容问题时显式修复携带原文与具体问题，新结果仍等待采用', async (): Promise<void> => {
+    project = (await chats.prepareRuntime(project.id, project.revision, 'optimize', target)).project!;
+    const parent = project.jobs.at(-1)!; const final = project.plan!.shots[0].prompts.firstFrame.final;
+    const received = await receive(parent, { optimized: '{{ref:missing-material}}' });
+    const invalid = project.jobs.find((item): boolean => item.id === parent.id)!; const before = structuredClone(invalid); const count = stored.length;
+    expect(received.needsRepair).toBe(true); expect(invalid.validationDetails?.every((issue): boolean => issue.repairable)).toBe(true);
+
+    const repaired = await chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: parent.id, repairMode: 'explicit' }); project = repaired.project!;
+
+    const child = project.jobs.find((item): boolean => item.id === repaired.repairJobId)!;
+    expect(stored).toHaveLength(count + 1); expect(child).toMatchObject({ parentJobId: parent.id, repairMode: 'explicit', validationDetails: invalid.validationDetails });
+    expect(child.requestText).toContain('$.optimized'); expect(child.requestText).toContain('{{ref:missing-material}}');
+    expect(project.jobs.find((item): boolean => item.id === parent.id)).toEqual(before);
+    expect((await receive(child, { optimized: originalBody })).success).toBe(true);
+    expect(project.jobs.find((item): boolean => item.id === child.id)?.resultStatus).toBe('candidate');
+    expect(project.plan!.shots[0].prompts.firstFrame.final).toBe(final);
+  });
+
+  it('内容问题可修复但当前正式正文已变化时拒绝显式修复旧请求，不创建任务', async (): Promise<void> => {
+    project = (await chats.prepareRuntime(project.id, project.revision, 'optimize', target)).project!;
+    const parent = project.jobs.at(-1)!; await receive(parent, { optimized: '{{ref:missing-material}}' });
+    const before = structuredClone(project.jobs.find((item): boolean => item.id === parent.id));
+    const updatedFinal = `${project.plan!.shots[0].prompts.firstFrame.final}。TEST 用户已保存的新正文`;
+    project.plan!.shots[0].prompts.firstFrame.final = updatedFinal; project = await projects.write(project);
+    const count = stored.length;
+
+    await expect(chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: parent.id, repairMode: 'explicit' })).rejects.toThrow('原请求依赖的剧本、镜头、已采用帧或正文已变化');
+
+    const saved = await projects.read(project.id);
+    expect(stored).toHaveLength(count); expect(saved.jobs.find((item): boolean => item.id === parent.id)).toEqual(before);
+    expect(saved.plan!.shots[0].prompts.firstFrame.final).toBe(updatedFinal);
+  });
+
   it('候选采用发现正文缺项会归入内容校验，但旧上下文不会自动发起修订或覆盖final', async (): Promise<void> => {
     project = (await chats.prepareRuntime(project.id, project.revision, 'optimize', { shotId: target.shotId, promptKind: 'video' })).project!;
     const job = project.jobs.at(-1)!; const body = `${snapshot.plan.shots[0].prompts.video.optimized}。全程无字幕、无对白文字叠加。`;
@@ -169,14 +240,13 @@ describe('具体回复与目标保护', (): void => {
     expect(snapshotJob.rawText).toBe(chosen.text);
   });
 
-  it('一次自动修订失败保留两份原文，显式新轮次精确放行新task并回到候选确认', async (): Promise<void> => {
+  it('选定回复的后台修订失败后继续同职责纠正，保护唯一新task并回到候选确认', async (): Promise<void> => {
     const adjustment = await begin(); const chosen = reply('{{ref:missing-material}}', 84); await capture(adjustment, [chosen]);
     const initial = await service.adopt(project.id, project.revision, adjustment.id, chosen.key); project = initial.project!;
     const auto = project.jobs.find((job): boolean => job.id === initial.repairJobId)!;
-    const failed = await receive(auto, { optimized: '{{ref:missing-material}}' }); expect(failed.needsRepair).toBe(false);
-    await expect(chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: auto.id, repairMode: 'automatic' })).rejects.toThrow('自动修订已使用一次');
-    const explicit = await chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: auto.id, repairMode: 'explicit' }); project = explicit.project!;
-    const next = project.jobs.find((job): boolean => job.id === explicit.repairJobId)!;
+    const failed = await receive(auto, { optimized: '{{ref:missing-material}}' }); expect(failed.needsRepair).toBe(true);
+    const continued = await chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: auto.id, repairMode: 'automatic' }); project = continued.project!;
+    const next = project.jobs.find((job): boolean => job.id === continued.repairJobId)!;
     expect(project.chatAdjustment?.repairJobId).toBe(next.id); expect(next.originKind).toBe('optimize');
     expect(stored.find((task): boolean => task.id === source.taskId)?.runtime?.chatAdjustmentGuard).toMatchObject({ active: true, allowedTaskId: next.taskId });
     expect(hasConversationGuard(project.accountId, next.taskId)).toBe(false); expect(hasConversationGuard(project.accountId, auto.taskId)).toBe(true);
@@ -186,6 +256,30 @@ describe('具体回复与目标保护', (): void => {
     expect(project.jobs.find((job): boolean => job.id === auto.id)?.rawText).toContain('missing-material');
     project = (await chats.adoptPromptCandidate(project.id, project.revision, next.id)).project!;
     expect(project.plan!.shots[0].prompts.firstFrame.sourceJobId).toBe(next.id);
+    project = (await service.end(project.id, project.revision, adjustment.id)).project!; expect(hasConversationGuard(project.accountId)).toBe(false);
+  });
+
+  it('受保护的具体回复修订旧误判只重校验当前叶子，不新建任务或提前采用', async (): Promise<void> => {
+    const adjustment = await begin(); const chosen = reply('{{ref:missing-material}}', 85); await capture(adjustment, [chosen]);
+    const started = await service.adopt(project.id, project.revision, adjustment.id, chosen.key); project = started.project!;
+    const repair = project.jobs.find((job): boolean => job.id === started.repairJobId)!;
+    expect((await receive(repair, { optimized: originalBody })).success).toBe(true);
+    const saved = project.jobs.find((job): boolean => job.id === repair.id)!;
+    saved.status = 'invalid'; saved.error = 'TEST 旧内容校验误判'; saved.validationIssues = [saved.error];
+    saved.validationDetails = [{ code: 'prompt_content', path: '$.optimized', targetId: `${target.shotId}:${target.promptKind}`,
+      actual: originalBody, actualType: 'string', expected: 'TEST 本项完整正文', repairable: true, message: saved.error }];
+    project = await projects.write(project);
+    const count = stored.length; const history = structuredClone(project.jobs.slice(0, -1)); const finalBefore = project.plan!.shots[0].prompts.firstFrame.final;
+    const guard = structuredClone(stored.find((task): boolean => task.id === source.taskId)?.runtime?.chatAdjustmentGuard);
+    const recovered = await chats.prepareRuntime(project.id, project.revision, 'repair', { parentJobId: repair.id }); project = recovered.project!;
+    expect(recovered).toMatchObject({ success: true, taskId: repair.taskId, repairJobId: repair.id });
+    expect(stored).toHaveLength(count); expect(project.jobs.slice(0, -1)).toEqual(history);
+    expect(project.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'candidate', parsedResult: { optimized: originalBody }, rawText: saved.rawText, requestText: saved.requestText, runId: saved.runId });
+    expect(project.chatAdjustment).toMatchObject({ status: 'active', selectedReplyKey: chosen.key, repairJobId: repair.id });
+    expect(stored.find((task): boolean => task.id === source.taskId)?.runtime?.chatAdjustmentGuard).toEqual(guard);
+    expect(project.plan!.shots[0].prompts.firstFrame.final).toBe(finalBefore); expect(hasConversationGuard(project.accountId)).toBe(true);
+    project = (await chats.adoptPromptCandidate(project.id, project.revision, repair.id)).project!;
+    expect(project.plan!.shots[0].prompts.firstFrame.sourceJobId).toBe(repair.id);
     project = (await service.end(project.id, project.revision, adjustment.id)).project!; expect(hasConversationGuard(project.accountId)).toBe(false);
   });
 

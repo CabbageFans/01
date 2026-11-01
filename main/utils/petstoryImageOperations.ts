@@ -42,7 +42,8 @@ function requireProject(result: PetStoryImageOperationResult): PetStoryProject {
 }
 function validateRequest(request: PetStoryImageOperationRequest): void {
   if (!request || typeof request.requestId !== 'string' || !/^[a-zA-Z0-9_-]{8,100}$/.test(request.requestId)
-    || !request.target || !!request.target.materialId === !!request.target.shotId) throw new Error('请选择具体素材后生成或修改图片');
+    || !request.target || !!request.target.materialId === !!request.target.shotId
+    || request.target.shotId && !['firstFrame', 'lastFrame'].includes(request.target.kind || '')) throw new Error('请选择具体素材后生成或修改图片');
 }
 function validateBeginProject(p: PetStoryProject, revision: number, request: PetStoryImageOperationRequest, replaceableProduction: boolean): boolean {
   if (p.revision !== revision) throw new Error('项目版本已变化，请刷新素材');
@@ -51,7 +52,6 @@ function validateBeginProject(p: PetStoryProject, revision: number, request: Pet
   if (p.production && p.production.state !== 'complete' && !replaceableProduction) throw new Error('已有制作任务尚未结束，请先处理原任务');
   const modifying = request.baseAssetId !== undefined || request.feedback !== undefined;
   if (modifying && (typeof request.baseAssetId !== 'string' || typeof request.feedback !== 'string' || !request.feedback.trim() || request.feedback.length > 4000)) throw new Error('请填写你希望怎么修改这张图片');
-  if (!modifying && !request.target.materialId) throw new Error('首次生成请使用对应图片节点的生成入口');
   return modifying;
 }
 
@@ -108,7 +108,8 @@ export class PetStoryImageOperationService {
     p.imageOperations = [...(p.imageOperations || []), operation];
     p = await this.projects.write(p); this.authorize(p.id, operation.id);
     try {
-      if (modifying) return await this.startProduction(p, operation, capability);
+      // 画布图片已有明确采用正文，直接复用原节点制作；不重新创作或偷偷采用提示词。
+      if (modifying || operation.target.shotId) return await this.startProduction(p, operation, capability);
       const materialId = materialTarget(operation);
       let usable = false;
       try { requireMaterialPromptSource(p, materialId); usable = true; } catch { /* 正文准备是本次图片操作内部步骤。 */ }
@@ -134,7 +135,9 @@ export class PetStoryImageOperationService {
   private async startProduction(p: PetStoryProject, operation: PetStoryImageOperation, capability?: PetStoryCapability): Promise<PetStoryImageOperationResult> {
     const started = operation.mode === 'modify'
       ? await this.production.generateImageFeedback(p.id, p.revision, operation.id, capability)
-      : await this.production.generateMaterials(p.id, p.revision, [materialTarget(operation)], capability, operation.id);
+      : operation.target.shotId && operation.target.kind
+        ? await this.production.generateShotMedia(p.id, p.revision, operation.target.shotId, operation.target.kind, capability, {}, operation.id)
+        : await this.production.generateMaterials(p.id, p.revision, [materialTarget(operation)], capability, operation.id);
     if (!started.success || !started.project?.production) throw new Error(started.error || '本次图片任务未保存');
     p = started.project;
     const saved = operationFor(p, operation.id);
@@ -195,7 +198,7 @@ export class PetStoryImageOperationService {
     let p = await this.projects.read(id); const operation = operationFor(p, operationId);
     if (operation.stage === 'complete') return resultFor(p, operation);
     if (p.chatAdjustment?.status === 'active') throw new Error('请先结束当前豆包调整，避免覆盖对话草稿');
-    if (operation.mode === 'modify' && p.production?.imageOperationId !== operationId) return this.resumeUncreatedModification(p, operation, capability);
+    if ((operation.mode === 'modify' || operation.target.shotId) && p.production?.imageOperationId !== operationId) return this.resumeUncreatedImage(p, operation, capability);
     operation.error = undefined;
     if (p.production?.imageOperationId === operationId) {
       const resumed = await this.production.resume(id, capability);
@@ -215,15 +218,15 @@ export class PetStoryImageOperationService {
     p = await this.projects.write(p); this.authorize(id, operationId);
     return resultFor(p, operationFor(p, operationId));
   }
-  private async resumeUncreatedModification(p: PetStoryProject, operation: PetStoryImageOperation, capability?: PetStoryCapability): Promise<PetStoryImageOperationResult> {
+  private async resumeUncreatedImage(p: PetStoryProject, operation: PetStoryImageOperation, capability?: PetStoryCapability): Promise<PetStoryImageOperationResult> {
     const runs = [p.production, ...(p.productionHistory || [])].filter((run): run is NonNullable<typeof run> => !!run);
     const knownSteps = runs.flatMap((run): typeof run.steps => run.steps);
     const orphan = this.tasks().some((task): boolean => task.petstory?.projectId === p.id
       && !knownSteps.some((step): boolean => step.id === task.petstory?.stepId && step.taskId === task.id));
     if (operation.taskId || runs.some((run): boolean => run.imageOperationId === operation.id) || orphan
-      || p.imageOperations?.some((item): boolean => item.id !== operation.id && !['complete', 'failed'].includes(item.stage))) throw new Error('原修改任务已有记录或创建结果不明，请核对原任务，不重新发送');
-    // 该生产入口只登记计划，尚未创建 Task；无计划／无孤立任务才能接续同一修改授权。
-    if (operation.basisHash !== imageTargetBasis(p, operation.target)) throw new Error('素材事实已变化，请按当前素材重新提交修改意见');
+      || p.imageOperations?.some((item): boolean => item.id !== operation.id && !['complete', 'failed'].includes(item.stage))) throw new Error('原图片任务已有记录或创建结果不明，请核对原任务，不重新发送');
+    // 该生产入口只登记计划，尚未创建 Task；无计划／无孤立任务才能接续同一次图片授权。
+    if (operation.basisHash !== imageTargetBasis(p, operation.target)) throw new Error('素材事实已变化，请按当前素材重新提交图片操作');
     try {
       const result = await this.startProduction(p, operation, capability);
       this.authorize(p.id, operation.id);

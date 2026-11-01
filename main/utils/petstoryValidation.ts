@@ -3,6 +3,7 @@ import type { PetStoryPlan, PetStoryShot, PetStoryCharacter, PetStoryPrompt, Pet
 export { PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptQuality';
 import { compileReferencedText, PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptQuality';
 import { subtitlePolicyIssues } from './petstorySubtitlePolicy';
+import { petStoryCharacterLabelKey, petStoryCharacterLabelOwners, seedanceSpeakerLabels } from './petstoryCharacterLabels';
 import { collectPetStoryPlanIssues, PetStoryContentValidationError, validPetStoryDuration } from './petstoryValidationIssues';
 export { collectPetStoryPlanIssues, formatPetStoryValidationIssue, PetStoryContentValidationError, planRepairPreservationIssues } from './petstoryValidationIssues';
 export type { PetStoryValidationIssue } from './petstoryValidationIssues';
@@ -49,7 +50,7 @@ function unique(ids: string[], field: string): void {
 function uniqueEntities(entities: { id: string; name: string; aliases?: string[] }[]): void {
   const names = new Map<string, string>();
   for (const entity of entities) for (const label of [entity.name, ...(entity.aliases || [])]) {
-    const key = label.normalize('NFKC').replace(/\s+/g, '').toLocaleLowerCase();
+    const key = petStoryCharacterLabelKey(label);
     if (!key) continue;
     if (names.has(key) && names.get(key) !== entity.id) throw new Error('同名或别名资产重复，请复用同一实体ID或明确区分');
     names.set(key, entity.id);
@@ -112,6 +113,18 @@ function runtimeReferenceIssues(project: PetStoryProject, job: PetStoryChatJob, 
   }
   return issues;
 }
+type RuntimeSpokenLine = { name: string; language: string; text: string; speakerIds: string[] };
+/** 合法正文中的额外声音块同样必须有已确认归属，不能被另一处正确发声掩盖。 */
+function seedanceSpokenIdentityIssues(lines: RuntimeSpokenLine[], dialogues: NonNullable<PetStoryShot['dialogue']>): string[] {
+  const issues: string[] = [];
+  for (const line of lines) {
+    if (line.speakerIds.length > 1) issues.push(`Seedance 台词说话者标签存在歧义：“${line.name}”同时对应多个已保存角色；改用该说话者全局唯一的完整名称或已登记别名`);
+    else if (line.speakerIds.length === 0) issues.push(`Seedance 台词说话者标签未登记：“${line.name}”不对应任何已保存角色；按确认剧本使用完整角色名称或已登记别名，不自行缩写或附加称谓`);
+    else if (!dialogues.some((dialogue): boolean => dialogue.speakerId === line.speakerIds[0] && dialogue.text === line.text)) issues.push(`Seedance 声音块与确认剧本不符：${line.name}的“${line.text}”不是该角色已确认的逐字台词；保留原台词及真正说话者，不新增、改写或重复发声`);
+    else if (/\p{Script=Han}/u.test(line.text) && line.language !== '中文') issues.push(`Seedance 台词语言不匹配：${line.name}的中文原台词必须标明“用中文说”，保留逐字台词“${line.text}”`);
+  }
+  return issues;
+}
 /** 仅检查可证明的返回契约缺项，不用字数或关键词数量判断创作质量。 */
 export function runtimePromptIssues(project: PetStoryProject, job: PetStoryChatJob, body: string): string[] {
   const issues: string[] = [];
@@ -131,21 +144,28 @@ export function runtimePromptIssues(project: PetStoryProject, job: PetStoryChatJ
     const quoted = /^“[\s\S]*”$|^"[\s\S]*"$|^「[\s\S]*」$|^『[\s\S]*』$/u.test(utterance);
     return [{ name: match[1].trim(), language: match[2].trim(), text: quoted ? utterance.slice(1, -1) : utterance }];
   });
+  const characters = project.plan?.characters || [];
+  const owners = petStoryCharacterLabelOwners(characters);
+  const resolvedSpoken = spoken.map((line): RuntimeSpokenLine => ({ ...line, speakerIds: owners.get(petStoryCharacterLabelKey(line.name)) || [] }));
   const checked = new Set<string>();
   const dialogues = shot.dialogue || [];
   for (const dialogue of dialogues) {
     if (!body.includes(dialogue.text)) { issues.push(`视频正文遗漏已确认原台词：${dialogue.text}`); continue; }
     if (!seedance) continue;
-    const name = project.plan?.characters.find((character): boolean => character.id === dialogue.speakerId)?.name || dialogue.speakerId;
+    const name = characters.find((character): boolean => character.id === dialogue.speakerId)?.name || dialogue.speakerId;
     const chinese = /\p{Script=Han}/u.test(dialogue.text);
     const key = JSON.stringify([dialogue.speakerId, dialogue.text]);
     if (checked.has(key)) continue;
     checked.add(key);
     const expected = dialogues.filter((line): boolean => line.speakerId === dialogue.speakerId && line.text === dialogue.text).length;
-    const actual = spoken.filter((line): boolean => line.name === name && line.text === dialogue.text && (!chinese || line.language === '中文')).length;
-    if (actual === 0) issues.push(`Seedance 台词未按花括号声音格式返回：${name}的原台词需整体置于 {角色用${chinese ? '中文' : '原语言'}说：“逐字台词”} 中`);
+    const identityLines = resolvedSpoken.filter((line): boolean => line.speakerIds.length === 1 && line.speakerIds[0] === dialogue.speakerId && line.text === dialogue.text);
+    const actual = identityLines.filter((line): boolean => !chinese || line.language === '中文').length;
+    if (actual === 0 && !resolvedSpoken.some((line): boolean => line.text === dialogue.text)) issues.push(`Seedance 台词未按花括号声音格式返回：${name}的原台词需整体置于 {${name}用${chinese ? '中文' : '原语言'}说：“${dialogue.text}”} 中`);
+    else if (actual === 0 && !identityLines.length) issues.push(`Seedance 台词说话者不匹配：原台词“${dialogue.text}”应属于${name}；使用可唯一识别该角色的已登记标签 ${seedanceSpeakerLabels(characters, dialogue.speakerId).join('、') || '（当前角色标签存在歧义，需先明确角色身份）'}，不要改变原台词或说话者`);
+    else if (actual === 0) issues.push(`Seedance 台词语言不匹配：${name}的中文原台词必须标明“用中文说”，保留逐字台词“${dialogue.text}”`);
     else if (actual !== expected) issues.push(`Seedance 原台词发声次数与确认剧本不符：${name}的“${dialogue.text}”应发声${expected}次，实际${actual}次；每次只写一个对应声音块`);
   }
+  if (seedance) issues.push(...seedanceSpokenIdentityIssues(resolvedSpoken, dialogues));
   return [...new Set(issues)];
 }
 export function validateEditIntent(value: unknown): PetStoryMaterialEditIntent {

@@ -8,15 +8,15 @@
  * - per-account 执行状态监听，自动路由任务到对应 webview
  */
 
-import { readAcceptedImageOutputs, bindPetStoryReferences, verifyPetStoryReferenceBindings, checkPetStoryPageGuard, readPetStoryComposer, waitForPetStoryImageComposer, uploadPetStoryImages, verifyPetStoryUploads, PetStoryControlError } from '../utils/doubaoBridge';
+import { readAcceptedImageOutputs, bindPetStoryReferences, verifyPetStoryReferenceBindings, checkPetStoryPageGuard, readPetStoryComposer, waitForPetStoryImageComposer, waitForPetStoryVideoComposer, uploadPetStoryImages, verifyPetStoryUploads, PetStoryControlError } from '../utils/doubaoBridge';
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { Button, Input, message, Modal, notification, Popover, Switch, Tooltip } from 'antd';
 import type { Account, AccountAvailability, AccountAvailabilitySource, Task, TaskUpdateInput } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { usePetStoryStore } from '../store/usePetStoryStore';
-import { isBackgroundImageOperationTask } from '../utils/petstoryBackground';
-import type { BackgroundPageSubmission } from '../utils/doubaoBridge';
+import { isBackgroundPetStoryTask } from '../utils/petstoryBackground';
+import type { BackgroundPageSubmission, VideoArtifactReadbackDiagnostic } from '../utils/doubaoBridge';
 import { readPetStoryConversationReplies } from '../utils/petstoryConversationReplies';
 import type { PetStoryConversationReply } from '@doubao-studio/contracts';
 import type { AutomationState } from '../store/useTaskStore';
@@ -42,12 +42,12 @@ import {
   uploadReferenceImages,
   uploadReferenceAudio,
   resetVideoCaptureCache,
-  refreshBlockerBaseline,
   detectVideoGenerationBlocker,
   injectGenerationMonitor,
   getGenerationStartTime,
   getConversationText,
   getChatPageSnapshot,
+  getCreationReadbackSnapshot,
   readStableChatAnswer,
   ChatReadbackRecoveryError,
   getSubmissionMessageCount,
@@ -61,6 +61,10 @@ import {
   dismissKnownDesktopDownloadPromotion,
 } from '../utils/doubaoBridge';
 import type { VideoArtifactResolution } from '../utils/videoArtifactResolver';
+import { observeVideoArtifact } from '../utils/videoArtifactObservation';
+import { conversationSyncPageSnapshotScript, syncTaskConversation } from '../utils/conversationSync';
+import type { ConversationSyncPageSnapshot, ConversationSyncResult } from '../utils/conversationSync';
+import type { VideoArtifactObservationProgress } from '../utils/videoArtifactObservation';
 import {
   canAttemptSubmission,
   classifySubmissionReadback,
@@ -68,9 +72,11 @@ import {
   matchesSubmissionConversation,
   requiresSubmissionReconciliation,
   updateStableStreak,
+  waitForConfirmedSubmission,
+  verifiedSubmissionConversationUrl,
   type SubmissionReadback,
 } from '../utils/realSendStateMachine';
-import { chatRequestIdentity, diagnoseChatReadback, inspectChatReadback, inspectCreationReadback } from '../utils/chatReadback';
+import { chatRequestIdentity, diagnoseChatReadback, diagnoseCreationReadback, inspectChatReadback, inspectCreationReadback } from '../utils/chatReadback';
 import type { ChatReadbackContext, ChatReadbackResult } from '../utils/chatReadback';
 import { createWebviewResourceScope } from '../utils/webviewLifecycle';
 import type { WebviewResourceScope } from '../utils/webviewLifecycle';
@@ -110,6 +116,33 @@ const taskChatReadbackContext = (task: Task, accountId: string, conversationUrl:
   ...(task.runtime?.chatReadback?.runId === task.runtime?.runId ? { userTurnId: task.runtime?.chatReadback?.userTurnId, userMessageId: task.runtime?.chatReadback?.userMessageId } : {}),
 });
 
+/** 跨端消息同步必须证明新文档已加载，且不丢弃用户当前输入或交互现场。 */
+const conversationSynchronizations = new WeakMap<HTMLWebViewElement, Promise<ConversationSyncResult>>();
+const synchronizeConversation = async (webview: HTMLWebViewElement, targetUrl: string, isCurrent: () => boolean,
+  trigger: 'explicit' | 'visibility' = 'explicit', signal?: AbortSignal): Promise<ConversationSyncResult> => {
+  const previous = conversationSynchronizations.get(webview);
+  const operation = (async (): Promise<ConversationSyncResult> => {
+    if (previous) await previous;
+    return syncTaskConversation({ navigator: webview, targetUrl, isCurrent, trigger, signal,
+      readPageSnapshot: (): Promise<ConversationSyncPageSnapshot> => webview.executeJavaScript(conversationSyncPageSnapshotScript()),
+    });
+  })();
+  conversationSynchronizations.set(webview, operation);
+  try { return await operation; }
+  finally { if (conversationSynchronizations.get(webview) === operation) conversationSynchronizations.delete(webview); }
+};
+
+function conversationSyncMessage(result: ConversationSyncResult): string {
+  if (result.ok) return '原会话已同步';
+  const reasons: Partial<Record<typeof result.reason, string>> = {
+    DRAFT_PRESENT: '豆包有未发送草稿，请发送或清除后再检查原结果', ATTACHMENTS_PRESENT: '豆包有未发送附件，请处理后再检查原结果',
+    GENERATING: '豆包正在回复，本次保留现场；回复结束后再检查原结果', HUMAN_VERIFICATION: '请先完成原账号人工验证，再检查原结果',
+    USER_INTERACTING: '豆包仍在交互中，本次保留现场；结束交互后再检查原结果', CONTEXT_CHANGED: '原任务、账号或会话已变化，请重新检查当前任务',
+    PAGE_UNREADABLE: '暂时无法核对豆包输入区，已保留现场，请稍后重试', PAGE_NOT_READY: '豆包页面尚未就绪，请稍后重试',
+  };
+  return reasons[result.reason] || '原会话同步未完成，请稍后检查原结果';
+}
+
 const chatReadbackReceipt = (task: Task, evidence: ChatReadbackResult, baselineMessageCount: number): NonNullable<Task['runtime']>['chatReadback'] => {
   if (!task.runtime?.runId || !evidence.promptPublished || !evidence.association) return undefined;
   return { runId: task.runtime.runId, baselineMessageCount, ...chatRequestIdentity(task.prompt), association: evidence.association,
@@ -144,6 +177,8 @@ interface BrowserPanelProps {
   accounts: Account[];
   activeAccount: Account | null;
   refreshKey: number;
+  /** 仅用户主动打开辅助浏览器／账号页为 true，用于保护自由聊天输入。 */
+  visible?: boolean;
 }
 
 function getAccountHome(account: Pick<Account, 'platform'>): string {
@@ -205,16 +240,21 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   accounts,
   activeAccount,
   refreshKey,
+  visible = false,
 }) => {
   const poolRef = useRef<HTMLDivElement>(null);
   const registryRef = useRef<Map<string, HTMLWebViewElement>>(new Map());
   const loadingMapRef = useRef<Map<string, boolean>>(new Map());
   const runningRef = useRef<Set<string>>(new Set());
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingRestartTasksRef = useRef<Map<string, TaskUpdateInput>>(new Map());
   const pendingCancellationStatusRef = useRef<Map<string, 'paused' | 'cancelled'>>(new Map());
   const manualVideoUsageRef = useRef<Set<string>>(new Set());
   const submissionReconcileRef = useRef<Set<string>>(new Set());
+  const submissionReconcilePromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+  const passiveConversationSyncRef = useRef<Map<string, number>>(new Map());
   const submissionReconcileUsageRef = useRef<Set<string>>(new Set());
   const availabilityRequestHandledRef = useRef<Record<string, number>>({});
   const availabilityProbeSequenceRef = useRef<Record<string, number>>({});
@@ -296,6 +336,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         state: 'unknown', reason: 'probe_not_saved', message: '账号状态尚未保存，请重新检测', checkedAt: new Date().toISOString(), source,
       };
       if (availability.state === 'ready') {
+        await useTaskStore.getState().resumeAfterAccountVerification(accountId, availability.checkedAt);
         setTimeout(() => useTaskStore.getState().processQueue(), 0);
       }
       if (source === 'manual') {
@@ -387,13 +428,26 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     return result;
   };
 
-  const extractVideoOutputs = async (webview: HTMLWebViewElement, conversationUrl?: string, signal?: AbortSignal): Promise<string[]> => {
+  const extractVideoOutputs = async (webview: HTMLWebViewElement, conversationUrl?: string, signal?: AbortSignal, taskId?: string): Promise<string[]> => {
+    const original = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+    const verifyOriginalConversation = (): void => {
+      if (conversationUrl && !isSameDoubaoConversation(webview.getURL(), conversationUrl)) {
+        throw new SubmissionSafetyPauseError('原视频会话已变化，已停止观察且未绑定其他会话产物；系统不会重发');
+      }
+      if (original && useTaskStore.getState().tasks.find((item): boolean => item.id === taskId)?.runtime?.runId !== original.runtime?.runId) throw new SubmissionSafetyPauseError('原视频运行已变化，停止绑定产物');
+    };
+    verifyOriginalConversation();
     // 使用结构化解析器，优先获取平台明确返回的原始媒体地址
     const result = await resolveVideoArtifact(webview, {
       conversationUrl: conversationUrl || webview.getURL(),
       timeoutMs: 12000,
       signal,
+      ...(original?.runtime?.submittedAt && original.assignedAccountId && conversationUrl ? {
+        sourcePrompt: original.runtime.input.prompt, readbackContext: taskChatReadbackContext(original, original.assignedAccountId, conversationUrl, webview.getURL()),
+        videoConfig: original.videoConfig, generationConfirmationRecorded: !!original.runtime.generationConfirmation,
+      } : {}),
     });
+    verifyOriginalConversation();
     if (result.status === 'resolved' && result.url) {
       console.log(`[extractVideoOutputs] 解析成功，来源: ${result.source}, vid: ${result.vid || 'N/A'}`);
       return normalizeVideoUrls([result.url]);
@@ -493,10 +547,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     };
 
     const handleSubmissionReconcile = async (event: Event): Promise<void> => {
-      const detail = (event as CustomEvent<{ taskId: string; useCurrentPage?: boolean }>).detail;
+      const detail = (event as CustomEvent<{ taskId: string; useCurrentPage?: boolean; accountId?: string; runId?: string; submittedAt?: string; verificationCheckedAt?: string }>).detail;
       const taskId = detail?.taskId;
       if (!taskId || submissionReconcileRef.current.has(taskId)) return;
       const task = useTaskStore.getState().tasks.find((item) => item.id === taskId);
+      if (detail.runId && (task?.runtime?.runId !== detail.runId || task.runtime.submittedAt !== detail.submittedAt || task.assignedAccountId !== detail.accountId)) return;
+      if (detail.verificationCheckedAt) {
+        const ready = useAccountStore.getState().accounts.find((item): boolean => item.id === detail.accountId)?.health?.availability;
+        if (ready?.state !== 'ready' || ready.checkedAt !== detail.verificationCheckedAt) return;
+      }
+      const observationController = abortControllersRef.current.get(taskId);
+      if (observationController?.signal.aborted) throw new DOMException('原结果检查已暂停', 'AbortError');
       if (!requiresSubmissionReconciliation(task)) {
         message.warning('该任务没有需要核对的提交记录');
         return;
@@ -522,11 +583,18 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         message.warning('原账号还有其他活跃任务，暂不导航或补取');
         return;
       }
+      if (isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, task) && visibleRef.current
+        && useAccountStore.getState().selectedAccountId !== accountId) {
+        message.info('当前正在查看其他豆包对话，请收起后继续收取本次结果');
+        return;
+      }
+      if (!canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))) throw new Error('另一个账号正在提交，请稍后检查原结果');
       submissionReconcileRef.current.add(taskId);
       useAccountStore.getState().selectAccount(accountId);
       const webview = await waitForConversationNavigator(
         () => registryRef.current.get(accountId),
-        { timeoutMs: 20_000, isReady: () => loadingMapRef.current.get(accountId) === false },
+        { timeoutMs: 20_000, isReady: () => loadingMapRef.current.get(accountId) === false,
+          wait: (ms: number): Promise<void> => observationController ? sleepWithAbort(ms, observationController.signal) : new Promise((resolve): void => { setTimeout(resolve, ms); }) },
       );
       if (!webview) {
         submissionReconcileRef.current.delete(taskId);
@@ -545,7 +613,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         submissionReconcileRef.current.delete(taskId);
         if (error instanceof AccountAvailabilityPauseError) {
           const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
-          if (latest?.runtime?.runId === task.runtime?.runId && latest?.runtime?.submittedAt === task.runtime?.submittedAt) await useTaskStore.getState().pauseAutomation(taskId, accountId, error.message, { status: 'waiting_verification', code: error.code });
+          if (!observationController?.signal.aborted && latest?.status !== 'cancelled' && latest?.runtime?.runId === task.runtime?.runId && latest?.runtime?.submittedAt === task.runtime?.submittedAt) await useTaskStore.getState().pauseAutomation(taskId, accountId, error.message, { status: 'waiting_verification', code: error.code });
           message.warning(error.message);
         }
         return;
@@ -554,18 +622,34 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         // 只有显式只读核对才补缺失 URL；须唯一匹配原已发布全文及原 run，不改变草稿或重新发送。
         if (confirmCurrentSubmission) {
           const currentUrl = normalizeDoubaoConversationUrl(webview.getURL());
-          const snapshot = await getChatPageSnapshot(webview);
+          if (!currentUrl) throw new Error('当前页面尚无具体原会话，保持暂停且不重发');
+          const snapshot = task.mode === 'video' ? await getCreationReadbackSnapshot(webview, {
+            conversationUrl: currentUrl, signal: observationController?.signal,
+            ensureCurrent: (): void => {
+              const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+              if (latest?.assignedAccountId !== accountId || latest.runtime?.runId !== task.runtime?.runId || latest.runtime?.submittedAt !== task.runtime?.submittedAt) throw new Error('原视频运行已变化');
+            },
+          }) : await getChatPageSnapshot(webview);
           const evidence = task.mode === 'chat' ? inspectChatReadback(snapshot, task.prompt, 0)
-            : inspectCreationReadback(snapshot, task.prompt, task.mode === 'image' ? 'image' : 'video', 0, task.videoConfig, !!task.runtime?.generationConfirmation);
+            : inspectCreationReadback(snapshot, task.prompt, task.mode === 'image' ? 'image' : 'video', 0, task.videoConfig, !!task.runtime?.generationConfirmation,
+              task.mode === 'video' ? taskChatReadbackContext(task, accountId, currentUrl, webview.getURL()) : undefined);
           const latest = useTaskStore.getState().tasks.find((item) => item.id === taskId);
-          if (!currentUrl || !evidence.promptPublished || latest?.runtime?.runId !== task.runtime?.runId
-            || latest?.runtime?.submittedAt !== task.runtime?.submittedAt) {
+          const verifiedUrl = verifiedSubmissionConversationUrl(task, latest, accountId, currentUrl, webview.getURL(), evidence);
+          if (observationController?.signal.aborted || !verifiedUrl) {
             if (!evidence.promptPublished && task.mode === 'chat') console.warn('[ChatReadbackMismatch]', JSON.stringify(diagnoseChatReadback(snapshot, task.prompt)));
+            if (task.mode === 'video' || task.mode === 'image') await window.electronAPI.logs.append({ level: 'warn', scope: 'automation', taskId, accountId,
+              message: '创作只读定位诊断 ' + JSON.stringify({ readback: diagnoseCreationReadback(snapshot, task.prompt, task.mode, task.videoConfig,
+                task.mode === 'video' ? taskChatReadbackContext(task, accountId, currentUrl, webview.getURL()) : undefined),
+                verifiedUrl: !!verifiedUrl, inputSame: JSON.stringify(task.runtime?.input) === JSON.stringify(latest?.runtime?.input),
+                promptInputMatches: latest?.runtime?.input.prompt === latest?.prompt, attachmentsMatch: JSON.stringify(latest?.runtime?.input.attachments || []) === JSON.stringify(latest?.attachments || []),
+                configMatches: JSON.stringify(latest?.runtime?.input.videoConfig) === JSON.stringify(latest?.videoConfig),
+                bindingMatches: JSON.stringify(latest?.runtime?.input.petstory) === JSON.stringify(latest?.petstory), runMatches: latest?.runtime?.runId === task.runtime?.runId,
+                submittedMatches: latest?.runtime?.submittedAt === task.runtime?.submittedAt }) });
             submissionReconcileRef.current.delete(taskId);
             message.error('当前 Chat 不唯一匹配原任务或运行已变化；未绑定、未重发');
             return;
           }
-          const saved = await useTaskStore.getState().updateTaskRuntime(taskId, { runtime: { conversationUrl: currentUrl } });
+          const saved = await useTaskStore.getState().updateTaskRuntime(taskId, { runtime: { conversationUrl: verifiedUrl } });
           conversationTarget = resolveTaskConversationTarget(useTaskStore.getState().tasks.find((item) => item.id === taskId));
           if (!saved || !conversationTarget.ok) {
             submissionReconcileRef.current.delete(taskId);
@@ -579,20 +663,29 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         return;
       }
       if (!conversationTarget.ok) { submissionReconcileRef.current.delete(taskId); return; }
-      const navigation = await openTaskConversation(webview, conversationTarget.url, { refreshIfAlreadyOpen: false });
+      const originalContextIsCurrent = (): boolean => {
+        const current = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+        return current?.runtime?.runId === task.runtime?.runId && current?.runtime?.submittedAt === task.runtime?.submittedAt
+          && current?.assignedAccountId === accountId && registryRef.current.get(accountId) === webview
+          && !observationController?.signal.aborted && current?.status !== 'cancelled' && current?.status !== 'done'
+          && canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState));
+      };
+      if (!originalContextIsCurrent()) throw new DOMException('原结果检查已暂停或运行已变化', 'AbortError');
+      const syncStartedAt = new Date().toISOString();
+      await useTaskStore.getState().updateTaskRuntime(taskId, { runtime: { message: '正在同步原豆包会话并检查视频结果，不会重新发送', lastHeartbeatAt: syncStartedAt } });
+      const navigation = await synchronizeConversation(webview, conversationTarget.url, originalContextIsCurrent, 'explicit', observationController?.signal);
       if (!navigation.ok) {
         submissionReconcileRef.current.delete(taskId);
-        message.error('无法安全打开任务绑定的原会话；任务保持原状态，未跳转到新会话');
-        return;
+        throw new Error(conversationSyncMessage(navigation));
       }
       try {
         await observeWithHumanVerification((): Promise<void> => waitForWebviewReady(webview, 20_000),
-          (): Promise<void> => assertNoHumanVerification(accountId, webview));
+          (): Promise<void> => assertNoHumanVerification(accountId, webview), observationController?.signal);
       } catch (error: unknown) {
         submissionReconcileRef.current.delete(taskId);
         if (error instanceof AccountAvailabilityPauseError && error.code === 'human_verification') {
           const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
-          if (latest?.runtime?.runId === task.runtime?.runId && latest?.runtime?.submittedAt === task.runtime?.submittedAt) await useTaskStore.getState().pauseAutomation(taskId, accountId, error.message, { status: 'waiting_verification', code: error.code });
+          if (!observationController?.signal.aborted && latest?.status !== 'cancelled' && latest?.runtime?.runId === task.runtime?.runId && latest?.runtime?.submittedAt === task.runtime?.submittedAt) await useTaskStore.getState().pauseAutomation(taskId, accountId, error.message, { status: 'waiting_verification', code: error.code });
           message.warning(error.message);
           return;
         }
@@ -601,8 +694,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       const isManualObservation = task.status === 'manual_submission_observing';
-      const observationController = isManualObservation || !!task.petstory ? new AbortController() : undefined;
-      if (observationController) abortControllersRef.current.set(taskId, observationController);
+      if (!originalContextIsCurrent()) throw new DOMException('原结果检查已暂停或运行已变化', 'AbortError');
       useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在核对平台结果（不会重新发送）...');
       try {
         await observeWithHumanVerification(async (observationSignal: AbortSignal): Promise<void> => {
@@ -640,11 +732,23 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
         // 导航预检完成后只读取原会话；不注入、不点击发送、不创建新对话。
         const conversationUrl = conversationTarget.url;
+        const lastVideoDiagnostics = new Map<string, string>();
+        const recordVideoDiagnostic = (diagnostic: VideoArtifactReadbackDiagnostic): void => {
+          const serialized = JSON.stringify(diagnostic);
+          if (serialized === lastVideoDiagnostics.get(diagnostic.stage)) return;
+          lastVideoDiagnostics.set(diagnostic.stage, serialized);
+          // 只保存本轮消息顺序和卡片计数，避免长期观察失败时丢失具体原因。
+          void window.electronAPI.logs.append({ level: 'info', scope: 'automation', taskId, accountId,
+            message: '原视频产物只读诊断 ' + serialized }).catch((): void => undefined);
+        };
         let conversationMatched = false;
         for (let attempt = 0; attempt < 40; attempt++) {
           if (isSameDoubaoConversation(webview.getURL(), conversationUrl)) {
             const matched = (task.petstory || task.promptReadback === 'exact') && (task.mode === 'image' || task.mode === 'video')
-              ? inspectCreationReadback(await getChatPageSnapshot(webview), task.prompt, task.mode, 0, task.videoConfig, !!task.runtime?.generationConfirmation).promptPublished
+              ? inspectCreationReadback(await (task.mode === 'video' ? getCreationReadbackSnapshot(webview, {
+                conversationUrl, signal: observationSignal, ensureCurrent: (): void => { if (!originalContextIsCurrent()) throw new Error('原视频运行已变化，停止读取历史'); },
+              }) : getChatPageSnapshot(webview)), task.prompt, task.mode, 0, task.videoConfig, !!task.runtime?.generationConfirmation,
+                task.mode === 'video' ? taskChatReadbackContext(task, accountId, conversationUrl, webview.getURL()) : undefined).promptPublished
               : matchesSubmissionConversation(task.prompt, await getConversationText(webview));
             if (matched) {
               conversationMatched = true;
@@ -654,10 +758,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           await new Promise((resolve) => setTimeout(resolve, 500));
         }
         if (!conversationMatched) {
-          throw new Error('原对话未同时匹配任务提示词前缀与平台提交回执，无法安全绑定结果');
+          throw new Error('尚未从同步后的原会话读到原请求身份，暂不绑定其他视频，请稍后检查原结果');
         }
+        // 已有真实成片优先于历史“待确认”文字；这次读取只用原请求关联的卡片。
+        let existingVideo = task.mode === 'video' ? await resolveVideoArtifact(webview, {
+          conversationUrl, runId: task.runtime?.runId, timeoutMs: 8000, isManual: true, signal: observationSignal,
+          sourcePrompt: task.runtime?.input.prompt || task.prompt, readbackContext: taskChatReadbackContext(task, accountId, conversationUrl, webview.getURL()),
+          videoConfig: task.videoConfig, generationConfirmationRecorded: !!task.runtime?.generationConfirmation,
+          onDiagnostic: recordVideoDiagnostic,
+        }) : undefined;
         const confirmation = await inspectGenerationConfirmation(webview);
-        if (confirmation.state === 'present') {
+        if (existingVideo?.status !== 'resolved' && confirmation.state === 'present') {
           const waitingMessage = '平台仍在等待视频生成参数确认；请人工确认后再次执行只读回读，系统不会代答或重发';
           await useTaskStore.getState().updateTaskRuntime(taskId, {
             status: 'waiting_generation_confirmation',
@@ -679,10 +790,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           message.warning(waitingMessage);
           return;
         }
-        if (task.status === 'waiting_generation_confirmation') {
+        if (existingVideo?.status !== 'resolved' && task.status === 'waiting_generation_confirmation') {
           const latestConversationText = await getConversationText(webview);
           const generationStartedAt = await getGenerationStartTime(webview);
-          const confirmedOriginal = task.petstory && inspectCreationReadback(await getChatPageSnapshot(webview), task.prompt, 'video', 0, task.videoConfig, !!task.runtime?.generationConfirmation).confirmationPublished;
+          const confirmedOriginal = task.petstory && inspectCreationReadback(await getChatPageSnapshot(webview), task.prompt, 'video', 0, task.videoConfig, !!task.runtime?.generationConfirmation,
+            taskChatReadbackContext(task, accountId, conversationUrl, webview.getURL())).confirmationPublished;
           const hasConfirmationReceipt = /视频生成已提交|正在生成|生成中|你的视频生成好了/.test(latestConversationText) || generationStartedAt > 0 || confirmedOriginal;
           if (!hasConfirmationReceipt) {
             const waitingMessage = '确认页已不可见，但尚未取得生成回执；任务继续等待，不会自动重发';
@@ -711,11 +823,61 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
         // 任务台账只要求绑定平台真实可播放产物；无水印授权属于手动下载能力，
         // 不能把 without_watermark=false 误判为“视频没有生成”。
-        const resolution = await resolveVideoArtifact(webview, {
-          conversationUrl,
-          timeoutMs: task.status === 'waiting_generation_confirmation' || isManualObservation ? 15 * 60_000 : 45_000,
-          isManual: true,
+        const assertOriginalVideoObservation = (requireActive: boolean = true): void => {
+          const current = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+          if (!task.runtime?.runId || !task.runtime.submittedAt || current?.assignedAccountId !== accountId
+            || current.runtime?.runId !== task.runtime.runId || current.runtime.submittedAt !== task.runtime.submittedAt
+            || current.runtime.input.mode !== 'video' || current.runtime.input.prompt !== task.runtime.input.prompt || current.status === 'done'
+            || registryRef.current.get(accountId) !== webview
+            || !isSameDoubaoConversation(webview.getURL(), conversationUrl)) throw new Error('原视频运行、账号、输入或会话已变化，停止只读观察');
+          if (observationSignal.aborted || requireActive && !['generating', 'manual_submission_observing'].includes(current.status)) throw new DOMException('原视频观察已暂停', 'AbortError');
+        };
+        assertOriginalVideoObservation(false);
+        const observationStartedAt = new Date().toISOString();
+        const observingSaved = await useTaskStore.getState().updateTaskRuntime(taskId, {
+          status: 'manual_submission_observing', result: '正在持续观察原视频会话，不会重新发送', errorInfo: null,
+          runtime: { stage: 'manual_submission_observing', message: '正在持续观察原视频会话，不会重新发送', lastHeartbeatAt: observationStartedAt },
+        });
+        if (!observingSaved) throw new Error('只读观察状态保存未确认，未重新发送');
+        assertOriginalVideoObservation();
+        let lastConversationSyncAt = Date.now();
+        const resolution = await observeVideoArtifact({
+          timeoutMs: task.status === 'waiting_generation_confirmation' || isManualObservation || task.runtime?.acceptanceObservation?.outcome === 'observing' ? 15 * 60_000 : 45_000,
           signal: observationSignal,
+          ensureCurrent: assertOriginalVideoObservation,
+          resolve: (timeoutMs: number, signal: AbortSignal): Promise<VideoArtifactResolution> => {
+            if (existingVideo?.status === 'resolved') { const result = existingVideo; existingVideo = undefined; return Promise.resolve(result); }
+            return resolveVideoArtifact(webview, {
+              conversationUrl, runId: task.runtime?.runId, timeoutMs, isManual: true, signal,
+              sourcePrompt: task.runtime?.input.prompt || task.prompt, readbackContext: taskChatReadbackContext(task, accountId, conversationUrl, webview.getURL()),
+              videoConfig: task.videoConfig, generationConfirmationRecorded: !!task.runtime?.generationConfirmation,
+              onDiagnostic: recordVideoDiagnostic,
+            });
+          },
+          onProgress: async ({ elapsedMs }: VideoArtifactObservationProgress): Promise<void> => {
+            // 手机端可能继续确认或追加消息；空闲时同步一次，不清理草稿或干预用户聊天。
+            if (Date.now() - lastConversationSyncAt >= 30_000) {
+              lastConversationSyncAt = Date.now();
+              await synchronizeConversation(webview, conversationUrl, originalContextIsCurrent, 'visibility', observationSignal);
+              assertOriginalVideoObservation();
+            }
+            const blocker = await detectVideoGenerationBlocker(webview, {
+              conversationUrl, baselineMessageCount: 0, allowGenerationConfirmation: !!task.runtime?.generationConfirmation,
+            });
+            if (blocker) throw new Error(`豆包已停止生成：${blocker}`);
+            const availability = await probeAccountAvailability(webview, account.platform || 'doubao', 'pre_task');
+            if (['login_required', 'action_required', 'unavailable'].includes(availability.state)) throw new AccountAvailabilityPauseError(availability.message, availability.reason);
+            assertOriginalVideoObservation();
+            const current = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+            const heartbeatAt = new Date().toISOString();
+            const saved = await useTaskStore.getState().updateTaskRuntime(taskId, {
+              runtime: { lastHeartbeatAt: heartbeatAt, message: `正在观察原视频产物（${Math.floor(elapsedMs / 1000)} 秒），不会重新发送`,
+                ...(current?.runtime?.acceptanceObservation?.outcome === 'observing'
+                  ? { acceptanceObservation: renewObservationLease(current.runtime.acceptanceObservation, heartbeatAt, 60_000) } : {}),
+              },
+            });
+            if (!saved) throw new Error('原视频观察心跳保存失败，已停止且未重新发送');
+          },
         });
         const outputs = resolution.status === 'resolved' && resolution.url
           ? normalizeVideoUrls([resolution.url])
@@ -738,11 +900,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           message.warning(pendingMessage);
           return;
         }
+        assertOriginalVideoObservation();
         if (!submissionReconcileUsageRef.current.has(taskId)) {
           submissionReconcileUsageRef.current.add(taskId);
           await useAccountStore.getState().recordSeedanceUsage(accountId, getVideoQuotaUsageUnits(task.videoConfig?.duration));
         }
         await useAccountStore.getState().recordAccountOutcome(accountId, 'success');
+        assertOriginalVideoObservation();
         await useTaskStore.getState().completeAutomation(taskId, accountId, outputs[0], outputs);
         message.success('平台产物核对成功，任务台账已恢复完成；未重新发送');
         }, (): Promise<void> => assertNoHumanVerification(accountId, webview), observationController?.signal);
@@ -750,6 +914,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         const reason = error instanceof Error ? error.message : String(error);
         const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
         if (latest?.status === 'done') return;
+        if (observationController?.signal.aborted && latest && ['paused', 'cancelled', 'waiting_verification'].includes(latest.status)) return;
         if (latest?.runtime?.runId !== task.runtime?.runId) {
           message.warning('原运行身份已变化，本次只读结果未写入当前运行');
           return;
@@ -781,21 +946,31 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
       }
     };
-    /** 素材页先保存只读观察意图；预检提前退出时必须收回没有观察器的等待状态。 */
-    const handleSubmissionReconcileSafely = async (event: Event): Promise<void> => {
-      const taskId = (event as CustomEvent<{ taskId?: string }>).detail?.taskId;
+    /** 后台操作先保存只读观察意图；预检提前退出时收回没有观察器的等待状态。 */
+    const runSubmissionReconcileSafely = async (event: Event): Promise<void> => {
+      const detail = (event as CustomEvent<{ taskId?: string; accountId?: string; runId?: string; submittedAt?: string; verificationCheckedAt?: string }>).detail;
+      const taskId = detail?.taskId;
       if (!taskId || submissionReconcileRef.current.has(taskId)) return;
       const initial = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+      if (detail.runId && (initial?.runtime?.runId !== detail.runId || initial.runtime.submittedAt !== detail.submittedAt || initial.assignedAccountId !== detail.accountId)) return;
+      if (detail.verificationCheckedAt) {
+        const ready = useAccountStore.getState().accounts.find((item): boolean => item.id === detail.accountId)?.health?.availability;
+        if (ready?.state !== 'ready' || ready.checkedAt !== detail.verificationCheckedAt) return;
+      }
       const initialRunId = initial?.runtime?.runId; const initialSubmittedAt = initial?.runtime?.submittedAt;
       const guardedObservation = initial?.status === 'manual_submission_observing'
         && !!initial.runtime?.runId && !!initial.runtime.submittedAt
-        && (!!initial.petstory || isBackgroundImageOperationTask(usePetStoryStore.getState().project, taskId));
-      if (!guardedObservation) { await handleSubmissionReconcile(event); return; }
+        && (!!initial.petstory || isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, initial));
+      if (automationEngine.hasController(taskId)) { message.info('原任务执行器仍在退出，请稍后检查原结果'); return; }
+      const controller = new AbortController();
+      abortControllersRef.current.set(taskId, controller);
+      let observationFailure = '';
       try { await handleSubmissionReconcile(event); }
-      catch { message.error('原任务结果暂时无法核对；未重新发送'); }
+      catch (error: unknown) { observationFailure = error instanceof Error ? error.message : '原任务结果暂时无法核对'; message.error(observationFailure); }
       finally {
+        if (abortControllersRef.current.get(taskId) === controller) abortControllersRef.current.delete(taskId);
         // 新运行或已有观察器仍拥有任务时，不覆盖其状态；只收束本次没有启动的观察。
-        if (!abortControllersRef.current.has(taskId)) {
+        if (guardedObservation && !abortControllersRef.current.has(taskId)) {
           submissionReconcileRef.current.delete(taskId);
           const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
           if (latest?.status === 'manual_submission_observing' && latest.runtime?.runId === initialRunId
@@ -814,7 +989,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             }
             const unsettled = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
             if (!verificationPaused && unsettled?.status === 'manual_submission_observing' && unsettled.runtime?.runId === initialRunId && unsettled.runtime?.submittedAt === initialSubmittedAt) {
-              const reason = '原任务提交尚未核对，请查看豆包对话后继续；未重新发送';
+              const reason = observationFailure || '原任务提交尚未核对，请查看豆包对话后继续；未重新发送';
               try {
                 const saved = await useTaskStore.getState().updateTaskRuntime(taskId, { status: 'paused',
                   errorInfo: { code: 'submission_uncertain', message: reason, recoverable: true, detectedAt: new Date().toISOString() },
@@ -824,6 +999,23 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             }
           }
         }
+      }
+    };
+    /** 同一原任务共享真实观察生命周期；停止并释放控制器后再通知制作调度。 */
+    const handleSubmissionReconcileSafely = async (event: Event): Promise<void> => {
+      const detail = (event as CustomEvent<{ taskId?: string; onSettled?: () => void | Promise<void> }>).detail;
+      if (!detail?.taskId) return;
+      const taskId = detail.taskId;
+      let observation = submissionReconcilePromisesRef.current.get(taskId);
+      if (!observation) {
+        observation = runSubmissionReconcileSafely(event);
+        submissionReconcilePromisesRef.current.set(taskId, observation);
+      }
+      try { await observation; }
+      catch { message.error('原任务结果暂时无法核对；未重新发送'); }
+      finally {
+        if (submissionReconcilePromisesRef.current.get(taskId) === observation) submissionReconcilePromisesRef.current.delete(taskId);
+        await detail.onSettled?.();
       }
     };
     window.addEventListener('mark-manual-submission', handleManualSubmission);
@@ -1417,6 +1609,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         return;
       }
       if (hasAccountChatAdjustment(accountId)) { message.info('请先采用当前回复或结束调整，再打开其他任务会话'); return; }
+      if (!canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))) { message.info('另一个账号正在提交，请稍后打开原会话'); return; }
       useAccountStore.getState().selectAccount(accountId);
       const webview = await waitForConversationNavigator(
         () => registryRef.current.get(accountId),
@@ -1426,13 +1619,55 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         message.warning('账号页面未能及时就绪，未跳转到其它会话');
         return;
       }
-      const navigation = await openTaskConversation(webview, conversationTarget.url);
-      if (navigation.ok) message.success('已打开任务对应的原会话');
-      else message.warning('无法安全打开任务对应的原会话，未跳转到新会话');
+      const taskState = useTaskStore.getState();
+      const accountBusy = taskState.tasks.some((item): boolean => item.assignedAccountId === accountId
+        && ['executing', 'generating', 'manual_submission_observing'].includes(item.status));
+      if (accountBusy || submissionReconcileRef.current.has(task.id)) {
+        if (isSameDoubaoConversation(webview.getURL(), conversationTarget.url)) message.info('原会话正在观察中，已保留当前现场');
+        else message.warning('原账号正在处理任务，请稍后打开原会话');
+        return;
+      }
+      const navigation = await synchronizeConversation(webview, conversationTarget.url, (): boolean => {
+        const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === task.id);
+        return latest?.runtime?.runId === task.runtime?.runId && latest?.assignedAccountId === accountId
+          && registryRef.current.get(accountId) === webview && canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))
+          && !useTaskStore.getState().tasks.some((item): boolean => item.assignedAccountId === accountId && ['executing', 'generating', 'manual_submission_observing'].includes(item.status));
+      });
+      if (navigation.ok) message.success('已同步并打开任务对应的原会话');
+      else message.warning(conversationSyncMessage(navigation));
     };
     window.addEventListener('open-task-conversation', handleOpenConversation);
     return () => window.removeEventListener('open-task-conversation', handleOpenConversation);
   }, []);
+
+  /** 常驻 Chat 在重新显示、聚焦或空闲时同步手机端消息；交互中的页面始终跳过。 */
+  useEffect(() => {
+    if (!visible || !activeAccount || !supportsDoubaoConversationLocator(activeAccount.platform)) return;
+    const accountId = activeAccount.id;
+    let stopped = false; let syncing = false;
+    const controller = new AbortController();
+    const current = (): boolean => !stopped && visibleRef.current && useAccountStore.getState().selectedAccountId === accountId
+      && !hasAccountChatAdjustment(accountId)
+      && !useTaskStore.getState().tasks.some((task): boolean => task.assignedAccountId === accountId
+        && ['executing', 'generating', 'manual_submission_observing', 'waiting_verification'].includes(task.status))
+      && !findInteractiveAccountId(useTaskStore.getState().accountAutomationState);
+    const sync = async (): Promise<void> => {
+      if (syncing || !current() || loadingMapRef.current.get(accountId)
+        || Date.now() - (passiveConversationSyncRef.current.get(accountId) || 0) < 25_000) return;
+      const webview = registryRef.current.get(accountId); const target = webview && normalizeDoubaoConversationUrl(webview.getURL());
+      if (!webview || !target) return;
+      syncing = true;
+      passiveConversationSyncRef.current.set(accountId, Date.now());
+      try { await synchronizeConversation(webview, target, (): boolean => current() && registryRef.current.get(accountId) === webview, 'visibility', controller.signal); }
+      catch { /* 账号页面在退出或重建，下一次显示／聚焦时重新核对。 */ }
+      finally { syncing = false; }
+    };
+    const onFocus = (): void => { void sync(); };
+    void sync();
+    window.addEventListener('focus', onFocus);
+    const timer = setInterval(onFocus, 30_000);
+    return (): void => { stopped = true; controller.abort(); clearInterval(timer); window.removeEventListener('focus', onFocus); };
+  }, [visible, activeAccount, webviewEpoch]);
 
   useEffect(() => {
     const handleAdapterSelfCheck = async () => {
@@ -1468,6 +1703,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (runningRef.current.has(accountId)) return;
       const task = tasks.find((t) => t.id === taskId);
       if (!task) return;
+      // 用户打开的自由聊天优先。尚未发送的后台请求保留原任务，收起后从画布继续；
+      // 已提交运行仍走只读观察，不因查看本任务会话而中止或重复发送。
+      if (visibleRef.current && !task.runtime?.submittedAt && isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, task)) {
+        runningRef.current.add(accountId);
+        void useTaskStore.getState().pauseAutomation(taskId, accountId, '豆包对话正在打开，请收起后继续生成；本次尚未发送', { status: 'paused', code: 'page_unrecognized' })
+          .catch((): void => { message.error('暂停状态暂未保存，请稍后重试；本次未操作豆包输入'); })
+          .finally(async (): Promise<void> => { await automationEngine.release(taskId); runningRef.current.delete(accountId); });
+        return;
+      }
       console.log(`[BrowserPanel] 路由任务 ${taskId} → ${accountId}`);
       // 调度器取得执行锁后，必须由这里激活对应账号；不能依赖用户先手动点开。
       useAccountStore.getState().selectAccount(accountId);
@@ -1517,13 +1761,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     // 仅选定自由回复的修订增加导航前的草稿保护。
     const selectedReplyRepair = mode === 'chat' && (useTaskStore.getState().tasks.some((item): boolean => item.runtime?.chatAdjustmentGuard?.active === true && item.runtime.chatAdjustmentGuard.allowedTaskId === taskId)
       || !!usePetStoryStore.getState().project?.jobs.some((job): boolean => job.taskId === taskId && !!job.repairReplySource));
-    const backgroundImageTask = isBackgroundImageOperationTask(usePetStoryStore.getState().project, taskId);
+    const backgroundTask = isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, initialTask);
     const imageRuntime = initialTask?.runtime;
-    const ownedImageDraft = backgroundImageTask && initialTask?.mode === 'image' && initialTask.executionIntent === 'armed'
+    const ownedImageDraft = backgroundTask && initialTask?.mode === 'image' && initialTask.executionIntent === 'armed'
       && initialTask.promptReadback === 'exact' && imageRuntime && imageRuntime.attempt >= 2
       && imageRuntime.input.prompt === prompt && imageRuntime.input.mode === mode && initialTask.prompt === prompt
       && !imageRuntime.submittedAt && !imageRuntime.acceptanceObservation && !initialTask.outputs.length ? prompt : undefined;
-    const ownedRepairDraft = ownedImageDraft || resumableRepairDraft(initialTask, prompt, selectedReplyRepair || backgroundImageTask);
+    const ownedRepairDraft = ownedImageDraft || resumableRepairDraft(initialTask, prompt, selectedReplyRepair || backgroundTask);
     const petstoryTask = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.petstory;
     const strictPrompt = !!petstoryTask || useTaskStore.getState().tasks.find((item) => item.id === taskId)?.promptReadback === 'exact';
     let petstoryGuard: import('@doubao-studio/contracts').PetStoryExecutionGuard | undefined;
@@ -1546,8 +1790,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     }
     abortControllersRef.current.set(taskId, controller);
     const pause = (ms: number) => sleepWithAbort(ms, controller.signal);
+    let preserveSubmittedConversation: ((evidence?: ChatReadbackResult, observedUrl?: string) => Promise<void>) | undefined;
     const checkHumanVerification = async (): Promise<void> => {
-      if (!controller.signal.aborted) await assertNoHumanVerification(accountId, webview);
+      if (!controller.signal.aborted) {
+        // 验证可能在发送后、受理回读完成前出现；先保留已能证明归属的原会话定位。
+        await preserveSubmittedConversation?.().catch((): void => { /* 只读证据不足时保留缺定位，绝不猜测或重发。 */ });
+        await assertNoHumanVerification(accountId, webview);
+      }
     };
     let initializationLease: InitializationLease | undefined;
     let autoConfirmMaterialAuthorization = false;
@@ -1574,6 +1823,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             pageStructureVersion: checkpoint.pageStructureVersion ?? current?.pageStructureVersion,
             failureStage: checkpoint.failureStage,
             missingControl: checkpoint.missingControl,
+            controlOperation: checkpoint.controlOperation,
+            failureReason: checkpoint.failureReason,
           },
           lastHeartbeatAt: new Date().toISOString(),
         },
@@ -1589,6 +1840,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     };
     const materialAuthorizationNotificationKey = `material-authorization-${taskId}`;
     try {
+      // 空闲同步已开始的导航必须先结束，不能在新任务配置输入时替换文档。
+      await conversationSynchronizations.get(webview);
+      if (controller.signal.aborted) throw new DOMException('任务已取消', 'AbortError');
       await refreshPetStoryGuard();
       const settings = await window.electronAPI.settings.get();
       autoConfirmMaterialAuthorization = settings.autoConfirmMaterialAuthorization === true;
@@ -1648,10 +1902,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       let conversationTextAfterSubmit = '';
       setAccountAutomationState(accountId, 'injecting', '正在创建新对话...', 'new_conversation');
       await checkHumanVerification();
+      if (backgroundTask && visibleRef.current) throw new AccountAvailabilityPauseError('豆包对话正在打开，请收起后继续生成；本次尚未发送', 'page_unrecognized');
       if (selectedReplyRepair && !useTaskStore.getState().tasks.some((item): boolean => item.runtime?.chatAdjustmentGuard?.active === true && item.runtime.chatAdjustmentGuard.allowedTaskId === taskId)) throw new SubmissionSafetyPauseError('本次豆包调整已结束或移交已收回；修订未导航、未发送');
-      const newConversationResult = await startNewConversation(webview, 20_000, mode === 'chat', selectedReplyRepair || backgroundImageTask, ownedRepairDraft);
+      const newConversationResult = await startNewConversation(webview, 20_000, mode === 'chat', selectedReplyRepair || backgroundTask, ownedRepairDraft);
       if (!newConversationResult.ok) {
-        if (backgroundImageTask) throw new AccountAvailabilityPauseError('豆包当前有未发送内容、正在回复或输入区尚未就绪，请处理后继续这次图片任务；本次未发送', 'page_unrecognized');
+        if (backgroundTask) throw new AccountAvailabilityPauseError('豆包当前有未发送内容、正在回复或输入区尚未就绪，请处理后继续本次制作；本次未发送', 'page_unrecognized');
         if (selectedReplyRepair) throw new AccountAvailabilityPauseError(`修订已暂停，当前豆包输入尚未就绪（${newConversationResult.reason || 'PAGE_UNKNOWN'}）；请处理未发送草稿或等待回复结束后继续原修订，未发送`, 'page_unrecognized');
         const failedAvailability = await performAvailabilityCheck(accountId, webview, 'pre_task');
         if (failedAvailability.state !== 'ready') {
@@ -1785,8 +2040,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
 
         if (petstoryGuard) {
-          if (mode === 'video') { await readPetStoryComposer(webview, { selectMode: petstoryGuard.mode }); await pause(250); }
-          checkPetStoryPageGuard(mode === 'image' ? await waitForPetStoryImageComposer(webview, controller.signal) : await readPetStoryComposer(webview), petstoryGuard, mode === 'video');
+          const composer = mode === 'video' ? await waitForPetStoryVideoComposer(webview, petstoryGuard, controller.signal)
+            : mode === 'image' ? await waitForPetStoryImageComposer(webview, controller.signal) : await readPetStoryComposer(webview);
+          checkPetStoryPageGuard(composer, petstoryGuard, mode === 'video');
         }
         await uploadTaskImages();
         // 有参考音频时上传（仅视频模式）
@@ -1831,6 +2087,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       // 注入生成状态网络监听器（后台 webview 也能准确检测生成完成）
+      if (backgroundTask && visibleRef.current) throw new AccountAvailabilityPauseError('豆包对话正在打开，请收起后继续生成；本次尚未发送', 'page_unrecognized');
       await injectGenerationMonitor(webview);
       if (mode === 'video') {
         await resetVideoCaptureCache(webview);
@@ -1884,7 +2141,28 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         initialMsgCount = await getSubmissionMessageCount(webview);
       }
       let latestChatReadback: ChatReadbackResult | undefined;
+      preserveSubmittedConversation = async (readback?: ChatReadbackResult, observedUrl?: string): Promise<void> => {
+        const original = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+        if (!original?.runtime?.submittedAt || original.runtime.runId !== expectedRunId || normalizeDoubaoConversationUrl(original.runtime.conversationUrl)
+          || !automationEngine.ownsController(taskId, controller) || registryRef.current.get(accountId) !== webview
+          || (mode !== 'chat' && !petstoryGuard && !strictPrompt)) return;
+        const currentUrl = normalizeDoubaoConversationUrl(observedUrl || webview.getURL());
+        if (!currentUrl) return;
+        const evidence = readback || (mode === 'chat'
+          ? inspectChatReadback(await getChatPageSnapshot(webview), prompt, initialMsgCount, taskChatReadbackContext(original, accountId, currentUrl, webview.getURL()))
+          : inspectCreationReadback(await getChatPageSnapshot(webview), prompt, mode === 'image' ? 'image' : 'video', initialMsgCount, videoConfig));
+        const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+        const verifiedUrl = verifiedSubmissionConversationUrl(original, latest, accountId, currentUrl, webview.getURL(), evidence);
+        if (!verifiedUrl || controller.signal.aborted || !automationEngine.ownsController(taskId, controller)) return;
+        const receipt = mode === 'chat' ? chatReadbackReceipt(original, evidence, initialMsgCount) : undefined;
+        const saved = await updateTaskRuntime(taskId, { runtime: { conversationUrl: verifiedUrl, ...(receipt ? { chatReadback: receipt } : {}) } });
+        const persisted = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+        if (!saved || persisted?.runtime?.runId !== expectedRunId || persisted.runtime.submittedAt !== original.runtime.submittedAt
+          || !isSameDoubaoConversation(persisted.runtime.conversationUrl, verifiedUrl)) throw new SubmissionSafetyPauseError('原消息已发布，但具体会话保存未确认；保持原提交且不重发');
+        taskConversationUrl = verifiedUrl;
+      };
       const readSubmissionEvidence = async (): Promise<SubmissionReadback> => {
+        const observedUrl = webview.getURL();
         if (mode === 'chat') {
           const originalTask = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
           const currentUrl = normalizeDoubaoConversationUrl(webview.getURL());
@@ -1893,11 +2171,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           const context = originalTask?.runtime?.submittedAt && originalTask.runtime.input.prompt === prompt && currentUrl
             ? taskChatReadbackContext(originalTask, accountId, normalizeDoubaoConversationUrl(originalTask.runtime.conversationUrl) || currentUrl, webview.getURL()) : undefined;
           latestChatReadback = inspectChatReadback(await getChatPageSnapshot(webview), prompt, initialMsgCount, context);
+          await preserveSubmittedConversation?.(latestChatReadback, observedUrl);
           return latestChatReadback;
         }
-        return (petstoryGuard || strictPrompt) && (mode === 'image' || mode === 'video')
-          ? inspectCreationReadback(await getChatPageSnapshot(webview), prompt, mode, initialMsgCount, videoConfig)
-          : getSubmissionEvidence(webview, prompt, generationStartTimeBeforeSubmit, initialMsgCount);
+        if ((petstoryGuard || strictPrompt) && (mode === 'image' || mode === 'video')) {
+          const evidence = inspectCreationReadback(await getChatPageSnapshot(webview), prompt, mode, initialMsgCount, videoConfig);
+          await preserveSubmittedConversation?.(evidence, observedUrl); return evidence;
+        }
+        return getSubmissionEvidence(webview, prompt, generationStartTimeBeforeSubmit, initialMsgCount);
       };
       let authorizationTriggeredSubmission = false;
       let submissionMarkedAt: string | undefined;
@@ -2056,11 +2337,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       await persistVideoReadiness('submission_controls');
 
       // 页内输入与发送控件的只读检查先于提交意图，不抢系统焦点或操作鼠标。
-      const backgroundInput: BackgroundPageSubmission | undefined = backgroundImageTask ? {
+      const backgroundInput: BackgroundPageSubmission | undefined = backgroundTask ? {
         taskId,
-        isCurrent: (): boolean => isBackgroundImageOperationTask(usePetStoryStore.getState().project, taskId)
-          && useTaskStore.getState().tasks.some((task): boolean => task.id === taskId && task.assignedAccountId === accountId && task.runtime?.runId === expectedRunId && task.status === 'executing')
-          && automationEngine.ownsAccountController(taskId, accountId, controller),
+        isCurrent: (): boolean => {
+          const task = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+          return isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, task)
+            && task?.assignedAccountId === accountId && task.runtime?.runId === expectedRunId && task.status === 'executing'
+            && automationEngine.ownsAccountController(taskId, accountId, controller);
+        },
       } : undefined;
       if (!authorizationTriggeredSubmission) {
         const preparation = await preparePageSubmission(webview, undefined, backgroundInput);
@@ -2117,8 +2401,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             }),
           ]);
         } catch (error: unknown) {
-          if (error instanceof HumanVerificationRequiredError) await pauseForHumanVerification(accountId);
           await checkHumanVerification();
+          if (error instanceof HumanVerificationRequiredError) await pauseForHumanVerification(accountId);
           throw new SubmissionSafetyPauseError('发送动作结果不确定，请人工核对豆包会话；系统未自动重发');
         } finally {
           abortDispatch();
@@ -2131,18 +2415,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         throw new SubmissionSafetyPauseError('发送按钮不可用或点击结果不确定；系统已停止且未自动重发');
       }
 
-      let submissionConfirmed = false;
-      let confirmedEvidence: SubmissionReadback | undefined;
-      for (let attempt = 0; attempt < (mode === 'chat' ? 30 : 4); attempt++) {
-        await pause(500);
-        const evidence = await readSubmissionEvidence();
-        if (classifySubmissionReadback(evidence) === 'confirmed') {
-          submissionConfirmed = true;
-          confirmedEvidence = evidence;
-          break;
-        }
-        await checkHumanVerification();
-      }
+      // 媒体消息与输入框可异步重绘，统一给原次发送 15 秒只读受理窗口。
+      const confirmedEvidence = await waitForConfirmedSubmission({
+        read: readSubmissionEvidence, wait: pause, onUnconfirmed: checkHumanVerification, signal: controller.signal,
+      });
+      const submissionConfirmed = !!confirmedEvidence;
       if (!submissionConfirmed) {
         await checkHumanVerification();
         if (latestChatReadback?.candidates.length) await updateTaskRuntime(taskId, { runtime: { chatReadbackReview: {
@@ -2206,15 +2483,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       initializationLease?.release();
       initializationLease = undefined;
 
-      // 提交成功后刷新阻断检测基线。
-      // resetVideoCaptureCache 在注入提示词前设置基线，此时用户消息尚未渲染。
-      // 提交成功后用户消息已写入页面，需要重新设置基线，否则
-      // detectVideoGenerationBlocker 的增量文本会包含用户提示词内容，
-      // 导致提示词中含"生成失败""会员专享"等词时被误判为平台限制。
-      if (mode === 'video') {
-        await pause(800); // 等待用户消息渲染完成
-        await refreshBlockerBaseline(webview);
-      }
+      const videoBlockerContext = { baselineMessageCount: initialMsgCount, conversationUrl };
 
       // 只有持久化与回读成功后才触发队列；all_accepted 依赖此时才可放行其他账号。
       setAccountAutomationState(accountId, 'generating', '等待豆包生成回复...', 'generating');
@@ -2308,12 +2577,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           }
         }
         if (mode === 'video') {
-          imageUrls = await extractVideoOutputs(webview, taskConversationUrl, controller.signal);
+          imageUrls = await extractVideoOutputs(webview, taskConversationUrl, controller.signal, taskId);
           if (imageUrls.length > 0) {
             generating = false;
             break;
           }
-          const blocker = await detectVideoGenerationBlocker(webview);
+          const blocker = await detectVideoGenerationBlocker(webview, videoBlockerContext);
           if (blocker) throw new Error(`豆包已停止生成：${blocker}`);
         }
         if (!generating) break;
@@ -2342,13 +2611,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           await checkHumanVerification();
           pollCount++;
 
-          imageUrls = await extractVideoOutputs(webview, taskConversationUrl, controller.signal);
+          imageUrls = await extractVideoOutputs(webview, taskConversationUrl, controller.signal, taskId);
           if (imageUrls.length > 0) {
             console.log(`[Automation:${accountId}] 获取视频地址成功: ${imageUrls.length} 个`);
             break;
           }
 
-          const blocker = await detectVideoGenerationBlocker(webview);
+          const blocker = await detectVideoGenerationBlocker(webview, videoBlockerContext);
           if (blocker) {
             throw new Error(`豆包已停止生成：${blocker}`);
           }
@@ -2415,8 +2684,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       // 页面验证可能与派发失败／回读失败同一轮出现，先保留真实原因与账号阻断。
       if (err?.name !== 'AbortError') {
         try {
-          if (err instanceof HumanVerificationRequiredError) await pauseForHumanVerification(accountId);
           await checkHumanVerification();
+          if (err instanceof HumanVerificationRequiredError) await pauseForHumanVerification(accountId);
         }
         catch (verificationError: unknown) {
           if (verificationError instanceof AccountAvailabilityPauseError && verificationError.code === 'human_verification') err = verificationError;

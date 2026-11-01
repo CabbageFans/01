@@ -153,12 +153,12 @@ const PetStoryChatAdjustmentPanel: React.FC = (): React.ReactElement | null => {
   return <section className="petstory-adjustment" aria-label="当前创作的豆包调整">
     <div className="adjustment-target"><MessageOutlined /><div><small>正在调整</small><strong>{target}</strong></div><Button type="text" size="small" disabled={state.busy} onClick={(): void => { void state.endChatAdjustment(); }}>结束调整</Button></div>
     <p>在豆包中自由交流，选中满意的具体回复后应用。</p>
-    {repair && <p role="status">{repairCandidate ? '已修正，请确认完整内容。' : petStoryJobStatus(repair, useTaskStore.getState().tasks.find((task): boolean => task.id === repair.taskId)).instruction}</p>}
+    {repair && <p role="status">{repairCandidate ? '已修正，请确认完整内容。' : petStoryJobStatus(repair, useTaskStore.getState().tasks.find((task): boolean => task.id === repair.taskId), state.promptRepairJobIds.includes(repair.id)).instruction}</p>}
     {state.chatReadbackError && <p role="status" className="adjustment-readback">{state.chatReadbackError}</p>}
     <div className="adjustment-actions"><Button size="small" onClick={(): void => { window.dispatchEvent(new CustomEvent('petstory-open-adjustment')); }}>打开关联会话</Button><Button type="primary" size="small" disabled={!a.replies.length || state.busy} onClick={(): void => setChoosing(true)}>选择回复{a.replies.length ? ` · ${a.replies.length}` : ''}</Button></div>
     <Modal title={`选择用于「${target}」的回复`} open={choosing && !preview} width={680} onCancel={(): void => setChoosing(false)} footer={<><Button onClick={(): void => setChoosing(false)}>返回对话</Button><Button type={selected?.imageUrls?.length && pictureTarget ? 'default' : 'primary'} loading={previewLoading} disabled={!selected?.text.trim() || state.busy} onClick={(): void => { void openPreview(); }}>应用到当前创作</Button>{!!selected?.imageUrls?.length && pictureTarget && <Button type="primary" loading={state.busy} disabled={!!draftLabels.length} onClick={(): void => { void importImages(); }}>查看并采用图片</Button>}</>}>
-      <p className="adjustment-note">选择完整的助手回复。应用时若有明确格式或内容问题，会请豆包修订一次，再供你确认。</p>
-      {repair && <p role="status">{petStoryJobStatus(repair, useTaskStore.getState().tasks.find((task): boolean => task.id === repair.taskId)).instruction}</p>}
+      <p className="adjustment-note">选择完整的助手回复。应用时若有可修订的格式或内容问题，会在后台继续修订和校验，通过后供你确认。</p>
+      {repair && <p role="status">{petStoryJobStatus(repair, useTaskStore.getState().tasks.find((task): boolean => task.id === repair.taskId), state.promptRepairJobIds.includes(repair.id)).instruction}</p>}
       {state.error && <Alert type="error" showIcon message={state.error} />}
       <Radio.Group className="adjustment-replies" value={selectedKey} onChange={(event): void => setSelectedKey(event.target.value as string)}>
         {a.replies.map((reply, index): React.ReactElement => <label key={reply.key} className={`adjustment-reply ${selectedKey === reply.key ? 'is-selected' : ''}`}><Radio value={reply.key}>豆包回复 {index + 1}</Radio>{!!reply.imageUrls?.length && <p>{reply.imageUrls.length} 张回复图片 · 选择后下载并预览，不会直接替换当前图片</p>}{!!reply.text.trim() && <p>{replyContent(reply.text)}</p>}</label>)}

@@ -81,7 +81,10 @@ describe('图片入口真实就绪回读', (): void => {
     const root = makeNode(); const editor = makeNode(); const input = makeNode(); input.accept = 'image/*'; input.parentElement = root;
     const mode = makeNode('参考图'); const parameters = makeNode('9:16 · 5s'); const model = makeNode('模型 Seedream 4.0'); const reference = makeNode('图片1');
     editor.closest = (): ProbeNode => root;
-    root.querySelectorAll = (selector: string): ProbeNode[] => selector === 'input[type="file"]' ? [input] : selector.includes('button') ? [mode, parameters] : [];
+    root.querySelectorAll = (selector: string): ProbeNode[] => selector === 'input[type="file"]' ? [input]
+      : selector.includes('[data-creation-params-panel-id]') ? [parameters]
+      : selector === '[data-input-engine-actionbar-control-key="video-model"]' ? [model]
+      : selector.includes('button') ? [mode, parameters] : [];
     const document = { body: makeNode(), querySelectorAll: (selector: string): ProbeNode[] => {
       if (selector.startsWith('textarea')) return [editor];
       if (selector === '[data-creation-params-panel-id]') return [parameters];

@@ -72,10 +72,10 @@ beforeEach((): void => {
   begin.mockImplementation(async (_id: string, _revision: number, request: PetStoryImageOperationRequest): Promise<PetStoryImageOperationResult> => {
     save(); const count = (project.imageOperations?.length || 0) + 1;
     const op: PetStoryImageOperation = { id: `TEST-operation-${serial}-${count}`, requestId: request.requestId, target: request.target,
-      mode: request.baseAssetId ? 'modify' : 'generate', stage: request.baseAssetId ? 'generating' : 'preparing', basisHash: 'TEST', createdAt: now,
+      mode: request.baseAssetId ? 'modify' : 'generate', stage: request.baseAssetId || request.target.shotId ? 'generating' : 'preparing', basisHash: 'TEST', createdAt: now,
       baseAssetId: request.baseAssetId, feedback: request.feedback };
     project.imageOperations = [...(project.imageOperations || []), op];
-    if (op.mode === 'generate') chatJob(op);
+    if (op.mode === 'generate' && op.target.materialId) chatJob(op);
     return response(op);
   });
   advance.mockImplementation(async (_id: string, id: string): Promise<PetStoryImageOperationResult> => {
@@ -90,7 +90,7 @@ beforeEach((): void => {
     if (media.status === 'done') {
       if (!op.outputAssetId) {
         op.outputAssetId = `TEST-output-${op.id}`;
-        project.assets.push({ id: op.outputAssetId, kind: 'character', materialId: op.target.materialId, taskId: media.id, runId: media.runtime?.runId, relativePath: 'TEST/candidate.png',
+        project.assets.push({ id: op.outputAssetId, kind: op.target.kind === 'lastFrame' ? 'plannedEndImage' : op.target.kind || 'character', materialId: op.target.materialId, shotId: op.target.shotId, taskId: media.id, runId: media.runtime?.runId, relativePath: 'TEST/candidate.png',
           imageReview: { target: op.target, state: 'candidate', basisHash: 'TEST' }, validation: { decoded: true, sha256: 'a'.repeat(64), bytes: 1, width: 1, height: 1, checkedAt: now } });
       }
       op.stage = 'complete'; return response(op);
@@ -109,11 +109,11 @@ beforeEach((): void => {
     save(); project.mobileStory!.text = text; return { success: true, project };
   });
   dispatch.mockReturnValue(true);
-  vi.stubGlobal('window', { dispatchEvent: dispatch, electronAPI: { petstory: { beginImageOperation: begin, advanceImageOperation: advance, resumeImageOperation: resume,
+  vi.stubGlobal('window', Object.assign(new EventTarget(), { dispatchEvent: dispatch, electronAPI: { petstory: { beginImageOperation: begin, advanceImageOperation: advance, resumeImageOperation: resume,
     collectChat: collect, prepareRuntime, adoptPromptCandidate: adoptPrompt, bindProductionRun: bindProduction, saveOriginalStory: saveStory,
     bindRun: async (_id: string, jobId: string, runId: string): Promise<PetStoryResult> => { project.jobs.find((job): boolean => job.id === jobId)!.runId = runId; return { success: true, project }; },
     open: async (): Promise<PetStoryResult> => ({ success: true, project }),
-  }, tasks: { list: async (): Promise<Task[]> => tasks } } });
+  }, tasks: { list: async (): Promise<Task[]> => tasks } } }));
   const account: Account = { id: project.accountId, name: 'TEST 原账号', platform: 'doubao', partition: 'TEST-image-partition', status: 'idle', avatar: '', pinned: false, createdAt: now, updatedAt: now };
   useAccountStore.setState({ ...original.accounts, accounts: [account], selectedAccountId: account.id, selectAccount: vi.fn() });
   useProjectStore.setState({ ...original.studio, projects: [{ id: project.studioProjectId, name: 'TEST 原故事隔离项目', description: '', color: '#fff', archived: false, createdAt: now, updatedAt: now }], selectProject: vi.fn() });
@@ -130,6 +130,28 @@ afterEach(async (): Promise<void> => {
 });
 
 describe('单次图片意图的后台接力', (): void => {
+  it.each(['firstFrame', 'lastFrame'] as const)('画布%s生成复用图片操作和进度，不进入旧制作调度或打开浏览器', async (kind): Promise<void> => {
+    const shot = project.plan!.shots.find((item): boolean => !!item.prompts[kind])!;
+    const target = { shotId: shot.id, kind };
+    const originalPlan = structuredClone(project.plan); const originalAssets = structuredClone(project.assets);
+    await usePetStoryStore.getState().generateShotMedia(shot.id, kind);
+    expect(usePetStoryStore.getState().error).toBe('');
+    expect(begin).toHaveBeenCalledExactlyOnceWith(project.id, 1, { target, requestId: expect.any(String) }, undefined);
+    expect(start).toHaveBeenCalledOnce(); expect(bindProduction).toHaveBeenCalledOnce();
+    expect(tasks.map((item): Task['mode'] => item.mode)).toEqual(['image']); expect(project.jobs).toEqual([]);
+    const state = usePetStoryStore.getState(); const op = state.project!.imageOperations!.at(-1)!;
+    expect(state.activeImageOperationId).toBe(op.id);
+    expect(petStoryImageProgress(state.project!, target, tasks, state.activeImageOperationId)).toMatchObject({ busy: true, stage: 'generating', task: { id: tasks[0].id } });
+    expect(dispatch.mock.calls.some(([event]): boolean => event.type === 'reveal-browser')).toBe(false);
+    expect(project.plan).toEqual(originalPlan); expect(project.assets).toEqual(originalAssets);
+    await finishMedia();
+    const completed = usePetStoryStore.getState();
+    expect(completed.activeImageOperationId).toBeNull(); expect(tasks).toHaveLength(1);
+    expect(petStoryImageProgress(completed.project!, target, tasks, completed.activeImageOperationId)).toMatchObject({ busy: false, stage: 'complete', candidateAssetId: expect.any(String) });
+    expect(project.assets.at(-1)?.imageReview).toMatchObject({ target, state: 'candidate' });
+    expect(project.adoptedImages).toBeUndefined(); expect(project.plan).toEqual(originalPlan);
+  });
+
   it('连续及未返回的后台推进不切换全局忙碌，当前图片持续显示生成状态并保留已有错误', async (): Promise<void> => {
     const target = { materialId: project.materials![0].id };
     await usePetStoryStore.getState().modifyImage(target, 'TEST-old-adopted', '调整表情');

@@ -1,0 +1,22 @@
+{
+  "prompt": "TEST原视频：固定机位，小熊把树枝递给伙伴，保留原角色与原场景。",
+  "config": { "aspectRatio": "9:16", "duration": "5s" },
+  "messages": [
+    { "role": "user", "text": "", "messageId": "TEST-attachment", "attachmentOnly": true },
+    { "role": "user", "text": "生成视频：TEST原视频：固定机位，小熊把树枝递给伙伴，保留原角色与原场景。，9:16，5s，720p", "messageId": "TEST-original-user" },
+    { "role": "assistant", "text": "视频生成参数确认：时长5秒，比例9:16，请确认后生成视频。", "messageId": "TEST-parameter", "replyId": "TEST-original-user" },
+    { "role": "user", "text": "确认", "messageId": "TEST-confirm" },
+    { "role": "assistant", "text": "已确认，正在为你生成原请求的视频。", "messageId": "TEST-start", "replyId": "TEST-confirm" },
+    { "role": "user", "text": "正在生成视频吗", "messageId": "TEST-status-1" },
+    { "role": "assistant", "text": "我来帮你查看一下。", "messageId": "TEST-answer-1", "replyId": "TEST-status-1" },
+    { "role": "user", "text": "还要排多久的队", "messageId": "TEST-status-2" },
+    { "role": "assistant", "text": "等待时间会有变化，请再稍等。", "messageId": "TEST-answer-2", "replyId": "TEST-status-2" },
+    { "role": "user", "text": "还在排队吗", "messageId": "TEST-status-3" },
+    { "role": "assistant", "text": "我无法直接读取后台队列。", "messageId": "TEST-answer-3", "replyId": "TEST-status-3" },
+    { "role": "user", "text": "我12点16确认，现在已经12点40了，还没给我视频，这正常吗", "messageId": "TEST-status-4" },
+    { "role": "assistant", "text": "我来解释一下等待情况。", "messageId": "TEST-answer-4", "replyId": "TEST-status-4" },
+    { "role": "user", "text": "重发一次", "messageId": "TEST-retry" },
+    { "role": "assistant", "text": "你的视频生成好了。", "messageId": "TEST-complete", "replyId": "TEST-retry" },
+    { "role": "assistant", "text": "", "messageId": "TEST-tool", "replyId": "TEST-retry", "videoReady": true }
+  ]
+}

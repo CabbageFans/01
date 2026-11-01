@@ -40,6 +40,8 @@ export function journeyShotAsset(project: PetStoryProject, shot: PetStoryShot, k
     const imageId = kind === 'firstFrame' ? project.adoptedImages?.[shot.id]?.firstFrameId : project.adoptedImages?.[shot.id]?.plannedEndImageId;
     return project.assets.find((asset): boolean => asset.id === imageId && asset.shotId === shot.id && asset.kind === assetKind && asset.imageReview?.state === 'adopted');
   }
+  const selectedVideoId = project.selectedVideos?.[shot.id];
+  if (selectedVideoId) return project.assets.find((asset): boolean => asset.id === selectedVideoId && asset.shotId === shot.id && asset.kind === 'video');
   const media = productions(project).find((production): boolean => !!production.shots[shot.id])?.shots[shot.id];
   if (media?.videoId) return project.assets.find((asset): boolean => asset.id === media.videoId && asset.shotId === shot.id && asset.kind === 'video');
   return [...project.assets].reverse().find((asset): boolean => asset.shotId === shot.id && asset.kind === 'video');
@@ -47,7 +49,12 @@ export function journeyShotAsset(project: PetStoryProject, shot: PetStoryShot, k
 
 /** 当前正文一致性只是成果显示事实；是否允许发送仍由主进程资格服务决定。 */
 export function journeyAssetMatchesPrompt(asset: PetStoryAsset | undefined, prompt: PetStoryPrompt | undefined): boolean {
-  if (!asset?.validation?.decoded || asset.needsReview) return false;
+  if (!asset?.validation?.decoded) return false;
+  // 首尾帧以用户已作出的采用决定为准，不因后续文字或视频设置变化要求重复确认。
+  if (['firstFrame', 'plannedEndImage'].includes(asset.kind) && asset.imageReview?.state === 'adopted') {
+    return asset.imageReview.sha256 === asset.validation.sha256 && !!asset.imageReview.adoptedAt;
+  }
+  if (asset.needsReview) return false;
   // 上传图片的采用事实独立于模型提示词；缺少生成正文不代表图片未确认。
   if (asset.imageReview?.state === 'adopted' && (!asset.taskId || !!asset.imageReview.sourceReply)) return true;
   return !!prompt?.final.trim() && !prompt.needsReview && asset.generationFinal === prompt.final;

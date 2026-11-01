@@ -61,9 +61,21 @@ export function imageTargetBasis(project: PetStoryProject, target: PetStoryImage
   return createHash('sha256').update(JSON.stringify(facts)).digest('hex');
 }
 
-/** 旧基础素材的明确确认继续有效；旧关键帧只有文件不等于用户已采用。 */
+/** 当前首尾帧沿用用户的明确采用决定；提示词和参考变化不撤销这次选图。 */
+function selectedAdoptedShotImage(project: PetStoryProject, asset: PetStoryAsset): boolean {
+  if (!asset.shotId || !asset.validation?.decoded || !['firstFrame', 'plannedEndImage'].includes(asset.kind)
+    || !project.plan?.shots.some((shot): boolean => shot.id === asset.shotId)) return false;
+  const kind = asset.kind === 'firstFrame' ? 'firstFrame' : 'lastFrame';
+  const review = asset.imageReview;
+  return review?.state === 'adopted' && !!review.adoptedAt && review.sha256 === asset.validation?.sha256
+    && !review.target.materialId && review.target.shotId === asset.shotId && review.target.kind === kind
+    && selectedShotImage(project, asset.shotId, kind)?.id === asset.id;
+}
+
+/** 旧基础素材的明确确认继续有效；关键帧须有采用记录，不能仅凭文件自动采用。 */
 export function isPetStoryImageAdopted(project: PetStoryProject, asset: PetStoryAsset): boolean {
-  if (asset.kind === 'video' || !asset.validation?.decoded || asset.needsReview || asset.imageReview?.state === 'candidate') return false;
+  if (asset.kind === 'video' || !asset.validation?.decoded || asset.imageReview?.state === 'candidate') return false;
+  if (asset.needsReview && !selectedAdoptedShotImage(project, asset)) return false;
   if (asset.kind === 'actualEndFrame') return !!asset.sourceVideo;
   if (asset.imageReview?.state === 'adopted') return asset.imageReview.sha256 === asset.validation.sha256 && !!asset.imageReview.adoptedAt;
   return !!project.materials?.some((item): boolean => item.selectedAssetId === asset.id && item.approved?.assetId === asset.id
@@ -71,14 +83,30 @@ export function isPetStoryImageAdopted(project: PetStoryProject, asset: PetStory
     && (item.kind !== 'character' || item.approved.identity?.assetId === asset.id && item.approved.identity.description === project.plan?.characters.find((character): boolean => character.id === item.entityId)?.description));
 }
 
-export function selectedShotImageId(project: PetStoryProject, shotId: string, kind: 'firstFrame' | 'lastFrame'): string | undefined {
+function selectedShotImage(project: PetStoryProject, shotId: string, kind: 'firstFrame' | 'lastFrame'): PetStoryAsset | undefined {
   const field = kind === 'firstFrame' ? 'firstFrameId' : 'plannedEndImageId';
   const selected = project.adoptedImages?.[shotId]?.[field];
   const runs = [project.production, ...(project.productionHistory || []).slice().reverse()];
   const prior = runs.find((run): boolean => !!run?.shots[shotId])?.shots[shotId]?.[field];
   const id = selected || prior;
-  const asset = project.assets.find((item): boolean => item.id === id);
+  return project.assets.find((item): boolean => item.id === id && item.shotId === shotId
+    && (kind === 'firstFrame' ? item.kind === 'firstFrame' || item.kind === 'actualEndFrame' : item.kind === 'plannedEndImage'));
+}
+
+export function selectedShotImageId(project: PetStoryProject, shotId: string, kind: 'firstFrame' | 'lastFrame'): string | undefined {
+  const asset = selectedShotImage(project, shotId, kind);
   return asset && isPetStoryImageAdopted(project, asset) ? asset.id : undefined;
+}
+
+/** 首尾帧只区分文件有效、是否采用和真正缺图，不要求重复复核已采用图片。 */
+export function shotImageUnavailableReason(project: PetStoryProject, shotId: string, kind: 'firstFrame' | 'lastFrame'): string {
+  const name = kind === 'firstFrame' ? '首帧' : '尾帧';
+  const asset = selectedShotImage(project, shotId, kind);
+  if (asset && !asset.validation?.decoded) return `本镜${name}图片已存在，但文件尚未通过校验，请检查原文件或上传替代图片。`;
+  if (asset?.imageReview?.state === 'adopted' && asset.imageReview.sha256 !== asset.validation?.sha256) return `本镜${name}图片的文件校验记录已变化，请核对原文件后重新确认，或上传替代图片。`;
+  const hasImage = !!asset || project.assets.some((item): boolean => imageTargetMatches(item, { shotId, kind }));
+  return hasImage ? `本镜已有${name}图片，但尚未确认用于制作。请查看图片并点击“满意，采用图片”。`
+    : `本镜尚无已采用的${name}图片，请先生成或上传图片，并确认采用。`;
 }
 
 /** 采用新方案只整理当前指针；历史文件与原任务始终保留，不做自动重生成。 */
@@ -89,9 +117,10 @@ export function reconcileAdoptedImages(project: PetStoryProject): void {
       delete project.adoptedImages?.[shotId];
       continue;
     }
-    for (const [field, kind] of [['firstFrameId', 'firstFrame'], ['plannedEndImageId', 'lastFrame']] as const) {
+    for (const field of ['firstFrameId', 'plannedEndImageId'] as const) {
       const asset = project.assets.find((item): boolean => item.id === selected[field]);
-      if (asset?.imageReview && asset.imageReview.basisHash !== imageTargetBasis(project, { shotId, kind })) asset.needsReview = true;
+      // 兼容旧记录的复核标记；保留采用时的依据摘要和文件指纹，不改写历史选图事实。
+      if (asset && selectedAdoptedShotImage(project, asset)) asset.needsReview = undefined;
     }
   }
 }

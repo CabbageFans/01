@@ -134,3 +134,6 @@ data/
 
 # 图片反馈专项：真实素材副本、会话与截图仅保留本机
 /artifacts/material-image-feedback/
+
+# 画布主工作区：真实项目备份、任务与截图只保留本机
+/artifacts/canvas-first-workspace/

@@ -82,7 +82,7 @@ function createMockWebview(responses: {
       return null;
     }),
     loadURL: vi.fn(),
-    getURL: vi.fn(() => 'https://www.doubao.com/chat/'),
+    getURL: vi.fn(() => 'https://www.doubao.com/chat/TEST-original'),
   };
   return mock;
 }
@@ -98,6 +98,50 @@ describe('resolveVideoArtifact 集成测试', () => {
     vi.restoreAllMocks();
   });
 
+  it('离开具体原会话时拒绝解析其他会话缓存，且不执行任何页面策略', async (): Promise<void> => {
+    const webview = createMockWebview({ cache: { found: true, vid: 'TEST-other-vid', videoUrl: 'https://vod.example.com/video/other.mp4' } });
+    webview.getURL = (): string => 'https://www.doubao.com/chat/TEST-other';
+    const result = await resolveVideoArtifact(webview, { conversationUrl: 'https://www.doubao.com/chat/TEST-original' });
+    expect(result.status).toBe('needs_manual_selection');
+    expect(result.url).toBeUndefined();
+    expect(webview.executeJavaScript).not.toHaveBeenCalled();
+  });
+
+  it('缓存读取期间切换会话时拒绝已经返回的其他视频候选', async (): Promise<void> => {
+    const webview = createMockWebview({ cache: { found: true, vid: 'TEST-other-vid', videoUrl: 'https://vod.example.com/video/other.mp4', fieldSource: 'original_media_info' } });
+    let currentUrl = 'https://www.doubao.com/chat/TEST-original';
+    webview.getURL = (): string => currentUrl;
+    const originalExecute = webview.executeJavaScript;
+    webview.executeJavaScript = vi.fn(async (code: string): Promise<unknown> => {
+      const result: unknown = await originalExecute(code);
+      currentUrl = 'https://www.doubao.com/chat/TEST-other';
+      return result;
+    });
+    const result = await resolveVideoArtifact(webview, { conversationUrl: 'https://www.doubao.com/chat/TEST-original' });
+    expect(result.status).toBe('needs_manual_selection');
+    expect(result.url).toBeUndefined();
+    expect(webview.executeJavaScript).toHaveBeenCalledOnce();
+  });
+
+  it('播放地址异步返回时会话已经变化，不绑定先前缓存或返回地址', async (): Promise<void> => {
+    const webview = createMockWebview({
+      cache: { found: true, vid: 'TEST-vid', videoUrl: 'https://vod.example.com/video/cache.mp4', fieldSource: 'original_media_info' },
+      playInfo: { status: 200, data: { data: { download_url: 'https://vod.example.com/video/play.mp4' } } },
+    });
+    let currentUrl = 'https://www.doubao.com/chat/TEST-original';
+    webview.getURL = (): string => currentUrl;
+    const originalExecute = webview.executeJavaScript;
+    webview.executeJavaScript = vi.fn(async (code: string): Promise<unknown> => {
+      const result: unknown = await originalExecute(code);
+      if (code.includes('get_play_info')) currentUrl = 'https://www.doubao.com/chat/TEST-other';
+      return result;
+    });
+    const result = await resolveVideoArtifact(webview, { conversationUrl: 'https://www.doubao.com/chat/TEST-original' });
+    expect(result.status).toBe('needs_manual_selection');
+    expect(result.url).toBeUndefined();
+    expect(webview.executeJavaScript).toHaveBeenCalledTimes(2);
+  });
+
   // ---- 1. 带 vid 的候选成功绑定 ----
 
   it('缓存命中 vid + original_media_info 时成功绑定原始地址', async () => {
@@ -111,7 +155,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv1',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 5000,
     });
 
@@ -131,7 +175,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv1',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 5000,
     });
 
@@ -151,7 +195,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv_stale',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 5000,
     });
 
@@ -178,7 +222,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv_scan',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 5000,
     });
 
@@ -208,7 +252,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv_scan_ok',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 5000,
     });
 
@@ -249,7 +293,7 @@ describe('resolveVideoArtifact 集成测试', () => {
         return null;
       }),
       loadURL: vi.fn(),
-      getURL: vi.fn(() => 'https://www.doubao.com/chat/'),
+      getURL: vi.fn(() => 'https://www.doubao.com/chat/TEST-original'),
     };
 
     // 在策略 1 返回后立即取消
@@ -264,7 +308,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv_cancel',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 10000,
       signal: controller.signal,
     });
@@ -313,7 +357,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     const webview = createMockWebview({});
 
     const result = await manualResolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv_aborted',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 15000,
       signal: controller.signal,
     });
@@ -350,7 +394,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv_aispace',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 10000,
     });
 
@@ -381,7 +425,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv_fallback',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 10000,
     });
 
@@ -423,7 +467,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv_vid_only',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 10000,
     });
 
@@ -532,7 +576,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await manualResolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/denied',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 5000,
     });
 
@@ -578,7 +622,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     });
 
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv_vid_only_002',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 10000,
     });
 
@@ -612,7 +656,7 @@ describe('resolveVideoArtifact 集成测试', () => {
         return null;
       }),
       loadURL: vi.fn(),
-      getURL: vi.fn(() => 'https://www.doubao.com/chat/'),
+      getURL: vi.fn(() => 'https://www.doubao.com/chat/TEST-original'),
     };
 
     // 100ms 后取消（模拟用户在请求等待期间点击取消）
@@ -620,7 +664,7 @@ describe('resolveVideoArtifact 集成测试', () => {
 
     const start = Date.now();
     const result = await resolveVideoArtifact(webview, {
-      conversationUrl: 'https://www.doubao.com/chat/?conversation_id=conv_abort_inflight',
+      conversationUrl: 'https://www.doubao.com/chat/TEST-original',
       timeoutMs: 15000,
       signal: controller.signal,
     });

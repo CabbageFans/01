@@ -38,6 +38,7 @@ function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolea
     contains(node: Element): boolean { return this === root && node.owned; }
     querySelectorAll(selector: string): Element[] {
       synchronizeState();
+      if (selector.includes('video-model') || selector.includes('data-creation-params-panel-id')) return state === 'video' || hiddenMeasurement ? [model as unknown as Element] : [];
       if (selector.includes('skill_input_exit_button')) return hiddenMeasurement || state === 'image-skill' || state === 'video' ? [skill] : [];
       if (selector.includes('aria-expanded')) return [];
       return [more, image, video].filter((n): boolean => n.shown());

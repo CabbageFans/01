@@ -34,7 +34,7 @@ interface PetStoryImageReviewProps {
 function adoptionNote(reviewingCurrent: boolean, replacing: boolean, needsReview: boolean): string {
   if (reviewingCurrent && needsReview) return '请核对变化后的参考内容；确认继续使用后，才可作为后续制作依据。';
   if (reviewingCurrent) return '当前采用图片；查看不会改变素材。';
-  return replacing ? '采用后替换当前图片；旧图和已有成果保留，相关镜头需要复核。' : '确认采用后，图片才会进入正式节点。';
+  return replacing ? '采用后替换当前图片；旧图和已有成果保留，后续制作使用新采用的图片。' : '确认采用后，图片才会进入正式节点。';
 }
 type ImageProgress = ReturnType<typeof petStoryImageProgress>;
 function imageError(local: string, external: string | undefined, operation: string): string { return local || external || operation || ''; }
@@ -82,11 +82,13 @@ const ImagePreviewBody: React.FC<ImagePreviewBodyProps> = ({ project, title, ima
 </aside></div>;
 interface PreviewActionsProps {
   reviewingCurrent: boolean; confirmingCurrent: boolean; hasCurrent: boolean; hasSelected: boolean; locked: boolean; readable: boolean; saving: boolean;
+  generationDisabled: boolean; generating: boolean; regenerate?: () => Promise<void>;
   close: () => void; modify: () => void; adopt: () => Promise<void>;
 }
-const PreviewActions: React.FC<PreviewActionsProps> = ({ reviewingCurrent, confirmingCurrent, hasCurrent, hasSelected, locked, readable, saving, close, modify, adopt }): React.ReactElement => <>
+const PreviewActions: React.FC<PreviewActionsProps> = ({ reviewingCurrent, confirmingCurrent, hasCurrent, hasSelected, locked, readable, saving, generationDisabled, generating, regenerate, close, modify, adopt }): React.ReactElement => <>
   <span className="petstory-adoption-note">{adoptionNote(reviewingCurrent, hasCurrent, confirmingCurrent)}</span>
   <Button onClick={close}>{reviewingCurrent ? '返回' : '暂不采用'}</Button>
+  {regenerate && <Button title="重新上传参考图和当前生图提示词，生成一组新图片" disabled={locked || generationDisabled} loading={generating} onClick={(): void => { void regenerate(); }}>重新生成</Button>}
   {hasSelected && <Button disabled={locked || !readable} onClick={modify}>不满意，修改图片</Button>}
   {(!reviewingCurrent || confirmingCurrent) && <Button type="primary" disabled={locked || !hasSelected || !readable} loading={saving} onClick={(): void => { void adopt(); }}>{confirmingCurrent ? '确认继续使用' : '满意，采用图片'}</Button>}
 </>;
@@ -100,9 +102,10 @@ const ImageFeedbackDialog: React.FC<ImageFeedbackDialogProps> = ({ projectId, ti
   <Input.TextArea id={`image-feedback-${base.id}`} aria-label="图片修改意见" value={feedback} disabled={submitting} autoSize={{ minRows: 4, maxRows: 8 }} placeholder="例如：表情更自然一些，衣服和背景保持不变。" onChange={(event): void => change(event.target.value)} />
   {error && <p className="petstory-image-feedback-error" role="alert">{error}</p>}
 </Modal>;
-function currentReviewState(current: PetStoryAsset | undefined, selected: PetStoryAsset | undefined, currentNeedsReview?: boolean): { reviewingCurrent: boolean; needsReview: boolean; confirmingCurrent: boolean } {
+function currentReviewState(target: PetStoryImageTarget, current: PetStoryAsset | undefined, selected: PetStoryAsset | undefined, currentNeedsReview?: boolean): { reviewingCurrent: boolean; needsReview: boolean; confirmingCurrent: boolean } {
   const reviewingCurrent = !!selected && selected.id === current?.id;
-  const needsReview = !!(currentNeedsReview || current?.needsReview);
+  // 已明确采用的首尾帧持续用于后续制作；旧复核标记只在基础素材确认流程中生效。
+  const needsReview = !!target.materialId && !!(currentNeedsReview || current?.needsReview);
   return { reviewingCurrent, needsReview, confirmingCurrent: reviewingCurrent && needsReview };
 }
 
@@ -112,7 +115,7 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
   const [readable, setReadable] = useState(false); const [error, setError] = useState(''); const [recoveryFailed, setRecoveryFailed] = useState(false);
   const [feedbackBaseId, setFeedbackBaseId] = useState<string>(); const [feedback, setFeedback] = useState('');
   const [feedbackError, setFeedbackError] = useState(''); const [submitting, setSubmitting] = useState(false); const [starting, setStarting] = useState(false);
-  const root = useRef<HTMLDivElement>(null); const awaitingResult = useRef<Set<string> | null>(null);
+  const root = useRef<HTMLDivElement>(null); const previewBody = useRef<HTMLDivElement>(null); const awaitingResult = useRef<Set<string> | null>(null);
   const state = usePetStoryStore(); const tasks = useTaskStore((store) => store.tasks);
   const progress = petStoryImageProgress(project, target, tasks, state.activeImageOperationId);
   const images = project.assets.filter((asset): boolean => imageBelongsToTarget(project, asset, target));
@@ -120,8 +123,9 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
   const candidates = pendingImageCandidates(project, target, currentAssetId);
   const selected = images.find((asset): boolean => asset.id === selectedId);
   const feedbackBase = images.find((asset): boolean => asset.id === feedbackBaseId);
-  const { reviewingCurrent, needsReview, confirmingCurrent } = currentReviewState(current, selected, currentNeedsReview);
+  const { reviewingCurrent, needsReview, confirmingCurrent } = currentReviewState(target, current, selected, currentNeedsReview);
   const busy = progress.busy || !!generating || starting || submitting;
+  const generationBlocked = !!generationDisabled || progress.resumable;
   const task = imageConversationTask(project, target, tasks);
   const selectedTask = selected ? imageConversationTask(project, target, tasks, selected.id) : undefined;
   const visibleError = imageError(error, externalError, progress.error);
@@ -137,15 +141,17 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
     const produced = images.find((asset): boolean => !previous.has(asset.id) && asset.validation?.decoded === true);
     if (!produced || feedbackBase && submitting) return;
     awaitingResult.current = null;
-    if (!root.current || root.current.closest('[hidden], .page-hidden') || document.hidden || document.querySelector('[role="dialog"]')) return;
+    const ownDialog = previewBody.current?.closest('[role="dialog"]');
+    const otherDialog = [...document.querySelectorAll('[role="dialog"]')].some((dialog): boolean => dialog !== ownDialog);
+    if (!root.current || root.current.closest('[hidden], .page-hidden') || document.hidden || otherDialog) return;
     setSelectedId(produced.id); setReadable(false); setError(''); setOpen(true);
   }, [images, feedbackBase, submitting]);
   useEffect((): void => { if (previewAssetId) { setSelectedId(previewAssetId); setReadable(false); setOpen(true); } }, [previewAssetId]);
   const generate = async (): Promise<void> => {
-    if (!onGenerate || busy || disabled || generationDisabled) return;
+    if (!onGenerate || busy || disabled || generationBlocked) return;
     setError(''); setRecoveryFailed(false); setStarting(true); awaitingResult.current = new Set(images.map((asset): string => asset.id));
-    try { await onGenerate(); const latest = usePetStoryStore.getState(); if (latest.error) setError(latest.error); }
-    catch (failure: unknown) { setError(failure instanceof Error ? failure.message : '图片任务未启动，请重试'); }
+    try { await onGenerate(); const latest = usePetStoryStore.getState(); if (latest.error) { awaitingResult.current = null; setError(latest.error); } }
+    catch (failure: unknown) { awaitingResult.current = null; setError(failure instanceof Error ? failure.message : '图片任务未启动，请重试'); }
     finally { setStarting(false); }
   };
   const upload = async (): Promise<void> => {
@@ -196,11 +202,13 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
     {current ? <button type="button" className="petstory-current-image" onClick={(): void => show(current.id)} aria-label={`查看${title}已采用图片`}><ReviewImage projectId={project.id} asset={current} name={`${title} · 当前采用`} /></button>
       : <div className="petstory-image-empty"><PictureOutlined /><span>尚未采用图片</span></div>}
     {current && needsReview && <p className="canvas-error">参考内容已更新，请复核这张图片。</p>}
-    <ImageActions current={current} currentNeedsReview={needsReview} candidateCount={candidates.length} disabled={disabled} busy={busy} generationDisabled={generationDisabled || progress.resumable} show={show} upload={upload} generate={onGenerate ? generate : undefined} openConversation={task ? (): void => openConversation() : undefined} />
+    <ImageActions current={current} currentNeedsReview={needsReview} candidateCount={candidates.length} disabled={disabled} busy={busy} generationDisabled={generationBlocked} show={show} upload={upload} generate={onGenerate ? generate : undefined} openConversation={task ? (): void => openConversation() : undefined} />
     {!open && !feedbackBase && <ImageOperationStatus progress={progress} error={visibleError} preparing={starting} disabled={disabled || busy} retry={retry} />}
-    {open && <Modal className="petstory-image-modal" title={`${title} · 选择图片`} open width={1000} onCancel={(): void => setOpen(false)} footer={<PreviewActions reviewingCurrent={reviewingCurrent} confirmingCurrent={confirmingCurrent} hasCurrent={!!current} hasSelected={!!selected} locked={disabled || busy} readable={readable} saving={state.busy} close={(): void => setOpen(false)} modify={beginFeedback} adopt={adopt} />}>
+    {open && <Modal className="petstory-image-modal" title={`${title} · 选择图片`} open width={1000} onCancel={(): void => setOpen(false)} footer={<PreviewActions reviewingCurrent={reviewingCurrent} confirmingCurrent={confirmingCurrent} hasCurrent={!!current} hasSelected={!!selected} locked={disabled || busy} readable={readable} saving={state.busy} generationDisabled={generationBlocked} generating={busy} regenerate={onGenerate ? generate : undefined} close={(): void => setOpen(false)} modify={beginFeedback} adopt={adopt} />}>
+      <div ref={previewBody}>
       <ImageOperationStatus progress={progress} error={visibleError} preparing={starting} disabled={disabled || busy} retry={retry} />
       <ImagePreviewBody project={project} title={title} images={images} candidates={candidates} current={current} selected={selected} reviewingCurrent={reviewingCurrent} confirmingCurrent={confirmingCurrent} identity={identity} locked={disabled || busy} readable={readable} batchSelectedId={batchSelectedId} onBatchSelection={onBatchSelection} hasConversation={!!selectedTask} onReadable={setReadable} select={(assetId: string): void => { if (selectedId !== assetId) setReadable(false); setSelectedId(assetId); setError(''); }} upload={upload} openConversation={(): void => openConversation(selected?.id)} />
+      </div>
     </Modal>}
     {feedbackBase && <ImageFeedbackDialog projectId={project.id} title={title} base={feedbackBase} feedback={feedback} error={feedbackError} submitting={submitting} disabled={disabled || progress.busy} cancel={(): void => { setFeedbackBaseId(undefined); setOpen(true); }} submit={submitFeedback} change={setFeedback} />}
 

@@ -1,10 +1,16 @@
+import { currentReferenceContinuation } from './petstoryReferenceContinuation';
 import { createHash } from 'node:crypto';
 import type { PetStoryCapability, PetStoryChatJob, PetStoryProject, PetStoryPrompt, PetStoryPromptKind, PetStoryPromptReference, PetStoryPromptTaskContract, PetStoryResolvedMode, PetStoryRuntimeTarget } from '@doubao-studio/contracts';
+import { previousAdoptedBoundary } from './petstoryBoundary';
+import { promptTextContext } from './petstoryTextContext';
 import { runtimePromptIssues } from './petstoryValidation';
 import { compileReferencedText, materialPromptReferences, plannedReferenceMap, promptReferences } from './petstoryPromptQuality';
 import { isStoryApproved } from './petstoryMaterials';
 import { isPetStoryImageAdopted } from './petstoryImageReview';
 import { plannedPetStoryMode } from './petstoryModes';
+import { hasCurrentPromptReviewError } from './petstoryReview';
+
+export type PromptEligibilityPurpose = 'candidate' | 'current';
 
 export interface PromptEligibilityTarget {
   materialId?: string;
@@ -26,7 +32,7 @@ function targetId(target: PromptEligibilityTarget): string | undefined { return 
 function adoptedText(prompt?: PetStoryPrompt): string | undefined { return prompt && (prompt.sourceJobId || prompt.edited) ? prompt.final : undefined; }
 
 /** 只锁定创作事实及已采用边界；确认图片、计划占位落地和上传编号不改变创作事实。 */
-export function promptDesignHash(p: PetStoryProject, target: PromptEligibilityTarget): string {
+function designHash(p: PetStoryProject, target: PromptEligibilityTarget, legacy: boolean, omitUnusedVideo: boolean = false): string {
   const material = p.materials?.find((item): boolean => item.id === target.materialId);
   if (material) return digest({ story: p.mobileStory, adaptedStory: p.plan?.adaptedStory, material: { id: material.id, designHash: material.designHash } });
   const shot = p.plan?.shots.find((item): boolean => item.id === target.shotId);
@@ -34,6 +40,8 @@ export function promptDesignHash(p: PetStoryProject, target: PromptEligibilityTa
   const { prompts: _prompts, characterIds, propIds, sceneReferenceAssetIds: _sceneReferenceAssetIds, ...design } = shot;
   const previous = p.plan?.shots.find((item): boolean => item.id === shot.previousShotId)
     || p.plan?.shots.filter((item): boolean => item.order < shot.order).sort((a, b): number => b.order - a.order)[0];
+  const selectedBoundary = previousAdoptedBoundary(p, shot) as { promptKind?: string } | undefined;
+  const usesLastFrame = selectedBoundary?.promptKind === 'lastFrame';
   const characters = p.plan?.characters.filter((item): boolean => characterIds.includes(item.id)).map(({ referenceAssetId: _referenceAssetId, ...item }): object => item).sort((a, b): number => JSON.stringify(a).localeCompare(JSON.stringify(b)));
   const profile = p.promptProfile ? { style: p.promptProfile.style, characters: Object.fromEntries(Object.entries(p.promptProfile.characters).filter(([id]): boolean => characterIds.includes(id))) } : undefined;
   const snapshot = { story: p.mobileStory, adaptedStory: p.plan?.adaptedStory, sceneDesign: p.plan?.sceneDesign, profile,
@@ -42,8 +50,22 @@ export function promptDesignHash(p: PetStoryProject, target: PromptEligibilityTa
     props: p.plan?.props?.filter((item): boolean => (propIds || []).includes(item.id)), scenes: p.plan?.scenes?.filter((item): boolean => item.id === shot.sceneId),
     firstFrame: target.promptKind === 'lastFrame' || target.promptKind === 'video' ? adoptedText(shot.prompts.firstFrame) : undefined,
     lastFrame: target.promptKind === 'video' ? adoptedText(shot.prompts.lastFrame) : undefined,
-    previousBoundary: previous ? { id: previous.id, endState: previous.endState, lastFrame: adoptedText(previous.prompts.lastFrame), video: adoptedText(previous.prompts.video) } : undefined };
+    previousBoundary: previous ? { id: previous.id, endState: previous.endState, lastFrame: adoptedText(previous.prompts.lastFrame), video: usesLastFrame && (!legacy || omitUnusedVideo) ? undefined : adoptedText(previous.prompts.video) } : undefined };
   return digest(snapshot);
+}
+/** 创作只使用选中的前镜边界：可信尾帧优先，否则使用视频正文。 */
+export function promptDesignHash(p: PetStoryProject, target: PromptEligibilityTarget): string { return designHash(p, target, false); }
+/** 仅核对旧存储合同，不重写原hash或任务。 */
+export function legacyPromptDesignHash(p: PetStoryProject, target: PromptEligibilityTarget): string { return designHash(p, target, true); }
+function currentDesignContract(p: PetStoryProject, target: PromptEligibilityTarget, task: PetStoryPromptTaskContract, source?: PetStoryChatJob): boolean {
+  const shot = p.plan?.shots.find((item): boolean => item.id === target.shotId);
+  const boundary = shot ? previousAdoptedBoundary(p, shot) as { promptKind?: string } | undefined : undefined;
+  if (source?.previousBoundaryHash !== undefined && source.previousBoundaryHash !== digest(boundary || null)) return false;
+  if (task.designHash === legacyPromptDesignHash(p, target)) return true;
+  if (task.designHash !== promptDesignHash(p, target)) return false;
+  // 两种hash仅在旧算法额外纳入了未选用video时不同；必须有原请求边界证据及精确原hash重现。
+  return boundary?.promptKind === 'lastFrame' && !!source?.previousBoundaryHash
+    && task.designHash === designHash(p, target, true, true);
 }
 export function promptModelDialect(model?: string): PetStoryPromptTaskContract['dialect'] {
   return /seedance[\s_-]*2[._]5/i.test(model || '') ? 'seedance25' : /seedance[\s_-]*2[._]0/i.test(model || '') ? 'seedance20' : 'generic';
@@ -72,12 +94,12 @@ function validRuleContract(p: PetStoryProject, target: PromptEligibilityTarget, 
 function targetModel(p: PetStoryProject, target: PromptEligibilityTarget): string | undefined {
   return target.model || p.production?.capability?.videoConfig?.model || promptWritingTarget(p, target).model;
 }
-function modelTargetIssues(p: PetStoryProject, target: PromptEligibilityTarget, task: PetStoryPromptTaskContract, source?: PetStoryChatJob): string[] {
+function modelTargetIssues(p: PetStoryProject, target: PromptEligibilityTarget, task: PetStoryPromptTaskContract, source?: PetStoryChatJob, authorizedReferences: boolean = false): string[] {
   if (target.promptKind !== 'video') return task.dialect === 'seedream' ? [] : ['图片正文尚未通过对应 Seedream 专用任务适配。'];
   const reasons: string[] = [];
   const model = targetModel(p, target);
   const dialect = promptModelDialect(model);
-  if (!target.mode || task.mode !== target.mode) reasons.push('正文生成时的目标视频模式与实际模式不同，请通过 Chat 重新生成或修订。');
+  if (!target.mode || task.mode !== target.mode && !authorizedReferences) reasons.push('正文生成时的目标视频模式与实际模式不同，请通过 Chat 重新生成或修订。');
   if (dialect === 'generic') reasons.push('当前视频目标模型未知；通用正文仅为创作计划，确定实际模型后请通过豆包适配。');
   else if (task.dialect !== dialect) reasons.push('正文生成时的 Seedance 方言与本次目标模型不同，请按当前模型通过豆包重新生成或修订。');
   const dialectStage = dialect === 'seedance20' ? 'video20' : dialect === 'seedance25' ? 'video25' : undefined;
@@ -118,11 +140,12 @@ function currentReferencePlan(p: PetStoryProject, prompt: PetStoryPrompt, target
   return promptReferences(p, shot, target.promptKind, target.mode, true);
 }
 /** 复用只读计划编译核对当前素材，不把等到媒体提交时报错当作阶段已完成。 */
-function currentReferenceValidation(p: PetStoryProject, prompt: PetStoryPrompt, target: PromptEligibilityTarget): { references?: PetStoryPromptReference[]; issues: string[] } {
+function currentReferenceValidation(p: PetStoryProject, prompt: PetStoryPrompt, target: PromptEligibilityTarget, purpose: PromptEligibilityPurpose): { references?: PetStoryPromptReference[]; issues: string[] } {
   if (!prompt.promptTask) return { issues: [] };
   try {
     const references = currentReferencePlan(p, prompt, target);
-    compileReferencedText(p, prompt.final, references, prompt.promptTask.references);
+    const continuation = purpose === 'current' && target.promptKind === 'video' && target.mode === 'reference' && target.shotId ? currentReferenceContinuation(p, target.shotId) : undefined;
+    compileReferencedText(p, prompt.final, references, prompt.promptTask.references, continuation ? 'authorized_frame_references' : purpose === 'current' && target.promptKind === 'video' ? 'current_frames' : 'original_assets');
     return { references, issues: [] };
   } catch (error: unknown) { return { issues: [error instanceof Error ? error.message : '当前目标素材与正文引用计划无法对应，请通过豆包适配。'] }; }
 }
@@ -133,10 +156,11 @@ function matchingWritingPlan(p: PetStoryProject, target: PromptEligibilityTarget
 }
 /** 收取时只核对输入事实；坏正文仍交内容校验处理，不能误标过期而跳过一次修订。 */
 export function promptContractFactsCurrent(p: PetStoryProject, job: PetStoryChatJob): boolean {
+  try { p = promptTextContext(p, job); } catch { return false; }
   const task = job.promptTask; if (!task?.designHash) return false;
   const target = promptWritingTarget(p, job);
   const prompt = job.materialId ? p.materials?.find((item): boolean => item.id === job.materialId)?.prompt : p.plan?.shots.find((item): boolean => item.id === job.shotId)?.prompts[job.promptKind || 'video'];
-  if (!prompt || task.designHash !== promptDesignHash(p, target)) return false;
+  if (!prompt || !currentDesignContract(p, target, task, job)) return false;
   const modelIssues = modelTargetIssues(p, target, task, job);
   if (modelIssues.length && !matchingWritingPlan(p, target, task, modelIssues)) return false;
   try { plannedReferenceMap(task.references, currentReferencePlan(p, { ...prompt, editIntent: job.editIntent }, target)); return true; }
@@ -144,33 +168,39 @@ export function promptContractFactsCurrent(p: PetStoryProject, job: PetStoryChat
 }
 /** 采用前在副本中检验同一原回复的当前资格，不改变源任务或用户final。 */
 export function inspectPromptCandidate(p: PetStoryProject, job: PetStoryChatJob): PromptEligibility {
+  try { p = promptTextContext(p, job); } catch (error: unknown) { return { state: 'needs_revision', reasons: [error instanceof Error ? error.message : '前序候选已变化'], writingReady: false }; }
   const prompt = job.materialId ? p.materials?.find((item): boolean => item.id === job.materialId)?.prompt : p.plan?.shots.find((item): boolean => item.id === job.shotId)?.prompts[job.promptKind || 'video'];
   const body = job.parsedResult?.optimized;
   if (!prompt || !body) return { state: 'needs_revision', reasons: ['候选缺少对应目标或完整原回复正文。'], writingReady: false };
   const snapshot = { ...p, jobs: p.jobs.map((item): PetStoryChatJob => item.id === job.id ? { ...item, status: 'applied', resultStatus: 'adopted' } : item) };
   return inspectPromptEligibility(snapshot, { ...prompt, final: body, optimized: body, edited: false, sourceJobId: job.id, candidateJobId: job.id,
-    rulesVersion: job.rulesVersion || prompt.rulesVersion, promptTask: job.promptTask, editIntent: job.editIntent, needsReview: undefined }, promptWritingTarget(p, job));
+    rulesVersion: job.rulesVersion || prompt.rulesVersion, promptTask: job.promptTask, editIntent: job.editIntent, needsReview: undefined }, promptWritingTarget(p, job), 'candidate');
 }
-/** 可读计划和本次媒体资格分开；任何入口都不能靠 edited 或缺字段跳过合同。 */
-export function inspectPromptEligibility(p: PetStoryProject, prompt: PetStoryPrompt, target: PromptEligibilityTarget): PromptEligibility {
+/** 候选严格核对创作快照；已采用视频正文按当前选图投产，不重放历史文字依赖。 */
+export function inspectPromptEligibility(p: PetStoryProject, prompt: PetStoryPrompt, target: PromptEligibilityTarget, purpose: PromptEligibilityPurpose = 'candidate'): PromptEligibility {
   if (!prompt.final?.trim()) return { state: 'creative_plan', reasons: ['镜头已设计，正式正文待通过专用豆包 Chat 生成。'], writingReady: false };
   const reasons: string[] = [];
   const task = prompt.promptTask;
   const source = creativeSource(p, prompt);
+  const currentVideo = purpose === 'current' && !target.materialId && target.promptKind === 'video';
   if (!task) reasons.push('保留正文缺少专用目标合同，请按当前模型／模式通过豆包重新生成或修订。');
   if (!validCreativeSource(p, prompt, target, source)) reasons.push('当前正文缺少本目标已采用的专用豆包 Chat 创作来源；旧分析稿和未采用候选不能投产。');
   if (!validRuleContract(p, target, task, source)) reasons.push('正文来源未核对本次专用规则阶段和目标合同，请通过豆包重新生成或修订。');
-  if (task && (!task.designHash || task.designHash !== promptDesignHash(p, target))) reasons.push('剧本、镜头设计或已采用帧／前镜边界与正文创作时不一致，请通过豆包重新生成或修订。');
-  if (prompt.needsReview) reasons.push('当前采用正文仍待复核；新候选尚未采用时下游继续读取旧正文。');
-  if (task) reasons.push(...modelTargetIssues(p, target, task, source));
-  reasons.push(...editedContentIssues(p, prompt, source));
-  const references = currentReferenceValidation(p, prompt, target); reasons.push(...references.issues);
+  // 原请求及designHash保留；本次明确生成使用已保存正文和当前采用图片，不要求再次创作。
+  if (task && (!task.designHash || !currentVideo && !currentDesignContract(p, target, task, source))) reasons.push('剧本、镜头设计或已采用帧／前镜边界与正文创作时不一致，请通过豆包重新生成或修订。');
+  if (prompt.needsReview && (!currentVideo || hasCurrentPromptReviewError(p, prompt, target))) reasons.push(currentVideo
+    ? '当前视频正文存在对应原文的审查错误，请手动修改或提交修改要求后再生成。'
+    : '当前采用正文仍待复核；新候选尚未采用时下游继续读取旧正文。');
+  const continuation = currentVideo && target.mode === 'reference' && target.shotId ? currentReferenceContinuation(p, target.shotId) : undefined;
+  if (task) reasons.push(...modelTargetIssues(p, target, task, source, !!continuation));
+  reasons.push(...(currentVideo && source ? runtimePromptIssues(p, { ...source, promptTask: task }, prompt.final) : editedContentIssues(p, prompt, source)));
+  const references = currentReferenceValidation(p, prompt, target, purpose); reasons.push(...references.issues);
   if (!reasons.length) return bindingEligibility(p, { ...target, currentReferences: target.currentReferences || references.references }, task);
   const writingPlan = matchingWritingPlan(p, target, task, reasons);
   return { state: writingPlan ? 'creative_plan' : 'needs_revision', reasons, writingReady: writingPlan };
 }
 function digestText(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 export function requirePromptEligibility(p: PetStoryProject, prompt: PetStoryPrompt, target: PromptEligibilityTarget): void {
-  const result = inspectPromptEligibility(p, prompt, target);
+  const result = inspectPromptEligibility(p, prompt, target, 'current');
   if (result.state === 'creative_plan' || result.state === 'needs_revision') throw new Error(result.reasons.join('；'));
 }

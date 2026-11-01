@@ -100,6 +100,89 @@ describe('F01 分析只产出设计与兼容草稿', (): void => {
   });
 });
 
+describe('手动确认当前提示词的来源与并发边界', (): void => {
+  async function candidate(kind: PetStoryPromptKind = 'firstFrame'): Promise<PetStoryChatJob> {
+    await withOriginalPlan(); p.promptModel = 'seedance-2.0';
+    const shot = p.plan!.shots[1]; const prompt = shot.prompts[kind]!;
+    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: kind });
+    const job = p.jobs.at(-1)!;
+    const body = `${prompt.final}\nTEST 候选的新光线要求${kind === 'video' ? `；${job.promptTask!.references.map((ref): string => `@图片${ref.order}`).join('、')}。全程无字幕，不叠加对白文字。` : ''}`;
+    job.resultStatus = 'candidate'; job.parsedResult = { optimized: body }; job.rawText = JSON.stringify({ optimized: body });
+    prompt.optimized = body; prompt.candidateJobId = job.id;
+    p = await projects.write(p); return p.jobs.at(-1)!;
+  }
+
+  it.each(['firstFrame', 'lastFrame', 'video'] as const)('%s候选可一次确定手改正文，原回复与实际来源合同保留且重开一致', async (kind): Promise<void> => {
+    const job = await candidate(kind); const shot = p.plan!.shots[1]; const before = structuredClone(p);
+    const final = `${job.parsedResult!.optimized}\nTEST 人工确认：第 12 段保留 9:16 画幅，持续 6 秒。`;
+    p = await projects.saveShotPrompt(p.id, p.revision, shot.id, kind, final, { expectedFinal: shot.prompts[kind]!.final, baseJobId: job.id });
+    expect(p.plan!.shots[1].prompts[kind]).toMatchObject({ final, edited: true, basisJobId: job.id, rulesVersion: job.rulesVersion, promptTask: job.promptTask });
+    expect(p.plan!.shots[1].prompts[kind]!.sourceJobId).toBeUndefined(); expect(p.plan!.shots[1].prompts[kind]!.candidateJobId).toBeUndefined();
+    expect(p.jobs.at(-1)).toMatchObject({ resultStatus: 'adopted', rawText: job.rawText, parsedResult: job.parsedResult,
+      replacedPrompt: { final: before.plan!.shots[1].prompts[kind]!.final, optimized: before.plan!.shots[1].prompts[kind]!.optimized, candidateJobId: job.id } });
+    expect(p.plan!.shots[0]).toEqual(before.plan!.shots[0]); expect(stored).toEqual([]);
+    expect((await new PetStoryProjects().open(directory)).plan!.shots[1].prompts[kind]!.final).toBe(final);
+  });
+
+  it('同项正文已被别处保存时拒绝覆盖，其他镜头变化仍允许合并', async (): Promise<void> => {
+    const job = await candidate(); const shot = p.plan!.shots[1]; const revision = p.revision; const expectedFinal = shot.prompts.firstFrame.final;
+    p = await projects.saveShotPrompt(p.id, p.revision, p.plan!.shots[2].id, 'firstFrame', 'TEST 其他镜头手改');
+    p = await projects.saveShotPrompt(p.id, revision, shot.id, 'firstFrame', 'TEST 这次手改', { expectedFinal, baseJobId: job.id });
+    expect(p.plan!.shots[2].prompts.firstFrame.final).toBe('TEST 其他镜头手改');
+    const before = structuredClone(p);
+    await expect(projects.saveShotPrompt(p.id, revision, shot.id, 'firstFrame', 'TEST 迟到保存', { expectedFinal })).rejects.toThrow('当前使用正文已变化');
+    expect(await projects.read(p.id)).toEqual(before);
+  });
+
+  it('兼容原事实未变但没有designHash的旧专用候选，保留其真实旧合同而不伪造新资格', async (): Promise<void> => {
+    await withOriginalPlan(); const job = await prepare('shot_1', 'firstFrame');
+    const body = `${p.plan!.shots[0].prompts.firstFrame.final}\nTEST 旧专用候选`;
+    await recordRun(job, response(job, body)); p = (await chat.collect(p.id, job.id)).project!;
+    delete p.jobs.at(-1)!.promptTask!.designHash; p = await projects.write(p);
+    const final = `${body}\nTEST 人工修改旧候选`;
+    p = await projects.saveShotPrompt(p.id, p.revision, 'shot_1', 'firstFrame', final, { expectedFinal: p.plan!.shots[0].prompts.firstFrame.final, baseJobId: job.id });
+    expect(p.plan!.shots[0].prompts.firstFrame).toMatchObject({ final, edited: true, basisJobId: job.id });
+    expect(p.plan!.shots[0].prompts.firstFrame.promptTask!.designHash).toBeUndefined();
+    expect(p.jobs.at(-1)).toMatchObject({ resultStatus: 'adopted', rawText: response(job, body) });
+    expect(stored).toHaveLength(1);
+  });
+
+  it('手动确认解决暂停批次中的本项失败和等待，重复保存不重计数也不发起后续请求', async (): Promise<void> => {
+    const job = await candidate(); const shot = p.plan!.shots[1];
+    const target = { shotId: shot.id, kind: 'firstFrame' as const }; const other = { shotId: p.plan!.shots[2].id, kind: 'firstFrame' as const };
+    p.jobs.at(-1)!.promptBatchId = 'TEST-manual-paused-batch';
+    p = await projects.savePromptBatch(p.id, p.revision, { id: 'TEST-manual-paused-batch', targets: [target, other], failedTargets: [{ target, message: 'TEST 原失败' }], total: 2, completed: 0, status: 'paused', jobId: job.id });
+    const final = `${job.parsedResult!.optimized}\nTEST 手动解决本项`;
+    p = await projects.saveShotPrompt(p.id, p.revision, shot.id, 'firstFrame', final, { expectedFinal: shot.prompts.firstFrame.final, baseJobId: job.id });
+    expect(p.promptBatch).toMatchObject({ targets: [other], failedTargets: [], total: 2, completed: 1, status: 'paused', candidateJobIds: [job.id] });
+    expect(p.promptBatch!.jobId).toBeUndefined();
+    p = await projects.saveShotPrompt(p.id, p.revision, shot.id, 'firstFrame', `${final}\nTEST 连续手改`, { expectedFinal: final });
+    expect(p.promptBatch!.completed).toBe(1); expect(stored).toEqual([]);
+  });
+
+  it.each(['wrong-target', 'invalid', 'superseded', 'design'] as const)('不把%s候选冒充手改来源，不修改原盘中记录', async (change): Promise<void> => {
+    const job = await candidate(); const shot = p.plan!.shots[1];
+    if (change === 'invalid') p.jobs.at(-1)!.status = 'invalid';
+    if (change === 'superseded') p.jobs.push({ ...job, id: 'TEST-newer-request', taskId: 'TEST-newer-task', status: 'bound', resultStatus: undefined, parsedResult: undefined });
+    if (change === 'design') shot.camera = `${shot.camera} TEST 改变机位`;
+    p = await projects.write(p); const before = structuredClone(p);
+    const targetKind = change === 'wrong-target' ? 'video' : 'firstFrame';
+    await expect(projects.saveShotPrompt(p.id, p.revision, shot.id, targetKind, 'TEST 手改正文', { expectedFinal: shot.prompts[targetKind]!.final, baseJobId: job.id })).rejects.toThrow();
+    expect(await projects.read(p.id)).toEqual(before); expect(stored).toEqual([]);
+  });
+
+  it('当前采用正文手改使旧未采用和坏回复只留历史，采用来源与其他镜头不变', async (): Promise<void> => {
+    const job = await candidate(); const shot = p.plan!.shots[1];
+    const invalid = { ...job, id: 'TEST-invalid-history', taskId: 'TEST-invalid-task', status: 'invalid' as const, resultStatus: undefined };
+    p.jobs.push(invalid); p = await projects.write(p); const before = structuredClone(p);
+    const final = `${shot.prompts.firstFrame.final}\nTEST 采用正文人工修改`;
+    p = await projects.saveShotPrompt(p.id, p.revision, shot.id, 'firstFrame', final, { expectedFinal: shot.prompts.firstFrame.final });
+    expect(p.plan!.shots[1].prompts.firstFrame.final).toBe(final); expect(p.plan!.shots[1].prompts.firstFrame.candidateJobId).toBeUndefined();
+    for (const prior of before.jobs) expect(p.jobs.find((item): boolean => item.id === prior.id)).toMatchObject({ resultStatus: 'stale', rawText: prior.rawText, parsedResult: prior.parsedResult });
+    expect(p.plan!.shots[0]).toEqual(before.plan!.shots[0]); expect(stored).toEqual([]);
+  });
+});
+
 describe('F03 明确结束等待、迟到回复与依赖范围', (): void => {
   it('结束等待持久化并暂停批次，原submittedAt、运行与任务状态不变，禁止自动重试', async (): Promise<void> => {
     await withOriginalPlan(); const job = await prepare(); await recordRun(job);
@@ -128,6 +211,8 @@ describe('F03 明确结束等待、迟到回复与依赖范围', (): void => {
     const result = await chat.collect(p.id, job.id); p = result.project!;
     expect(result.success).toBe(false); expect(result.needsRepair).toBe(false); expect(p.jobs[0]).toMatchObject({ status: 'invalid', rawText: raw, endedWaitingAt: expect.any(String) });
     expect(p.jobs[0].validationIssues?.length).toBeGreaterThan(0); expect(stored).toHaveLength(1);
+    await expect(chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: job.id })).rejects.toThrow('当前仍在等待');
+    expect(stored).toHaveLength(1);
   });
   it('旧版未保存requestId的原任务结束等待后，迟到回复也只能成为历史候选', async (): Promise<void> => {
     await withOriginalPlan(); const shot = p.plan!.shots[1]; const oldFinal = shot.prompts.firstFrame.final;
@@ -231,7 +316,7 @@ describe('主进程当前阶段资格清单', (): void => {
 });
 
 describe('用户明确授权新的局部修订轮次', (): void => {
-  it('首轮失败可自动纠正一次，仍失败后用户可对未变审查正文发起新轮并保留历史', async (): Promise<void> => {
+  it('局部修订失败可持续自动纠正，用户也可主动对未变审查正文另开新轮并保留历史', async (): Promise<void> => {
     await withOriginalPlan();
     p = (await chat.prepareRuntime(p.id, p.revision, 'review', { shotId: 'shot_1', promptKind: 'firstFrame' })).project!;
     const review = p.jobs.at(-1)!;
@@ -245,7 +330,7 @@ describe('用户明确授权新的局部修订轮次', (): void => {
     expect(failed.needsRepair).toBe(true);
     p = (await chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: first.id, repairMode: 'automatic' })).project!; const auto = p.jobs.at(-1)!;
     await recordRun(auto, raw); const stillFailed = await chat.collect(p.id, auto.id); p = stillFailed.project!;
-    expect(stillFailed.needsRepair).toBe(false); await expect(chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: auto.id })).rejects.toThrow('自动修订已使用一次');
+    expect(stillFailed.needsRepair).toBe(true);
     p = (await chat.prepareRuntime(p.id, p.revision, 'revise', target)).project!; const second = p.jobs.at(-1)!;
     expect(second.requestId).not.toBe(first.requestId); expect(second.parentJobId).toBe(review.id);
     await recordRun(second, response(second, snapshot.plan.shots[0].prompts.firstFrame.optimized));

@@ -127,6 +127,14 @@ export class PetStoryExistingMediaService {
     }
     return true;
   }
+  /** 显式关联的视频不占用当前制作步骤；播放与后续接力仍按同一原任务证据核对。 */
+  async linkedVideoTask(p: PetStoryProject, asset: PetStoryAsset): Promise<Task | undefined> {
+    if (asset.kind !== 'video' || asset.origin !== 'historical_task' || !asset.shotId || !asset.taskId || !asset.runId) return undefined;
+    const task = this.tasks.list().find((item): boolean => item.id === asset.taskId && item.runtime?.runId === asset.runId);
+    if (!task || asset.generationPrompt !== task.prompt) return undefined;
+    const body = await this.verifyBinding(p, task, asset.shotId, 'video');
+    return body && body.final === asset.generationFinal ? task : undefined;
+  }
   async candidates(id: string, shotId: string, kind: PetStoryPromptKind): Promise<PetStoryMediaCandidate[]> {
     const p = await this.projects.read(id);
     if (!p.plan?.shots.some((s): boolean => s.id === shotId && !!s.prompts[kind])) throw new Error('镜头或提示词用途不存在');
@@ -151,7 +159,9 @@ export class PetStoryExistingMediaService {
     const duplicate = p.assets.find((a): boolean => a.taskId === task.id && a.runId === task.runtime?.runId && a.artifactId === artifact.id);
     if (duplicate) {
       if (duplicate.shotId !== shotId || duplicate.kind !== imageKind(kind)) throw new Error('该产物已属于其他镜头或用途，不复用归属');
-      return { success: true, project: p };
+      if (kind !== 'video' || p.selectedVideos?.[shotId] === duplicate.id) return { success: true, project: p };
+      p.selectedVideos = { ...p.selectedVideos, [shotId]: duplicate.id };
+      return { success: true, project: await this.projects.write(p) };
     }
     const downloaded = this.download(task, artifact.id, p);
     if (!downloaded?.filePath) throw new Error('原产物尚无完成的下载记录，请先重新下载原产物');
@@ -172,6 +182,7 @@ export class PetStoryExistingMediaService {
       asset.imageReview = { state: 'candidate', target, basisHash: imageTargetBasis(p, target) };
     }
     p.assets.push(asset);
+    if (kind === 'video') p.selectedVideos = { ...p.selectedVideos, [shotId]: asset.id };
     return { success: true, project: await this.projects.write(p) };
   }
 }

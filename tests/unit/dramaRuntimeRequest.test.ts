@@ -208,7 +208,7 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     expect(data.targetReferenceList).toMatchObject([{ targetLabel: '@图片1', slot: 'first', status: 'planned', bindingStatus: 'not_bound_for_this_generation' }, { targetLabel: '@图片2', slot: 'last', status: 'planned' }]);
     expect((data.attachmentList as object[]).slice(0, 2)).toMatchObject([{ chatImage: 1, version: 'TEST-first' }, { chatImage: 2, version: 'TEST-last' }]);
     expect(built.prompt).toContain('直接使用 targetLabel 的 @图片N');
-    expect(built.prompt).toContain('{角色用中文说：“逐字台词”}');
+    expect(built.prompt).toContain('优先直接使用该句 requiredSpokenBlock');
     expect(built.prompt).toContain('@、图片和整数之间不得插入空格或换行');
     expect(built.prompt).toContain('包括环境底声、物件声与动作音效');
     expect(built.prompt).not.toContain('不输出固定图片N编号、裸@');
@@ -263,6 +263,69 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     expect(facts(built.prompt).parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: parent.rawText, validationIssues: parent.validationIssues });
     expect(built.prompt).toContain('重新返回该目标完整结果（方案为完整方案、提示词为该项完整正文）');
   });
+  it.each(['seedance-2.0-fast', 'seedance-2.5'] as const)('%s视频初次及连续修订均携带speakerId绑定的完整人物标签、逐字原句和重复次数', (model): void => {
+    const p = enriched(); p.promptCapability = production(model).capability;
+    const character = p.plan!.characters.find((item): boolean => item.id === 'lumei')!;
+    character.name = '噜妹（黑衣男子）'; character.aliases = ['黑衣男子', '男青年'];
+    const shot = p.plan!.shots[1]; const text = '我说你踩住屎了吧！你还不信！';
+    shot.dialogue = [
+      { speakerId: character.id, text, tone: '', pace: '' },
+      { speakerId: 'lulu', text: '你说“什么”？', tone: '', pace: '' },
+      { speakerId: character.id, text, tone: '', pace: '', delivery: 'offscreen' },
+    ];
+    const initial = buildDramaRequest(p, { kind: 'optimize', requestId: 'TEST-exact-dialogue', shotId: shot.id, promptKind: 'video' });
+    const parent: PetStoryChatJob = { id: 'TEST-dialogue-original', taskId: 'TEST-task', kind: 'optimize', status: 'invalid', shotId: shot.id, promptKind: 'video', inputHash: 'TEST', sourceUrl: '',
+      requestText: 'TEST历史要求：只能用黑衣男子称呼角色', rawText: 'TEST原正文保留', validationIssues: ['TEST历史误报：主名不属于正确角色'], promptTask: initial.promptTask };
+    const previous: PetStoryChatJob = { ...parent, id: 'TEST-dialogue-repair', kind: 'repair', originKind: 'optimize', parentJobId: parent.id, requestText: 'TEST上一轮修订请求', rawText: 'TEST最新待修原正文' };
+    p.jobs.push(parent, previous);
+    const repair = buildDramaRequest(p, { kind: 'repair', requestId: 'TEST-exact-dialogue-repair', shotId: shot.id, promptKind: 'video', parentJob: previous });
+    for (const request of [initial, repair]) {
+      const data = facts(request.prompt);
+      expect(data.dialogueContract).toMatchObject({ shotId: shot.id, source: 'current_shot_dialogue_by_speakerId', utterances: [
+        { order: 1, speakerId: character.id, speakerLabel: character.name, language: '中文', text, delivery: 'onscreen', occurrence: 1, expectedOccurrences: 2, requiredSpokenBlock: `{噜妹（黑衣男子）用中文说：“${text}”}` },
+        { order: 2, speakerId: 'lulu', text: '你说“什么”？', occurrence: 1, expectedOccurrences: 1 },
+        { order: 3, speakerId: character.id, text, delivery: 'offscreen', occurrence: 2, expectedOccurrences: 2 },
+      ] });
+      const utterances = (data.dialogueContract as { utterances: { acceptedSpeakerLabels: string[] }[] }).utterances;
+      expect(utterances[0].acceptedSpeakerLabels).toEqual(expect.arrayContaining(['噜妹（黑衣男子）', '黑衣男子', '男青年', '噜妹']));
+      expect(request.prompt).toContain('不能照抄通用“角色”占位符');
+    }
+    expect(facts(repair.prompt).parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: previous.rawText,
+      historyPolicy: expect.stringContaining('不能覆盖本次当前事实、人物speakerId绑定、dialogueContract或输出约定') });
+    expect(repair.assets).toEqual([]);
+  });
+  it('对白合同不向模型提供跨角色冲突的短主名，图片任务不混入声音合同', (): void => {
+    const p = enriched(); p.promptCapability = production('seedance-2.0-fast').capability;
+    const character = p.plan!.characters.find((item): boolean => item.id === 'lumei')!;
+    character.name = '噜妹（黑衣男子）'; character.aliases = ['黑衣男子'];
+    const other = p.plan!.characters.find((item): boolean => item.id === 'friend')!; other.aliases = ['噜妹'];
+    const shot = p.plan!.shots[1]; shot.dialogue = [{ speakerId: character.id, text: 'TEST同一说话者', tone: '', pace: '' }];
+    const data = facts(buildDramaRequest(p, { kind: 'optimize', requestId: 'TEST-collision-label', shotId: shot.id, promptKind: 'video' }).prompt);
+    const utterances = (data.dialogueContract as { utterances: { acceptedSpeakerLabels: string[] }[] }).utterances;
+    expect(utterances[0].acceptedSpeakerLabels).toContain(character.name);
+    expect(utterances[0].acceptedSpeakerLabels).not.toContain('噜妹');
+    for (const promptKind of ['firstFrame', 'lastFrame'] as const) expect(facts(buildDramaRequest(p, { kind: 'optimize', requestId: `TEST-no-dialogue-${promptKind}`, shotId: shot.id, promptKind }).prompt)).not.toHaveProperty('dialogueContract');
+    p.promptCapability = undefined;
+    expect(facts(buildDramaRequest(p, { kind: 'optimize', requestId: 'TEST-generic-no-dialogue-contract', shotId: shot.id, promptKind: 'video' }).prompt)).not.toHaveProperty('dialogueContract');
+  });
+  it.each(['analysis', 'assets', 'optimize', 'materialPrompt', 'review', 'revise'] as const)('%s实际初始与关联修订请求均不包含一次自动修订上限', (kind: 'analysis' | 'assets' | 'optimize' | 'materialPrompt' | 'review' | 'revise'): void => {
+    const p = enriched();
+    const review: PetStoryChatJob = { id: 'TEST-source-review', taskId: 'TEST-review-task', kind: 'review', status: 'applied', shotId: 'shot_2', promptKind: 'video', inputHash: 'TEST', sourceUrl: '',
+      parsedResult: { issues: [{ id: 'TEST-original-issue', targetId: 'shot_2:video', severity: 'error', evidence: 'TEST原正文证据', impact: 'TEST实际影响', requestedChange: 'TEST本项修订目标' }] } };
+    p.jobs.push(review);
+    const target: { shotId?: string; promptKind?: 'video'; materialId?: string } = ['analysis', 'assets'].includes(kind) ? {}
+      : kind === 'materialPrompt' ? { materialId: 'prop:branch' } : { shotId: 'shot_2', promptKind: 'video' };
+    const initial = buildDramaRequest(p, { kind, requestId: `TEST-initial-${kind}`, ...target,
+      ...(kind === 'revise' ? { parentJob: review, selectedIssueIds: ['TEST-original-issue'] } : {}) });
+    const parent: PetStoryChatJob = { id: `TEST-failed-${kind}`, taskId: 'TEST-initial-task', kind, status: 'invalid', inputHash: 'TEST', sourceUrl: '', ...target,
+      parentJobId: kind === 'revise' ? review.id : undefined, requestText: initial.prompt, rawText: 'TEST本轮最新失败原文', validationIssues: ['TEST具体可修复问题'], promptTask: initial.promptTask };
+    p.jobs.push(parent);
+    const repaired = buildDramaRequest(p, { kind: 'repair', requestId: `TEST-continue-${kind}`, ...target, parentJob: parent });
+    for (const actualRequest of [initial.prompt, repaired.prompt]) expect(actualRequest).not.toMatch(/同一原请求最多一次自动修订|唯一一次自动格式纠正|格式或内容共用该上限|留待用户处理|不无限重写/);
+    expect(facts(repaired.prompt).parentResult).toMatchObject({ originalDuty: kind, originalRequest: initial.prompt, originalReply: parent.rawText, validationIssues: parent.validationIssues });
+    if (['review', 'revise'].includes(kind)) expect(repaired.prompt).toContain('持续迭代，直到校验通过');
+    expect(resources.productDecisions.join('\n')).toContain('持续迭代直到校验通过');
+  });
   it('优化不注入错误旧正文，审查和定点修订保留原候选作为被检查数据', (): void => {
     const p = project(); const options = { requestId: 'TEST-review', shotId: 'shot_1', promptKind: 'video' as const };
     expect(buildDramaRequest(p, { ...options, kind: 'optimize' }).prompt).not.toContain('TEST-old-body-not-fact');
@@ -301,7 +364,7 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     expect((): unknown => compileMaterialPrompt(p, material.id)).toThrow('待复核'); expect(compileMaterialPrompt(p, material.id, true).rulesVersion).toBe(resources.version);
     shot.dialogue = [{ speakerId: 'lulu', text: 'TEST逐字原台词', tone: '', pace: '' }];
     p.promptModel = 'seedance-2.0'; seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' });
-    expect((): unknown => compilePrompt(p, shot.id, 'video', 'reference')).toThrow('遗漏已确认的原台词');
+    expect((): unknown => compilePrompt(p, shot.id, 'video', 'reference')).toThrow('遗漏已确认原台词');
   });
   it('OS／VO保存真实说话者但不强迫入画、上传或冒充画内发声', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; shot.characterIds = ['lulu'];

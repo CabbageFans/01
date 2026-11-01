@@ -83,6 +83,7 @@ describe('原五镜头画布持久化与操作边界', (): void => {
   it('the page store serializes the same 13 text items and only advances after successful collection', async (): Promise<void> => {
     const initial = { petstory: usePetStoryStore.getState(), tasks: useTaskStore.getState(), accounts: useAccountStore.getState(), projects: useProjectStore.getState() };
     const now = new Date().toISOString();
+    const beforeFinals = p.plan!.shots.map((shot): object => Object.fromEntries(Object.entries(shot.prompts).map(([kind, prompt]): [string, object | undefined] => [kind, prompt ? { final: prompt.final, edited: prompt.edited, sourceJobId: prompt.sourceJobId } : undefined])));
     const account: Account = { id: p.accountId, name: 'TEST 原账号替身', platform: 'doubao', avatar: '', partition: 'TEST-only', status: 'idle', pinned: false, createdAt: now, updatedAt: now };
     vi.stubGlobal('window', { electronAPI: { petstory: { prepareRuntime: chats.prepareRuntime.bind(chats), bindRun: chats.bindRun.bind(chats), collectChat: chats.collect.bind(chats),
       adoptPromptCandidate: chats.adoptPromptCandidate.bind(chats),
@@ -105,20 +106,19 @@ describe('原五镜头画布持久化与操作边界', (): void => {
         await runtime(task, JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, optimized: source.optimized }));
         await usePetStoryStore.getState().collect(job.id);
         expect(usePetStoryStore.getState().error).toBe('');
-        if (usePetStoryStore.getState().project!.jobs.find((entry): boolean => entry.id === job.id)?.resultStatus === 'candidate') {
-          // 手改保护所要求的采用点保持可见；未采用时不能把下一项的依赖算作完成。
-          expect(usePetStoryStore.getState().promptBatch).toMatchObject({ completed: index, status: 'paused' });
-          expect(tasks).toHaveLength(index + 1);
-          await usePetStoryStore.getState().adoptPromptCandidate(job.id);
-          expect(usePetStoryStore.getState().error).toBe('');
-        }
+        expect(usePetStoryStore.getState().project!.jobs.find((entry): boolean => entry.id === job.id)).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+        // 候选保存即推进；13项连续生成不要求先采用，也不把文字候选冒充正式输入。
+        expect(usePetStoryStore.getState().promptBatch).toMatchObject({ completed: index + 1, status: index === 12 ? 'complete' : 'running' });
         expect(tasks).toHaveLength(Math.min(13, index + 2));
       }
       expect(usePetStoryStore.getState().promptBatch).toEqual({ total: 13, completed: 13, status: 'complete' });
       expect(tasks.every((t): boolean => t.mode === 'chat')).toBe(true);
-      expect(usePetStoryStore.getState().project!.jobs.every((j): boolean => j.status === 'applied')).toBe(true);
+      expect(usePetStoryStore.getState().project!.jobs.every((j): boolean => j.status === 'applied' && j.resultStatus === 'candidate')).toBe(true);
+      expect(usePetStoryStore.getState().project!.promptBatch?.candidateJobIds).toHaveLength(13);
+      expect(usePetStoryStore.getState().project!.plan!.shots.map((shot): object => Object.fromEntries(Object.entries(shot.prompts).map(([kind, prompt]): [string, object | undefined] => [kind, prompt ? { final: prompt.final, edited: prompt.edited, sourceJobId: prompt.sourceJobId } : undefined])))).toEqual(beforeFinals);
+      expect(usePetStoryStore.getState().project!.production).toBeUndefined();
     } finally {
-      usePetStoryStore.getState().stopPromptBatch();
+      await usePetStoryStore.getState().stopPromptBatch();
       usePetStoryStore.setState(initial.petstory); useTaskStore.setState(initial.tasks); useAccountStore.setState(initial.accounts); useProjectStore.setState(initial.projects);
       vi.unstubAllGlobals();
     }

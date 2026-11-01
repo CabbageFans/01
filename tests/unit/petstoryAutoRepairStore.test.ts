@@ -50,6 +50,12 @@ function saveCollected(jobId: string, valid: boolean, candidate = false): PetSto
   } else { job.error = 'TEST 原回复时长不符合当前项目约束'; job.validationIssues = [job.error]; }
   return { success: valid, project, ...(valid ? {} : { error: job.error, needsRepair: true }) };
 }
+function saveRepairableFailure(jobId: string): PetStoryResult {
+  const result = saveCollected(jobId, false); const job = project.jobs.find((item): boolean => item.id === jobId)!;
+  job.parsedResult = { optimized: 'TEST 本轮完整但未通过校验的正文' };
+  job.validationDetails = [{ code: 'prompt_content', path: '$.optimized', actualType: 'string', expected: 'TEST 本轮完整约束', repairable: true, message: 'TEST 修正本轮引用或台词格式' }];
+  return result;
+}
 
 function installAdjustment(): void {
   project.chatAdjustment = { id: 'TEST-auto-adjustment', sourceJobId: 'TEST-source', target: {}, basisHash: 'TEST',
@@ -93,6 +99,9 @@ beforeEach((): void => {
   vi.stubGlobal('localStorage', { setItem: vi.fn() });
   vi.stubGlobal('window', Object.assign(new EventTarget(), { electronAPI: { petstory: { prepareRuntime, collectChat, previewAdjustmentReply: previewReply, adoptAdjustmentReply: adoptReply, adoptPromptCandidate: adoptPrompt, savePromptBatch, promptStageTargets, retryUnsubmitted,
     open: async (): Promise<PetStoryResult> => ({ success: true, project }),
+    markCanvasChat: async (_id: string, _revision: number, jobId: string): Promise<PetStoryResult> => {
+      project = structuredClone(project); project.revision++; project.jobs.find((job): boolean => job.id === jobId)!.background = 'canvas'; return { success: true, project };
+    },
     bindRun: async (_id: string, jobId: string, runId: string): Promise<PetStoryResult> => { project.jobs.find((job): boolean => job.id === jobId)!.runId = runId; return { success: true, project }; },
     endChatWaiting: async (_id: string, _revision: number, jobId: string): Promise<PetStoryResult> => {
       project = structuredClone(project); project.revision++; project.jobs.find((job): boolean => job.id === jobId)!.endedWaitingAt = now;
@@ -121,6 +130,326 @@ afterEach(async (): Promise<void> => {
 });
 
 describe('原五镜头的自动修订与明确入口', (): void => {
+  it.each([false, true])('验证暂停保留文字批次接续；用户明确停止=%s时验证就绪不能复活后续发送', async (userStopped: boolean): Promise<void> => {
+    await usePetStoryStore.getState().regenerateAllPrompts(); const job = project.jobs[0]; const task = tasks[0];
+    task.status = 'waiting_verification'; task.runtime!.stage = 'waiting_verification'; task.runtime!.submittedAt = now;
+    task.errorInfo = { code: 'human_verification', message: 'TEST 人机验证等待', detectedAt: now, recoverable: true };
+    unobserve = observePetStoryTasks(); useTaskStore.setState({ tasks: structuredClone(tasks) });
+    await vi.waitFor((): void => { expect(project.promptBatch?.status).toBe('paused'); expect(usePetStoryStore.getState().busy).toBe(false); });
+    if (userStopped) await usePetStoryStore.getState().stopPromptBatch();
+    const checkedAt = new Date().toISOString();
+    const account = useAccountStore.getState().accounts[0];
+    useAccountStore.setState({ accounts: [{ ...account, health: { loginState: 'ok', verificationRequired: false, consecutiveFailures: 0, successCount: 0, failureCount: 0,
+      availability: { state: 'ready', reason: 'ready', message: 'TEST', source: 'manual', checkedAt } } }] });
+    task.status = 'manual_submission_observing'; task.runtime!.stage = 'manual_submission_observing';
+    useTaskStore.setState({ tasks: structuredClone(tasks) });
+    window.dispatchEvent(new CustomEvent('task-verification-recovery-started', { detail: { taskId: task.id, accountId: account.id, runId: task.runtime!.runId, submittedAt: now, verificationCheckedAt: checkedAt } }));
+    if (!userStopped) await vi.waitFor((): void => { expect(project.promptBatch?.status).toBe('running'); expect(usePetStoryStore.getState().busy).toBe(false); });
+    collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => saveCollected(jobId, true, true));
+    task.status = 'done'; task.runtime!.chatResponse = { text: 'TEST 原结果', capturedAt: now };
+    useTaskStore.setState({ tasks: structuredClone(tasks) });
+    if (userStopped) {
+      expect(project.promptBatch?.status).toBe('paused'); expect(collectChat).not.toHaveBeenCalled(); expect(prepareRuntime).toHaveBeenCalledTimes(1);
+    } else {
+      await vi.waitFor((): void => { expect(project.promptBatch?.completed).toBe(1); expect(usePetStoryStore.getState().busy).toBe(false); });
+      expect(project.promptBatch?.candidateJobIds).toEqual([job.id]); expect(prepareRuntime).toHaveBeenCalledTimes(2);
+    }
+    expect(startAutomation.mock.calls.filter(([id]): boolean => id === task.id)).toHaveLength(1);
+  });
+
+  it('一次开始后观察器连续处理三轮失败，直至合格候选才推进且不自动采用', async (): Promise<void> => {
+    const preserved = structuredClone(project.plan); let received = 0;
+    collectChat.mockImplementation(async (_id: string, jobId: string): Promise<PetStoryResult> => ++received <= 3 ? saveRepairableFailure(jobId) : saveCollected(jobId, true, true));
+    usePetStoryStore.setState({ autoRepair: false });
+    await usePetStoryStore.getState().regenerateAllPrompts();
+    unobserve = observePetStoryTasks();
+    for (let round = 0; round < 4; round++) {
+      const job = project.jobs.at(-1)!; const task = tasks.find((item): boolean => item.id === job.taskId)!;
+      task.status = 'done'; task.runtime!.chatResponse = { text: 'TEST 本轮平台原回复', capturedAt: now };
+      useTaskStore.setState({ tasks: structuredClone(tasks) });
+      await vi.waitFor((): void => { expect(collectChat).toHaveBeenCalledTimes(round + 1); expect(usePetStoryStore.getState().busy).toBe(false); });
+      expect(project.jobs).toHaveLength(round + 2);
+      expect(usePetStoryStore.getState().error).toBe('');
+      expect(usePetStoryStore.getState().promptRepairJobIds).toEqual([]);
+    }
+    expect(project.jobs.slice(0, 3).every((job): boolean => job.status === 'invalid' && !!job.rawText)).toBe(true);
+    expect(project.jobs[3]).toMatchObject({ status: 'applied', resultStatus: 'candidate', parentJobId: project.jobs[2].id });
+    expect(project.promptBatch).toMatchObject({ completed: 1, candidateJobIds: [project.jobs[3].id], status: 'running' });
+    expect(project.plan).toEqual(preserved); expect(adoptPrompt).not.toHaveBeenCalled();
+  });
+
+  it('视频点击自动接续最新失败修订，不重新创建原目标或提前创建视频', async (): Promise<void> => {
+    const shot = project.plan!.shots[0]; shot.prompts.video.final = '';
+    const parent = installJob('optimize', { shotId: shot.id, promptKind: 'video', background: 'canvas' }); saveRepairableFailure(parent.id);
+    const failed = installJob('repair', { shotId: shot.id, promptKind: 'video', parentJobId: parent.id, repairMode: 'automatic' }); saveRepairableFailure(failed.id);
+    project.promptBatch = { scope: 'shots', total: 1, completed: 0, status: 'paused', jobId: failed.id, targets: [{ shotId: shot.id, kind: 'video' }] };
+    const media = vi.fn(); Object.assign(window.electronAPI.petstory, { generateShotMedia: media });
+    collectChat.mockImplementation(async (_id: string, jobId: string): Promise<PetStoryResult> => saveRepairableFailure(jobId));
+    usePetStoryStore.setState({ project, error: '镜头或最终提示词不存在' });
+    await usePetStoryStore.getState().generateShotMedia(shot.id, 'video');
+    expect(collectChat).toHaveBeenCalledExactlyOnceWith(project.id, failed.id);
+    expect(prepareRuntime).toHaveBeenCalledExactlyOnceWith(project.id, expect.any(Number), 'repair', { parentJobId: failed.id, repairMode: 'automatic' });
+    expect(media).not.toHaveBeenCalled(); expect(usePetStoryStore.getState().error).toBe('');
+    expect(project.plan!.shots[0].prompts.video.final).toBe('');
+  });
+
+  it('视频已有合格未采用候选时等待确认，不再生成文字或视频', async (): Promise<void> => {
+    const shot = project.plan!.shots[0]; shot.prompts.video.final = '';
+    const job = installJob('optimize', { shotId: shot.id, promptKind: 'video' }); saveCollected(job.id, true, true);
+    const media = vi.fn(); Object.assign(window.electronAPI.petstory, { generateShotMedia: media });
+    usePetStoryStore.setState({ project }); await usePetStoryStore.getState().generateShotMedia(shot.id, 'video');
+    expect(prepareRuntime).not.toHaveBeenCalled(); expect(collectChat).not.toHaveBeenCalled(); expect(media).not.toHaveBeenCalled();
+  });
+
+  it('已有进行中制作时不因空正文绕进文字链，仍由原制作规则处理', async (): Promise<void> => {
+    const shot = project.plan!.shots[0]; shot.prompts.video.final = '';
+    const entry = { state: 'unknown' as const, reason: 'TEST 未检查' };
+    project.production = { phase: 'shots', state: 'paused', planHash: 'TEST', approvedAt: now,
+      capability: { accountId: project.accountId, checkedAt: now, durations: [5], image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry } },
+      fallbacks: {}, shots: {}, steps: [], message: 'TEST 原制作暂停' };
+    const media = vi.fn(async (): Promise<PetStoryResult> => ({ success: false, project, error: 'TEST 请先处理原制作任务' }));
+    Object.assign(window.electronAPI.petstory, { generateShotMedia: media });
+    usePetStoryStore.setState({ project }); await usePetStoryStore.getState().generateShotMedia(shot.id, 'video');
+    expect(media).toHaveBeenCalledTimes(1); expect(prepareRuntime).not.toHaveBeenCalled(); expect(collectChat).not.toHaveBeenCalled();
+    expect(usePetStoryStore.getState().error).toBe('TEST 请先处理原制作任务');
+  });
+
+  it('视频等待正文原运行时仅恢复观察，不新建修订或重发', async (): Promise<void> => {
+    const shot = project.plan!.shots[0]; shot.prompts.video.final = '';
+    const job = installJob('optimize', { shotId: shot.id, promptKind: 'video', background: 'canvas' }); const task = tasks[0];
+    job.runId = task.runtime!.runId; task.status = 'paused'; task.runtime!.submittedAt = now;
+    task.errorInfo = { code: 'submission_uncertain', message: 'TEST 原受理未明', recoverable: true, detectedAt: now };
+    useTaskStore.setState({ updateTaskRuntime: vi.fn(async (): Promise<boolean> => true) });
+    const dispatch = vi.spyOn(window, 'dispatchEvent'); usePetStoryStore.setState({ project });
+    await usePetStoryStore.getState().generateShotMedia(shot.id, 'video');
+    expect(prepareRuntime).not.toHaveBeenCalled(); expect(startAutomation).not.toHaveBeenCalled(); expect(retryUnsubmitted).not.toHaveBeenCalled();
+    expect(dispatch.mock.calls.some(([event]): boolean => event.type === 'reconcile-task-submission')).toBe(true);
+    expect(task.runtime!.submittedAt).toBe(now);
+  });
+
+  it('本镜缺正文且未生成时后台创建原文字任务，归属异常则停止', async (): Promise<void> => {
+    const shot = project.plan!.shots[0]; shot.prompts.video.final = '';
+    usePetStoryStore.setState({ project }); await usePetStoryStore.getState().generateShotMedia(shot.id, 'video');
+    expect(prepareRuntime).toHaveBeenCalledExactlyOnceWith(project.id, expect.any(Number), 'optimize', { shotId: shot.id, promptKind: 'video', background: 'canvas' });
+    const job = project.jobs.at(-1)!; job.status = 'invalid'; job.rawText = 'TEST 归属不符回复'; job.error = 'TEST requestId不符';
+    usePetStoryStore.setState({ project }); await usePetStoryStore.getState().generateShotMedia(shot.id, 'video');
+    expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(collectChat).not.toHaveBeenCalled(); expect(usePetStoryStore.getState().error).toBe(job.error);
+  });
+
+  it('单镜修订准备期间停止，保留新hold任务但不启动下一轮', async (): Promise<void> => {
+    const shot = project.plan!.shots[0]; shot.prompts.video.final = '';
+    const parent = installJob('optimize', { shotId: shot.id, promptKind: 'video', background: 'canvas' }); saveRepairableFailure(parent.id);
+    const prepare = prepareRuntime.getMockImplementation()!; let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve): void => { release = resolve; });
+    prepareRuntime.mockImplementationOnce(async (...args: Parameters<typeof prepare>): Promise<PetStoryResult> => { await pending; return prepare(...args); });
+    collectChat.mockImplementation(async (_id: string, jobId: string): Promise<PetStoryResult> => saveRepairableFailure(jobId));
+    usePetStoryStore.setState({ project }); const preparing = usePetStoryStore.getState().generateShotMedia(shot.id, 'video');
+    await vi.waitFor((): void => expect(prepareRuntime).toHaveBeenCalledTimes(1));
+    expect(usePetStoryStore.getState().promptRepairJobIds).toEqual([parent.id]);
+    await usePetStoryStore.getState().stopPromptBatch(); release?.(); await preparing;
+    expect(project.jobs).toHaveLength(2); expect(project.jobs[1]).toMatchObject({ kind: 'repair', status: 'bound', parentJobId: parent.id });
+    expect(startAutomation).not.toHaveBeenCalled(); expect(usePetStoryStore.getState().promptRepairJobIds).toEqual([]);
+  });
+
+  it('继续旧失败批次时衔接原修订链，不另外优化相同目标', async (): Promise<void> => {
+    const shot = project.plan!.shots[0]; const parent = installJob('optimize', { shotId: shot.id, promptKind: 'video', background: 'canvas' }); saveRepairableFailure(parent.id);
+    const failed = installJob('repair', { shotId: shot.id, promptKind: 'video', parentJobId: parent.id }); saveRepairableFailure(failed.id);
+    project.promptBatch = { scope: 'shots', total: 1, completed: 0, status: 'paused', jobId: parent.id, targets: [{ shotId: shot.id, kind: 'video' }] };
+    promptStageTargets.mockImplementation(async (): Promise<PetStoryResult> => ({ success: true, project, promptTargets: project.promptBatch!.targets }));
+    collectChat.mockImplementation(async (_id: string, jobId: string): Promise<PetStoryResult> => saveRepairableFailure(jobId));
+    usePetStoryStore.setState({ project }); await usePetStoryStore.getState().generateCanvasPrompts();
+    expect(collectChat).toHaveBeenCalledExactlyOnceWith(project.id, failed.id);
+    expect(prepareRuntime).toHaveBeenCalledExactlyOnceWith(project.id, expect.any(Number), 'repair', { parentJobId: failed.id, repairMode: 'automatic' });
+  });
+
+  it('本批部分确认按动态镜头与种类汇总失败和成功数，详细原因进入现有日志且保留失败候选', async (): Promise<void> => {
+    const shots = project.plan!.shots; const ids: string[] = [];
+    for (const target of [{ shotId: shots[0].id, promptKind: 'firstFrame' as const }, { shotId: shots[1].id, promptKind: 'firstFrame' as const }, { shotId: shots[3].id, promptKind: 'firstFrame' as const }, { shotId: shots[3].id, promptKind: 'lastFrame' as const }]) {
+      const job = installJob('optimize', target); job.status = 'applied'; job.resultStatus = 'candidate'; job.parsedResult = { optimized: 'TEST离线完整候选' }; ids.push(job.id);
+    }
+    project.promptBatch = { total: ids.length, completed: ids.length, status: 'complete', targets: [], candidateJobIds: ids };
+    usePetStoryStore.setState({ project, promptBatch: { total: ids.length, completed: ids.length, status: 'complete' } });
+    const detail = 'TEST原始合同校验原因'; const append = vi.fn<(entry: { message: string }) => Promise<void>>().mockResolvedValue(undefined);
+    Object.assign(window.electronAPI, { logs: { append } });
+    adoptPrompt.mockImplementation(async (_id: string, _revision: number, id: string): Promise<PetStoryResult> => {
+      if (id !== ids[0]) return { success: false, project, error: detail };
+      project = structuredClone(project); project.revision++; project.jobs.find((job): boolean => job.id === id)!.resultStatus = 'adopted'; return { success: true, project };
+    });
+    await usePetStoryStore.getState().adoptPromptBatchCandidates();
+    expect(usePetStoryStore.getState().error).toBe(`已确认1项；镜头${shots[1].order}首帧、镜头${shots[3].order}首帧／尾帧需修改后确认。`);
+    expect(usePetStoryStore.getState().error).not.toContain(detail); expect(append).toHaveBeenCalledTimes(3);
+    expect(append.mock.calls.every((call): boolean => call[0].message === detail)).toBe(true);
+    expect(project.jobs.filter((job): boolean => job.resultStatus === 'candidate')).toHaveLength(3);
+  });
+
+  it('打开项目等待任务列表时较新的资格结果不会被最初打开快照覆盖', async (): Promise<void> => {
+    const shot = project.plan!.shots[0];
+    project.promptBatch = { total: 2, completed: 0, status: 'paused', targets: [{ shotId: shot.id, kind: 'firstFrame' }, { shotId: shot.id, kind: 'video' }] };
+    const corrected = structuredClone(project); corrected.revision++; corrected.promptBatch!.completed = 1; corrected.promptBatch!.targets.shift();
+    window.electronAPI.tasks.list = async (): Promise<Task[]> => { usePetStoryStore.setState({ project: corrected, promptBatch: { total: 2, completed: 1, status: 'paused' } }); return tasks; };
+    await usePetStoryStore.getState().openProject('/OFFLINE/原故事副本');
+    expect(usePetStoryStore.getState().project?.revision).toBe(corrected.revision);
+    expect(usePetStoryStore.getState().promptBatch).toEqual({ total: 2, completed: 1, status: 'paused' });
+    expect(prepareRuntime).not.toHaveBeenCalled(); expect(startAutomation).not.toHaveBeenCalled();
+  });
+
+  it('无运行队列时采用响应同步持久进度；恢复前发现合法候选已完成便不发送', async (): Promise<void> => {
+    const shot = project.plan!.shots[0]; const job = installJob('optimize', { shotId: shot.id, promptKind: 'firstFrame', promptBatchId: 'TEST-counter' });
+    saveCollected(job.id, true, true);
+    project.promptBatch = { id: 'TEST-counter', scope: 'shots', targets: [{ shotId: shot.id, kind: 'firstFrame' }], failedTargets: [{ target: { shotId: shot.id, kind: 'firstFrame' }, message: 'TEST旧失败' }], total: 1, completed: 0, status: 'paused', candidateJobIds: [job.id] };
+    usePetStoryStore.setState({ project, promptBatch: { total: 1, completed: 0, status: 'paused' } });
+    adoptPrompt.mockImplementationOnce(async (): Promise<PetStoryResult> => {
+      project = structuredClone(project); project.revision++; project.promptBatch = { ...project.promptBatch!, targets: [], failedTargets: [], completed: 1, status: 'complete' };
+      return { success: true, project };
+    });
+    await usePetStoryStore.getState().adoptPromptCandidate(job.id);
+    expect(usePetStoryStore.getState().promptBatch).toEqual({ total: 1, completed: 1, status: 'complete' });
+    // 模拟重开的是旧计数，但主进程恢复前资格核对已结算现存合法候选。
+    const old = structuredClone(project); old.promptBatch = { ...old.promptBatch!, targets: [{ shotId: shot.id, kind: 'firstFrame' }], completed: 0, status: 'paused' };
+    usePetStoryStore.setState({ project: old, promptBatch: { total: 1, completed: 0, status: 'paused' } });
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [], pendingCandidateJobIds: [job.id] });
+    await usePetStoryStore.getState().generateCanvasPrompts();
+    expect(usePetStoryStore.getState().promptBatch).toEqual({ total: 1, completed: 1, status: 'complete' });
+    expect(prepareRuntime).not.toHaveBeenCalled(); expect(startAutomation).not.toHaveBeenCalled(); expect(tasks).toHaveLength(1);
+  });
+
+  it.each([false, true])('画布节点恢复明确标记后台并复用原任务：已提交=%s', async (submitted: boolean): Promise<void> => {
+    const job = installJob('optimize', { shotId: project.plan!.shots[0].id, promptKind: 'firstFrame' }); const task = tasks[0]; job.runId = task.runtime!.runId;
+    task.status = 'paused'; task.errorInfo = { code: submitted ? 'submission_uncertain' : 'page_loading', message: 'TEST原任务', recoverable: true, detectedAt: now };
+    if (submitted) task.runtime!.submittedAt = now;
+    usePetStoryStore.setState({ project });
+    const events: string[] = [];
+    window.addEventListener('reconcile-task-submission', ((event: CustomEvent<{ taskId: string }>): void => { events.push(event.detail.taskId); }) as EventListener);
+    const update = vi.fn(async (): Promise<boolean> => true); useTaskStore.setState({ updateTaskRuntime: update });
+    await usePetStoryStore.getState().resumeCanvasPrompt(job.id);
+    expect(project.jobs).toHaveLength(1); expect(tasks).toHaveLength(1); expect(project.jobs[0].background).toBe('canvas');
+    expect(prepareRuntime).not.toHaveBeenCalled();
+    if (submitted) { expect(startAutomation).not.toHaveBeenCalled(); expect(retryUnsubmitted).not.toHaveBeenCalled(); expect(events).toEqual([task.id]); expect(task.runtime!.submittedAt).toBe(now); }
+    else { expect(startAutomation).toHaveBeenCalledExactlyOnceWith(task.id, expect.any(Function)); expect(retryUnsubmitted).toHaveBeenCalledExactlyOnceWith(project.id, job.id); expect(events).toEqual([]); }
+  });
+
+  it('画布有可读失败正文且自动修订已失败时，按原要求修复不需要用户填写修改意见', async (): Promise<void> => {
+    const target = { shotId: project.plan!.shots[0].id, promptKind: 'video' as const };
+    const parent = installJob('optimize', target); saveCollected(parent.id, false);
+    const automatic = installJob('repair', { ...target, parentJobId: parent.id, repairMode: 'automatic' }); saveCollected(automatic.id, false);
+    const before = structuredClone(project.jobs); const adopted = structuredClone(project.plan);
+    usePetStoryStore.setState({ project });
+
+    await usePetStoryStore.getState().resumeCanvasPrompt(parent.id);
+
+    expect(prepareRuntime).toHaveBeenCalledExactlyOnceWith(project.id, expect.any(Number), 'repair', { parentJobId: automatic.id, repairMode: 'explicit' });
+    expect(project.jobs).toHaveLength(3);
+    expect(project.jobs[2]).toMatchObject({ ...target, kind: 'repair', parentJobId: automatic.id, repairMode: 'explicit' });
+    expect(project.jobs[2].promptFeedback).toBeUndefined();
+    expect(startAutomation).toHaveBeenCalledExactlyOnceWith(project.jobs[2].taskId, expect.any(Function));
+    expect(project.jobs.slice(0, 2).map((job): unknown => ({ rawText: job.rawText, validationIssues: job.validationIssues, error: job.error })))
+      .toEqual(before.map((job): unknown => ({ rawText: job.rawText, validationIssues: job.validationIssues, error: job.error })));
+    expect(project.plan).toEqual(adopted); expect(usePetStoryStore.getState().error).toBe('');
+  });
+
+  it.each([false, true])('画布原要求修复入口复用已有修订子任务，已提交=%s时不另建或重发', async (submitted: boolean): Promise<void> => {
+    const target = { shotId: project.plan!.shots[0].id, promptKind: 'video' as const };
+    const parent = installJob('optimize', target); saveCollected(parent.id, false);
+    const repair = installJob('repair', { ...target, parentJobId: parent.id, repairMode: 'explicit' }); const task = tasks[1]; repair.runId = task.runtime!.runId;
+    if (submitted) { task.status = 'paused'; task.runtime!.submittedAt = now; task.errorInfo = { code: 'submission_uncertain', message: 'TEST 原受理不明', recoverable: true, detectedAt: now }; }
+    const events: string[] = [];
+    window.addEventListener('reconcile-task-submission', ((event: CustomEvent<{ taskId: string }>): void => { events.push(event.detail.taskId); }) as EventListener);
+    useTaskStore.setState({ updateTaskRuntime: vi.fn(async (): Promise<boolean> => true) });
+    usePetStoryStore.setState({ project });
+
+    await usePetStoryStore.getState().resumeCanvasPrompt(parent.id);
+
+    expect(project.jobs).toHaveLength(2); expect(tasks).toHaveLength(2); expect(prepareRuntime).not.toHaveBeenCalled();
+    expect(project.jobs[1].background).toBe('canvas');
+    if (submitted) {
+      expect(startAutomation).not.toHaveBeenCalled(); expect(retryUnsubmitted).not.toHaveBeenCalled(); expect(events).toEqual([task.id]);
+      expect(task.runtime!.submittedAt).toBe(now); expect(task.runtime!.runId).toBe(repair.runId);
+    } else { expect(startAutomation).toHaveBeenCalledExactlyOnceWith(task.id, expect.any(Function)); expect(events).toEqual([]); }
+  });
+
+  it('画布原要求修复在保存归属期间连点只创建并启动一次修订', async (): Promise<void> => {
+    const parent = installJob('optimize', { shotId: project.plan!.shots[0].id, promptKind: 'video' }); saveCollected(parent.id, false);
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve): void => { release = resolve; });
+    const originalMark = window.electronAPI.petstory.markCanvasChat; const mark = vi.spyOn(window.electronAPI.petstory, 'markCanvasChat');
+    mark.mockImplementationOnce(async (...args: Parameters<typeof originalMark>): Promise<PetStoryResult> => { await pending; return originalMark(...args); });
+    usePetStoryStore.setState({ project });
+
+    const first = usePetStoryStore.getState().resumeCanvasPrompt(parent.id);
+    await usePetStoryStore.getState().resumeCanvasPrompt(parent.id);
+    expect(mark).toHaveBeenCalledTimes(1); expect(prepareRuntime).not.toHaveBeenCalled();
+    release?.(); await first;
+
+    expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(startAutomation).toHaveBeenCalledTimes(1);
+    expect(project.jobs).toHaveLength(2); expect(usePetStoryStore.getState().busy).toBe(false);
+  });
+
+  it('已有修订的画布归属保存失败时不继续恢复或发送', async (): Promise<void> => {
+    const target = { shotId: project.plan!.shots[0].id, promptKind: 'video' as const };
+    const parent = installJob('optimize', target); saveCollected(parent.id, false);
+    installJob('repair', { ...target, parentJobId: parent.id, repairMode: 'explicit' });
+    const originalMark = window.electronAPI.petstory.markCanvasChat; const mark = vi.spyOn(window.electronAPI.petstory, 'markCanvasChat');
+    mark.mockImplementationOnce(originalMark).mockResolvedValueOnce({ success: false, project, error: 'TEST 画布归属未保存' });
+    usePetStoryStore.setState({ project });
+
+    await usePetStoryStore.getState().resumeCanvasPrompt(parent.id);
+
+    expect(mark).toHaveBeenCalledTimes(2); expect(prepareRuntime).not.toHaveBeenCalled(); expect(startAutomation).not.toHaveBeenCalled();
+    expect(retryUnsubmitted).not.toHaveBeenCalled(); expect(project.jobs).toHaveLength(2); expect(usePetStoryStore.getState().error).toBe('TEST 画布归属未保存');
+  });
+
+  it('画布恢复已保存批次时优先接回后续未决原任务，不另建旧失败队首或重复请求', async (): Promise<void> => {
+    const failed = installJob('optimize', { shotId: project.plan!.shots[0].id, promptKind: 'firstFrame' }); failed.status = 'invalid'; failed.rawText = 'TEST原失败回复';
+    const pending = installJob('optimize', { shotId: project.plan!.shots[1].id, promptKind: 'firstFrame' }); pending.runId = tasks[1].runtime!.runId;
+    tasks[1].status = 'paused'; tasks[1].errorInfo = { code: 'page_loading', message: 'TEST尚未发送', recoverable: true, detectedAt: now };
+    project.promptBatch = { targets: [{ shotId: failed.shotId!, kind: 'firstFrame' }, { shotId: pending.shotId!, kind: 'firstFrame' }], total: 2, completed: 0, status: 'paused', jobId: failed.id };
+    usePetStoryStore.setState({ project });
+    await usePetStoryStore.getState().generateCanvasPrompts();
+    expect(prepareRuntime).not.toHaveBeenCalled(); expect(project.jobs).toHaveLength(2); expect(tasks).toHaveLength(2);
+    expect(startAutomation).toHaveBeenCalledExactlyOnceWith(pending.taskId, expect.any(Function));
+    expect(project.promptBatch).toMatchObject({ scope: 'shots', status: 'running', jobId: pending.id, completed: 0 });
+    expect(project.promptBatch!.targets.map((target): string | undefined => target.shotId)).toEqual([pending.shotId, failed.shotId]);
+    expect(project.jobs[0].rawText).toBe('TEST原失败回复');
+  });
+
+  it('画布一次生成连续保存候选，进度按保存推进，重复入口不创建任务且本批确认不波及历史', async (): Promise<void> => {
+    const firstShot = project.plan!.shots[0]; const before = structuredClone(project.plan);
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [{ shotId: firstShot.id, kind: 'firstFrame' }, { shotId: firstShot.id, kind: 'video' }] });
+    await usePetStoryStore.getState().generateCanvasPrompts(); const first = project.jobs[0];
+    await usePetStoryStore.getState().generateCanvasPrompts(); expect(prepareRuntime).toHaveBeenCalledTimes(1);
+    collectChat.mockImplementationOnce(async (_id: string, id: string): Promise<PetStoryResult> => saveCollected(id, true, true));
+    await usePetStoryStore.getState().collect(first.id); const second = project.jobs[1];
+    expect(second).toMatchObject({ background: 'canvas', promptBatchId: first.promptBatchId, textContextJobIds: [first.id], promptKind: 'video' });
+    expect(project.promptBatch).toMatchObject({ completed: 1, total: 2, status: 'running', candidateJobIds: [first.id] });
+    collectChat.mockImplementationOnce(async (_id: string, id: string): Promise<PetStoryResult> => saveCollected(id, true, true));
+    await usePetStoryStore.getState().collect(second.id);
+    expect(project.promptBatch).toMatchObject({ completed: 2, total: 2, status: 'complete', candidateJobIds: [first.id, second.id], targets: [] });
+    expect(project.plan).toEqual(before); expect(adoptPrompt).not.toHaveBeenCalled();
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [], pendingCandidateJobIds: [first.id, second.id] });
+    await usePetStoryStore.getState().generateCanvasPrompts();
+    expect(prepareRuntime).toHaveBeenCalledTimes(2); expect(project.promptBatch?.candidateJobIds).toEqual([first.id, second.id]);
+    project.promptBatch!.candidateJobIds = [second.id, first.id]; // 反馈回填可能把上游候选放到末尾，确认仍按真实依赖顺序。
+    const historical = installJob('optimize', { shotId: project.plan!.shots[1].id, promptKind: 'firstFrame' }); historical.status = 'applied'; historical.resultStatus = 'candidate'; historical.parsedResult = { optimized: 'TEST历史候选' };
+    usePetStoryStore.setState({ project });
+    await usePetStoryStore.getState().adoptPromptBatchCandidates();
+    expect(adoptPrompt.mock.calls.map((call): string => call[2])).toEqual([first.id, second.id]);
+    expect(project.jobs.find((job): boolean => job.id === historical.id)?.resultStatus).toBe('candidate');
+  });
+
+  it('画布单项明确失败保留候选及原回复，跳过其依赖并继续独立镜头', async (): Promise<void> => {
+    const [first, second] = project.plan!.shots; second.transition = 'cut';
+    promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [{ shotId: first.id, kind: 'firstFrame' }, { shotId: first.id, kind: 'video' }, { shotId: second.id, kind: 'firstFrame' }] });
+    await usePetStoryStore.getState().generateCanvasPrompts(); const failed = project.jobs[0];
+    collectChat.mockImplementationOnce(async (_id: string, id: string): Promise<PetStoryResult> => ({ ...saveCollected(id, false), needsRepair: false }));
+    await usePetStoryStore.getState().collect(failed.id);
+    expect(project.jobs.at(-1)).toMatchObject({ shotId: second.id, promptKind: 'firstFrame' });
+    expect(project.jobs).toHaveLength(2); expect(project.jobs[0].rawText).toBeTruthy();
+    collectChat.mockImplementationOnce(async (_id: string, id: string): Promise<PetStoryResult> => saveCollected(id, true, true));
+    await usePetStoryStore.getState().collect(project.jobs.at(-1)!.id);
+    expect(project.promptBatch).toMatchObject({ total: 3, completed: 1, status: 'paused', failedTargets: [expect.objectContaining({ jobId: failed.id }), expect.objectContaining({ message: '等待前序提示词完成后继续' })] });
+    expect(project.promptBatch?.targets).toHaveLength(2); expect(adoptPrompt).not.toHaveBeenCalled();
+  });
+
   it('合格原回复的手动收取不额外创建修订，也不改变当前采用方案', async (): Promise<void> => {
     await usePetStoryStore.getState().analyze(); const job = project.jobs[0]; const adopted = structuredClone(project.plan);
     await usePetStoryStore.getState().collect(job.id);
@@ -171,7 +500,7 @@ describe('原五镜头的自动修订与明确入口', (): void => {
     expect(usePetStoryStore.getState().project?.jobs[0].status).toBe('invalid');
   });
 
-  it('修订合格仍停在原目标候选，确认采用后只结算一次并继续原批次', async (): Promise<void> => {
+  it('修订合格保存候选即继续原批次，确认采用不会再次结算目标', async (): Promise<void> => {
     const preserved = structuredClone(project.plan);
     await usePetStoryStore.getState().regenerateAllPrompts(); const parent = project.jobs[0];
     collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => saveCollected(jobId, false));
@@ -180,8 +509,8 @@ describe('原五镜头的自动修订与明确入口', (): void => {
     expect(project.promptBatch).toMatchObject({ completed: 0, jobId: repair.id, status: 'running' });
     collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => saveCollected(jobId, true, true));
     await usePetStoryStore.getState().collect(repair.id);
-    expect(project.promptBatch).toMatchObject({ completed: 0, jobId: repair.id, status: 'paused' });
-    expect(prepareRuntime).toHaveBeenCalledTimes(2); expect(project.plan).toEqual(preserved);
+    expect(project.promptBatch).toMatchObject({ completed: 1, candidateJobIds: [repair.id], status: 'running' });
+    expect(prepareRuntime).toHaveBeenCalledTimes(3); expect(project.plan).toEqual(preserved);
     await usePetStoryStore.getState().adoptPromptCandidate(repair.id);
     expect(prepareRuntime).toHaveBeenCalledTimes(3);
     expect(project.jobs.at(-1)).toMatchObject({ kind: 'optimize', shotId: parent.shotId, promptKind: 'video' });
@@ -189,6 +518,26 @@ describe('原五镜头的自动修订与明确入口', (): void => {
     await usePetStoryStore.getState().adoptPromptCandidate(repair.id);
     expect(prepareRuntime).toHaveBeenCalledTimes(3); expect(project.promptBatch?.completed).toBe(1);
     expect(project.jobs[0]).toMatchObject({ id: parent.id, status: 'invalid', error: 'TEST 原回复时长不符合当前项目约束' });
+  });
+
+  it('后台重校验直接接纳同一原回复，批次结算候选且不重发原任务', async (): Promise<void> => {
+    const preserved = structuredClone(project.plan);
+    await usePetStoryStore.getState().regenerateAllPrompts(); const parent = project.jobs[0];
+    const originalTask = tasks[0]; originalTask.status = 'done'; originalTask.runtime!.submittedAt = now;
+    originalTask.runtime!.chatResponse = { text: 'TEST 已保存的合格原回复', capturedAt: now };
+    const taskSnapshot = structuredClone(originalTask);
+    collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => saveRepairableFailure(jobId));
+    prepareRuntime.mockImplementationOnce(async (): Promise<PetStoryResult> => ({ ...saveCollected(parent.id, true, true), taskId: parent.taskId, repairJobId: parent.id, repairSourceJobId: parent.id }));
+    await usePetStoryStore.getState().collect(parent.id);
+    expect(project.promptBatch).toMatchObject({ completed: 1, candidateJobIds: [parent.id], failedTargets: [], status: 'running' });
+    expect(project.jobs[0]).toMatchObject({ id: parent.id, status: 'applied', resultStatus: 'candidate' });
+    expect(project.jobs).toHaveLength(2); // 后续目标正常推进，未给原回复创建修订子任务。
+    expect(project.jobs[1]).toMatchObject({ kind: 'optimize', promptKind: 'video' });
+    expect(project.jobs.some((job): boolean => job.kind === 'repair')).toBe(false);
+    expect(startAutomation.mock.calls.filter(([taskId]): boolean => taskId === parent.taskId)).toHaveLength(1);
+    expect(tasks[0]).toEqual(taskSnapshot); expect(project.plan).toEqual(preserved);
+    expect(adoptPrompt).not.toHaveBeenCalled(); expect(usePetStoryStore.getState().error).toBe('');
+    expect(usePetStoryStore.getState().promptRepairJobIds).toEqual([]);
   });
 
   it('收取等待期间用户暂停批次，不再创建或发送自动修订', async (): Promise<void> => {
@@ -202,25 +551,17 @@ describe('原五镜头的自动修订与明确入口', (): void => {
     expect(project.promptBatch).toMatchObject({ status: 'paused', completed: 0, jobId: parent.id });
   });
 
-  it('唯一自动修订仍失败时停止；用户显式新轮次可修订且只获得一次新的自动预算', async (): Promise<void> => {
-    await usePetStoryStore.getState().analyze(); const parent = project.jobs[0];
-    collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => saveCollected(jobId, false));
-    await usePetStoryStore.getState().collect(parent.id); const repair = project.jobs[1];
-    collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => ({ ...saveCollected(jobId, false), needsRepair: false }));
-    await usePetStoryStore.getState().collect(repair.id);
-    expect(project.jobs).toHaveLength(2); expect(usePetStoryStore.getState().error).toContain('豆包还未修好，你可以继续调整');
-    expect(project.jobs.find((job): boolean => job.id === repair.id)?.error).toBe('TEST 原回复时长不符合当前项目约束');
-    await usePetStoryStore.getState().correctOnce(repair.id);
-    expect(prepareRuntime.mock.calls.at(-1)?.slice(2)).toEqual(['repair', { parentJobId: repair.id, repairMode: 'explicit' }]);
-    expect(project.jobs).toHaveLength(3); expect(project.jobs[0].rawText).toBeDefined(); expect(project.jobs[1].rawText).toBeDefined();
-    const explicit = project.jobs[2];
-    collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => saveCollected(jobId, false));
-    await usePetStoryStore.getState().collect(explicit.id);
-    const automatic = project.jobs[3];
-    expect(automatic).toMatchObject({ kind: 'repair', parentJobId: explicit.id, repairMode: 'automatic' });
-    collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => ({ ...saveCollected(jobId, false), needsRepair: false }));
-    await usePetStoryStore.getState().collect(automatic.id);
-    expect(project.jobs).toHaveLength(4); expect(prepareRuntime).toHaveBeenCalledTimes(4);
+  it('方案分析也不再按修订次数停止，主进程判可修复就连续处理到合格', async (): Promise<void> => {
+    await usePetStoryStore.getState().analyze();
+    for (let round = 0; round < 3; round++) {
+      collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => saveCollected(jobId, false));
+      await usePetStoryStore.getState().collect(project.jobs.at(-1)!.id);
+      expect(project.jobs).toHaveLength(round + 2); expect(usePetStoryStore.getState().error).toBe('');
+    }
+    const last = project.jobs.at(-1)!;
+    await usePetStoryStore.getState().collect(last.id);
+    expect(project.jobs).toHaveLength(4); expect(project.jobs[3].status).toBe('applied');
+    expect(project.jobs.slice(0, 3).every((job): boolean => !!job.rawText && job.status === 'invalid')).toBe(true);
   });
 
   it.each(['网络连接失败', '需要重新登录', '尚未收到完整回复', '程序映射错误'])('%s由恢复处理，不发内容修订', async (error: string): Promise<void> => {
@@ -335,15 +676,15 @@ describe('原五镜头的自动修订与明确入口', (): void => {
     else expect(project.promptBatch?.status).toBe('paused');
   });
 
-  it('收取旧父回复发现修订已是合格候选，交接待确认并在采用后只完成原目标一次', async (): Promise<void> => {
+  it('收取旧父回复发现修订已是合格候选，保留待确认并立即推进一次', async (): Promise<void> => {
     await usePetStoryStore.getState().regenerateAllPrompts(); const parent = project.jobs[0];
     const repair = installJob('repair', { parentJobId: parent.id, shotId: parent.shotId, promptKind: parent.promptKind, repairMode: 'automatic' });
     saveCollected(repair.id, true, true); usePetStoryStore.setState({ project });
     collectChat.mockImplementationOnce(async (_id: string, jobId: string): Promise<PetStoryResult> => ({ ...saveCollected(jobId, false), repairJobId: repair.id }));
     const startsBefore = startAutomation.mock.calls.length;
     await usePetStoryStore.getState().collect(parent.id);
-    expect(project.promptBatch).toMatchObject({ jobId: repair.id, status: 'paused', completed: 0 });
-    expect(startAutomation).toHaveBeenCalledTimes(startsBefore); expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(usePetStoryStore.getState().error).toBe('');
+    expect(project.promptBatch).toMatchObject({ candidateJobIds: [repair.id], status: 'running', completed: 1 });
+    expect(startAutomation).toHaveBeenCalledTimes(startsBefore + 1); expect(prepareRuntime).toHaveBeenCalledTimes(2); expect(usePetStoryStore.getState().error).toBe('');
     await usePetStoryStore.getState().adoptPromptCandidate(repair.id);
     expect(project.promptBatch).toMatchObject({ status: 'running', completed: 1 });
     expect(prepareRuntime).toHaveBeenCalledTimes(2); expect(project.jobs.at(-1)).toMatchObject({ kind: 'optimize', shotId: parent.shotId, promptKind: 'video' });

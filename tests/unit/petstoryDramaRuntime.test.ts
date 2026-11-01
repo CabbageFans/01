@@ -13,6 +13,7 @@ import { syncMaterials } from '../../main/utils/petstoryMaterials';
 import { compileMaterialPrompt, compilePrompt } from '../../main/utils/petstoryPromptQuality';
 import { PetStoryProductionService } from '../../main/utils/petstoryProduction';
 import { buildPetStoryPromptExport } from '../../main/utils/petstoryExport';
+import { inspectPromptCandidate, inspectPromptEligibility, legacyPromptDesignHash, promptWritingTarget } from '../../main/utils/petstoryEligibility';
 import { validatePetStoryPlan } from '../../main/utils/petstoryValidation';
 import originalFive from '../fixtures/drama-runtime-input.json';
 
@@ -53,6 +54,14 @@ async function finish(job: PetStoryChatJob, result: Record<string, unknown>, bad
   const updated = core.updateRuntime({ taskId: task.id, status: 'done', runtime }); if (!updated.success) throw new Error(updated.error);
   if (!job.runId) await chat.bindRun(p.id, job.id, runtime.runId);
   const collected = await chat.collect(p.id, job.id); p = collected.project!; return p;
+}
+/** 模拟旧校验器留下的误判记录；原 Task、run、请求与回复均由正式收取链生成。 */
+async function historicalPromptFailure(job: PetStoryChatJob): Promise<PetStoryChatJob> {
+  const saved = p.jobs.find((item): boolean => item.id === job.id)!;
+  saved.status = 'invalid'; saved.error = 'TEST 旧校验器未识别角色主名'; saved.validationIssues = [saved.error];
+  saved.validationDetails = [{ code: 'prompt_content', path: '$.optimized', targetId: `${saved.shotId}:${saved.promptKind}`,
+    actual: saved.parsedResult?.optimized, actualType: 'string', expected: 'TEST 已确认角色与台词', repairable: true, message: saved.error }];
+  p = await projects.write(p); return p.jobs.find((item): boolean => item.id === job.id)!;
 }
 /** 收取和采用是两个动作；每次采用都通过正式服务，先检查候选已经保存。 */
 async function adoptPrompt(job: PetStoryChatJob): Promise<void> {
@@ -100,6 +109,159 @@ async function pauseUncertain(job: PetStoryChatJob, submitted = true): Promise<T
 }
 
 describe('drama runtime 完整正文与候选采用', (): void => {
+  it.each(['legacy-empty-video', 'new-existing-video', 'legacy-unchanged'] as const)('前镜选择尾帧后，兼容%s且采用未选用视频不造成假过期，不改原合同', async (variant): Promise<void> => {
+    const previous = p.plan!.shots[0]; previous.prompts.lastFrame = { ...prompt('TEST已采用前镜尾帧'), sourceJobId: 'TEST-last-source' };
+    if (variant !== 'legacy-empty-video') previous.prompts.video = { ...prompt('TEST已有前镜视频'), sourceJobId: 'TEST-video-source' };
+    p = await projects.write(p);
+    const candidate = await prepare('optimize', { shotId: 'shot-1', promptKind: 'firstFrame' });
+    if (variant !== 'new-existing-video') {
+      p.jobs.at(-1)!.promptTask!.designHash = legacyPromptDesignHash(p, candidate); p = await projects.write(p);
+    }
+    await finish(candidate, { optimized: '第1张参考图控制场景，TEST当前镜头完整首帧候选。' });
+    const originalContract = structuredClone(p.jobs.at(-1)!.promptTask);
+    if (variant !== 'legacy-unchanged') {
+      p.plan!.shots[0].prompts.video = { ...prompt('TEST本批后来采用的视频'), sourceJobId: 'TEST-later-video' }; p = await projects.write(p);
+    }
+    expect(inspectPromptCandidate(p, p.jobs.at(-1)!).writingReady).toBe(true);
+    await adoptPrompt(candidate);
+    expect(p.jobs.at(-1)!.promptTask).toEqual(originalContract);
+    expect(p.plan!.shots[1].prompts.firstFrame.final).toBe('第1张参考图控制场景，TEST当前镜头完整首帧候选。');
+  });
+
+  it('旧hash兼容必须有原选中尾帧的完整边界证据，缺失时不能推测放行', async (): Promise<void> => {
+    p.plan!.shots[0].prompts.lastFrame = { ...prompt('TEST采用尾帧'), sourceJobId: 'TEST-last-source' }; p = await projects.write(p);
+    const candidate = await prepare('optimize', { shotId: 'shot-1', promptKind: 'firstFrame' });
+    p.jobs.at(-1)!.previousBoundaryHash = undefined; p = await projects.write(p);
+    await finish(candidate, { optimized: '第1张参考图控制场景，TEST原合同候选。' });
+    p.plan!.shots[0].prompts.video = { ...prompt('TEST后来采用视频'), sourceJobId: 'TEST-later-video' }; p = await projects.write(p);
+    expect(inspectPromptCandidate(p, p.jobs.at(-1)!).writingReady).toBe(false);
+    await expect(chat.adoptPromptCandidate(p.id, p.revision, candidate.id)).rejects.toThrow('当前候选需按当前事实修订');
+  });
+
+  it.each(['lastFrame', 'videoFallback', 'story'] as const)('真实%s创作依赖发生变化仍拒绝旧候选，不靠兼容放宽', async (change): Promise<void> => {
+    if (change !== 'videoFallback') p.plan!.shots[0].prompts.lastFrame = { ...prompt('TEST采用尾帧'), sourceJobId: 'TEST-last-source' };
+    p.plan!.shots[0].prompts.video = { ...prompt('TEST采用视频'), sourceJobId: 'TEST-video-source' }; p = await projects.write(p);
+    const candidate = await prepare('optimize', { shotId: 'shot-1', promptKind: 'firstFrame' });
+    await finish(candidate, { optimized: '第1张参考图控制场景，TEST依赖变化前的候选。' });
+    if (change === 'story') { p.mobileStory!.text += '\nTEST用户修改原文'; p = await projects.write(p); }
+    else p = await projects.saveShotPrompt(p.id, p.revision, 'shot-0', change === 'lastFrame' ? 'lastFrame' : 'video', 'TEST用户手改实际选中前镜边界');
+    expect(inspectPromptCandidate(p, p.jobs.at(-1)!).writingReady).toBe(false);
+    await expect(chat.adoptPromptCandidate(p.id, p.revision, candidate.id)).rejects.toThrow();
+  });
+
+  it('暂停批次的失败目标经节点反馈保存合法候选后只结算一次，已完成项的再次修改不重复计数', async (): Promise<void> => {
+    const target = { shotId: 'shot-0', kind: 'firstFrame' as const }; const other = { shotId: 'shot-1', kind: 'firstFrame' as const };
+    p = await projects.savePromptBatch(p.id, p.revision, { id: 'TEST-paused-feedback', scope: 'shots', targets: [target, other], failedTargets: [{ target, message: 'TEST原失败' }, { target: other, message: 'TEST另一失败' }], total: 2, completed: 0, status: 'paused' });
+    const feedback = await prepare('optimize', { shotId: target.shotId, promptKind: target.kind, promptBatchId: p.promptBatch!.id, background: 'canvas', promptFeedback: { text: 'TEST修改本项' } });
+    await finish(feedback, { optimized: '第1张参考图控制场景，TEST失败目标修订后的完整候选。' });
+    expect(p.promptBatch).toMatchObject({ completed: 1, total: 2, status: 'paused', targets: [other], failedTargets: [{ target: other, message: 'TEST另一失败' }], candidateJobIds: [feedback.id] });
+    const originalRaw = p.jobs.at(-1)!.rawText; const count = tasks().length;
+    await chat.collect(p.id, feedback.id); p = await projects.read(p.id); expect(p.promptBatch?.completed).toBe(1);
+    await adoptPrompt(feedback); expect(p.promptBatch?.completed).toBe(1);
+    const next = await prepare('optimize', { shotId: target.shotId, promptKind: target.kind, promptBatchId: p.promptBatch!.id, background: 'canvas', promptFeedback: { text: 'TEST再调整本项', baseJobId: feedback.id } });
+    await finish(next, { optimized: '第1张参考图控制场景，TEST已完成目标的新版本候选。' });
+    expect(p.promptBatch).toMatchObject({ completed: 1, targets: [other], candidateJobIds: [next.id] });
+    expect(p.jobs.find((job): boolean => job.id === feedback.id)?.rawText).toBe(originalRaw); expect(tasks()).toHaveLength(count + 1);
+  });
+
+  it.each(['adopt', 'resume'] as const)('兼容已保存但未结算的反馈候选：%s走正式服务修复批次进度，不重发', async (action: 'adopt' | 'resume'): Promise<void> => {
+    const target = { shotId: 'shot-0', kind: 'firstFrame' as const }; const other = { shotId: 'shot-1', kind: 'firstFrame' as const };
+    p = await projects.savePromptBatch(p.id, p.revision, { id: 'TEST-old-feedback-counter', scope: 'shots', targets: [target, other], total: 2, completed: 0, status: 'paused' });
+    const feedback = await prepare('optimize', { shotId: target.shotId, promptKind: target.kind, promptBatchId: p.promptBatch!.id, background: 'canvas', promptFeedback: { text: 'TEST本项意见' } });
+    await finish(feedback, { optimized: '第1张参考图控制场景，TEST已保存的合法反馈候选。' });
+    // 用正式元数据保存服务模拟修复前版本：候选真实存在，remaining/failed尚未结算。
+    p = await projects.savePromptBatch(p.id, p.revision, { ...p.promptBatch!, targets: [target, other], failedTargets: [{ target, message: 'TEST旧失败' }, { target: other, message: 'TEST保留失败' }], jobId: feedback.id, completed: 0, status: 'paused' });
+    const before = tasks();
+    if (action === 'adopt') await adoptPrompt(feedback);
+    else p = (await chat.promptStageTargets(p.id, p.revision, 'shots')).project!;
+    expect(p.promptBatch).toMatchObject({ completed: 1, total: 2, status: 'paused', targets: [other], failedTargets: [{ target: other, message: 'TEST保留失败' }] });
+    expect(p.promptBatch?.jobId).toBeUndefined(); expect(tasks()).toEqual(before);
+    p = (await chat.promptStageTargets(p.id, p.revision, 'shots')).project!;
+    expect(p.promptBatch?.completed).toBe(1); expect(tasks()).toEqual(before);
+  });
+
+  it('历史镜头恢复只持久关联后台，原task/run/提交证据保持不变', async (): Promise<void> => {
+    const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame' });
+    await pauseUncertain(job); const before = tasks();
+    const result = await chat.markCanvasChat(p.id, p.revision, job.id); p = result.project!;
+    expect(p.jobs.find((item): boolean => item.id === job.id)).toMatchObject({ background: 'canvas', runId: before[0].runtime!.runId, status: 'bound' });
+    expect(tasks()).toEqual(before); expect(p.plan!.shots[0].prompts.firstFrame.final).toBe('TEST首帧0');
+  });
+
+  it('同批候选连续供后续文字使用且不采用，单项及整批顺序采用后合同仍匹配', async (): Promise<void> => {
+    const originals = structuredClone(p.plan!.shots[0].prompts);
+    const batchId = 'TEST-canvas-batch';
+    p = await projects.savePromptBatch(p.id, p.revision, { id: batchId, scope: 'shots', targets: [{ shotId: 'shot-0', kind: 'firstFrame' }, { shotId: 'shot-0', kind: 'video' }], total: 2, completed: 0, status: 'running', candidateJobIds: [] });
+    const first = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame', background: 'canvas', promptBatchId: batchId });
+    const firstBody = '第1张参考图控制场景布局，TEST本批完整静态首帧正文。';
+    await finish(first, { optimized: firstBody });
+    expect(p.plan!.shots[0].prompts.firstFrame.final).toBe(originals.firstFrame.final);
+    p = await projects.savePromptBatch(p.id, p.revision, { ...p.promptBatch!, targets: [{ shotId: 'shot-0', kind: 'video' }], completed: 1, candidateJobIds: [first.id] });
+    const video = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', background: 'canvas', promptBatchId: batchId, textContextJobIds: [first.id] });
+    const facts = requestFacts(video);
+    expect(facts.batchCandidateTextContext).toEqual([expect.objectContaining({ sourceJobId: first.id, promptText: firstBody, status: 'saved_candidate_for_this_batch_text_only' })]);
+    expect(facts.adoptedFrameText).toMatchObject({ firstFrame: { promptText: firstBody } });
+    expect(facts.batchCandidatePolicy).toContain('尚未由用户正式采用');
+    await finish(video, { optimized: '第1张参考图控制场景布局，TEST本批完整视频过程。全程无字幕、无对白文字叠加。' });
+    expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+    expect(p.plan!.shots[0].prompts.video.final).toBe(originals.video.final);
+    await adoptPrompt(video);
+    expect(inspectPromptEligibility(p, p.plan!.shots[0].prompts.video, promptWritingTarget(p, video)).writingReady).toBe(false);
+    await adoptPrompt(first);
+    expect(inspectPromptEligibility(p, p.plan!.shots[0].prompts.video, promptWritingTarget(p, video)).writingReady).toBe(true);
+    expect(p.jobs.find((job): boolean => job.id === first.id)?.replacedPrompt?.final).toBe(originals.firstFrame.final);
+    expect(tasks()).toHaveLength(2); expect(tasks().every((task): boolean => task.mode === 'chat')).toBe(true);
+  });
+
+  it('节点主动反馈绑定具体候选，每次返回完整新候选且可连续修改，保留手改和其他节点', async (): Promise<void> => {
+    p.plan!.shots[0].prompts.firstFrame.edited = true; p = await projects.write(p);
+    const originals = structuredClone(p.plan);
+    const first = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame', background: 'canvas', promptFeedback: { text: 'TEST只调整表情' } });
+    expect(requestFacts(first).userPromptFeedback).toEqual({ text: 'TEST只调整表情', baseText: originals!.shots[0].prompts.firstFrame.final });
+    const firstBody = '第1张参考图控制布局，TEST用户反馈后的完整新候选。';
+    await finish(first, { optimized: firstBody });
+    const second = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame', background: 'canvas', promptFeedback: { text: 'TEST再让表情自然一点', baseJobId: first.id, baseText: 'TEST伪造基准不应信任' } });
+    expect(requestFacts(second).userPromptFeedback).toEqual({ text: 'TEST再让表情自然一点', baseJobId: first.id, baseText: firstBody });
+    await finish(second, { optimized: '第1张参考图控制布局，TEST第二轮完整新候选。' });
+    expect(p.plan!.shots[0].prompts.firstFrame).toMatchObject({ final: originals!.shots[0].prompts.firstFrame.final, edited: true, candidateJobId: second.id });
+    expect(p.plan!.shots[1]).toEqual(originals!.shots[1]);
+    await adoptPrompt(second);
+    expect(p.jobs.at(-1)?.replacedPrompt).toMatchObject({ final: originals!.shots[0].prompts.firstFrame.final, edited: true });
+    expect(tasks()).toHaveLength(2); expect(p.jobs.every((job): boolean => job.background === 'canvas')).toBe(true);
+  });
+
+  it('本批上游反馈新正文先采用后，不会把依赖旧快照的下游候选一并冒充当前合法正文', async (): Promise<void> => {
+    const batchId = 'TEST-feedback-dependency';
+    p = await projects.savePromptBatch(p.id, p.revision, { id: batchId, scope: 'shots', targets: [{ shotId: 'shot-0', kind: 'firstFrame' }, { shotId: 'shot-0', kind: 'video' }], total: 2, completed: 0, status: 'running' });
+    const first = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame', promptBatchId: batchId, background: 'canvas' });
+    await finish(first, { optimized: '第1张参考图控制场景，TEST原批次首帧候选。' });
+    p = await projects.savePromptBatch(p.id, p.revision, { ...p.promptBatch!, targets: [{ shotId: 'shot-0', kind: 'video' }], completed: 1, candidateJobIds: [first.id] });
+    const video = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', promptBatchId: batchId, textContextJobIds: [first.id], background: 'canvas' });
+    await finish(video, { optimized: '第1张参考图控制场景，TEST原批次视频候选。全程无字幕、无对白文字叠加。' });
+    p = await projects.savePromptBatch(p.id, p.revision, { ...p.promptBatch!, targets: [], completed: 2, status: 'complete', candidateJobIds: [first.id, video.id] });
+    const revision = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame', promptBatchId: batchId, background: 'canvas', promptFeedback: { text: 'TEST调整首帧表情', baseJobId: first.id } });
+    await finish(revision, { optimized: '第1张参考图控制场景，TEST用户改后首帧候选。' });
+    expect(p.promptBatch?.candidateJobIds).toEqual([video.id, revision.id]);
+    await adoptPrompt(revision);
+    await expect(chat.adoptPromptCandidate(p.id, p.revision, video.id)).rejects.toThrow('已采用首帧');
+    p = await projects.read(p.id);
+    expect(p.plan!.shots[0].prompts.video.final).toBe('TEST视频0');
+    expect(p.jobs.find((job): boolean => job.id === video.id)).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+    expect(tasks()).toHaveLength(3);
+  });
+
+  it('反馈自动修订继承具体正文和后台关联，合格后仍为待采用候选', async (): Promise<void> => {
+    const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame', background: 'canvas', promptFeedback: { text: 'TEST调整表情' } });
+    await finish(job, { optimized: '第99张参考图控制场景，TEST无效编号。' });
+    const repair = await prepare('repair', { parentJobId: job.id });
+    expect(repair).toMatchObject({ background: 'canvas', promptFeedback: job.promptFeedback, originKind: 'optimize' });
+    expect(requestFacts(repair).userPromptFeedback).toEqual(job.promptFeedback);
+    await finish(repair, { optimized: '第1张参考图控制场景，TEST完整修订正文。' });
+    expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+    expect(p.plan!.shots[0].prompts.firstFrame.final).toBe('TEST首帧0');
+    expect(tasks()).toHaveLength(2);
+  });
+
   it.each([['analysis', true], ['analysis', false], ['repair', true], ['repair', false]] as const)('%s回复（已有方案=%s）按明确切镜清理冗余前镜引用，保留原文与处理记录且不新增请求', async (kind, hasPlan): Promise<void> => {
     const incoming = await configuredCastPlan();
     if (!hasPlan) { p.plan = undefined; p.materials = undefined; p = await projects.write(p); }
@@ -333,7 +495,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: 'TEST视频0' }); expect(p.plan!.shots[0].prompts.video.needsReview).toBeUndefined();
     expect(p.jobs.at(-1)?.rawText).toContain('<声音>TEST原有环境底音</声音>');
   });
-  it('用户局部修订仍用XML可进入一次定向纠正，仍失败后终止自动链并保留原final', async (): Promise<void> => {
+  it('用户局部修订仍用XML时持续后台定向纠正，合格前后都保留原final', async (): Promise<void> => {
     const original = p.plan!.shots[0].prompts.video.final;
     const review = await prepare('review', { shotId: 'shot-0', promptKind: 'video' }); await finish(review, { issues: [issue('sound-format', 'shot-0:video', 'error')] });
     const revision = await prepare('revise', { shotId: 'shot-0', promptKind: 'video', parentJobId: review.id, selectedIssueIds: ['sound-format'], capability: capability() });
@@ -346,11 +508,15 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const repair = await prepare('repair', { parentJobId: revision.id, repairMode: 'automatic' });
     expect(repair).toMatchObject({ originKind: 'revise', selectedIssueIds: ['sound-format'], stage: expect.stringContaining('video') });
     expect(repair.stage).toContain('video20');
-    await finish(repair, { optimized: body }); expect((await chat.collect(p.id, repair.id)).needsRepair).toBe(false);
-    await expect(prepare('repair', { parentJobId: repair.id, repairMode: 'automatic' })).rejects.toThrow('自动修订已使用一次');
+    await finish(repair, { optimized: body }); expect((await chat.collect(p.id, repair.id)).needsRepair).toBe(true);
+    const next = await prepare('repair', { parentJobId: repair.id, repairMode: 'automatic' });
+    expect(next).toMatchObject({ originKind: 'revise', selectedIssueIds: ['sound-format'] });
+    expect(requestFacts(next).parentResult).toMatchObject({ originalDuty: 'revise', selectedIssueIds: ['sound-format'], issues: [issue('sound-format', 'shot-0:video', 'error')], originalRequest: revision.requestText });
+    await finish(next, { optimized: `${labels} TEST完整动作。<TEST原有环境底音>。全程无字幕、无对白文字叠加。` });
+    expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
     expect((await new PetStoryProjects().open(directory)).plan!.shots[0].prompts.video).toMatchObject({ final: original, needsReview: true });
   });
-  it.each(['第99张参考图定义当前场景。', '{{ref:missing-material}}定义当前场景。'])('Seedream 引用错误在采用前保留候选并进入唯一一次修订：%s', async (body: string): Promise<void> => {
+  it.each(['第99张参考图定义当前场景。', '{{ref:missing-material}}定义当前场景。'])('Seedream 引用错误在采用前保留候选并进入后台修订：%s', async (body: string): Promise<void> => {
     const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame' });
     expect(job.promptTask?.dialect).toBe('seedream');
     await finish(job, { optimized: body });
@@ -403,14 +569,60 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect((await new PetStoryProjects().open(directory)).plan!.shots[0].prompts.video.promptTask).toEqual(repair.promptTask);
     const count = tasks().length; expect((await prepare('repair', { parentJobId: job.id })).id).toBe(repair.id); expect(tasks()).toHaveLength(count);
   });
-  it('修订后仍缺标签保留第二条候选，不允许递归再修订', async (): Promise<void> => {
-    const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
-    await finish(job, { optimized: 'TEST 缺标签的原回复' });
-    const repair = await prepare('repair', { parentJobId: job.id });
-    await finish(repair, { optimized: 'TEST 第二条仍缺标签的候选' });
-    expect(p.jobs.at(-1)).toMatchObject({ status: 'invalid', parsedResult: { optimized: 'TEST 第二条仍缺标签的候选' } });
-    expect(p.plan!.shots[0].prompts.video.final).toBe('TEST视频0');
-    await expect(prepare('repair', { parentJobId: repair.id })).rejects.toThrow('自动修订已使用一次');
+  it('连续三次失败后后台仍能迭代到合格，每个父回复只创建唯一子任务且不提前采用', async (): Promise<void> => {
+    const original = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
+    const labels = original.promptTask!.references.map((reference): string => `@图片${reference.order}`).join(' ');
+    const failedBodies = ['TEST 首次缺少全部标签', `${labels} TEST第二次XML声音。<声音>风声</声音>。全程无字幕、无对白文字叠加。`, `${labels} TEST第三次缺少禁字幕要求。`];
+    const failedReplies: string[] = []; let current = original;
+    for (const body of failedBodies) {
+      await finish(current, { optimized: body });
+      const parent = p.jobs.find((job): boolean => job.id === current.id)!;
+      expect(parent).toMatchObject({ status: 'invalid', parsedResult: { optimized: body } });
+      const collected = await chat.collect(p.id, parent.id); p = collected.project!;
+      expect(collected.needsRepair).toBe(true); failedReplies.push(parent.rawText!);
+      const count = tasks().length; const revision = p.revision;
+      const [one, two] = await Promise.all([chat.prepareRuntime(p.id, revision, 'repair', { parentJobId: parent.id }), chat.prepareRuntime(p.id, revision, 'repair', { parentJobId: parent.id })]);
+      expect(one.repairJobId).toBe(two.repairJobId); expect(tasks()).toHaveLength(count + 1); p = one.project!;
+      current = p.jobs.find((job): boolean => job.id === one.repairJobId)!;
+      expect(current).toMatchObject({ originKind: 'optimize', repairMode: 'automatic', parentJobId: parent.id, promptTask: original.promptTask });
+      expect(requestFacts(current).parentResult).toMatchObject({ originalDuty: 'optimize', originalRequest: original.requestText, originalReply: parent.rawText,
+        validationIssues: parent.validationIssues, validationDetails: parent.validationDetails });
+      // 持久化关联跨服务实例仍幂等，不能因回调重入或重开而重复发送原运行。
+      const reopened = new PetStoryChatService(projects, { list: tasks, create: (): never => { throw new Error('TEST不应重复创建'); } });
+      expect((await reopened.prepareRuntime(p.id, revision, 'repair', { parentJobId: parent.id })).repairJobId).toBe(current.id);
+      expect(tasks()).toHaveLength(count + 1); expect(p.plan!.shots[0].prompts.video.final).toBe('TEST视频0');
+    }
+    const body = `${labels} TEST模型最终返回完整起终动作。<雨后微风声>。全程无字幕、无对白文字叠加。`;
+    await finish(current, { optimized: body });
+    expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'candidate', parsedResult: { optimized: body } });
+    expect(p.jobs.slice(0, -1).map((job): string | undefined => job.rawText)).toEqual(failedReplies);
+    expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: 'TEST视频0', optimized: body, candidateJobId: current.id });
+    expect(tasks()).toHaveLength(4); await adoptPrompt(current); expect(p.plan!.shots[0].prompts.video.final).toBe(body);
+  });
+  it.each(['analysis', 'assets', 'review'] as const)('%s也能连续后台纠正到合格，保留原职责与各轮原文', async (kind: 'analysis' | 'assets' | 'review'): Promise<void> => {
+    const candidatePlan = kind === 'analysis' ? await configuredCastPlan() : undefined;
+    const original = await prepare(kind); await finish(original, {});
+    expect((await chat.collect(p.id, original.id)).needsRepair).toBe(true);
+    const repair = await prepare('repair', { parentJobId: original.id }); await finish(repair, {});
+    expect((await chat.collect(p.id, repair.id)).needsRepair).toBe(true);
+    const next = await prepare('repair', { parentJobId: repair.id });
+    expect(next.originKind).toBe(kind); expect(requestFacts(next).parentResult).toMatchObject({ originalDuty: kind, originalRequest: original.requestText,
+      originalReply: p.jobs.find((job): boolean => job.id === repair.id)!.rawText });
+    const result: Record<string, unknown> = kind === 'analysis' ? { ...candidatePlan, storyUsable: true, contentBasis: { beginning: 'TEST开头', middle: 'TEST变化', ending: 'TEST结局' } }
+      : kind === 'review' ? { issues: [] } : { characters: p.plan!.characters, props: p.plan!.props, scenes: p.plan!.scenes,
+        shotBindings: p.plan!.shots.map((shot): object => ({ shotId: shot.id, characterIds: shot.characterIds, propIds: shot.propIds, propStates: shot.propStates, sceneId: shot.sceneId })) };
+    await finish(next, result);
+    expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+    expect(tasks()).toHaveLength(3); expect(p.jobs.every((job): boolean => !!job.rawText)).toBe(true);
+  });
+  it.each(['content_rejected', 'verification', 'quota_exhausted'] as const)('确定内容失败后平台出现%s仍停止，不把平台错误当内容改写重试', async (code: 'content_rejected' | 'verification' | 'quota_exhausted'): Promise<void> => {
+    const original = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
+    await finish(original, { optimized: 'TEST缺少引用和声音约束的原正文' });
+    const failure = core.updateRuntime({ taskId: original.taskId, status: 'fail', errorInfo: { code, message: 'TEST实际平台错误', recoverable: true, detectedAt: new Date().toISOString() } });
+    expect(failure.success).toBe(true); const before = tasks();
+    const collected = await chat.collect(p.id, original.id); p = collected.project!; expect(collected.needsRepair).toBe(false);
+    await expect(prepare('repair', { parentJobId: original.id })).rejects.toThrow('平台未完成');
+    expect(tasks()).toEqual(before); expect(p.jobs).toHaveLength(1); expect(p.jobs[0].rawText).toContain('TEST缺少引用');
   });
   it('已选 Seedance 方言检查原台词声音花括号，修订原回复自身携带语法且无程序补写', async (): Promise<void> => {
     p.plan!.characters = [{ id: 'speaker', name: 'TEST角色', role: 'main', purpose: 'TEST台词测试', description: 'TEST身份' }];
@@ -426,6 +638,63 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: 'TEST视频0', optimized: body, candidateJobId: repair.id });
     await adoptPrompt(repair);
     expect(p.plan!.shots[0].prompts.video.final).toBe(body); expect(p.jobs.at(-1)?.rawText).toContain('TEST角色用中文说');
+  });
+  it('角色主名已合法的旧误判原回复先本地重校验，零新任务恢复同一候选并保持final', async (): Promise<void> => {
+    p.plan!.characters = [{ id: 'speaker', name: '噜妹（黑衣男子）', aliases: ['黑衣男子'], role: 'main', purpose: 'TEST台词测试', description: 'TEST身份' }];
+    p.plan!.shots[0].characterIds = ['speaker']; p.plan!.shots[0].dialogue = [{ speakerId: 'speaker', text: 'TEST逐字台词', tone: '', pace: '' }];
+    p.materials = syncMaterials(p); p = await projects.write(p);
+    const original = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
+    const labels = original.promptTask!.references.map((reference): string => `@图片${reference.order}`).join(' ');
+    const body = `${labels} {噜妹用中文说：“TEST逐字台词”}。TEST完整动作。全程无字幕、无对白文字叠加。`;
+    await finish(original, { optimized: body }); const parent = await historicalPromptFailure(original);
+    const originalTask = tasks()[0]; const count = tasks().length; const revision = p.revision;
+    const [one, two] = await Promise.all([chat.prepareRuntime(p.id, revision, 'repair', { parentJobId: parent.id }), chat.prepareRuntime(p.id, revision, 'repair', { parentJobId: parent.id })]);
+    expect(one).toMatchObject({ success: true, taskId: original.taskId, repairJobId: original.id, repairSourceJobId: original.id });
+    expect(two.project?.revision).toBe(one.project?.revision); p = one.project!;
+    expect(tasks()).toHaveLength(count); expect(tasks()[0]).toEqual(originalTask); expect(p.jobs).toHaveLength(1);
+    expect(p.jobs[0]).toMatchObject({ status: 'applied', resultStatus: 'candidate', parsedResult: { optimized: body }, rawText: parent.rawText, requestText: parent.requestText, runId: parent.runId });
+    expect(p.jobs[0].error).toBeUndefined(); expect(p.jobs[0].validationDetails).toBeUndefined();
+    expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: 'TEST视频0', optimized: body, candidateJobId: original.id });
+    const reopened = new PetStoryChatService(projects, { list: tasks, create: (): never => { throw new Error('TEST 不应再发一轮'); } });
+    expect(await reopened.prepareRuntime(p.id, revision, 'repair', { parentJobId: parent.id })).toMatchObject({ success: true, taskId: original.taskId, repairJobId: original.id });
+    await adoptPrompt(original); expect(p.plan!.shots[0].prompts.video.final).toBe(body);
+  });
+  it('连续修订最新叶子的旧误判复用叶子原运行，保留所有父请求与原回复', async (): Promise<void> => {
+    const original = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
+    await finish(original, { optimized: 'TEST 缺少引用的原回复' });
+    const child = await prepare('repair', { parentJobId: original.id });
+    const body = `${child.promptTask!.references.map((reference): string => `@图片${reference.order}`).join(' ')} TEST完整动作。全程无字幕、无对白文字叠加。`;
+    await finish(child, { optimized: body }); await historicalPromptFailure(child);
+    const originalHistory = structuredClone(p.jobs[0]); const count = tasks().length;
+    const result = await chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: child.id }); p = result.project!;
+    expect(result).toMatchObject({ success: true, taskId: child.taskId, repairJobId: child.id });
+    expect(tasks()).toHaveLength(count); expect(p.jobs).toHaveLength(2); expect(p.jobs[0]).toEqual(originalHistory);
+    expect(p.jobs[1]).toMatchObject({ parentJobId: original.id, status: 'applied', resultStatus: 'candidate', parsedResult: { optimized: body } });
+    expect(p.plan!.shots[0].prompts.video.final).toBe('TEST视频0');
+  });
+  it('父回复已有待发或已提交子任务时只接续子任务，不回退旧父候选或混用run', async (): Promise<void> => {
+    const original = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
+    await finish(original, { optimized: 'TEST 缺少引用的原回复' });
+    const child = await prepare('repair', { parentJobId: original.id }); const parentHistory = structuredClone(p.jobs[0]); const count = tasks().length;
+    const held = await chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: original.id });
+    expect(held).toMatchObject({ success: true, taskId: child.taskId, repairJobId: child.id }); expect(held.project?.jobs[0]).toEqual(parentHistory);
+    await pauseUncertain(child);
+    const submitted = await chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: original.id });
+    expect(submitted).toMatchObject({ success: true, taskId: child.taskId, repairJobId: child.id });
+    expect(submitted.project?.jobs[0]).toEqual(parentHistory); expect(tasks()).toHaveLength(count); expect(submitted.project?.plan!.shots[0].prompts.video.final).toBe('TEST视频0');
+  });
+  it.each(['facts', 'run', 'reply', 'request', 'ended'] as const)('已保存回复遇%s变化时不能恢复为新候选或创建额外修订', async (change: 'facts' | 'run' | 'reply' | 'request' | 'ended'): Promise<void> => {
+    const original = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
+    const body = `${original.promptTask!.references.map((reference): string => `@图片${reference.order}`).join(' ')} TEST完整动作。全程无字幕、无对白文字叠加。`;
+    await finish(original, { optimized: body }); const parent = await historicalPromptFailure(original);
+    if (change === 'facts') p.plan!.shots[0].action += ' TEST 用户新动作';
+    if (change === 'run') parent.runId = 'TEST-other-run';
+    if (change === 'reply') parent.rawText = `${parent.rawText} `;
+    if (change === 'request') parent.requestText = 'TEST-other-request';
+    if (change === 'ended') parent.endedWaitingAt = new Date().toISOString();
+    p = await projects.write(p); const before = structuredClone(p); const count = tasks().length;
+    await expect(chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: parent.id })).rejects.toThrow();
+    expect(tasks()).toHaveLength(count); expect(await projects.read(p.id)).toEqual(before); expect(before.plan!.shots[0].prompts.video.final).toBe('TEST视频0');
   });
   it('本次请求加载实质规则，完整新正文先存候选，明确采用后保存重开、编译保持一致', async (): Promise<void> => {
     const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame' });
@@ -759,15 +1028,18 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     await expect(prepare('revise', { shotId: 'shot-0', promptKind: 'video', parentJobId: review.id, selectedIssueIds: selected })).rejects.toThrow(/非空且不重复|不属于父审查/);
     expect(tasks()).toHaveLength(before); expect((await projects.read(p.id)).jobs).toHaveLength(1);
   });
-  it('内容修订结构错误保留所选问题，一次自动纠正后仍错误才停止', async (): Promise<void> => {
+  it('内容修订结构错误保留所选问题并持续纠正，合格结果仍待用户采用', async (): Promise<void> => {
     const review = await prepare('review', { materialId: 'scene:location' }); await finish(review, { issues: [issue('required', 'scene:location', 'error'), issue('optional', 'scene:location', 'suggestion')] });
     const original = p.materials![0].prompt.final;
     const revision = await prepare('revise', { materialId: 'scene:location', parentJobId: review.id, selectedIssueIds: ['required'] }); await finish(revision, {});
     expect(requestFacts(revision).parentResult).toMatchObject({ selectedIssueIds: ['required'], issues: [issue('required', 'scene:location', 'error')] });
     const collected = await chat.collect(p.id, revision.id); expect(collected.needsRepair).toBe(true);
     const repair = await prepare('repair', { parentJobId: revision.id, repairMode: 'automatic' });
-    await finish(repair, {}); expect((await chat.collect(p.id, repair.id)).needsRepair).toBe(false);
-    await expect(prepare('repair', { parentJobId: repair.id })).rejects.toThrow('自动修订已使用一次');
+    await finish(repair, {}); expect((await chat.collect(p.id, repair.id)).needsRepair).toBe(true);
+    const next = await prepare('repair', { parentJobId: repair.id });
+    expect(requestFacts(next).parentResult).toMatchObject({ originalDuty: 'revise', selectedIssueIds: ['required'], issues: [issue('required', 'scene:location', 'error')], originalRequest: revision.requestText });
+    await finish(next, { optimized: 'TEST完整场景正文' });
+    expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'candidate', originKind: 'revise', selectedIssueIds: ['required'] });
     expect(p.materials![0].prompt).toMatchObject({ final: original, needsReview: true });
     expect((await new PetStoryProjects().open(directory)).jobs.at(-1)?.selectedIssueIds).toEqual(['required']);
   });

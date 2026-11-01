@@ -1,3 +1,6 @@
+import type { Task } from '../types';
+import { isSameDoubaoConversation, normalizeDoubaoConversationUrl, resolveTaskConversationTarget } from './taskConversationLocator';
+
 /**
  * DOUBAO-TASK-REAL-SEND-RECOVERY-01：真实发送/回复终态判定纯逻辑（可测试，零 DOM）。
  *
@@ -29,6 +32,36 @@ export function canAttemptSubmission(
   submittedAt: string | undefined,
 ): boolean {
   return Boolean(expectedRunId && runtimeRunId && expectedRunId === runtimeRunId && !submittedAt);
+}
+
+/** 恢复只读取原输入；任务正文、素材和制作参数变化后不能借旧消息补定位。 */
+function submissionInputStillCurrent(task: Task): boolean {
+  const input = task.runtime?.input;
+  return !!input && input.prompt === task.prompt && input.mode === task.mode
+    && JSON.stringify(input.attachments || []) === JSON.stringify(task.attachments || [])
+    && input.audioAttachment === task.audioAttachment && JSON.stringify(input.videoConfig) === JSON.stringify(task.videoConfig)
+    && JSON.stringify(input.petstory) === JSON.stringify(task.petstory);
+}
+
+/** 只为原已提交运行保存定位；URL 本身、生成提示或输入框清空都不等于原消息证据。 */
+export function verifiedSubmissionConversationUrl(
+  original: Task,
+  current: Task | undefined,
+  accountId: string,
+  observedUrl: string,
+  currentUrl: string,
+  evidence: Pick<SubmissionReadback, 'promptPublished'>,
+): string | undefined {
+  const runtime = original.runtime; const latest = current?.runtime;
+  const url = normalizeDoubaoConversationUrl(observedUrl);
+  if (!url || !isSameDoubaoConversation(url, currentUrl) || !evidence.promptPublished || !runtime?.runId || !runtime.submittedAt
+    || current?.id !== original.id || original.assignedAccountId !== accountId || current.assignedAccountId !== accountId
+    || latest?.runId !== runtime.runId || latest.submittedAt !== runtime.submittedAt || ['cancelled', 'done'].includes(current.status)
+    || original.mode !== current.mode || original.prompt !== current.prompt || JSON.stringify(runtime.input) !== JSON.stringify(latest.input)
+    || !submissionInputStillCurrent(current)) return undefined;
+  const target = resolveTaskConversationTarget(current);
+  if (!target.ok && target.reason !== 'CONVERSATION_URL_MISSING' || target.ok && !isSameDoubaoConversation(target.url, url)) return undefined;
+  return url;
 }
 
 export interface SubmissionRecoveryTask {
@@ -68,6 +101,27 @@ export function matchesSubmissionConversation(prompt: string, conversationText: 
 export function classifySubmissionReadback(r: SubmissionReadback): 'confirmed' | 'not-confirmed' {
   const published = r.generationStarted || r.promptPublished;
   return published && r.inputCleared ? 'confirmed' : 'not-confirmed';
+}
+
+/** 单次发送后的有界只读回查；等待期间不拥有再次发送的能力。 */
+export async function waitForConfirmedSubmission(options: {
+  read: () => Promise<SubmissionReadback>;
+  wait: (milliseconds: number) => Promise<void>;
+  onUnconfirmed: () => Promise<void>;
+  signal: AbortSignal;
+  timeoutMs?: number;
+}): Promise<SubmissionReadback | undefined> {
+  const deadline = Date.now() + (options.timeoutMs ?? 15_000);
+  while (Date.now() < deadline) {
+    if (options.signal.aborted) throw new DOMException('任务已暂停', 'AbortError');
+    await options.wait(Math.min(500, deadline - Date.now()));
+    if (options.signal.aborted) throw new DOMException('任务已暂停', 'AbortError');
+    const evidence = await options.read();
+    if (options.signal.aborted) throw new DOMException('任务已暂停', 'AbortError');
+    if (classifySubmissionReadback(evidence) === 'confirmed') return evidence;
+    await options.onUnconfirmed();
+  }
+  return undefined;
 }
 
 /** 会话文本相对基线的净增长（字符数；不含输入框内容由调用方保证）。 */

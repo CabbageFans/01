@@ -3,11 +3,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DownloadJob, PetStoryCapability, PetStoryPlan, PetStoryProductionResult, PetStoryProject, Task, TaskAddParams } from '@doubao-studio/contracts';
+import type { DownloadJob, PetStoryCapability, PetStoryPageBinding, PetStoryPlan, PetStoryProductionResult, PetStoryProject, Task, TaskAddParams } from '@doubao-studio/contracts';
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
 import { PetStoryProductionService, productionCounts, checkProductionReferences, productionPlanHash } from '../../main/utils/petstoryProduction';
 import { resolvePetStoryMode } from '../../main/utils/petstoryModes';
 import { productionCapability } from '../../main/utils/petstoryCapability';
+import { PetStoryExistingMediaService } from '../../main/utils/petstoryExistingMedia';
 import { extractActualEndFrame, mediaCommand, validatePetStoryMedia } from '../../main/utils/petstoryMedia';
 import { TaskService } from '../../main/core/TaskService';
 import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
@@ -86,7 +87,7 @@ async function complete(taskId: string): Promise<void> {
 }
 async function approve(value: PetStoryCapability = capability()): Promise<void> {
   p = await projects.read(p.id);
-  p.promptCapability = value; seedOfflinePromptContracts(p); p = await projects.write(p);
+  p.promptCapability = value; seedOfflinePromptContracts(p, undefined, { completeVideoBody: true }); p = await projects.write(p);
   const result = await service.approve(p.id, p.revision, value, {});
   expect(result.success).toBe(true);
   p = result.project as PetStoryProject;
@@ -142,6 +143,270 @@ beforeEach(async (): Promise<void> => {
 });
 
 describe('P4 实际入口和请求模式', (): void => {
+  it.each(['firstFrame', 'lastFrame', 'video'] as const)('空final的%s原回复校验失败时说明后台持续修订，不要求用户修复', async (kind): Promise<void> => {
+    const shot = p.plan!.shots[2]; p.promptCapability = capability();
+    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: kind }, { completeVideoBody: true });
+    const prompt = shot.prompts[kind]!; const job = p.jobs.at(-1)!;
+    prompt.final = ''; job.status = 'invalid'; job.resultStatus = undefined;
+    job.validationDetails = [{ code: 'TEST-invalid-contract', path: '$.optimized', actualType: 'string', expected: '完整原要求正文', repairable: true, message: 'TEST 缺少本次素材标签' }];
+    p = await projects.write(p); const before = structuredClone(p);
+    await expect(service.generateShotMedia(p.id, p.revision, shot.id, kind, capability())).rejects.toThrow('软件会在后台按原要求持续修订并校验');
+    const inspected = await service.inspectGeneration(p.id, p.revision, { shotId: shot.id, promptKind: kind }, capability());
+    expect(inspected.eligibility?.blockers.find((item): boolean => item.code === 'prompt')?.message).toContain('后台按原要求持续修订并校验');
+    expect(inspected.eligibility?.blockers.find((item): boolean => item.code === 'prompt')?.message).not.toContain('点击');
+    expect(await projects.read(p.id)).toEqual(before); expect(tasks).toEqual([]); expect(createdInputs).toEqual([]);
+  });
+  it.each(['firstFrame', 'lastFrame', 'video'] as const)('空final的%s已有合格候选时提示确认使用，不重新生成', async (kind): Promise<void> => {
+    const shot = p.plan!.shots[2]; p.promptCapability = capability();
+    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: kind }, { completeVideoBody: true });
+    const prompt = shot.prompts[kind]!; const job = p.jobs.at(-1)!;
+    prompt.final = ''; prompt.candidateJobId = job.id; job.resultStatus = 'candidate';
+    p = await projects.write(p); const before = structuredClone(p);
+    await expect(service.generateShotMedia(p.id, p.revision, shot.id, kind, capability())).rejects.toThrow('已有待采用候选，请先在对应提示词节点“确认使用”');
+    expect(await projects.read(p.id)).toEqual(before); expect(tasks).toEqual([]); expect(createdInputs).toEqual([]);
+  });
+  it.each(['absent', 'stale', 'wrong-target', 'changed-facts'] as const)('空final且原回复%s时不提供失效的修复或候选采用引导', async (scenario): Promise<void> => {
+    const shot = p.plan!.shots[2]; const kind = 'video'; p.promptCapability = capability();
+    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: kind }, { completeVideoBody: true });
+    const job = p.jobs.at(-1)!; shot.prompts.video.final = ''; job.status = 'invalid'; job.resultStatus = undefined;
+    job.validationDetails = [{ code: 'TEST-invalid-contract', path: '$.optimized', actualType: 'string', expected: '完整原要求正文', repairable: true, message: 'TEST 校验原因' }];
+    if (scenario === 'absent') p.jobs = [];
+    if (scenario === 'stale') job.resultStatus = 'stale';
+    if (scenario === 'wrong-target') job.shotId = p.plan!.shots[0].id;
+    if (scenario === 'changed-facts') shot.action = 'TEST 已修改当前镜头动作';
+    p = await projects.write(p); const before = structuredClone(p);
+    await expect(service.generateShotMedia(p.id, p.revision, shot.id, kind, capability())).rejects.toThrow('尚未准备；开始本镜制作后将先在后台准备并校验');
+    expect(await projects.read(p.id)).toEqual(before); expect(tasks).toEqual([]); expect(createdInputs).toEqual([]);
+  });
+  it.each([
+    ['executing', undefined, '正在后台准备并校验'],
+    ['queued', 'hold', '文字任务等待继续'],
+    ['waiting_verification', undefined, '请先完成原账号登录或人机验证'],
+    ['paused', undefined, 'TEST 真实平台阻断'],
+  ] as const)('已有当前后台正文任务为%s时区分真实准备状态，不创建媒体任务', async (status, executionIntent, message): Promise<void> => {
+    const shot = p.plan!.shots[2]; p.promptCapability = capability();
+    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' }, { completeVideoBody: true });
+    const parent = p.jobs.at(-1)!; shot.prompts.video.final = ''; parent.status = 'invalid'; parent.resultStatus = undefined;
+    const child = { ...parent, id: 'TEST-newer-repair', taskId: 'TEST-repair-task', kind: 'repair' as const, parentJobId: parent.id, status: 'bound' as const, rawText: undefined };
+    p.jobs.push(child);
+    tasks.push({ id: child.taskId, projectId: p.studioProjectId, assignedAccountId: p.accountId, mode: 'chat', status, executionIntent,
+      prompt: 'TEST 后台文字请求', outputs: [], result: null, createdAt: p.updatedAt, updatedAt: p.updatedAt,
+      errorInfo: status === 'paused' ? { code: 'quota_exhausted', message: 'TEST 真实平台阻断', recoverable: false, detectedAt: p.updatedAt } : undefined });
+    p = await projects.write(p); const before = structuredClone(p); const originalTasks = structuredClone(tasks);
+    await expect(service.generateShotMedia(p.id, p.revision, shot.id, 'video', capability())).rejects.toThrow(message);
+    const inspected = await service.inspectGeneration(p.id, p.revision, { shotId: shot.id, promptKind: 'video' }, capability());
+    expect(inspected.eligibility?.blockers.find((item): boolean => item.code === 'prompt')?.message).toContain(message);
+    expect(await projects.read(p.id)).toEqual(before); expect(tasks).toEqual(originalTasks); expect(createdInputs).toEqual([]);
+  });
+  it.each(['missing-details', 'empty-details', 'unrepairable', 'ownership-error'] as const)('空final的原回复%s时要求核对原会话，不引导改写', async (scenario): Promise<void> => {
+    const shot = p.plan!.shots[2]; p.promptCapability = capability();
+    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' }, { completeVideoBody: true });
+    const job = p.jobs.at(-1)!; shot.prompts.video.final = ''; job.status = 'invalid'; job.resultStatus = undefined;
+    if (scenario === 'empty-details') job.validationDetails = [];
+    if (scenario === 'unrepairable') job.validationDetails = [{ code: 'TEST-ownership', path: '$.requestId', actualType: 'string', expected: '原请求身份', repairable: false, message: 'TEST 归属不符' }];
+    if (scenario === 'ownership-error') job.error = 'TEST requestId 与原请求不符';
+    p = await projects.write(p); const before = structuredClone(p);
+    await expect(service.generateShotMedia(p.id, p.revision, shot.id, 'video', capability())).rejects.toThrow('请先查看豆包对话并核对原结果');
+    expect(await projects.read(p.id)).toEqual(before); expect(tasks).toEqual([]); expect(createdInputs).toEqual([]);
+  });
+  it('镜头已不存在时明确提示重新选择，保留现有提示词和任务', async (): Promise<void> => {
+    const before = structuredClone(p);
+    await expect(service.generateShotMedia(p.id, p.revision, 'TEST-missing-shot', 'video', capability())).rejects.toThrow('镜头不存在或已不属于当前方案');
+    expect(await projects.read(p.id)).toEqual(before); expect(tasks).toEqual([]); expect(createdInputs).toEqual([]);
+  });
+  async function prepareReferenceContinuation(nativeClaim: boolean = false, framePurpose?: string): Promise<{ request: import('@doubao-studio/contracts').PetStoryVideoReferenceRequest; original: Task; source: PetStoryProject['plan'] }> {
+    const shotId = p.plan!.shots[2].id;
+    p = await projects.addShotImage(p.id, p.revision, shotId, 'firstFrame', picture);
+    p = await projects.adoptImage(p.id, p.revision, { shotId, kind: 'firstFrame' }, p.assets.at(-1)!.id);
+    p = await projects.addShotImage(p.id, p.revision, shotId, 'lastFrame', picture);
+    p = await projects.adoptImage(p.id, p.revision, { shotId, kind: 'lastFrame' }, p.assets.at(-1)!.id);
+    if (nativeClaim) p.plan!.shots[2].prompts.video.final = `原生首尾帧。${p.plan!.shots[2].prompts.video.final}`;
+    if (framePurpose) p.plan!.shots[2].prompts.video.final = `${framePurpose}。${p.plan!.shots[2].prompts.video.final}`;
+    const fast = capability(); fast.videoConfig!.model = 'seedance-2.0-fast';
+    p.promptCapability = fast; seedOfflinePromptContracts(p, { shotId, promptKind: 'video' }, { completeVideoBody: true }); p = await projects.write(p);
+    const generated = await service.generateShotMedia(p.id, p.revision, shotId, 'video', fast); expect(generated.success).toBe(true);
+    const pending = await service.advance(p.id); const original = await start(pending.taskId!);
+    expect(core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code: 'petstory_controls_unconfirmed', message: 'TEST 仅有普通参考上传，尚未上传或提交', recoverable: true, detectedAt: new Date().toISOString() } }).success).toBe(true);
+    expect((await service.advance(p.id)).success).toBe(false); p = await projects.read(p.id);
+    const step = p.production!.steps[0];
+    return { request: { shotId, taskId: original.id, runId: original.runtime!.runId, inputHash: step.inputHash,
+      firstFrameId: step.attachmentAssetIds[0], lastFrameId: step.attachmentAssetIds[1], authorizationId: 'TEST-reference-authorization', useExistingFrames: true }, original: list()[0], source: structuredClone(p.plan) };
+  }
+  async function resumeFrameIntent(nativeClaim: boolean = false, framePurpose?: string): Promise<{ task: Task; bindings: PetStoryPageBinding[]; original: Task; source: PetStoryProject['plan'] }> {
+    const { original, source } = await prepareReferenceContinuation(nativeClaim, framePurpose);
+    const resumed = await service.resume(p.id);
+    expect(resumed.project!.production!.shots[p.plan!.shots[2].id].resolvedMode).toBe('first_last_frame');
+    const task = await start(original.id); p = await projects.read(p.id); const step = p.production!.steps[0];
+    const bindings = step.compiledPrompt!.references.map((reference, index): PetStoryPageBinding => ({
+      assetId: reference.assetId, order: index + 1, slot: 'reference', label: `@图片${index + 1}`, reference: 'mention',
+      previewHash: String(index + 1).padStart(64, '0'), fileSha256: p.assets.find((asset): boolean => asset.id === reference.assetId)!.validation!.sha256,
+      targetId: `TEST-unified-target-${index}`, nodeId: `TEST-unified-node-${index}`, nodeIds: [`TEST-unified-node-${index}`], occurrenceCount: 1,
+    }));
+    return { task, bindings, original, source };
+  }
+  it.each(['mention', 'plain'] as const)('首尾两图经统一上传按真实%s绑定，继续同一原任务并保留本镜首尾用途', async (reference): Promise<void> => {
+    const { task, bindings, original, source } = await resumeFrameIntent();
+    if (reference === 'plain') for (const binding of bindings) { binding.reference = 'plain'; binding.label = `第 ${binding.order} 张图`; delete binding.nodeId; delete binding.targetId; delete binding.nodeIds; delete binding.occurrenceCount; }
+    const result = await service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings);
+    expect(result.success).toBe(true); const saved = result.project!; const step = saved.production!.steps[0];
+    expect(saved.plan).toEqual(source); expect(saved.production!.shots[p.plan!.shots[2].id].resolvedMode).toBe('first_last_frame');
+    expect(step.compiledPrompt!.references.map((item): string | undefined => item.slot)).toEqual(['first', 'last']);
+    expect(step.pageBindings).toEqual(bindings); expect(step.compiledPrompt!.final).toBe(source!.shots[2].prompts.video.final);
+    expect(step.compiledPrompt!.text).toContain(reference === 'mention' ? '@图片1、@图片2' : '第 1 张图、第 2 张图');
+    expect((await service.guard(task.id)).guard?.mode).toBe('first_last_frame');
+    const actual = list()[0]; expect(actual.id).toBe(original.id); expect(actual.videoConfig).toEqual(original.videoConfig);
+    expect(actual.attachments).toEqual(original.attachments); expect(actual.runtime!.input.prompt).toBe(step.compiledPrompt!.text);
+    expect(saved.production!.referenceContinuations).toBeUndefined(); expect(tasks).toHaveLength(1); expect(createdInputs).toHaveLength(1);
+  });
+  it('原生首尾槽绑定保留原校验，按角色渲染引用而不改最终正文', async (): Promise<void> => {
+    const { task, bindings, source } = await resumeFrameIntent();
+    bindings.forEach((binding, index): void => { binding.slot = index === 0 ? 'first_frame' : 'last_frame'; binding.reference = 'slot'; });
+    const result = await service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings);
+    expect(result.compiledPrompt!.text).toContain('首帧画面、尾帧画面'); expect(result.compiledPrompt!.final).toBe(source!.shots[2].prompts.video.final);
+    expect((await service.guard(task.id)).guard?.mode).toBe('first_last_frame');
+  });
+  it.each(['mixed', 'count', 'order', 'asset', 'file-hash', 'preview', 'fake-slot', 'mention-nodes'] as const)('首尾两图统一上传拒绝%s错位，原任务和正文保持原样', async (change): Promise<void> => {
+    const { task, bindings } = await resumeFrameIntent();
+    if (change === 'mixed') { bindings[0].slot = 'first_frame'; bindings[0].reference = 'slot'; }
+    if (change === 'count') bindings.pop();
+    if (change === 'order') bindings[0].order = 2;
+    if (change === 'asset') [bindings[0].assetId, bindings[1].assetId] = [bindings[1].assetId, bindings[0].assetId];
+    if (change === 'file-hash') bindings[0].fileSha256 = '0'.repeat(64);
+    if (change === 'preview') bindings[1].previewHash = bindings[0].previewHash;
+    if (change === 'fake-slot') bindings[0].reference = 'slot';
+    if (change === 'mention-nodes') bindings[0].nodeIds = [];
+    const before = await projects.read(p.id); const beforeTasks = list();
+    await expect(service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings)).rejects.toThrow();
+    expect(await projects.read(p.id)).toEqual(before); expect(list()).toEqual(beforeTasks);
+  });
+  it('正文明确要求原生首尾槽时拒绝统一上传，不自动改写正文或切换模式', async (): Promise<void> => {
+    const { task, bindings, source } = await resumeFrameIntent(true); const before = list();
+    await expect(service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings)).rejects.toThrow('原生首尾');
+    expect(list()).toEqual(before); expect((await projects.read(p.id)).plan).toEqual(source);
+    expect((await projects.read(p.id)).production!.shots[p.plan!.shots[2].id].resolvedMode).toBe('first_last_frame');
+  });
+  it.each(['尾帧作为目标结尾', '以首帧作为开头、尾帧作为结束画面'])('首尾用途“%s”允许统一上传，不误判为原生槽要求', async (framePurpose): Promise<void> => {
+    const { task, bindings, source } = await resumeFrameIntent(false, framePurpose);
+    const result = await service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings);
+    expect(result.compiledPrompt!.final).toBe(source!.shots[2].prompts.video.final);
+    expect((await service.guard(task.id)).guard?.mode).toBe('first_last_frame');
+  });
+  it('提交守卫重新核对已保存的统一首尾图文件摘要，不能沿用被篡改的页面回执', async (): Promise<void> => {
+    const { task, bindings } = await resumeFrameIntent();
+    await service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings);
+    const changed = await projects.read(p.id); changed.production!.steps[0].pageBindings![0].fileSha256 = '0'.repeat(64); await projects.write(changed);
+    await expect(service.guard(task.id)).rejects.toThrow('文件摘要'); expect(list()[0].runtime!.submittedAt).toBeUndefined();
+  });
+  it('明确两参考图恢复复用原task、原全文和同Fast，只改变当前实际槽位并保存旧运行审计', async (): Promise<void> => {
+    const { request, original, source } = await prepareReferenceContinuation();
+    const result = await service.resumeReferenceVideo(p.id, p.revision, request); expect(result.success).toBe(true);
+    const saved = result.project!; const step = saved.production!.steps[0]; const record = saved.production!.referenceContinuations![request.shotId];
+    expect(saved.plan).toEqual(source); expect(tasks).toHaveLength(1); expect(createdInputs).toHaveLength(1);
+    expect(saved.production!.fallbacks[request.shotId]).toBe('reference'); expect(saved.production!.shots[request.shotId].resolvedMode).toBe('reference');
+    expect(step.compiledPrompt!.references.map((ref): unknown => [ref.assetId, ref.slot])).toEqual([[request.firstFrameId, undefined], [request.lastFrameId, undefined]]);
+    expect(step.compiledPrompt!.text).toBe(original.prompt); expect(step.compiledPrompt!.final).toBe(source!.shots[2].prompts.video.final);
+    expect(record.sourceRuntime).toEqual(original.runtime); expect(record.sourceError).toEqual(original.errorInfo); expect(record.model).toBe('seedance-2.0-fast');
+    expect(list()[0].videoConfig).toEqual(original.videoConfig); expect(list()[0].runtime!.input).toEqual(original.runtime!.input);
+    expect((await service.advance(p.id))).toMatchObject({ success: true, action: 'start', taskId: original.id });
+    expect((await service.guard(original.id, false)).guard).toMatchObject({ mode: 'reference', attachmentAssetIds: [request.firstFrameId, request.lastFrameId] });
+    const beforeReplay = list()[0].runtime;
+    const replay = await service.resumeReferenceVideo(p.id, p.revision, request); expect(replay.success).toBe(true); expect(tasks).toHaveLength(1); expect(list()[0].runtime).toEqual(beforeReplay);
+    const nextAt = new Date().toISOString();
+    expect(core.updateRuntime({ taskId: original.id, status: 'executing', runtime: { runId: 'TEST-reference-next-run', attempt: 2, stage: 'preparing_account', message: 'TEST',
+      startedAt: nextAt, stageStartedAt: nextAt, lastHeartbeatAt: nextAt, input: original.runtime!.input } }).success).toBe(true);
+    await service.bindRun(p.id, original.id, 'TEST-reference-next-run');
+    const nextRun = list()[0].runtime;
+    expect((await service.resumeReferenceVideo(p.id, p.revision, request)).action).toBe('wait'); expect(list()[0].runtime).toEqual(nextRun);
+  });
+  it('两图授权落盘后重试失败，重开可用同一授权接续，保留原审计且不另建任务', async (): Promise<void> => {
+    const { request, original } = await prepareReferenceContinuation();
+    const retry = vi.spyOn(core, 'retry').mockImplementationOnce((): never => { throw new Error('TEST 首次重试写盘失败'); });
+    await expect(service.resumeReferenceVideo(p.id, p.revision, request)).rejects.toThrow('首次重试写盘失败');
+    retry.mockRestore();
+    const held = await projects.read(p.id); const record = structuredClone(held.production!.referenceContinuations![request.shotId]);
+    expect(held.production!.state).toBe('paused'); expect(list()[0].id).toBe(original.id); expect(list()[0].runtime).toEqual(original.runtime);
+    service = makeService();
+    expect((await service.resumeReferenceVideo(p.id, p.revision, request)).success).toBe(true);
+    expect((await service.advance(p.id))).toMatchObject({ action: 'start', taskId: original.id });
+    expect((await projects.read(p.id)).production!.referenceContinuations![request.shotId]).toEqual(record); expect(createdInputs).toHaveLength(1);
+  });
+  it('两参考图授权后的明确重发保留原模式授权，新hold任务可通过正式运行守卫', async (): Promise<void> => {
+    const { request, original } = await prepareReferenceContinuation();
+    await service.resumeReferenceVideo(p.id, p.revision, request);
+    const now = new Date().toISOString(); const runId = 'TEST-reference-submitted-run';
+    expect(core.updateRuntime({ taskId: original.id, status: 'executing', runtime: { runId, attempt: 2, stage: 'preparing_account', message: 'TEST',
+      startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: original.runtime!.input } }).success).toBe(true);
+    await service.bindRun(p.id, original.id, runId);
+    expect(core.updateRuntime({ taskId: original.id, status: 'waiting_verification', runtime: { submittedAt: now },
+      errorInfo: { code: 'human_verification', message: 'TEST 验证阻断', recoverable: true, detectedAt: now } }).success).toBe(true);
+    await service.pause(p.id); const paused = await projects.read(p.id);
+    const result = await service.resubmit(p.id, paused.revision, { taskId: original.id, runId, submittedAt: now,
+      authorizationId: 'TEST-reference-resubmission', acceptDuplicateRisk: true });
+    expect(result).toMatchObject({ success: true, action: 'start' });
+    expect(result.project!.production!.steps[0].resubmissionHistory![0].taskId).toBe(original.id);
+    expect((await service.guard(result.taskId!, false)).guard).toMatchObject({ mode: 'reference', attachmentAssetIds: [request.firstFrameId, request.lastFrameId] });
+    const reopened = new PetStoryProjects(); await reopened.open(projects.directory(p.id)); service = makeService(reopened);
+    await service.resume(p.id);
+    expect((await service.guard(result.taskId!, false)).guard?.mode).toBe('reference');
+    expect((await service.resumeReferenceVideo(p.id, p.revision, request))).toMatchObject({ action: 'wait', taskId: result.taskId });
+    expect(tasks).toHaveLength(2); expect(createdInputs).toHaveLength(1);
+  });
+  it.each(['submittedAt', 'acceptanceObservation', 'chatResponse', 'chatReadback', 'chatReadbackReview', 'manualObservation', 'outputs', 'artifacts', 'lock', 'resubmissionOf'] as const)('两参考图恢复拒绝%s证据，不清旧记录或改mode', async (evidence): Promise<void> => {
+    const { request } = await prepareReferenceContinuation();
+    const task = tasks[0];
+    if (evidence === 'outputs') task.outputs = ['https://TEST.invalid/late.mp4'];
+    else if (evidence === 'artifacts') Object.assign(task, { artifacts: [{ id: 'TEST-late' }] });
+    else if (evidence === 'lock') Object.assign(task, { lock: { expiresAt: new Date(Date.now() + 60_000).toISOString() } });
+    else if (evidence === 'resubmissionOf') Object.assign(task, { resubmissionOf: {} });
+    else Object.assign(task.runtime!, { [evidence]: evidence === 'submittedAt' ? new Date().toISOString() : {} });
+    const before = structuredClone(tasks);
+    await expect(service.resumeReferenceVideo(p.id, p.revision, request)).rejects.toThrow();
+    expect(tasks).toEqual(before); expect((await projects.read(p.id)).production!.shots[request.shotId].resolvedMode).toBe('first_last_frame');
+  });
+  it('两参考图恢复拒绝错序选图或非模式准备失败，不扩充附件', async (): Promise<void> => {
+    const { request } = await prepareReferenceContinuation();
+    await expect(service.resumeReferenceVideo(p.id, p.revision, { ...request, lastFrameId: request.firstFrameId })).rejects.toThrow('原顺序');
+    tasks[0].errorInfo!.code = 'video_duration_control_not_ready';
+    await expect(service.resumeReferenceVideo(p.id, p.revision, request)).rejects.toThrow('明确未提交');
+    expect(tasks).toHaveLength(1); expect((await projects.read(p.id)).production!.referenceContinuations).toBeUndefined();
+  });
+  it('原final严格声明原生首尾时拒绝两图降级，不自动改写正文或落授权', async (): Promise<void> => {
+    const { request, original } = await prepareReferenceContinuation(true);
+    await expect(service.resumeReferenceVideo(p.id, p.revision, request)).rejects.toThrow('最终文本仍声明原生首尾帧');
+    expect(list()[0]).toEqual(original); expect((await projects.read(p.id)).production!.referenceContinuations).toBeUndefined();
+  });
+  it('两参考图授权不能顺带改变当前模型', async (): Promise<void> => {
+    const { request, original } = await prepareReferenceContinuation();
+    p.promptModel = 'seedance-2.5'; p = await projects.write(p);
+    await expect(service.resumeReferenceVideo(p.id, p.revision, request)).rejects.toThrow('当前模型或比例与原任务不一致');
+    expect(list()[0]).toEqual(original); expect((await projects.read(p.id)).production!.referenceContinuations).toBeUndefined();
+  });
+  it.each(['firstFrame', 'lastFrame', 'video'] as const)('手动确定%s候选后，正式hold任务和运行输入精确使用新正文', async (kind): Promise<void> => {
+    const shotId = p.plan!.shots[2].id;
+    if (kind !== 'firstFrame') {
+      p = await projects.addShotImage(p.id, p.revision, shotId, 'firstFrame', picture);
+      p = await projects.adoptImage(p.id, p.revision, { shotId, kind: 'firstFrame' }, p.assets.at(-1)!.id);
+    }
+    if (kind === 'video') {
+      p = await projects.addShotImage(p.id, p.revision, shotId, 'lastFrame', picture);
+      p = await projects.adoptImage(p.id, p.revision, { shotId, kind: 'lastFrame' }, p.assets.at(-1)!.id);
+    }
+    p.promptCapability = capability(); seedOfflinePromptContracts(p, { shotId, promptKind: kind }, { completeVideoBody: true });
+    const prompt = p.plan!.shots[2].prompts[kind]!; const job = p.jobs.at(-1)!;
+    const candidate = `${prompt.final}\nTEST 候选光线${kind === 'video' ? `；${job.promptTask!.references.map((ref): string => `@图片${ref.order}`).join('、')}。全程无字幕，不叠加对白文字。` : ''}`;
+    job.resultStatus = 'candidate'; job.parsedResult = { optimized: candidate }; job.rawText = JSON.stringify({ optimized: candidate });
+    prompt.optimized = candidate; prompt.candidateJobId = job.id; p = await projects.write(p);
+    const final = `${candidate}\nTEST 人工要求：保留 9:16 和普通数字 12，使用柔和光线。`;
+    p = await projects.saveShotPrompt(p.id, p.revision, shotId, kind, final, { expectedFinal: prompt.final, baseJobId: job.id });
+    await service.generateShotMedia(p.id, p.revision, shotId, kind, capability());
+    const result = await service.advance(p.id);
+    expect(result.action).toBe('start'); expect(list()).toHaveLength(1);
+    expect(createdInputs[0].prompts).toEqual([final]); expect(list()[0].prompt).toBe(final);
+    expect(result.project!.production!.steps[0].compiledPrompt!.final).toBe(final);
+    const started = await start(result.taskId!);
+    expect(started.runtime!.input.prompt).toBe(final); expect(started.runtime!.input.promptReadback).toBe('exact');
+    expect(started.runtime!.submittedAt).toBeUndefined();
+  });
   it('未收取Chat阻断相关镜头入口，独立素材仍须具有正式正文', async (): Promise<void> => {
     p.jobs.push({ id: 'TEST-unresolved-chat', taskId: 'TEST-uncertain-chat', kind: 'optimize', status: 'bound', inputHash: 'a'.repeat(64), sourceUrl: p.source.url, sourceStoryId: p.mobileStory!.id, shotId: p.plan!.shots[0].id, promptKind: 'video' });
     p = await projects.write(p); const c = capability();
@@ -168,7 +433,7 @@ describe('P4 实际入口和请求模式', (): void => {
     const shot = p.plan!.shots.find((item): boolean => !!item.prompts.lastFrame)!;
     shot.requestedMode = 'auto';
     Object.assign(p.production!.shots[shot.id], { requestedMode: 'auto', resolvedMode: 'reference' });
-    seedOfflinePromptContracts(p); p = await projects.write(p);
+    seedOfflinePromptContracts(p, undefined, { completeVideoBody: true }); p = await projects.write(p);
     p.production!.planHash = productionPlanHash(p.plan!); p = await projects.write(p);
     expect(resolvePetStoryMode(shot, productionCapability(p)).resolvedMode).toBe('reference');
     await service.pause(p.id); const reopenedProjects = new PetStoryProjects(); await reopenedProjects.open(projects.directory(p.id)); service = makeService(reopenedProjects);
@@ -440,6 +705,22 @@ describe('P4 顺序素材接力与持久化', (): void => {
     });
     expect((await service.advance(p.id)).success).toBe(false); expect((await projects.read(p.id)).production?.steps[0].assetId).toBeUndefined(); expect(tasks).toHaveLength(1);
   });
+  it('实际视频短于原请求时保留真实文件和原任务，不增加复核门槛或重建生成', async (): Promise<void> => {
+    p.plan!.shots = [p.plan!.shots[0]]; p.plan!.shots[0].durationSeconds = 7; p = await projects.write(p);
+    await approve(); const next = await advanceToVideo(); await complete(next.taskId || '');
+    const original = list().find((task): boolean => task.id === next.taskId)!;
+    expect(original.videoConfig?.duration).toBe('7s'); expect(original.runtime?.input.videoConfig?.duration).toBe('7s');
+    const count = tasks.length;
+    const collected = await service.advance(p.id);
+    expect(collected.success, collected.error).toBe(true);
+    const saved = await projects.read(p.id); const asset = saved.assets.find((item): boolean => item.kind === 'video')!;
+    expect(asset).toMatchObject({ taskId: original.id, runId: original.runtime?.runId, validation: { decoded: true, durationSeconds: 6 } });
+    expect(asset.needsReview).toBeUndefined();
+    expect(saved.plan!.shots[0].durationSeconds).toBe(7);
+    expect(saved.selectedVideos?.[saved.plan!.shots[0].id]).toBe(asset.id);
+    expect(await fs.readFile(await service.assetFile(saved, asset.id, 'video'))).toEqual(await fs.readFile(video));
+    expect(tasks).toHaveLength(count); expect(list().find((task): boolean => task.id === original.id)).toEqual(original);
+  });
   it('actual out-of-range video pauses before continuation and never recreates the generation', async (): Promise<void> => {
     await approve(); const next = await advanceToVideo(); await complete(next.taskId || '');
     const invalidVideo = path.join(root, 'TEST-production-four-seconds.mp4');
@@ -516,6 +797,77 @@ describe('P4 顺序素材接力与持久化', (): void => {
     expect((await start(replacement.id)).runtime?.runId).not.toBe(request.runId);
     const duplicate = await service.resubmit(p.id, current.revision, request, capability());
     expect(duplicate).toMatchObject({ success: true, action: 'wait', taskId: replacement.id }); expect(tasks).toHaveLength(2);
+  });
+  it('显式关联重发前迟到的历史视频后可读取原视频，归属仍核对原运行与原素材', async (): Promise<void> => {
+    const shotId = p.plan!.shots[0].id; const c = capability();
+    p = await projects.addShotImage(p.id, p.revision, shotId, 'firstFrame', picture);
+    p = await projects.adoptImage(p.id, p.revision, { shotId, kind: 'firstFrame' }, p.assets.at(-1)!.id);
+    p.promptCapability = c; seedOfflinePromptContracts(p, { shotId, promptKind: 'video' }, { completeVideoBody: true }); p = await projects.write(p);
+    await service.generateShotMedia(p.id, p.revision, shotId, 'video', c);
+    const prepared = await service.advance(p.id); const original = await start(prepared.taskId!); const submittedAt = new Date().toISOString();
+    core.updateRuntime({ taskId: original.id, status: 'waiting_verification', runtime: { submittedAt },
+      errorInfo: { code: 'human_verification', message: 'TEST 验证阻断', recoverable: true, detectedAt: submittedAt } });
+    await service.pause(p.id); const paused = await projects.read(p.id);
+    const replacement = await service.resubmit(p.id, paused.revision, { taskId: original.id, runId: original.runtime!.runId, submittedAt,
+      authorizationId: 'TEST-late-video-authorization', acceptDuplicateRisk: true }, c);
+    await complete(replacement.taskId!); await service.advance(p.id); await service.advance(p.id);
+    core.updateStatus({ taskId: original.id, status: 'done', outputs: ['https://TEST.invalid/late-original.mp4'] });
+    const source = list().find((task): boolean => task.id === original.id)!; const artifact = source.artifacts![0]; const now = new Date().toISOString();
+    jobs.push({ id: 'TEST-late-video-download', taskId: source.id, accountId: p.accountId, mode: 'video', url: artifact.url, status: 'done', attempts: 1,
+      saveDir: root, filePath: video, createdAt: now, updatedAt: now });
+    const existing = new PetStoryExistingMediaService(projects, { list, downloads: (): DownloadJob[] => structuredClone(jobs) });
+    const ready = await projects.read(p.id); const linked = (await existing.link(p.id, ready.revision, shotId, 'video', source.id, artifact.id)).project!;
+    const imported = linked.assets.at(-1)!; const replacementAsset = linked.production!.steps[0].assetId;
+    expect(imported).toMatchObject({ kind: 'video', origin: 'historical_task', taskId: source.id, runId: source.runtime!.runId, artifactId: artifact.id });
+    expect(imported.id).not.toBe(replacementAsset);
+    expect(linked.production).toEqual(ready.production); expect(linked.selectedVideos?.[shotId]).toBe(imported.id);
+    expect(await service.assetFile(linked, imported.id, 'video')).toBe(path.join(projects.directory(p.id), imported.relativePath));
+    const replacementTask = list().find((task): boolean => task.id === replacement.taskId)!;
+    const reselected = (await existing.link(p.id, linked.revision, shotId, 'video', replacementTask.id, replacementTask.artifacts![0].id)).project!;
+    expect(reselected.selectedVideos?.[shotId]).toBe(replacementAsset); expect(reselected.assets).toHaveLength(linked.assets.length);
+    const selectedOriginal = (await existing.link(p.id, reselected.revision, shotId, 'video', source.id, artifact.id)).project!;
+    expect(selectedOriginal.selectedVideos?.[shotId]).toBe(imported.id); expect(selectedOriginal.assets).toHaveLength(linked.assets.length);
+    const reopened = new PetStoryProjects(); p = await reopened.open(projects.directory(p.id));
+    expect(p.selectedVideos?.[shotId]).toBe(imported.id);
+    const nextShotId = p.plan!.shots[1].id;
+    seedOfflinePromptContracts(p, { shotId: nextShotId, promptKind: 'firstFrame' }); p = await projects.write(p);
+    // 当前镜头可能保留之前从替代视频提取的末帧；重新生成必须读取本次明确选择的原视频。
+    const oldProduction = p.production!; const oldSource = oldProduction.shots[nextShotId];
+    oldSource.actualEndFrameId = 'TEST-previous-end'; oldSource.startFromPreviousEnd = { assetId: replacementAsset!, taskId: replacementTask.id,
+      runId: replacementTask.runtime!.runId, sha256: p.assets.find((item): boolean => item.id === replacementAsset)!.validation!.sha256, atSeconds: 5 };
+    p.assets.push({ id: 'TEST-previous-end', kind: 'actualEndFrame', shotId: nextShotId, relativePath: `shots/${nextShotId}/TEST-previous-end.png`,
+      sourceVideo: oldSource.startFromPreviousEnd });
+    p = await projects.write(p);
+    const continuation = await service.generateShotMedia(p.id, p.revision, nextShotId, 'firstFrame', c);
+    expect(continuation.project!.production!.shots[nextShotId].startFromPreviousEnd?.assetId).toBe(imported.id);
+    tasks.find((task): boolean => task.id === original.id)!.runtime!.runId = 'TEST-foreign-video-run';
+    await expect(service.assetFile(linked, imported.id, 'video')).rejects.toThrow('归属无效');
+    expect(tasks).toHaveLength(2);
+  });
+  it.each(['shape', 'missing', 'other-shot', 'image'] as const)('镜头视频选择%s无效时拒绝读盘，不沿用其他视频', async (change): Promise<void> => {
+    const invalid = structuredClone(p); const shotId = invalid.plan!.shots[0].id;
+    invalid.selectedVideos = change === 'shape' ? [] as unknown as Record<string, string> : { [shotId]: change === 'missing' ? 'TEST-missing-video' : invalid.assets[0].id };
+    if (change === 'other-shot') {
+      const otherShotId = invalid.plan!.shots[1].id;
+      invalid.assets.push({ id: 'TEST-other-shot-video', kind: 'video', shotId: otherShotId, relativePath: `shots/${otherShotId}/TEST-other-video.mp4`,
+        taskId: 'TEST-other-task', runId: 'TEST-other-run', artifactId: 'TEST-other-artifact', downloadJobId: 'TEST-other-download', validation: await validatePetStoryMedia(video, 'video') });
+      invalid.selectedVideos[shotId] = 'TEST-other-shot-video';
+    }
+    await expect(projects.write(invalid)).rejects.toThrow(change === 'shape' ? '视频选择记录无效' : '选中视频缺失或归属不符');
+    expect((await projects.read(p.id)).selectedVideos).toBeUndefined();
+  });
+  it('旧项目没有视频选择字段仍可保存，删除镜头后保留旧文件与选择历史且不阻断新方案', async (): Promise<void> => {
+    expect((await projects.read(p.id)).selectedVideos).toBeUndefined();
+    const removedShotId = p.plan!.shots.at(-1)!.id;
+    p.assets.push({ id: 'TEST-removed-shot-video', kind: 'video', shotId: removedShotId, relativePath: `shots/${removedShotId}/TEST-removed-video.mp4`,
+      taskId: 'TEST-old-task', runId: 'TEST-old-run', artifactId: 'TEST-old-artifact', downloadJobId: 'TEST-old-download', validation: await validatePetStoryMedia(video, 'video') });
+    p.selectedVideos = { [removedShotId]: 'TEST-removed-shot-video' }; p = await projects.write(p);
+    const nextPlan = structuredClone(p.plan!); nextPlan.shots.pop();
+    const saved = await projects.savePlan(p.id, p.revision, nextPlan);
+    expect(saved.plan!.shots.some((shot): boolean => shot.id === removedShotId)).toBe(false);
+    expect(saved.assets.find((asset): boolean => asset.id === 'TEST-removed-shot-video')).toEqual(p.assets.at(-1));
+    const reopened = new PetStoryProjects(); const loaded = await reopened.open(projects.directory(p.id));
+    expect(loaded.selectedVideos).toEqual(p.selectedVideos);
   });
   it('project write failure leaves one held replacement and retries the same authorization without another task', async (): Promise<void> => {
     const { task, current, request } = await uncertainProduction();

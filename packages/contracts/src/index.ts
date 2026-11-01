@@ -5,6 +5,7 @@
  * 消费方必须使用 `import type` 导入，禁止普通 import。
  */
 export type { PetStoryImageTarget, PetStoryImageReview, PetStoryImageOperation, PetStoryImageOperationRequest, PetStoryImageOperationResult } from './dto/petstory';
+export type { PetStoryPromptEditBasis } from './dto/petstory';
 
 export type {
   GenerationMode,
@@ -120,7 +121,7 @@ export type {
 export type { ElectronAPI } from './dto/electron-api';
 export type { PetStoryGenerationBlocker, PetStoryGenerationEligibility, PetStoryGenerationEligibilityResult } from './dto/petstory';
 
-export type { PetStoryValidationIssue, PetStoryPromptBatch, PetStoryMaterialEditIntent, PetStoryRuntimeTarget, PetStoryReviewIssue, PetStoryAssetBindings, PetStoryMediaCandidate, PetStoryMaterial, PetStoryProp, PetStoryScene, PetStoryPageBinding, PetStoryPromptProfile, PetStoryPromptReference, PetStoryPromptTaskContract, PetStoryCompiledPrompt, PetStoryCapability, PetStoryEntryCapability, PetStoryResolvedMode, PetStoryModeResolution, PetStoryMediaValidation, PetStoryTaskBinding, PetStoryProductionStep, PetStoryShotMedia, PetStoryProduction, PetStoryProductionCounts, PetStoryExecutionGuard, PetStoryProductionResult, PetStoryMode, PetStoryPromptKind, PetStoryPrompt, PetStoryCharacter, PetStoryShot, PetStoryPlan, PetStoryAsset, PetStoryChatJob, PetStoryProject, PetStoryResult, PetStoryAPI } from './dto/petstory';
+export type { PetStoryValidationIssue, PetStoryPromptBatch, PetStoryMaterialEditIntent, PetStoryRuntimeTarget, PetStoryReviewIssue, PetStoryAssetBindings, PetStoryMediaCandidate, PetStoryMaterial, PetStoryProp, PetStoryScene, PetStoryPageBinding, PetStoryPromptProfile, PetStoryPromptReference, PetStoryPromptTaskContract, PetStoryCompiledPrompt, PetStoryCapability, PetStoryEntryCapability, PetStoryResolvedMode, PetStoryModeResolution, PetStoryMediaValidation, PetStoryTaskBinding, PetStoryProductionStep, PetStoryShotMedia, PetStoryProduction, PetStoryProductionCounts, PetStoryVideoReferenceRequest, PetStoryVideoReferenceContinuation, PetStoryExecutionGuard, PetStoryProductionResult, PetStoryMode, PetStoryPromptKind, PetStoryPrompt, PetStoryCharacter, PetStoryShot, PetStoryPlan, PetStoryAsset, PetStoryChatJob, PetStoryProject, PetStoryResult, PetStoryAPI } from './dto/petstory';
 
 export type { PetStoryChatAdjustment, PetStoryConversationReply, PetStoryAdjustmentResult } from './dto/petstoryAdjustment';
 

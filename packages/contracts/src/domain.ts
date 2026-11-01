@@ -183,6 +183,8 @@ export interface TaskRunSnapshot {
     compositeVisibleAtMs?: number;
     stableAtMs?: number;
     failureStage?: 'account' | 'new_conversation' | 'video_entry' | 'model' | 'aspect_ratio' | 'duration' | 'assets' | 'prompt' | 'submission_controls' | 'mode_entry' | 'model_control' | 'composite_control' | 'stable_readback' | 'final_readback';
+    controlOperation?: 'model_trigger' | 'parameters_trigger' | 'model_option' | 'ratio_option' | 'duration_slider' | 'readback';
+    failureReason?: 'not_found' | 'ambiguous' | 'covered' | 'disabled' | 'changed' | 'menu_not_open' | 'value_not_applied' | 'page_unavailable';
   };
   generationConfirmation?: {
     detectedAt: string;

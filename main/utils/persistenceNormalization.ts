@@ -544,6 +544,8 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): 
       compositeVisibleAtMs: asNonNegativeNumber(r.controlReadiness.compositeVisibleAtMs, 0) || undefined,
       stableAtMs: asNonNegativeNumber(r.controlReadiness.stableAtMs, 0) || undefined,
       failureStage: optionalOneOf(r.controlReadiness.failureStage, ['account', 'new_conversation', 'video_entry', 'model', 'aspect_ratio', 'duration', 'assets', 'prompt', 'submission_controls', 'mode_entry', 'model_control', 'composite_control', 'stable_readback', 'final_readback']) as NonNullable<TaskRunSnapshot['controlReadiness']>['failureStage'],
+      controlOperation: optionalOneOf(r.controlReadiness.controlOperation, ['model_trigger', 'parameters_trigger', 'model_option', 'ratio_option', 'duration_slider', 'readback']) as NonNullable<TaskRunSnapshot['controlReadiness']>['controlOperation'],
+      failureReason: optionalOneOf(r.controlReadiness.failureReason, ['not_found', 'ambiguous', 'covered', 'disabled', 'changed', 'menu_not_open', 'value_not_applied', 'page_unavailable']) as NonNullable<TaskRunSnapshot['controlReadiness']>['failureReason'],
     } : undefined,
     generationConfirmation: isObject(r.generationConfirmation) &&
       isValidISODate(r.generationConfirmation.detectedAt) &&
