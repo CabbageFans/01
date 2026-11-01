@@ -44,6 +44,8 @@ export interface VideoControlReadinessResult {
   ready: boolean;
   currentStage?: VideoPageReadinessStage;
   failureStage?: VideoControlReadinessStage;
+  controlOperation?: 'model_trigger' | 'parameters_trigger' | 'model_option' | 'ratio_option' | 'duration_slider' | 'readback';
+  failureReason?: 'not_found' | 'ambiguous' | 'covered' | 'disabled' | 'changed' | 'menu_not_open' | 'value_not_applied' | 'page_unavailable';
   missingControl?: VideoReadinessMissingControl;
   pageStructureVersion?: string;
   attempts: number;
@@ -82,7 +84,10 @@ export class VideoControlReadinessError extends Error {
       stable_readback: 'video_stable_readback_not_ready', final_readback: 'video_final_readback_not_ready',
     };
     const code = codeByStage[normalizedStage] ?? `video_${normalizedStage}_not_ready`;
-    super(`${code}: ${normalizedStage} 未在有界等待内就绪（${diagnostic.elapsedMs}ms/${diagnostic.attempts}次），已在提交前停止`);
+    const stageLabels: Record<string, string> = { model: '视频模型', aspect_ratio: '画面比例', duration: '视频时长' };
+    const reasonLabels: Record<string, string> = { not_found: '未找到对应选项', ambiguous: '存在多个目标，无法确认', covered: '目标被遮挡', disabled: '控件不可用', changed: '控件已变化', menu_not_open: '参数菜单未展开', value_not_applied: '设置后回读不一致', page_unavailable: '页面暂时无法读取' };
+    const detail = diagnostic.failureReason ? `：${reasonLabels[diagnostic.failureReason]}` : '未在有界等待内就绪';
+    super(`${code}: ${stageLabels[normalizedStage] || normalizedStage}${detail}（${diagnostic.elapsedMs}ms/${diagnostic.attempts}次），已在提交前停止`);
     this.name = 'VideoControlReadinessError';
     this.code = code;
     this.diagnostic = {

@@ -408,14 +408,14 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     const bridgeSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'utils', 'doubaoBridge.ts'), 'utf8');
     expect(bridgeSource).toContain("document.querySelectorAll('iframe')");
     expect(bridgeSource).toContain('订阅|会员|升级|subscribe|membership|upgrade');
-    expect(bridgeSource).toContain("throw new Error('membership_required: 视频模型需要会员操作，已停止提交')");
+    expect(bridgeSource).toContain("throw new Error('membership_required: 视频参数需要会员操作，已停止提交')");
   });
 
-  it('比例已匹配时不重复选择，时长弹层只在 slider 不可见时打开', () => {
+  it('比例已匹配时不重复选择，当前参数菜单已打开时不再次toggle', () => {
     const bridgeSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'utils', 'doubaoBridge.ts'), 'utf8');
-    expect(bridgeSource).toContain("beforeComposite?.startsWith(`${config.aspectRatio} ·`)");
-    expect(bridgeSource).toContain('let slider = await findDurationSlider()');
-    expect(bridgeSource).toContain('if (!slider.position)');
+    expect(bridgeSource).toContain("if ((await probe()).ratio !== targetRatio)");
+    expect(bridgeSource).toContain('if (current.menuOpen) return;');
+    expect(bridgeSource).toContain("await openMenu('duration', targetRatio)");
   });
 
   it('完成路径必须经过 evaluateTerminal（chat 模式无绕过）', () => {

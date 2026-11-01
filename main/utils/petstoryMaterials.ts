@@ -111,7 +111,8 @@ export function invalidateMaterialDependents(p: PetStoryProject, materialId: str
   const material = p.materials?.find((item): boolean => item.id === materialId);
   const affected = new Set(p.plan?.shots.filter((shot): boolean => material?.kind === 'character' ? shot.characterIds.includes(material.entityId)
     : material?.kind === 'prop' ? !!shot.propIds?.includes(material.entityId) : material?.kind === 'scene' && shot.sceneId === material.entityId).map((shot): string => shot.id));
-  for (const asset of p.assets) if (asset.shotId && affected.has(asset.shotId) && ['firstFrame', 'plannedEndImage', 'video', 'actualEndFrame'].includes(asset.kind)) asset.needsReview = true;
+  // 首尾帧保留明确采用事实；更换基础素材不要求对旧关键帧重复确认或重新生成。
+  for (const asset of p.assets) if (asset.shotId && affected.has(asset.shotId) && ['video', 'actualEndFrame'].includes(asset.kind)) asset.needsReview = true;
   for (const scene of p.plan?.scenes || []) {
     if (`scene:${scene.parentSceneId}` !== materialId) continue;
     const child = p.materials?.find((m): boolean => m.id === `scene:${scene.id}`);

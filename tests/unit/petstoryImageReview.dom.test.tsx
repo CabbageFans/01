@@ -1,6 +1,6 @@
 /** DOM 仅用明确的文件读取替身验证采用边界，不调用平台或写入真实项目。 */
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PetStoryAsset, PetStoryImageTarget, PetStoryProject } from '@doubao-studio/contracts';
 import { PetStoryImageReview, imageBelongsToTarget } from '../../src/components/PetStoryImageReview';
@@ -76,14 +76,18 @@ describe('图片候选预览与明确采用', (): void => {
     expect(screen.getByText('图片待确认')).toBeDefined(); expect(screen.getByRole('button', { name: '查看镜头 3 · 首帧已采用图片' })).toBeDefined();
   });
 
-  it.each([false, true])('当前旧图需复核时可预览并明确继续采用（外部确认失效=%s）', async (external): Promise<void> => {
+  it.each([false, true])('已采用首帧忽略历史复核标记，预览不要求再次采用（外部标记=%s）', async (external): Promise<void> => {
     project.assets = [image('old', 'adopted')]; project.assets[0].needsReview = !external;
     const adopt = vi.fn(async (): Promise<void> => undefined);
     render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" currentNeedsReview={external} disabled={false} onUpload={async (): Promise<void> => undefined} onAdopt={adopt} />);
-    fireEvent.click(screen.getByRole('button', { name: '查看并复核' })); const dialog = screen.getByRole('dialog');
-    expect(within(dialog).getByText('需要复核')).toBeDefined();
-    const confirm = within(dialog).getByRole('button', { name: '确认继续使用' }); await waitFor((): void => expect(confirm.hasAttribute('disabled')).toBe(false));
-    expect(adopt).not.toHaveBeenCalled(); fireEvent.click(confirm); await waitFor((): void => expect(adopt).toHaveBeenCalledExactlyOnceWith('old'));
+    expect(screen.queryByRole('button', { name: '查看并复核' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' })); const dialog = screen.getByRole('dialog');
+    await waitFor((): void => expect(within(dialog).getAllByRole('img', { name: '镜头 3 · 首帧 · 当前采用' }).length).toBeGreaterThan(0));
+    expect(within(dialog).getByText('已采用')).toBeDefined();
+    expect(within(dialog).queryByText('需要复核')).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: '确认继续使用' })).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: '满意，采用图片' })).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: /返\s*回/ })); expect(adopt).not.toHaveBeenCalled();
   });
 
   it('预览、切换和关闭不写入，采用仅传入用户选中的那张', async (): Promise<void> => {
@@ -137,6 +141,99 @@ describe('图片候选预览与明确采用', (): void => {
     expect(imageBelongsToTarget(project, image('own'), target)).toBe(true);
     expect(imageBelongsToTarget(project, image('own'), { shotId: 'TEST-other', kind: 'firstFrame' })).toBe(false);
     expect(imageBelongsToTarget(project, image('own'), { shotId: target.shotId, kind: 'lastFrame' })).toBe(false);
+  });
+});
+
+describe('图片预览重新生成', (): void => {
+  it('底部重新生成直接发起完整生成，不传选中图或反馈，也不采用图片', async (): Promise<void> => {
+    const generate = vi.fn(async (): Promise<void> => undefined);
+    const modify = vi.fn(async (): Promise<void> => undefined); const adopt = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onGenerate={generate} onModify={modify} onUpload={async (): Promise<void> => undefined} onAdopt={adopt} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' })); const dialog = screen.getByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: '选择候选图片 1' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: '重新生成' }));
+    await waitFor((): void => expect(generate).toHaveBeenCalledExactlyOnceWith());
+    expect(modify).not.toHaveBeenCalled(); expect(adopt).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: '修改这张图片' })).toBeNull();
+    expect(project.adoptedImages?.['TEST-shot'].firstFrameId).toBe('old'); expect(project.assets).toHaveLength(4);
+  });
+
+  it('重新生成完成后在原预览选中新候选，旧图和采用关系保留', async (): Promise<void> => {
+    const generate = vi.fn(async (): Promise<void> => {
+      usePetStoryStore.setState({ project: { ...project, revision: 2, assets: [...project.assets, image('regenerated')] }, error: '' });
+    });
+    const adopt = vi.fn(async (): Promise<void> => undefined);
+    const Harness: React.FC = (): React.ReactElement => {
+      const current = usePetStoryStore((state) => state.project) || project;
+      return <PetStoryImageReview project={current} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onGenerate={generate} onUpload={async (): Promise<void> => undefined} onAdopt={adopt} />;
+    };
+    render(<Harness />); fireEvent.click(screen.getByRole('button', { name: '查看图片' }));
+    const dialog = screen.getByRole('dialog'); fireEvent.click(within(dialog).getByRole('button', { name: '重新生成' }));
+    await waitFor((): void => expect(within(dialog).getByRole('img', { name: '镜头 3 · 首帧 · 待确认图片' }).getAttribute('src')).toContain('regenerated'));
+    expect(within(dialog).getByRole('button', { name: '选择候选图片 3' }).classList.contains('selected')).toBe(true);
+    expect(screen.getAllByRole('dialog')).toHaveLength(1); expect(adopt).not.toHaveBeenCalled();
+    expect(usePetStoryStore.getState().project?.assets).toHaveLength(5);
+    expect(usePetStoryStore.getState().project?.adoptedImages?.['TEST-shot'].firstFrameId).toBe('old');
+  });
+
+  it('启动中禁用重复生成和修改，启动失败保留预览及旧图并显示原因', async (): Promise<void> => {
+    let reject: (error: Error) => void = (): void => undefined;
+    const pending = new Promise<void>((_resolve, fail): void => { reject = fail; });
+    const generate = vi.fn(async (): Promise<void> => pending);
+    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onGenerate={generate} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' })); const dialog = screen.getByRole('dialog');
+    const regenerate = within(dialog).getByRole('button', { name: '重新生成' });
+    fireEvent.click(regenerate); fireEvent.click(regenerate);
+    expect(generate).toHaveBeenCalledOnce(); expect(regenerate.hasAttribute('disabled')).toBe(true);
+    expect(within(dialog).getByRole('button', { name: '不满意，修改图片' }).hasAttribute('disabled')).toBe(true);
+    await act(async (): Promise<void> => { reject(new Error('TEST 参考图上传失败')); await pending.catch((): void => undefined); });
+    await waitFor((): void => expect(within(dialog).getByRole('alert').textContent).toContain('TEST 参考图上传失败'));
+    expect(regenerate.hasAttribute('disabled')).toBe(false); expect(project.assets).toHaveLength(4);
+    expect(project.adoptedImages?.['TEST-shot'].firstFrameId).toBe('old');
+  });
+
+  it('生成期间改看其他镜头，新结果到达不抢占其他镜头预览', async (): Promise<void> => {
+    const otherTarget: PetStoryImageTarget = { shotId: 'TEST-other-shot', kind: 'firstFrame' };
+    project.assets.push({ ...image('other-candidate'), shotId: otherTarget.shotId, imageReview: { state: 'candidate', target: otherTarget, basisHash: 'TEST' } });
+    const generate = vi.fn(async (): Promise<void> => undefined);
+    const Harness: React.FC = (): React.ReactElement => {
+      const current = usePetStoryStore((state) => state.project) || project;
+      return <><section aria-label="本镜"><PetStoryImageReview project={current} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onGenerate={generate} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} /></section>
+        <section aria-label="其他镜头"><PetStoryImageReview project={current} target={otherTarget} title="镜头 4 · 首帧" disabled={false} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} /></section></>;
+    };
+    render(<Harness />);
+    fireEvent.click(within(screen.getByRole('region', { name: '本镜' })).getByRole('button', { name: '查看图片' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '重新生成' }));
+    await waitFor((): void => expect(generate).toHaveBeenCalledOnce());
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '暂不采用' }));
+    fireEvent.click(within(screen.getByRole('region', { name: '其他镜头' })).getByRole('button', { name: '查看图片' }));
+    act((): void => usePetStoryStore.setState({ project: { ...project, revision: 2, assets: [...project.assets, image('regenerated')] } }));
+    await waitFor((): void => expect(within(screen.getByRole('region', { name: '本镜' })).getByText('图片待确认 · 3 张')).toBeDefined());
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    const otherDialog = screen.getByRole('dialog', { name: '镜头 4 · 首帧 · 选择图片' });
+    await waitFor((): void => expect(within(otherDialog).getByRole('img', { name: '镜头 4 · 首帧 · 待确认图片' }).getAttribute('src')).toContain('other-candidate'));
+    expect(screen.queryByRole('dialog', { name: '镜头 3 · 首帧 · 选择图片' })).toBeNull();
+  });
+
+  it.each(['disabled', 'generationDisabled', 'resumable'] as const)('%s时不能用重新生成绕开原生成限制或未完成任务', (reason): void => {
+    if (reason === 'resumable') project.imageOperations = [{ id: 'TEST-resume-original', requestId: 'TEST-original-request', target, mode: 'generate', stage: 'generating', basisHash: 'TEST', createdAt: now }];
+    const generate = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={reason === 'disabled'} generationDisabled={reason === 'generationDisabled'} onGenerate={generate} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' }));
+    const regenerate = within(screen.getByRole('dialog')).getByRole('button', { name: '重新生成' });
+    expect(regenerate.hasAttribute('disabled')).toBe(true); fireEvent.click(regenerate); expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('所选旧候选不可读不妨碍重新生成，仍禁止采用和基于该图修改', async (): Promise<void> => {
+    window.electronAPI.petstory.readReference = vi.fn(async (): Promise<{ success: false; error: string }> => ({ success: false, error: 'TEST 旧候选文件缺失' }));
+    const generate = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="镜头 3 · 首帧" currentAssetId="old" disabled={false} onGenerate={generate} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' })); const dialog = screen.getByRole('dialog');
+    await waitFor((): void => expect(within(dialog).getAllByText('TEST 旧候选文件缺失').length).toBeGreaterThan(0));
+    expect(within(dialog).getByRole('button', { name: '满意，采用图片' }).hasAttribute('disabled')).toBe(true);
+    expect(within(dialog).getByRole('button', { name: '不满意，修改图片' }).hasAttribute('disabled')).toBe(true);
+    const regenerate = within(dialog).getByRole('button', { name: '重新生成' }); expect(regenerate.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(regenerate); await waitFor((): void => expect(generate).toHaveBeenCalledExactlyOnceWith());
   });
 });
 

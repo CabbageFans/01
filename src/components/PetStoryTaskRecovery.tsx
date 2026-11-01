@@ -7,7 +7,7 @@ import { useAccountStore } from '../store/useAccountStore';
 import { selectPlanReview } from '../utils/petstoryPlanReview';
 import { canStartBoundChat } from '../utils/petstoryCandidate';
 import { revealBrowser } from '../utils/workspace';
-import { canvasPromptNames } from './petStoryCanvasShared';
+import { canvasPromptNames, petStoryVideoRecoveryMessage } from './petStoryCanvasShared';
 import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
 import { resolveTaskConversationTarget } from '../utils/taskConversationLocator';
 import { pendingImageCandidates } from '../utils/petstoryImageCandidates';
@@ -27,6 +27,29 @@ function hasCutBindingIssue(job: PetStoryChatJob): boolean {
   return job.status === 'invalid' && ['analysis', 'repair'].includes(job.kind) && /^[a-zA-Z0-9_-]+切镜不应绑定上一镜头$/.test(job.error || '');
 }
 
+function isPromptTarget(job: PetStoryChatJob): boolean {
+  return job.kind !== 'review' && job.originKind !== 'review' && (!!job.materialId || !!job.shotId && !!job.promptKind);
+}
+/** 只把本目标明确可修订的正文／返回契约问题投影为后台工作，不猜测归属或事实异常。 */
+export function isPetStoryAutomaticPromptFailure(job: PetStoryChatJob): boolean {
+  const targetId = job.materialId || (job.shotId && job.promptKind ? `${job.shotId}:${job.promptKind}` : undefined);
+  return isPromptTarget(job) && !!job.rawText && !!job.requestId && !!job.validationDetails?.length
+    && job.validationDetails.every((issue): boolean => issue.repairable && ['prompt_content', 'content_contract'].includes(issue.code) && (!issue.targetId || issue.targetId === targetId));
+}
+
+interface PetStoryJobDisplayStatus { title: string; instruction: string }
+function invalidJobStatus(job: PetStoryChatJob, task: Task | undefined, repairPreparing: boolean): PetStoryJobDisplayStatus | undefined {
+  if (job.status !== 'invalid') return;
+  if (job.resultStatus === 'stale') return { title: '历史回复待核对', instruction: job.staleReason || '当前依据已变化，这条回复仅作历史记录；请查看对应对象的当前内容和制作条件。' };
+  if (isPetStoryAutomaticPromptFailure(job) || repairPreparing) {
+    if (task?.status === 'waiting_verification' || task?.errorInfo?.code === 'authentication_unconfirmed') return { title: '需要登录或验证', instruction: '请先在原执行账号完成豆包登录或验证，再继续原任务。' };
+    return repairPreparing ? { title: '正在后台修订', instruction: '正在后台修订并校验，校验通过后提供完整候选供确认。' }
+      : { title: '提示词待后台修订', instruction: '提示词尚未通过校验，等待后台修订；通过后提供完整候选供确认。' };
+  }
+  if (isPromptTarget(job)) return { title: '回复需要核对', instruction: job.error || job.validationDetails?.map((issue): string => issue.message).join('；') || '本次回复尚未通过校验，请核对原任务和当前制作依据。' };
+  return job.kind === 'repair' ? { title: '仍需调整', instruction: '豆包还未修好，你可以继续调整。原回复与修订回复均已保留。' } : { title: '内容需要处理', instruction: '已保留原回复。查看具体问题后修订，或返回对应对象处理；不要重复发送原请求。' };
+}
+
 /** 结构整理可追溯，不把它显示为内容质量或媒体效果通过。 */
 export const PetStoryFormatCorrections: React.FC<{ job: PetStoryChatJob }> = ({ job }): React.ReactElement | null => job.formatCorrections?.length
   ? <Alert className="mt-2" type="info" showIcon message="已整理分镜结构" description={<ul>{job.formatCorrections.map((item): React.ReactNode => <li key={item}>{item}</li>)}</ul>} /> : null;
@@ -40,11 +63,12 @@ export function petStoryJobTargetName(project: PetStoryProject, job: PetStoryCha
   return ({ analysis: '剧本理解与分镜方案', assets: '人物／道具／场景清单', review: '内容审查', revise: '内容修订', repair: '回复缺项修订', optimize: '镜头提示词', materialPrompt: '基础素材提示词' })[kind];
 }
 
-export function petStoryJobStatus(job: PetStoryChatJob, task?: Task): { title: string; instruction: string } {
+export function petStoryJobStatus(job: PetStoryChatJob, task?: Task, repairPreparing: boolean = false): PetStoryJobDisplayStatus {
   const repairAction = job.validationDetails?.some((issue): boolean => issue.code === 'duration') ? '正在请豆包修正镜头时长…' : '正在请豆包修正内容，请等待完整回复…';
   if (job.endedWaitingAt) return { title: '已结束等待', instruction: '平台任务并未取消，也未认定回复已收到或已采用；可只读检查原回复，其他独立目标仍可继续。' };
   if (hasCutBindingIssue(job)) return { title: '分镜结构待整理', instruction: '回复已明确采用正常切镜，但保留了多余的前镜头绑定。点击下方按钮，工具会读取已有回复并整理这项结构，保留原文、剧情和台词，再完整校验分镜方案。' };
-  if (job.status === 'invalid') return job.kind === 'repair' ? { title: '仍需调整', instruction: '豆包还未修好，你可以继续调整。原回复与修订回复均已保留。' } : { title: '内容需要处理', instruction: '已保留原回复。查看具体问题后修订，或返回对应对象处理；不要重复发送原请求。' };
+  const invalid = invalidJobStatus(job, task, repairPreparing);
+  if (invalid) return invalid;
   if (job.status === 'applied') {
     if (job.resultStatus === 'stale') return { title: '历史回复待核对', instruction: '当前依据已变化，这条回复仅作历史记录；请查看对应对象的当前内容和制作条件。' };
     return { title: job.resultStatus === 'candidate' ? '新候选待选择' : '回复已保存', instruction: job.resultStatus === 'candidate' ? (job.kind === 'repair' ? '已修正，请确认完整内容。' : '请对比并采用需要的结果；收到候选不会覆盖你的手动修改。') : '当前回复已保存，可继续对应阶段。' };
@@ -59,10 +83,11 @@ export function petStoryJobStatus(job: PetStoryChatJob, task?: Task): { title: s
   }
   if (!task) return { title: '原任务记录待载入', instruction: '先刷新任务记录，再核对原请求。此处不会新建或重发任务。' };
   if (['executing', 'generating', 'manual_submission_observing'].includes(task.status)) return job.kind === 'repair' ? { title: '正在修订', instruction: repairAction } : { title: '正在处理', instruction: '正在准备这次豆包请求，请等待页面反馈。' };
+  if (job.kind === 'repair' && isPromptTarget(job) && task.status === 'queued') return { title: '后台修订待启动', instruction: '修订任务已排队，等待后台调度后继续校验。' };
   return { title: '原任务尚未发送', instruction: '先处理豆包登录、验证或页面阻断，再从这里继续原任务；它会复用原请求。' };
 }
 
-function openOriginalTask(task: Task): void {
+export function openPetStoryOriginalTask(task: Task): void {
   const accountId = task.assignedAccountId;
   if (!accountId || !useAccountStore.getState().accounts.some((account): boolean => account.id === accountId)) { message.warning('原执行账号不存在，请先在账号与浏览器中处理。'); return; }
   const interactiveId = findInteractiveAccountId(useTaskStore.getState().accountAutomationState);
@@ -72,6 +97,7 @@ function openOriginalTask(task: Task): void {
   // 没有原会话地址时只打开原账号，让用户从历史对话查找；不猜测或绑定当前页面。
   if (resolveTaskConversationTarget(task).ok) window.dispatchEvent(new CustomEvent('open-task-conversation', { detail: { task } }));
 }
+const openOriginalTask = openPetStoryOriginalTask;
 
 /** 与原恢复服务共用，读结果和结束等待不受无关编辑草稿阻断。 */
 export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; job: PetStoryChatJob; task?: Task; compact?: boolean }> = ({ project, job, task, compact = false }): React.ReactElement => {
@@ -82,8 +108,9 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
   const canReconcile = job.status === 'bound' && !!task?.runtime?.submittedAt && ['fail', 'paused', 'cancelled', 'waiting_verification'].includes(task.status);
   const conversation = resolveTaskConversationTarget(task);
   const localFormatFix = hasCutBindingIssue(job);
-  const canRepair = !localFormatFix && !job.endedWaitingAt && job.resultStatus !== 'stale' && job.status === 'invalid' && !!job.requestId && !project.jobs.some((item): boolean => item.kind === 'repair' && item.parentJobId === job.id);
-  const canAdjust = job.status === 'invalid' && !project.jobs.some((item): boolean => item.parentJobId === job.id && item.kind === 'repair')
+  const backgroundRepair = isPromptTarget(job) || state.promptRepairJobIds.includes(job.id);
+  const canRepair = !backgroundRepair && !localFormatFix && !job.endedWaitingAt && job.resultStatus !== 'stale' && job.status === 'invalid' && !!job.requestId && !project.jobs.some((item): boolean => item.kind === 'repair' && item.parentJobId === job.id);
+  const canAdjust = !backgroundRepair && job.status === 'invalid' && !project.jobs.some((item): boolean => item.parentJobId === job.id && item.kind === 'repair')
     && (project.chatAdjustment?.status !== 'active' || project.chatAdjustment.repairJobId === job.id);
   const adjust = (): void => {
     if (project.chatAdjustment?.status === 'active') { revealBrowser(); window.dispatchEvent(new CustomEvent('petstory-open-adjustment')); return; }
@@ -91,10 +118,10 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
   };
   const controls = <><Space wrap className="mt-2" aria-label={`${petStoryJobTargetName(project, job)}处理操作`}>
     {task && <Button size="small" onClick={(): void => openOriginalTask(task)}>{conversation.ok ? '打开对应豆包会话' : '打开执行账号豆包'}</Button>}
-    {job.status !== 'applied' && <Button size="small" type={localFormatFix ? 'primary' : 'default'} disabled={state.busy || !task?.runtime?.chatResponse?.text && job.status !== 'captured'} onClick={(): void => { void state.collect(job.id); }}>{localFormatFix ? '读取原回复并整理分镜结构' : '重新保存回复'}</Button>}
+    {job.status !== 'applied' && !(backgroundRepair && job.status === 'invalid' && isPetStoryAutomaticPromptFailure(job)) && <Button size="small" type={localFormatFix ? 'primary' : 'default'} disabled={state.busy || !task?.runtime?.chatResponse?.text && job.status !== 'captured'} onClick={(): void => { void state.collect(job.id); }}>{localFormatFix ? '读取原回复并整理分镜结构' : '重新保存回复'}</Button>}
     {canReconcile && <Button size="small" disabled={state.busy} onClick={(): void => { void state.recoverChat(job.id); }}>检查原回复（不重复发送）</Button>}
-    {canStart && <Button size="small" type="primary" disabled={state.busy} onClick={(): void => { void state.startBoundChat(job.id); }}>{task?.status === 'queued' ? '继续原文字任务（尚未发送）' : '处理阻断后继续原任务（未发送）'}</Button>}
-    {canRepair && <Button size="small" disabled={state.busy} onClick={(): void => { void state.correctOnce(job.id); }}>按具体缺项修订一次</Button>}
+    {canStart && !(backgroundRepair && job.kind === 'repair' && task?.status === 'queued') && <Button size="small" type="primary" disabled={state.busy} onClick={(): void => { void state.startBoundChat(job.id); }}>{task?.status === 'queued' ? '继续原文字任务（尚未发送）' : '处理阻断后继续原任务（未发送）'}</Button>}
+    {canRepair && <Button size="small" disabled={state.busy} onClick={(): void => { void state.correctOnce(job.id); }}>继续处理具体缺项</Button>}
     {canAdjust && <Button size="small" onClick={adjust}>在豆包中调整</Button>}
     {pending && <Button size="small" disabled={state.busy} onClick={(): void => { void state.endChatWaiting(job.id); }}>结束本次等待</Button>}
     {!task && <Button size="small" disabled={state.busy} onClick={(): void => { void taskState.loadTasks(); }}>刷新任务记录</Button>}
@@ -109,10 +136,10 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
     action = (): void => { void state.collect(job.id); };
   } else if (canReconcile) {
     label = '检查原回复（不重复发送）'; action = (): void => { void state.recoverChat(job.id); };
-  } else if (canStart) {
+  } else if (canStart && !(backgroundRepair && job.kind === 'repair' && task?.status === 'queued')) {
     label = '继续原文字任务（尚未发送）'; action = (): void => { void state.startBoundChat(job.id); };
   } else if (canRepair) {
-    label = '按具体缺项修订一次'; action = (): void => { void state.correctOnce(job.id); };
+    label = '继续处理具体缺项'; action = (): void => { void state.correctOnce(job.id); };
   } else if (!task) {
     label = '刷新任务记录'; action = (): void => { void taskState.loadTasks(); };
   }
@@ -133,7 +160,7 @@ function currentJobs(project: PetStoryProject): PetStoryChatJob[] {
 }
 
 /** 只保留当前明确授权的快照；平台结果或运行变化后再次核对，不能沿用旧确认。 */
-const PetStoryResubmissionActions: React.FC<{ projectId: string; task: Task }> = ({ projectId, task }): React.ReactElement => {
+export const PetStoryResubmissionActions: React.FC<{ projectId: string; task: Task; disabled?: boolean }> = ({ projectId, task, disabled = false }): React.ReactElement => {
   const state = usePetStoryStore();
   const accounts = useAccountStore((store) => store.accounts);
   const [resubmitTarget, setResubmitTarget] = React.useState<{ projectId: string; taskId: string; runId: string; submittedAt: string } | null>(null);
@@ -142,7 +169,7 @@ const PetStoryResubmissionActions: React.FC<{ projectId: string; task: Task }> =
     if (task.runtime?.runId && task.runtime.submittedAt) setResubmitTarget({ projectId, taskId: task.id, runId: task.runtime.runId, submittedAt: task.runtime.submittedAt });
   };
   const confirmResubmission = async (): Promise<void> => {
-    if (!resubmitTarget || usePetStoryStore.getState().busy) return;
+    if (!resubmitTarget || disabled || usePetStoryStore.getState().busy) return;
     const current = usePetStoryStore.getState().project; const currentTasks = useTaskStore.getState();
     const candidate = current?.id === resubmitTarget.projectId ? petStoryResubmissionTask(current, currentTasks.tasks, [...Object.values(currentTasks.executingTasks), ...(currentTasks.activeTaskId ? [currentTasks.activeTaskId] : [])]) : undefined;
     if (!candidate || candidate.id !== resubmitTarget.taskId || candidate.runtime?.runId !== resubmitTarget.runId || candidate.runtime.submittedAt !== resubmitTarget.submittedAt) {
@@ -153,9 +180,9 @@ const PetStoryResubmissionActions: React.FC<{ projectId: string; task: Task }> =
     await usePetStoryStore.getState().resubmitProduction({ taskId: resubmitTarget.taskId, runId: resubmitTarget.runId, submittedAt: resubmitTarget.submittedAt, authorizationId: crypto.randomUUID(), acceptDuplicateRisk: true });
     setResubmitTarget(null);
   };
-  return <><Button size="small" disabled={state.busy || !!resubmissionBlock} onClick={openConfirmation}>确认重发一次</Button>
+  return <><Button size="small" disabled={disabled || state.busy || !!resubmissionBlock} onClick={openConfirmation}>确认重发一次</Button>
     {resubmissionBlock && <p className="mt-2 text-amber-600" role="status">{resubmissionBlock}</p>}
-    {resubmitTarget && <Modal title="确认重发一次" open okText="确认风险，重发一次" cancelText="取消" confirmLoading={state.busy} okButtonProps={{ disabled: !!resubmissionBlock }} onOk={(): void => { void confirmResubmission(); }} onCancel={(): void => setResubmitTarget(null)}>
+    {resubmitTarget && <Modal title="确认重发一次" open okText="确认风险，重发一次" cancelText="取消" confirmLoading={state.busy} okButtonProps={{ disabled: disabled || !!resubmissionBlock }} onOk={(): void => { void confirmResubmission(); }} onCancel={(): void => setResubmitTarget(null)}>
       <p>原请求可能已受理，重发可能产生重复结果或再次消耗额度。原请求与产物保留。</p>
     </Modal>}
   </>;
@@ -210,8 +237,8 @@ const PetStoryProductionRecovery: React.FC<{ project: PetStoryProject }> = ({ pr
   const awaitingImage = !!imageTarget && pendingImageCandidates(project, imageTarget).length > 0;
   const inspectImages = (): void => { const stage = imageTarget?.materialId ? 'materials' : 'keyframes'; const id = imageTarget?.materialId ? `material-${imageTarget.materialId}` : `shot-media-${step?.shotId}-${step?.kind}`; window.dispatchEvent(new CustomEvent('petstory-locate-draft', { detail: { stage, id, objectId: step?.shotId } })); requestAnimationFrame((): void => document.getElementById(id)?.scrollIntoView({ block: 'center', behavior: 'smooth' })); };
   const resubmissionTask = petStoryResubmissionTask(project, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]);
-  const productionMessage = resubmissionTask ? '受理仍未确认，可检查原结果或确认重发一次' : production.message;
-  const stepError = resubmissionTask && /只读.*(?:禁止|不能).*重发|禁止重发/.test(step?.error || '') ? undefined : step?.error;
+  const productionMessage = resubmissionTask ? '受理仍未确认，可检查原结果或确认重发一次' : petStoryVideoRecoveryMessage(production.message);
+  const stepError = resubmissionTask && /只读.*(?:禁止|不能).*重发|禁止重发/.test(step?.error || '') ? undefined : petStoryVideoRecoveryMessage(step?.error || '');
   return <section className="py-3" aria-label="当前媒体制作任务">
       <strong>{material?.name || (shot ? `镜头 ${shot.order}` : '当前素材制作')}</strong> <Tag color={production.state === 'paused' ? 'orange' : 'blue'}>{production.state === 'paused' ? '制作已暂停' : '正在制作'}</Tag>
       <p className="my-2">{productionMessage}</p>{stepError && <Alert type="warning" message={stepError} />}
@@ -226,6 +253,7 @@ const PetStoryProductionRecovery: React.FC<{ project: PetStoryProject }> = ({ pr
 /** 始终位于画布缩放之外；恢复入口直接可见，任务标识和原始记录留在诊断内。 */
 export const PetStoryCurrentTasks: React.FC<{ project: PetStoryProject; onContinue?: () => void; hidePlanRequests?: boolean }> = ({ project, onContinue, hidePlanRequests = false }): React.ReactElement => {
   const tasks = useTaskStore((store) => store.tasks);
+  const repairJobIds = usePetStoryStore((store) => store.promptRepairJobIds);
   const mergedPlanIds = new Set(hidePlanRequests ? selectPlanReview(project).family.map((job): string => job.id) : []);
   const jobs = currentJobs(project).filter((job): boolean => !mergedPlanIds.has(job.id));
   const ended = project.jobs.filter((job): boolean => !!job.endedWaitingAt).length;
@@ -236,10 +264,12 @@ export const PetStoryCurrentTasks: React.FC<{ project: PetStoryProject; onContin
     {!jobs.length && (!production || production.state === 'complete') && <p role="status">当前没有正在等待的任务。请按当前阶段的推荐操作继续。</p>}
     {jobs.map((job): React.ReactNode => {
       const original = tasks.find((item): boolean => item.id === job.taskId);
-      const status = petStoryJobStatus(job, original);
+      const repairPreparing = repairJobIds.includes(job.id);
+      const status = petStoryJobStatus(job, original, repairPreparing);
+      const backgroundRepair = isPetStoryAutomaticPromptFailure(job) || repairPreparing;
       return <section key={job.id} className="border-b border-white/10 py-3 first:pt-0" aria-label={`${petStoryJobTargetName(project, job)}当前任务`}>
-        <strong>{petStoryJobTargetName(project, job)}</strong> <Tag color={job.status === 'invalid' ? 'orange' : 'blue'}>{status.title}</Tag>
-        <p className="my-2">{status.instruction}</p>{job.error && job.kind !== 'repair' && <Alert type="warning" message={hasCutBindingIssue(job) ? '正常切镜中残留了前镜头绑定，可直接整理已保存的回复。' : job.error} showIcon />}
+        <strong>{petStoryJobTargetName(project, job)}</strong> <Tag color={job.status === 'invalid' && !backgroundRepair ? 'orange' : 'blue'}>{status.title}</Tag>
+        <p className="my-2">{status.instruction}</p>{job.error && job.kind !== 'repair' && !backgroundRepair && <Alert type="warning" message={hasCutBindingIssue(job) ? '正常切镜中残留了前镜头绑定，可直接整理已保存的回复。' : job.error} showIcon />}
         <PetStoryChatRecoveryActions project={project} job={job} task={original} />
         <PetStoryFormatCorrections job={job} />
         <details className="mt-2"><summary>诊断详情与原始记录</summary><p>任务：{job.taskId}<br />运行：{job.runId || '尚未启动'}</p>{job.error && <p>{job.error}</p>}{job.rulesVersion && <p>规则：{job.rulesVersion}</p>}{job.rawText && <pre className="prompt-readonly">{job.rawText}</pre>}{jobRepairAncestors(project, job).map((parent): React.ReactNode => <details key={parent.id}><summary>本次修订的原回复记录</summary><p>原任务：{parent.taskId}</p><p>{parent.error}</p>{parent.rawText && <pre className="prompt-readonly">{parent.rawText}</pre>}</details>)}{original?.runtime?.chatReadbackReview && <><p>{original.runtime.chatReadbackReview.reason}</p><pre className="prompt-readonly">{JSON.stringify(original.runtime.chatReadbackReview.candidates, null, 2)}</pre></>}</details>

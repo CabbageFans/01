@@ -30,6 +30,31 @@ describe('视频生成参数确认独立状态', () => {
     expect(classifyGenerationConfirmationText('请生成一个商品视频，不需要再次询问').state).toBe('absent');
   });
 
+  it.each([
+    '请回复“开始”后正式生成视频。',
+    '回复“开始”，我会按以上参数为你正式生成视频。',
+    '请回复 「开始」 后，我再为你制作视频。',
+    "回复 '开始'：我将开始生成视频。",
+  ])('识别要求回复开始后才生成视频的明确待办：%s', (text: string): void => {
+    expect(classifyGenerationConfirmationText(text)).toMatchObject({ state: 'present', marker: 'confirm_before_generation' });
+  });
+
+  it('回复开始的参数确认仍仅提取原模型时长比例摘要', (): void => {
+    const result = classifyGenerationConfirmationText('模型：Seedance 2.0 Fast，时长：7秒，比例：9:16。回复“开始”后，我将正式生成视频。');
+    expect(result).toMatchObject({ state: 'present', marker: 'confirm_before_generation', model: 'Seedance 2.0 Fast', duration: '7秒', aspectRatio: '9:16' });
+    expect(result).not.toHaveProperty('text');
+  });
+
+  it.each([
+    '视频以角色回复“开始”后奔跑为开头。',
+    '视频已生成完成，无需回复“开始”。',
+    '回复“开始”，我会生成文字分镜。',
+    '收到“开始”了，正在生成视频。',
+    '你回复“开始”后，视频已生成。',
+  ])('普通开始措辞或已有生成回执不误判为新确认：%s', (text: string): void => {
+    expect(classifyGenerationConfirmationText(text).state).toBe('absent');
+  });
+
   it('等待确认任务即使缺 submittedAt 也永久禁止重试发送', () => {
     const task = { status: 'waiting_generation_confirmation', errorInfo: { code: 'generation_confirmation_required' } };
     expect(isGenerationConfirmationTask(task)).toBe(true);
@@ -157,12 +182,16 @@ describe('源码安全边界', () => {
     const end = panel.indexOf("window.addEventListener('reconcile-task-submission'", start);
     const body = panel.slice(start, end);
     expect(body).toContain('resolveTaskConversationTarget(task)');
-    expect(body).toContain('openTaskConversation(webview, conversationTarget.url');
+    expect(body).toContain("synchronizeConversation(webview, conversationTarget.url, originalContextIsCurrent, 'explicit', observationController?.signal)");
     expect(body).toContain('const conversationUrl = conversationTarget.url');
     expect(body).not.toContain('currentIsConcreteChat');
     expect(body).not.toContain('injectPrompt(');
     expect(body).not.toContain('submitPromptWithNativeClick(');
     expect(body).not.toContain('startNewConversation(');
+    const lifecycle = body.slice(body.indexOf('const runSubmissionReconcileSafely'));
+    const controllerRegistered = lifecycle.indexOf('abortControllersRef.current.set(taskId, controller)');
+    expect(controllerRegistered).toBeGreaterThan(-1);
+    expect(controllerRegistered).toBeLessThan(lifecycle.indexOf('await handleSubmissionReconcile(event)'));
   });
 
   it('提交前恢复严格限制一次，提交后不走配置恢复分支', () => {

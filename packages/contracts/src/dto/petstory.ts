@@ -5,6 +5,11 @@ import type { TaskResubmitUncertainParams } from './tasks';
 /** PetStory 桌面内部契约；路径和任务绑定只由主进程生成。 */
 export type PetStoryMode = 'auto' | 'first_frame' | 'first_last_frame' | 'reference';
 export type PetStoryPromptKind = 'firstFrame' | 'lastFrame' | 'video';
+/** 手动确认以打开编辑器时的正文为基准；同项已变化时禁止覆盖。 */
+export interface PetStoryPromptEditBasis {
+  expectedFinal: string;
+  baseJobId?: string;
+}
 export interface PetStoryPromptProfile {
   style: string;
   /** 旧 style 保留供迁移，不跨资产套用。共同字段只描述媒介／画面语言。 */
@@ -290,6 +295,8 @@ export interface PetStoryShotMedia extends PetStoryModeResolution {
   startFromPreviousEnd?: PetStoryAsset['sourceVideo'];
 }
 export interface PetStoryProduction {
+  /** 仅明确未提交的原视频可授权将既有首尾图改作两张普通参考图；源合同与旧运行完整留存。 */
+  referenceContinuations?: Record<string, PetStoryVideoReferenceContinuation>;
   /** 图片操作的单次授权关联；不改变正式选图。 */
   imageOperationId?: string;
   phase?: 'materials' | 'shots';
@@ -305,6 +312,19 @@ export interface PetStoryProduction {
   shots: Record<string, PetStoryShotMedia>;
   steps: PetStoryProductionStep[];
   message: string;
+}
+export interface PetStoryVideoReferenceRequest {
+  shotId: string; taskId: string; runId: string; inputHash: string;
+  firstFrameId: string; lastFrameId: string; authorizationId: string; useExistingFrames: true;
+}
+export interface PetStoryVideoReferenceContinuation {
+  authorizationId: string; authorizedAt: string; shotId: string; taskId: string; originalRunId: string;
+  firstFrameId: string; lastFrameId: string; firstSha256: string; lastSha256: string;
+  model: string; finalHash: string; promptTaskHash: string;
+  sourceCompiledPrompt: PetStoryCompiledPrompt;
+  sourcePageBindings?: PetStoryPageBinding[];
+  sourceRuntime: NonNullable<Task['runtime']>;
+  sourceError?: Task['errorInfo'];
 }
 export interface PetStoryProductionCounts {
   shots: number;
@@ -352,6 +372,12 @@ export interface PetStoryAssetBindings {
   sceneDesign?: string;
 }
 export interface PetStoryRuntimeTarget {
+  /** 画布授权的后台文字任务，沿用原账号执行器。 */
+  background?: 'canvas';
+  promptBatchId?: string;
+  /** 只供本轮文字创作的明确候选来源，不是采用或媒体输入。 */
+  textContextJobIds?: string[];
+  promptFeedback?: { text: string; baseJobId?: string; baseText?: string };
   /** 自动修订只消耗原轮次一次；显式新轮次由用户操作授权。 */
   repairMode?: 'automatic' | 'explicit';
   shotId?: string;
@@ -377,6 +403,11 @@ export interface PetStoryValidationIssue {
   message: string;
 }
 export interface PetStoryChatJob {
+  background?: 'canvas';
+  promptBatchId?: string;
+  textContextJobIds?: string[];
+  /** 用户主动反馈独立于每轮一次的自动格式修订预算。 */
+  promptFeedback?: { text: string; baseJobId?: string; baseText?: string };
   /** 修订所依据的选定自由回复；原回复全文只保存在父快照，不冒充本任务回复。 */
   repairReplySource?: { adjustmentId: string; replyKey: string };
   /** repair 的创作职责，沿父链继承，不能把视频／尾帧修订当作分析。 */
@@ -400,6 +431,8 @@ export interface PetStoryChatJob {
   editIntent?: PetStoryMaterialEditIntent;
   capability?: PetStoryCapability;
   inputFinal?: string;
+  /** 显式采用前的完整正文版本，保留用户手改与原来源。 */
+  replacedPrompt?: PetStoryPrompt;
   /** 审查实际送审的各目标 final；缺失的旧全局审查不能据当前正文补造快照。 */
   reviewInputFinals?: Record<string, string>;
   /** 本次分析实际配置的来源称谓与主配角快照；不从后来的配置补造旧合同。 */
@@ -456,6 +489,8 @@ export interface PetStoryProject {
   assets: PetStoryAsset[];
   /** 同一项目内经用户明确采用的镜头图片，独立于生成批次和候选文件。 */
   adoptedImages?: Record<string, { firstFrameId?: string; plannedEndImageId?: string }>;
+  /** 用户明确关联或本次生成取得的视频选择，独立于原制作步骤与历史快照。 */
+  selectedVideos?: Record<string, string>;
   promptProfile?: PetStoryPromptProfile;
   /** 仅恢复文字方言选择；媒体生成仍须在当前会话核对。 */
   promptCapability?: PetStoryCapability;
@@ -487,6 +522,10 @@ export interface PetStoryResult {
 }
 
 export interface PetStoryPromptBatch {
+  id?: string;
+  scope?: 'shots';
+  candidateJobIds?: string[];
+  failedTargets?: { target: { shotId?: string; kind?: PetStoryPromptKind; materialId?: string }; jobId?: string; message: string }[];
   targets: ({ shotId: string; kind: PetStoryPromptKind; materialId?: never } | { materialId: string; shotId?: never; kind?: never })[];
   total: number;
   completed: number;
@@ -527,7 +566,8 @@ export interface PetStoryAPI {
   inspectGeneration: (projectId: string, revision: number, target: PetStoryRuntimeTarget, capability?: PetStoryCapability, fallbacks?: Record<string, 'first_frame' | 'reference'>) => Promise<PetStoryGenerationEligibilityResult>;
   revealAsset: (projectId: string, assetId: string) => Promise<PetStoryResult>;
   revealProject: (projectId: string) => Promise<PetStoryResult>;
-  promptStageTargets: (projectId: string, revision: number) => Promise<PetStoryResult>;
+  markCanvasChat: (projectId: string, revision: number, jobId: string) => Promise<PetStoryResult>;
+  promptStageTargets: (projectId: string, revision: number, scope?: 'shots') => Promise<PetStoryResult>;
   savePromptModel: (projectId: string, revision: number, model?: PetStoryProject['promptModel']) => Promise<PetStoryResult>;
   savePromptBatch: (projectId: string, revision: number, batch: PetStoryPromptBatch) => Promise<PetStoryResult>;
   endChatWaiting: (projectId: string, revision: number, jobId: string) => Promise<PetStoryResult>;
@@ -538,7 +578,7 @@ export interface PetStoryAPI {
   listExistingMediaCandidates: (projectId: string, shotId: string, kind: PetStoryPromptKind) => Promise<{ success: boolean; candidates?: PetStoryMediaCandidate[]; error?: string }>;
   saveOriginalStory: (projectId: string, revision: number, text: string) => Promise<PetStoryResult>;
   linkExistingMedia: (projectId: string, revision: number, shotId: string, kind: PetStoryPromptKind, taskId: string, artifactId?: string) => Promise<PetStoryResult>;
-  saveShotPrompt: (projectId: string, revision: number, shotId: string, kind: PetStoryPromptKind, final: string) => Promise<PetStoryResult>;
+  saveShotPrompt: (projectId: string, revision: number, shotId: string, kind: PetStoryPromptKind, final: string, basis?: PetStoryPromptEditBasis) => Promise<PetStoryResult>;
   generateShotMedia: (projectId: string, revision: number, shotId: string, kind: PetStoryPromptKind, capability?: PetStoryCapability, fallbacks?: Record<string, 'first_frame' | 'reference'>) => Promise<PetStoryProductionResult>;
   readMedia: (projectId: string, assetId: string) => Promise<{ success: boolean; data?: string; mimeType?: string; error?: string }>;
   exportPrompts: (projectId: string, revision: number) => Promise<PetStoryResult>;
@@ -558,6 +598,7 @@ export interface PetStoryAPI {
   advanceProduction: (projectId: string) => Promise<PetStoryProductionResult>;
   pauseProduction: (projectId: string) => Promise<PetStoryProductionResult>;
   resumeProduction: (projectId: string, capability?: PetStoryCapability) => Promise<PetStoryProductionResult>;
+  resumeReferenceVideo: (projectId: string, revision: number, request: PetStoryVideoReferenceRequest) => Promise<PetStoryProductionResult>;
   resubmitProduction: (projectId: string, revision: number, request: TaskResubmitUncertainParams, capability?: PetStoryCapability) => Promise<PetStoryProductionResult>;
   bindProductionRun: (projectId: string, taskId: string, runId: string) => Promise<PetStoryProductionResult>;
   guardProductionTask: (taskId: string) => Promise<PetStoryProductionResult>;

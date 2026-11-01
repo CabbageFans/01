@@ -20,7 +20,9 @@ const now = '2026-10-25T01:00:00.000Z';
 const prepareRuntime = vi.fn(async (_id: string, _revision: number, kind: PetStoryChatJob['kind'], target?: PetStoryRuntimeTarget): Promise<PetStoryResult> => {
   const index = tasks.length + 1; const id = `TEST-job-${index}`; const taskId = `TEST-task-${index}`;
   project = structuredClone(project); project.revision++;
-  project.jobs.push({ id, taskId, kind, status: 'bound', inputHash: 'TEST', sourceUrl: '', sourceStoryId: project.mobileStory!.id, requestId: `TEST-request-${index}`, expectedIds: [target?.materialId || target?.shotId || 'story'], createdAt: new Date(Date.parse(now) + index * 1000).toISOString(), ...target });
+  const parent = project.jobs.find((job): boolean => job.id === target?.parentJobId);
+  const inherited = kind === 'repair' && parent ? { shotId: parent.shotId, promptKind: parent.promptKind, materialId: parent.materialId } : {};
+  project.jobs.push({ id, taskId, kind, status: 'bound', inputHash: 'TEST', sourceUrl: '', sourceStoryId: project.mobileStory!.id, requestId: `TEST-request-${index}`, expectedIds: [target?.materialId || target?.shotId || 'story'], createdAt: new Date(Date.parse(now) + index * 1000).toISOString(), ...inherited, ...target });
   tasks.push({ id: taskId, projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'chat', status: 'queued', prompt: 'TEST 主进程运行时请求替身', runtime: { runId: `TEST-run-${index}` } } as Task);
   return { success: true, project, taskId };
 });
@@ -201,7 +203,7 @@ describe('产品运行时按钮到主进程请求', (): void => {
     expect(tasks).toHaveLength(1);
     for (let index = 0; index < project.materials.length; index++) {
       expect(prepareRuntime.mock.calls[index][2]).toBe('materialPrompt');
-      expect(prepareRuntime.mock.calls[index][3]).toEqual({ materialId: project.materials[index].id });
+      expect(prepareRuntime.mock.calls[index][3]).toEqual({ materialId: project.materials[index].id, promptBatchId: expect.any(String), textContextJobIds: [] });
       await finishCurrent();
       expect(tasks).toHaveLength(Math.min(project.materials.length, index + 2));
     }
@@ -238,28 +240,32 @@ describe('产品运行时按钮到主进程请求', (): void => {
     expect(tasks).toHaveLength(3); expect(project.jobs[2].kind).toBe('optimize');
     expect(usePetStoryStore.getState().promptBatch).toMatchObject({ completed: 1, status: 'running' });
   });
-  it('同项一次修订仍失败时暂停批次，完整候选留在项目中且不创建第三次请求', async (): Promise<void> => {
+  it('同项修订仍失败时自动衔接下一轮，合格后才推进批次', async (): Promise<void> => {
     await usePetStoryStore.getState().regenerateAllPrompts();
     const failCandidate = async (_id: string, jobId: string): Promise<PetStoryResult> => {
       project = structuredClone(project); project.revision++;
       const job = project.jobs.find((item): boolean => item.id === jobId)!;
       job.status = 'invalid'; job.rawText = 'TEST 不合格完整候选'; job.error = 'TEST 具体缺项';
-      return { success: false, project, error: job.error, needsRepair: job.kind !== 'repair' };
+      return { success: false, project, error: job.error, needsRepair: true };
     };
     collectChat.mockImplementationOnce(failCandidate).mockImplementationOnce(failCandidate);
     await usePetStoryStore.getState().collect(project.jobs[0].id, true);
     await usePetStoryStore.getState().collect(project.jobs[1].id, true);
-    expect(tasks).toHaveLength(2); expect(project.jobs[1].rawText).toBe('TEST 不合格完整候选');
-    expect(usePetStoryStore.getState().promptBatch).toMatchObject({ completed: 0, status: 'paused' });
+    expect(tasks).toHaveLength(3); expect(project.jobs[1].rawText).toBe('TEST 不合格完整候选');
+    expect(project.jobs[2]).toMatchObject({ kind: 'repair', parentJobId: project.jobs[1].id });
+    expect(usePetStoryStore.getState().promptBatch).toMatchObject({ completed: 0, status: 'running' });
+    await usePetStoryStore.getState().collect(project.jobs[2].id, true);
+    expect(tasks).toHaveLength(4); expect(project.jobs[3].kind).toBe('optimize');
+    expect(usePetStoryStore.getState().promptBatch).toMatchObject({ completed: 1, status: 'running' });
   });
-  it('当前画布实际渲染分镜候选、空间说明和逐项审查入口，查看不发请求', (): void => {
+  it('当前画布实际渲染分镜候选、空间说明和自然语言修改入口，查看不发请求', (): void => {
     project.plan!.understanding = 'TEST 当前剧本理解'; project.plan!.sceneDesign = 'TEST 全场空间连续性';
     project.jobs.push({ id: 'candidate-reply', taskId: 'candidate-task', kind: 'analysis', status: 'applied', inputHash: 'TEST', sourceUrl: '', sourceStoryId: project.mobileStory!.id, requestId: 'candidate-request', rulesVersion: 'TEST-runtime', ruleFiles: ['TEST/storyboard.md'], resultStatus: 'candidate', parsedResult: { plan: structuredClone(project.plan) }, rawText: 'TEST 原回复记录' });
     const html = renderToStaticMarkup(React.createElement(PetStoryRuntime, { project, disabled: false }));
     expect(html).toContain('重新分析，生成新方案候选'); expect(html).toContain('补齐人物／道具／场景'); expect(html).toContain('确认并采用方案');
     expect(html).toContain('TEST 当前剧本理解'); expect(html).toContain('TEST 全场空间连续性');
     const promptHtml = renderToStaticMarkup(React.createElement(CanvasPromptEditor, { project, shot: project.plan!.shots[0], kind: 'video', disabled: false, generationBlocked: false, dirtyChanged: (): void => undefined }));
-    expect(promptHtml).toContain('审查本项正文');
+    expect(promptHtml).toContain('修改要求'); expect(promptHtml).not.toContain('审查本项正文');
     // 媒体节点按本镜资格显示缺项，提示词不重复整项目的素材阻断。
     expect(promptHtml).not.toContain('基础图片尚未全部采用');
     expect(prepareRuntime).not.toHaveBeenCalled(); expect(tasks).toHaveLength(0);
@@ -370,7 +376,7 @@ describe('产品运行时按钮到主进程请求', (): void => {
     promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [target], pendingCandidateJobIds: ['TEST-current-candidate'] });
     await usePetStoryStore.getState().continuePromptStage();
     expect(promptStageTargets).toHaveBeenCalledWith(project.id, 8);
-    expect(prepareRuntime.mock.calls[0].slice(2)).toEqual(['optimize', { shotId: target.shotId, promptKind: target.kind }]);
+    expect(prepareRuntime.mock.calls[0].slice(2)).toEqual(['optimize', { shotId: target.shotId, promptKind: target.kind, promptBatchId: expect.any(String), textContextJobIds: [] }]);
     expect(usePetStoryStore.getState().error).toContain('新候选待采用'); expect(usePetStoryStore.getState().error).toContain('下游仍引用');
     await finishCurrent(); expect(tasks).toHaveLength(1);
     promptStageTargets.mockResolvedValueOnce({ success: true, project, promptTargets: [], pendingCandidateJobIds: ['TEST-current-candidate'] });
@@ -399,11 +405,11 @@ describe('产品运行时按钮到主进程请求', (): void => {
     expect(tasks).toHaveLength(2); expect(project.jobs[1]).toMatchObject({ shotId: 'shot_1', promptKind: 'video' });
     expect(project.promptBatch).toMatchObject({ status: 'running', completed: 1, jobId: project.jobs[1].id });
   });
-  it('已失败候选重开继续保持暂停，等待新的明确修订操作，不自动重发', async (): Promise<void> => {
+  it('缺少可修复校验详情的历史失败回复保持暂停，不自动重发', async (): Promise<void> => {
     await usePetStoryStore.getState().regenerateAllPrompts(); await usePetStoryStore.getState().stopPromptBatch();
     project.jobs[0].status = 'invalid'; project.jobs[0].rawText = 'TEST离线失败原回复';
     usePetStoryStore.setState({ project }); await usePetStoryStore.getState().continuePromptStage();
-    expect(tasks).toHaveLength(1); expect(usePetStoryStore.getState().error).toContain('明确修订'); expect(project.promptBatch?.status).toBe('paused');
+    expect(tasks).toHaveLength(1); expect(usePetStoryStore.getState().error).toContain('核对原任务'); expect(project.promptBatch?.status).toBe('paused');
   });
   it.each(['regenerate', 'revise'] as const)('旧invalid批次目标经后来明确%s并采用且当前资格通过后，继续消耗该目标并发送保存的下一项', async (operation: 'regenerate' | 'revise'): Promise<void> => {
     const original = await failOriginalBatch(); const first = project.promptBatch!.targets[0]; const next = project.promptBatch!.targets[1];

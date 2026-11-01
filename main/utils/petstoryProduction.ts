@@ -1,44 +1,67 @@
+import { currentReferenceContinuation, referenceContinuationHash, referenceContinuationStep } from './petstoryReferenceContinuation';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { DownloadJob, PetStoryAsset, PetStoryCapability, PetStoryExecutionGuard, PetStoryPlan, PetStoryProductionCounts, PetStoryProductionResult, PetStoryProductionStep, PetStoryProject, Task, TaskAddParams, TaskDownloadOutputsParams, TaskDownloadOutputsResult, TaskResubmitUncertainParams, PetStoryCompiledPrompt, PetStoryPromptKind, PetStoryShot, PetStoryShotMedia } from '@doubao-studio/contracts';
+import type { DownloadJob, PetStoryAsset, PetStoryCapability, PetStoryChatJob, PetStoryExecutionGuard, PetStoryPlan, PetStoryProductionCounts, PetStoryProductionResult, PetStoryProductionStep, PetStoryProject, Task, TaskAddParams, TaskDownloadOutputsParams, TaskDownloadOutputsResult, TaskResubmitUncertainParams, PetStoryCompiledPrompt, PetStoryPromptKind, PetStoryShot, PetStoryShotMedia, PetStoryVideoReferenceRequest, PetStoryVideoReferenceContinuation } from '@doubao-studio/contracts';
 import { PetStoryProjects, projectPath } from './petstoryProject';
-import { compilePrompt, compileMaterialPrompt, checkPromptReferences, assetCharacterIds } from './petstoryPromptQuality';
+import { compilePrompt, compileMaterialPrompt, checkPromptReferences, assetCharacterIds, requiresNativeFirstLastSlots } from './petstoryPromptQuality';
 import { bindReferenceText } from './petstoryReferenceText';
 import { approvedMaterialHash, materialAsset, requireApprovedMaterials, requireMaterialInventory, requireMaterialPromptSource, requiredMaterialKeys } from './petstoryMaterials';
 import type { PetStoryPageBinding, PetStoryRuntimeTarget, PetStoryGenerationBlocker, PetStoryGenerationEligibilityResult, PetStoryModeResolution } from '@doubao-studio/contracts';
-import { finalTaskInput } from './petstoryChat';
-import { validatePetStoryPlan } from './petstoryValidation';
+import { boundaryStillCurrent, finalTaskInput, frameStillCurrent, hasSupersedingJob, runtimeContextStillCurrent } from './petstoryChat';
+import { runtimePromptIssues, validatePetStoryPlan } from './petstoryValidation';
 import { resolvePetStoryMode } from './petstoryModes';
 import { productionCapability } from './petstoryCapability';
 import { extractActualEndFrame, mediaDigest, validatePetStoryMedia } from './petstoryMedia';
-import { requirePromptEligibility, promptWritingTarget } from './petstoryEligibility';
+import { inspectPromptCandidate, promptContractFactsCurrent, requirePromptEligibility, promptWritingTarget } from './petstoryEligibility';
 import { pendingChatConflicts } from './petstoryPending';
-import { compileImageFeedback, imageTargetBasis, imageTargetMatches, isPetStoryImageAdopted, selectedShotImageId } from './petstoryImageReview';
+import { hasCurrentPromptReviewError } from './petstoryReview';
+import { PetStoryExistingMediaService } from './petstoryExistingMedia';
+import { compileImageFeedback, imageTargetBasis, imageTargetMatches, isPetStoryImageAdopted, selectedShotImageId, shotImageUnavailableReason } from './petstoryImageReview';
 
 /** 页面绑定属于本次上传文件与当前编译片段，不接受导出文本作为绑定证据。 */
-function validatePageBinding(p: PetStoryProject, step: PetStoryProductionStep, b: PetStoryPageBinding, index: number): void {
+function validatePageBinding(p: PetStoryProject, step: PetStoryProductionStep, b: PetStoryPageBinding, index: number, unifiedFrames: boolean): void {
   const ref = step.compiledPrompt?.references[index];
   // 附件未在正文显式引用时不凭空补 @；仍核对该文件预览、素材目标和零节点证据。
   const noTextReference = !!step.compiledPrompt?.segments
     && !step.compiledPrompt.segments.some((segment): boolean => 'referenceOrder' in segment && segment.referenceOrder === b.order)
     && b.occurrenceCount === 0 && b.nodeIds?.length === 0;
-      const slot = ref?.slot === 'first' ? 'first_frame' : ref?.slot === 'last' ? 'last_frame' : 'reference';
+      const slot = unifiedFrames ? 'reference' : ref?.slot === 'first' ? 'first_frame' : ref?.slot === 'last' ? 'last_frame' : 'reference';
       if (!/^(?:@图片[0-9]+|第 [0-9]+ 张图)$/.test(b.label) || (b.nodeId !== undefined && !/^[a-zA-Z0-9_:.=-]{1,160}$/.test(b.nodeId)) || b.assetId !== step.attachmentAssetIds[index] || b.order !== index + 1 || b.slot !== slot || !/^[a-f0-9]{64}$/.test(b.previewHash)
         || !['plain', 'mention', 'slot'].includes(b.reference) || b.label.length > 40 || (b.reference === 'mention' && !b.nodeId && !noTextReference)) throw new Error('页面素材／槽位／引用节点映射不符');
-  validateBindingEvidence(p, step, b, slot);
+  validateBindingEvidence(p, step, b, slot, unifiedFrames);
 
 }
 
-function validateBindingEvidence(p: PetStoryProject, step: PetStoryProductionStep, b: PetStoryPageBinding, slot: PetStoryPageBinding['slot']): void {
+function validateBindingEvidence(p: PetStoryProject, step: PetStoryProductionStep, b: PetStoryPageBinding, slot: PetStoryPageBinding['slot'], unifiedFrames: boolean): void {
       const source = step.compiledPrompt;
-      if (source?.segments) {
+      if (source?.segments || unifiedFrames) {
         const asset = p.assets.find((a): boolean => a.id === b.assetId);
         if (!asset?.validation || b.fileSha256 !== asset.validation.sha256 || !/^[a-f0-9]{64}$/.test(b.fileSha256)) throw new Error('本次真实上传文件摘要与确认素材不符');
         if ((slot === 'reference') === (b.reference === 'slot')) throw new Error('普通引用和首尾槽位不能互换');
         if (b.reference === 'mention' && (!b.targetId || !/^[a-zA-Z0-9_:.=-]{1,160}$/.test(b.targetId) || !b.nodeIds || b.nodeIds.some((id): boolean => !/^[a-zA-Z0-9_:.=-]{1,160}$/.test(id))
-          || b.occurrenceCount !== source.segments.filter((s): boolean => 'referenceOrder' in s && s.referenceOrder === b.order).length || b.nodeIds.length !== b.occurrenceCount)) throw new Error('每次原生引用的节点／素材目标证据不全');
+          || b.occurrenceCount !== source?.segments?.filter((s): boolean => 'referenceOrder' in s && s.referenceOrder === b.order).length || b.nodeIds.length !== b.occurrenceCount)) throw new Error('每次原生引用的节点／素材目标证据不全');
       }}
+
+/** 首尾用途与页面上传方式分别保存；统一上传只接受完整、有序的两张端图，不混入半组槽位。 */
+function usesUnifiedFrameBindings(step: PetStoryProductionStep, bindings: PetStoryPageBinding[]): boolean {
+  const source = step.compiledPrompt;
+  const unified = step.kind === 'video' && source?.resolvedMode === 'first_last_frame' && source.references.length === 2
+    && source.references[0].slot === 'first' && source.references[1].slot === 'last'
+    && bindings.length === 2 && bindings.every((binding): boolean => binding.slot === 'reference' && ['mention', 'plain'].includes(binding.reference));
+  if (unified && requiresNativeFirstLastSlots(source.final)) throw new Error('最终正文明确要求原生首尾帧槽，当前统一上传方式无法满足；原文和模式已保留，未提交');
+  return unified;
+}
+
+function validatePageBindings(p: PetStoryProject, step: PetStoryProductionStep, bindings: PetStoryPageBinding[]): void {
+  if (!Array.isArray(bindings) || bindings.length !== step.attachmentAssetIds.length) throw new Error('页面引用清单与本次运行不符');
+  if (new Set(bindings.map((binding): string => `${binding.slot}:${binding.previewHash}`)).size !== bindings.length
+    || new Set(bindings.map((binding): string => `${binding.slot}:${binding.label}`)).size !== bindings.length) throw new Error('多个文件指向同一页面素材或编号，禁止错绑');
+  const targets = bindings.flatMap((binding): string[] => binding.slot === 'reference' && binding.targetId ? [binding.targetId] : []);
+  if (new Set(targets).size !== targets.length) throw new Error('不同文件不能引用同一平台素材目标');
+  const unifiedFrames = usesUnifiedFrameBindings(step, bindings);
+  bindings.forEach((binding, index): void => validatePageBinding(p, step, binding, index, unifiedFrames));
+}
 
 type GenerationAdd = (code: PetStoryGenerationBlocker['code'], message: string, location?: Partial<PetStoryRuntimeTarget>) => void;
 type GenerationCheck = (code: PetStoryGenerationBlocker['code'], work: () => void | Promise<unknown>, location?: Partial<PetStoryRuntimeTarget>) => Promise<boolean>;
@@ -73,6 +96,26 @@ function hasSubmissionEvidence(task: Task): boolean {
   return !!(runtime?.submittedAt || runtime?.acceptanceObservation || runtime?.chatResponse || runtime?.chatReadback
     || runtime?.chatReadbackReview || runtime?.manualObservation || task.outputs.length || task.artifacts?.length);
 }
+/** 任何活跃租约、人工会话或重发关联都阻止清理原运行。 */
+function referenceRecoveryGuarded(task: Task, step: PetStoryProductionStep): boolean {
+  return !!(task.runtime?.chatAdjustmentGuard?.active
+    || task.lock && (!Number.isFinite(Date.parse(task.lock.expiresAt)) || Date.parse(task.lock.expiresAt) > Date.now())
+    || task.resubmissionOf !== undefined || task.resubmittedAs !== undefined || step.resubmissionHistory !== undefined);
+}
+function referenceVideoRecoveryRuntime(step: PetStoryProductionStep, task: Task, request: PetStoryVideoReferenceRequest): NonNullable<Task['runtime']> {
+  const runtime = task.runtime;
+  if (step.kind !== 'video' || step.shotId !== request.shotId || task.id !== request.taskId || step.runId !== request.runId || runtime?.runId !== request.runId
+    || step.inputHash !== request.inputHash || !['fail', 'paused', 'cancelled'].includes(task.status) || task.errorInfo?.code !== 'petstory_controls_unconfirmed'
+    || hasSubmissionEvidence(task) || runtime.stage === 'completed' || referenceRecoveryGuarded(task, step)) throw new Error('原视频不满足明确未提交的恢复条件，未改模式或发送');
+  return runtime;
+}
+function referenceVideoFrames(p: PetStoryProject, production: NonNullable<PetStoryProject['production']>, step: PetStoryProductionStep, request: PetStoryVideoReferenceRequest): { media: PetStoryShotMedia; shot: PetStoryShot } {
+  const media = requireValue(production.shots[request.shotId]); const shot = requireValue(p.plan?.shots.find((item): boolean => item.id === request.shotId));
+  if (media.resolvedMode !== 'first_last_frame' || shot.prompts.video.promptTask?.mode !== 'first_last_frame'
+    || request.firstFrameId !== selectedShotImageId(p, shot.id, 'firstFrame') || request.lastFrameId !== selectedShotImageId(p, shot.id, 'lastFrame')
+    || JSON.stringify(step.attachmentAssetIds) !== JSON.stringify([request.firstFrameId, request.lastFrameId]) || step.attachmentAssetIds.length !== 2) throw new Error('仅允许原生首尾任务当前已选的两张图片按原顺序改作参考图');
+  return { media, shot };
+}
 export function productionPlanHash(plan: PetStoryPlan): string {
   return hash({ ...plan, characters: plan.characters.map((c): object => ({ ...c, referenceAssetId: undefined })) });
 }
@@ -99,10 +142,49 @@ function productionStepTarget(step?: Pick<PetStoryProductionStep, 'materialId' |
 }
 function productionResumeTarget(production: NonNullable<PetStoryProject['production']>, pending?: PetStoryProductionStep): PetStoryRuntimeTarget | undefined { return production.target || productionStepTarget(pending); }
 function productionShotScope(production: NonNullable<PetStoryProject['production']>): string[] | undefined { return production.target ? [production.target.shotId] : undefined; }
+function needsContinuationFrame(shot: PetStoryShot, media: PetStoryShotMedia, shots: Record<string, PetStoryShotMedia>): boolean {
+  return shot.transition === 'continue' && (!media.actualEndFrameId || media.startFromPreviousEnd?.assetId !== shots[shot.previousShotId || '']?.videoId)
+    && !!shot.prompts.firstFrame.promptTask?.references.some((reference): boolean => reference.purpose === 'actualEndFrame');
+}
 function isFeedbackBase(p: PetStoryProject, asset: PetStoryAsset, operationId?: string): boolean {
   const operation = operationId ? p.imageOperations?.find((item): boolean => item.id === operationId && item.mode === 'modify') : undefined;
   return !!operation && p.production?.imageOperationId === operation.id && operation.baseAssetId === asset.id
     && operation.baseSha256 === asset.validation?.sha256 && imageTargetMatches(asset, operation.target);
+}
+/** 只读选择仍对应当前创作依据的回复；恢复文案不能引导采用或修复过期结果。 */
+function currentShotPromptReply(p: PetStoryProject, shot: PetStoryShot, kind: PetStoryPromptKind): PetStoryChatJob | undefined {
+  const job = [...p.jobs].reverse().find((item): boolean => item.shotId === shot.id && item.promptKind === kind
+    && ['optimize', 'revise', 'repair'].includes(item.kind) && item.originKind !== 'review');
+  if (!job || !p.mobileStory || job.endedWaitingAt || job.resultStatus === 'stale' || job.sourceStoryId !== p.mobileStory.id || hasSupersedingJob(p, job)) return undefined;
+  if (job.inputFinal !== undefined && job.inputFinal !== shot.prompts[kind]?.final || !frameStillCurrent(p, job) || !boundaryStillCurrent(p, job)) return undefined;
+  const current = job.promptTask?.designHash ? promptContractFactsCurrent(p, job) : job.contextHash === undefined || runtimeContextStillCurrent(p, job);
+  return current ? job : undefined;
+}
+function pendingShotPromptMessage(p: PetStoryProject, job: PetStoryChatJob, label: string, tasks: Task[]): string {
+  const task = tasks.find((item): boolean => item.id === job.taskId && item.mode === 'chat' && item.projectId === p.studioProjectId && item.assignedAccountId === p.accountId);
+  if (!task) return `${label}的原文字任务状态待同步，请检查原任务；不会重复提交。`;
+  if (task.errorInfo?.code === 'submission_uncertain') return `${label}的原文字任务是否受理尚未确认，请检查原结果；不会自动重发。`;
+  if (task.status === 'waiting_verification') return `${label}后台准备已暂停：请先完成原账号登录或人机验证。`;
+  if (['fail', 'paused', 'cancelled'].includes(task.status)) return `${label}后台准备已暂停：${task.errorInfo?.message || job.error || '原文字任务尚未完成'}。`;
+  if (task.status === 'queued' && task.executionIntent === 'hold') return `${label}文字任务等待继续；开始本镜制作后将接续原任务。`;
+  return `${label}正在后台准备并校验，校验通过后请确认使用。`;
+}
+function missingShotPromptMessage(p: PetStoryProject, shot: PetStoryShot, kind: PetStoryPromptKind, tasks: Task[]): string {
+  const label = { firstFrame: '首帧生图提示词', lastFrame: '尾帧编辑提示词', video: '视频提示词 / 运镜' }[kind];
+  const job = currentShotPromptReply(p, shot, kind);
+  if (job?.status === 'invalid') {
+    if (job.rawText && job.requestId && job.validationDetails?.length && job.validationDetails.every((issue): boolean => issue.repairable)) {
+      return `${label}尚未通过校验；开始本镜制作后，软件会在后台按原要求持续修订并校验，通过后请确认使用。`;
+    }
+    const reason = job.validationDetails?.find((issue): boolean => !issue.repairable)?.message || job.error || '原回复缺少可核验的归属或完整校验记录';
+    return `${label}后台准备已暂停：${reason}。请先查看豆包对话并核对原结果。`;
+  }
+  if (job?.status === 'applied' && job.resultStatus === 'candidate' && job.parsedResult?.optimized?.trim()
+    && inspectPromptCandidate(p, job).writingReady && !runtimePromptIssues(p, job, job.parsedResult.optimized).length) {
+    return `${label}已有待采用候选，请先在对应提示词节点“确认使用”，再生成媒体。`;
+  }
+  if (job && ['bound', 'captured'].includes(job.status)) return pendingShotPromptMessage(p, job, label, tasks);
+  return `${label}尚未准备；开始本镜制作后将先在后台准备并校验，通过后请确认使用。`;
 }
 function checkPlannedReferences(p: PetStoryProject, capability: PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): void {
   for (const shot of requireValue(p.plan).shots) {
@@ -164,17 +246,17 @@ export class PetStoryProductionService {
       for (const key of requiredMaterialKeys(p.plan, [shot.id])) await check('materials', (): void => { materialAsset(p, key); }, { materialId: key });
     }
     const media = this.shotMedia(p)[shot.id];
-    if (kind !== 'firstFrame' && !media.firstFrameId) add('firstFrame', '请先制作并完成本镜首帧。', { shotId: shot.id, promptKind: 'firstFrame' });
+    if (kind !== 'firstFrame' && !media.firstFrameId) add('firstFrame', shotImageUnavailableReason(p, shot.id, 'firstFrame'), { shotId: shot.id, promptKind: 'firstFrame' });
     if (kind === 'video' && capability) {
       await check('capability', (): void => { resolution = resolvePetStoryMode(shot, capability, fallbacks[shot.id]); });
-      if (resolution?.resolvedMode === 'first_last_frame' && !media.plannedEndImageId) add('lastFrame', '本镜使用首尾帧模式，请先制作本镜尾帧。', { shotId: shot.id, promptKind: 'lastFrame' });
+      if (resolution?.resolvedMode === 'first_last_frame' && !media.plannedEndImageId) add('lastFrame', shotImageUnavailableReason(p, shot.id, 'lastFrame'), { shotId: shot.id, promptKind: 'lastFrame' });
     }
     const mode = kind === 'video' ? resolution?.resolvedMode || promptWritingTarget(p, target).mode : undefined;
     const promptValid = await check('prompt', (): void => {
-      if (!prompt?.final.trim()) throw new Error('本节点尚无当前使用的提示词，请先生成并采用。');
+      if (!prompt?.final.trim()) throw new Error(missingShotPromptMessage(p, shot, kind, this.tasks.list()));
       requirePromptEligibility(p, prompt, { shotId: shot.id, promptKind: kind, mode, model: capability?.videoConfig?.model });
     });
-    const needsActualEnd = kind === 'firstFrame' && shot.transition === 'continue' && !media.actualEndFrameId && prompt?.promptTask?.references.some((ref): boolean => ref.purpose === 'actualEndFrame');
+    const needsActualEnd = kind === 'firstFrame' && needsContinuationFrame(shot, media, this.shotMedia(p));
     if (needsActualEnd) {
       // 实际提取只在用户授权生成后发生；查询仅验证正式提取将读取的前镜真实视频。
       const previous = this.shotMedia(p)[shot.previousShotId || ''];
@@ -199,7 +281,7 @@ export class PetStoryProductionService {
     return Object.fromEntries((p.plan?.shots || []).map((shot): [string, PetStoryShotMedia] => {
       const prior = [p.production, ...(p.productionHistory || []).slice().reverse()].find((run): boolean => !!run?.shots[shot.id])?.shots[shot.id];
       const latest = (kind: PetStoryAsset['kind']): string | undefined => [...p.assets].reverse().find((asset): boolean => asset.shotId === shot.id && asset.kind === kind)?.id;
-      return [shot.id, { requestedMode: shot.requestedMode, resolvedMode: prior?.resolvedMode || (shot.requestedMode === 'auto' ? 'reference' : shot.requestedMode), reason: prior?.reason || '仅图片节点授权，视频实际模式尚未确认', firstFrameId: selectedShotImageId(p, shot.id, 'firstFrame'), plannedEndImageId: selectedShotImageId(p, shot.id, 'lastFrame'), videoId: prior?.videoId || latest('video'), actualEndFrameId: prior?.actualEndFrameId, startFromPreviousEnd: prior?.startFromPreviousEnd }];
+      return [shot.id, { requestedMode: shot.requestedMode, resolvedMode: prior?.resolvedMode || (shot.requestedMode === 'auto' ? 'reference' : shot.requestedMode), reason: prior?.reason || '仅图片节点授权，视频实际模式尚未确认', firstFrameId: selectedShotImageId(p, shot.id, 'firstFrame'), plannedEndImageId: selectedShotImageId(p, shot.id, 'lastFrame'), videoId: p.selectedVideos?.[shot.id] || prior?.videoId || latest('video'), actualEndFrameId: prior?.actualEndFrameId, startFromPreviousEnd: prior?.startFromPreviousEnd }];
     }));
   }
   async preview(id: string, capability: PetStoryCapability | undefined = undefined, fallbacks: Record<string, 'first_frame' | 'reference'> = {}): Promise<PetStoryProductionResult> {
@@ -238,30 +320,33 @@ export class PetStoryProductionService {
     return { success: true, project: p, counts };
   }
   /** 每次只授权点击的媒体节点；缺少前置素材直接停止，不暗中补生成。 */
-  async generateShotMedia(id: string, revision: number, shotId: string, kind: PetStoryPromptKind, capability: PetStoryCapability | undefined = undefined, fallbacks: Record<string, 'first_frame' | 'reference'> = {}): Promise<PetStoryProductionResult> {
+  async generateShotMedia(id: string, revision: number, shotId: string, kind: PetStoryPromptKind, capability: PetStoryCapability | undefined = undefined, fallbacks: Record<string, 'first_frame' | 'reference'> = {}, imageOperationId?: string): Promise<PetStoryProductionResult> {
     let p = await this.projects.read(id);
     capability = productionCapability(p, capability);
     if (p.revision !== revision) throw new Error('项目版本已变化，请重新查看节点');
     if (!['firstFrame', 'lastFrame', 'video'].includes(kind)) throw new Error('媒体节点类型无效');
+    if (imageOperationId && (kind === 'video' || !p.imageOperations?.some((operation): boolean => operation.id === imageOperationId
+      && operation.mode === 'generate' && operation.target.shotId === shotId && operation.target.kind === kind))) throw new Error('图片节点与本次操作授权不一致');
     const shot = p.plan?.shots.find((s): boolean => s.id === shotId);
-    if (!shot || !shot.prompts[kind]?.final.trim()) throw new Error('镜头或最终提示词不存在');
+    if (!shot) throw new Error('镜头不存在或已不属于当前方案，请刷新后重新选择。');
+    if (!shot.prompts[kind]?.final.trim()) throw new Error(missingShotPromptMessage(p, shot, kind, this.tasks.list()));
     if (p.production && p.production.state !== 'complete') throw new Error('请先处理原制作任务，不重复创建节点任务');
     this.validateRequestContext(p, capability, { shotId, promptKind: kind });
     await this.checkApprovedFiles(p, [shotId]);
     // 图片节点不要求先确认尚未使用的视频入口；这里的模式仅留作未授权占位。
     const shots = this.shotMedia(p);
     const media = shots[shotId];
-    if (kind === 'firstFrame' && shot.transition === 'continue' && !media.actualEndFrameId && shot.prompts.firstFrame.promptTask?.references.some((ref): boolean => ref.purpose === 'actualEndFrame')) {
+    if (kind === 'firstFrame' && needsContinuationFrame(shot, media, shots)) {
       requirePromptEligibility(p, shot.prompts.firstFrame, { shotId, promptKind: kind });
       await this.prepareContinuationFrame(p, shot, shots);
     }
-    if (kind !== 'firstFrame' && !media.firstFrameId) throw new Error('请先明确点击生成并完成本镜首帧；本操作不会自动生成图片');
+    if (kind !== 'firstFrame' && !media.firstFrameId) throw new Error(shotImageUnavailableReason(p, shot.id, 'firstFrame'));
     if (kind === 'video') {
       Object.assign(media, resolvePetStoryMode(shot, capability, fallbacks[shot.id]));
-      if (media.resolvedMode === 'first_last_frame' && !media.plannedEndImageId) throw new Error('原生首尾帧视频需要实际首帧和尾帧；请先分别生成图片');
+      if (media.resolvedMode === 'first_last_frame' && !media.plannedEndImageId) throw new Error(shotImageUnavailableReason(p, shot.id, 'lastFrame'));
     }
     if (p.production) p.productionHistory = [...(p.productionHistory || []), p.production];
-    p.production = { phase: 'shots', target: { shotId, kind }, materialHash: approvedMaterialHash(p, [shotId]), state: 'running', planHash: productionPlanHash(requireValue(p.plan)), approvedAt: new Date().toISOString(), capability, fallbacks, shots, steps: [], message: `仅授权 ${shot.order} 镜 ${kind}，完成后停止` };
+    p.production = { phase: 'shots', target: { shotId, kind }, imageOperationId, materialHash: approvedMaterialHash(p, [shotId]), state: 'running', planHash: productionPlanHash(requireValue(p.plan)), approvedAt: new Date().toISOString(), capability, fallbacks, shots, steps: [], message: `仅授权 ${shot.order} 镜 ${kind}，完成后停止` };
     // 用原编译器核对本项前置与 final，在任何任务创建前失败即停止。
     const compiled = compilePrompt(p, shotId, kind, kind === 'video' ? media.resolvedMode : undefined);
     await Promise.all(compiled.references.map((r): Promise<string> => this.assetFile(p, r.assetId, 'image')));
@@ -303,6 +388,49 @@ export class PetStoryProductionService {
     const saved = await this.projects.write(p);
     this.authorized.add(id);
     return { success: true, project: saved };
+  }
+  private async resumeAuthorizedReferenceVideo(id: string, p: PetStoryProject, request: PetStoryVideoReferenceRequest, existing: PetStoryVideoReferenceContinuation): Promise<PetStoryProductionResult> {
+    const production = requireValue(p.production);
+    if (existing.authorizationId !== request.authorizationId || existing.taskId !== request.taskId || existing.originalRunId !== request.runId
+      || existing.firstFrameId !== request.firstFrameId || existing.lastFrameId !== request.lastFrameId || hash(existing.sourceCompiledPrompt.text) !== request.inputHash) throw new Error('已有两参考图授权，请继续原任务，不重复授权');
+    const step = requireValue(referenceContinuationStep(production, request.shotId, existing));
+    const task = this.originalTask(p, step);
+    // 原两图授权不再次授权后续明确重发；仅返回已有的关联任务。
+    if (step.taskId !== existing.taskId) return { success: true, project: p, taskId: task.id, action: 'wait' };
+    // 授权落盘后的失败允许接续同一个 hold；新运行、发送证据或执行状态只回读，绝不再次清理运行。
+    if (task.runtime?.runId !== existing.originalRunId || hasSubmissionEvidence(task) || !['queued', 'fail', 'paused', 'cancelled'].includes(task.status)) return { success: true, project: p, taskId: existing.taskId, action: 'wait' };
+    if (!currentReferenceContinuation(p, request.shotId) || referenceRecoveryGuarded(task, step)) throw new Error('原两参考图授权或任务状态已变化，未重新发送');
+    await this.validateStepInputs(p, step, task);
+    return this.resume(id, production.capability);
+  }
+  /** 用户明确把本次未发送的原生首尾图改作两张参考图；不改正文、不换模型、不新建图片或任务。 */
+  async resumeReferenceVideo(id: string, revision: number, request: PetStoryVideoReferenceRequest): Promise<PetStoryProductionResult> {
+    const p = await this.projects.read(id); const production = this.checked(p);
+    if (!request || request.useExistingFrames !== true || !/^[a-zA-Z0-9_-]{8,100}$/.test(request.authorizationId || '')) throw new Error('请明确授权仅用已有首尾两图作为参考图继续');
+    const existing = production.referenceContinuations?.[request.shotId];
+    if (existing) return this.resumeAuthorizedReferenceVideo(id, p, request, existing);
+    if (p.revision !== revision || production.state !== 'paused') throw new Error('原制作状态已变化，请重新查看当前任务');
+    const step = requireValue(production.steps.find((item): boolean => item.status !== 'complete'), '原制作步骤已经结束');
+    const task = this.originalTask(p, step); const runtime = referenceVideoRecoveryRuntime(step, task, request);
+    const { media, shot } = referenceVideoFrames(p, production, step, request);
+    const capability = productionCapability(p, production.capability);
+    if (!task.videoConfig?.model || capability.videoConfig?.model !== task.videoConfig.model || capability.videoConfig.aspectRatio !== task.videoConfig.aspectRatio) throw new Error('当前模型或比例与原任务不一致，不能借此授权更换参数');
+    this.validateRequestContext(p, capability, { shotId: shot.id, promptKind: 'video' });
+    await this.validateStepInputs(p, step, task);
+    const source = requireValue(step.compiledPrompt, '原编译正文缺失');
+    if (step.pageBindings || source.references.length !== 2 || source.text !== task.prompt || source.final !== shot.prompts.video.final) throw new Error('原输入已有网页绑定或正文已变化，不能按本次两图授权改配');
+    production.referenceContinuations = { ...production.referenceContinuations, [shot.id]: { authorizationId: request.authorizationId, authorizedAt: new Date().toISOString(), shotId: shot.id,
+      taskId: task.id, originalRunId: runtime.runId, firstFrameId: request.firstFrameId, lastFrameId: request.lastFrameId,
+      firstSha256: requireValue(p.assets.find((asset): boolean => asset.id === request.firstFrameId)?.validation?.sha256), lastSha256: requireValue(p.assets.find((asset): boolean => asset.id === request.lastFrameId)?.validation?.sha256),
+      model: task.videoConfig.model, finalHash: referenceContinuationHash(shot.prompts.video.final), promptTaskHash: referenceContinuationHash(shot.prompts.video.promptTask),
+      sourceCompiledPrompt: structuredClone(source), sourceRuntime: structuredClone(runtime), sourceError: task.errorInfo ? structuredClone(task.errorInfo) : undefined } };
+    production.fallbacks[shot.id] = 'reference'; media.resolvedMode = 'reference'; media.reason = '用户明确授权已有首帧与尾帧作为两张普通参考图；不保证原生首尾帧约束';
+    const compiled = compilePrompt(p, shot.id, 'video', 'reference');
+    if (compiled.text !== source.text || compiled.references.length !== 2 || JSON.stringify(compiled.references.map((reference): string => reference.assetId)) !== JSON.stringify(step.attachmentAssetIds)
+      || compiled.references.some((reference): boolean => reference.slot !== undefined)) throw new Error('两参考图编译改变了原全文或图片清单，未发送');
+    step.compiledPrompt = compiled; production.capability = capability;
+    await this.projects.write(p);
+    return this.resume(id, capability);
   }
   /** 不明提交只能由用户针对原运行另行授权；新 hold 任务绑定成功后才进入正式调度。 */
   async resubmit(id: string, revision: number, request: TaskResubmitUncertainParams, capability?: PetStoryCapability): Promise<PetStoryProductionResult> {
@@ -454,12 +582,9 @@ export class PetStoryProductionService {
     const p = await this.projects.read(id); const production = this.checked(p);
     const step = production.steps.find((s): boolean => s.taskId === taskId && s.runId === runId && s.status === 'bound');
     if (!step || !Array.isArray(bindings) || bindings.length !== step.attachmentAssetIds.length) throw new Error('页面引用清单与本次运行不符');
-    if (new Set(bindings.map((b): string => `${b.slot}:${b.previewHash}`)).size !== bindings.length || new Set(bindings.map((b): string => `${b.slot}:${b.label}`)).size !== bindings.length) throw new Error('多个文件指向同一页面素材或编号，禁止错绑');
-    const targets = bindings.flatMap((b): string[] => b.slot === 'reference' && b.targetId ? [b.targetId] : []);
-    if (new Set(targets).size !== targets.length) throw new Error('不同文件不能引用同一平台素材目标');
     const task = this.originalTask(p, step);
     if (task.runtime?.submittedAt) throw new Error('已提交的网页绑定快照不可改写');
-    bindings.forEach((binding, index): void => validatePageBinding(p, step, binding, index));
+    validatePageBindings(p, step, bindings);
     if (step.pageBindings) throw new Error('本次网页绑定已经固定，不能重复改写');
     const source = requireValue(step.compiledPrompt, '原编译输入缺失');
     const compiled = bindReferenceText(source, bindings);
@@ -473,10 +598,10 @@ export class PetStoryProductionService {
   async assetFile(p: PetStoryProject, id: string, kind: 'image' | 'video', feedbackOperationId?: string): Promise<string> {
     const asset = p.assets.find((a): boolean => a.id === id);
     if (!asset || (kind === 'video' ? asset.kind !== 'video' : asset.kind === 'video')) throw new Error('素材未登记或类别不符');
-    if (kind === 'image' && !isPetStoryImageAdopted(p, asset) && !isFeedbackBase(p, asset, feedbackOperationId)) throw new Error('这张图片尚未采用或需要复核，请先预览确认');
+    if (kind === 'image' && !isPetStoryImageAdopted(p, asset) && !isFeedbackBase(p, asset, feedbackOperationId)) throw new Error('这张图片尚未采用或当前文件确认无效，请先查看图片并明确采用');
     if (kind === 'video') {
       const step = [p.production, ...(p.productionHistory || [])].flatMap((r): PetStoryProductionStep[] => r?.steps || []).find((s): boolean => s.kind === 'video' && s.assetId === asset.id && s.status === 'complete');
-      const task = step ? this.originalTask(p, step) : undefined;
+      const task = step ? this.originalTask(p, step) : await new PetStoryExistingMediaService(this.projects, this.tasks).linkedVideoTask(p, asset);
       const artifact = task?.artifacts?.find((a): boolean => a.id === asset.artifactId && a.runId === asset.runId && a.kind === 'video');
       if (!task || task.status !== 'done' || !artifact || !task.outputs.includes(artifact.url) || ['expired', 'invalid'].includes(artifact.validation?.state || '')) throw new Error('选中视频的原任务或产物已过期、未选中或归属无效');
     }
@@ -537,6 +662,7 @@ export class PetStoryProductionService {
   }
   private validateCompiledStep(p: PetStoryProject, step: PetStoryProductionStep, task: Task): void {
     const production = this.checked(p);
+    if (step.pageBindings) validatePageBindings(p, step, step.pageBindings);
     const feedback = p.imageOperations?.find((item): boolean => item.id === production.imageOperationId && item.mode === 'modify');
     if (feedback) {
       const source = compileImageFeedback(p, feedback);
@@ -694,6 +820,14 @@ export class PetStoryProductionService {
     const final = input.prompts[0];
     if (!final || /@(?:Image|Video|Audio)\b/i.test(final)) throw new Error('最终提示词为空或含未验证引用语法');
     checkProductionReferences(final, p, assetIds);
+    const videoPrompt = target.kind === 'video' ? p.plan?.shots.find((shot): boolean => shot.id === target.shotId)?.prompts.video : undefined;
+    // 本次正文与实际输入已通过正式编译；清理旧泛标记，避免新成果继续被误报待复核。
+    if (videoPrompt?.needsReview && compiledPrompt?.kind === 'video' && compiledPrompt.final === videoPrompt.final
+      && !hasCurrentPromptReviewError(p, videoPrompt, { shotId: target.shotId, promptKind: 'video' })) {
+      videoPrompt.needsReview = undefined;
+      // checked已验证原快照；仅同步本次已核对的标记变化，不改历史文字合同或任务输入。
+      production.planHash = productionPlanHash(requireValue(p.plan));
+    }
     const step: PetStoryProductionStep = { ...target, id: randomUUID(), inputHash: hash(final), attachmentAssetIds: assetIds, compiledPrompt, status: 'preparing' };
     production.steps.push(step); production.message = `${target.characterId || target.shotId} · ${target.kind}`;
     // 创建前先登记意图；两文件写入间退出时宁可停下核对，不自动多建一次。
@@ -780,10 +914,15 @@ export class PetStoryProductionService {
       }
       if (!asset) continue;
       p.assets.push(asset); firstAssetId ||= asset.id;
-      if (kind === 'video') { this.checked(p).shots[requireValue(step.shotId)].videoId = asset.id; break; }
+      if (kind === 'video') break;
     }
     if (firstAssetId) {
       step.assetId = firstAssetId; step.status = 'complete'; step.error = undefined;
+      if (kind === 'video') {
+        const shotId = requireValue(step.shotId);
+        this.checked(p).shots[shotId].videoId = firstAssetId;
+        p.selectedVideos = { ...p.selectedVideos, [shotId]: firstAssetId };
+      }
       if (kind === 'image' && this.checked(p).phase !== 'materials') {
         const production = this.checked(p);
         production.state = production.target ? 'complete' : 'paused';

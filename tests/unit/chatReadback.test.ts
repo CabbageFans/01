@@ -48,6 +48,33 @@ describe('PetStory creation receipts', (): void => {
     const changed = page([{ role: 'user', text: `生成视频：${prompt}，另加角色，9:16，5s` }, answer]);
     expect(inspectCreationReadback(changed, prompt, 'video', 0, config).promptPublished).toBe(false);
   });
+  it('accepts the observed fixed 720p creation suffix only around the full original prompt and exact parameters', (): void => {
+    const config = { aspectRatio: '9:16', duration: '5s' };
+    const snapshot = page([{ role: 'user', text: `生成视频：${prompt}，9:16，5s，720p` }, answer]);
+    expect(inspectCreationReadback(snapshot, prompt, 'video', 0, config).promptPublished).toBe(true);
+    expect(inspectChatReadback(snapshot, prompt, 0).promptPublished).toBe(false);
+    expect(inspectCreationReadback(snapshot, prompt, 'image', 0).promptPublished).toBe(false);
+    for (const cfg of [undefined, { ...config, duration: '10s' }, { ...config, aspectRatio: '16:9' }]) {
+      expect(inspectCreationReadback(snapshot, prompt, 'video', 0, cfg).promptPublished).toBe(false);
+    }
+    for (const text of [
+      `生成视频：${prompt}，9:16，5s，1080p`, `生成视频：${prompt}，9:16，5s，720p，追加要求`,
+      `生成视频：${prompt}，另加角色，9:16，5s，720p`, `生成视频：${prompt.slice(0, -1)}，9:16，5s，720p`,
+      `生成视频：${prompt}，16:9，5s，720p`, `生成视频：${prompt}，9:16，10s，720p`,
+      `生成视频：${prompt}，720p，9:16，5s`, `前文生成视频：${prompt}，9:16，5s，720p`,
+    ]) expect(inspectCreationReadback(page([{ role: 'user', text }, answer]), prompt, 'video', 0, config).promptPublished).toBe(false);
+  });
+  it('the 720p receipt keeps original attachment turn, unique prompt, baseline and recorded confirmation boundaries', (): void => {
+    const config = { aspectRatio: '9:16', duration: '5s' };
+    const original = { role: 'user' as const, text: `生成视频：${prompt}，9:16，5s，720p`, turnId: 'TEST-original' };
+    const attachment = { role: 'user' as const, text: '', attachmentOnly: true, turnId: 'TEST-original' };
+    const confirmed = page([attachment, original, answer, { role: 'user', text: '确认' }, answer]);
+    expect(inspectCreationReadback(confirmed, prompt, 'video', 0, config, true)).toMatchObject({ promptPublished: true, confirmationPublished: true });
+    expect(inspectCreationReadback(confirmed, prompt, 'video', 0, config).promptPublished).toBe(false);
+    expect(inspectCreationReadback(page([{ ...attachment, turnId: 'TEST-other' }, original, answer]), prompt, 'video', 0, config).promptPublished).toBe(false);
+    expect(inspectCreationReadback(page([original, answer, original, answer]), prompt, 'video', 0, config).promptPublished).toBe(false);
+    expect(inspectCreationReadback(page([original, answer]), prompt, 'video', 2, config).promptPublished).toBe(false);
+  });
   it('accepts the observed image wrapper only around a unique, exact published prompt', (): void => {
     const snapshot = page([{ role: 'user', text: `生成图片：${prompt}` }, answer]);
     expect(inspectCreationReadback(snapshot, prompt, 'image', 0).promptPublished).toBe(true);
@@ -248,7 +275,7 @@ describe('ordinary Chat message-scoped readback', (): void => {
   it('executes the actual serialized guest probe and excludes unrelated body content', async (): Promise<void> => {
     const messageNode = (role: string, text: string): object => ({
       getAttribute: (name: string): string | null => name === 'data-testid' ? role : null,
-      querySelector: (): object => ({ textContent: text }),
+      querySelector: (selector: string): object | null => selector === '[data-testid="message_text_content"]' ? { textContent: text } : null,
       querySelectorAll: (): object[] => [],
     });
     const doc = {

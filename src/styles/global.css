@@ -764,6 +764,14 @@ button:focus-visible,a:focus-visible,summary:focus-visible,[role=button]:focus-v
 .page-heading p { color:var(--studio-muted); font-size:13px; margin:0; }
 .page-hidden { display:none !important; }
 .page-fill { min-width:0; }
+/* 画布阶段沿完整父子链分配剩余高度，不挤占其他页面的滚动。 */
+.workspace-content.is-canvas-workspace { display:flex; flex-direction:column; min-height:0; overflow:hidden; padding:8px 12px 12px; }
+.page-fill.is-canvas-workspace { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; overflow:hidden; }
+.petstory-panel.is-canvas-workspace { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; overflow:hidden; gap:0; }
+.petstory-panel.is-canvas-workspace > .journey-sticky { flex:none; padding:0; margin:0; }
+.petstory-panel.is-canvas-workspace .journey-sticky .petstory-stages { margin:0; }
+.petstory-panel.is-canvas-workspace .journey-sticky .petstory-stages button { flex:1 1 0; min-width:100px; padding:9px 6px; }
+.petstory-panel.is-canvas-workspace > .canvas-stage-content { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; overflow:hidden; margin:0; }
 .workspace-card { padding:22px; border:1px solid var(--studio-border); border-radius:12px; background:var(--studio-panel); min-width:0; }
 .workspace-card h2 { font-size:15px; font-weight:600; margin:0; color:var(--studio-text); }
 .workspace-card h3 { font-size:16px; font-weight:600; margin:0 0 12px; }

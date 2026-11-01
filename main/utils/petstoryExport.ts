@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type { PetStoryCompiledPrompt, PetStoryPageBinding, PetStoryProject, PetStoryPrompt, PetStoryPromptKind, PetStoryResolvedMode, PetStoryMaterial, PetStoryShot, PetStoryProductionStep, Task } from '@doubao-studio/contracts';
 import { compileMaterialPrompt, compilePrompt, PROMPT_RULES_VERSION } from './petstoryPromptQuality';
 import { inspectPromptEligibility, type PromptEligibility } from './petstoryEligibility';
-import { reviewMatchesPrompt } from './petstoryReview';
+import { hasCurrentPromptReviewError, reviewMatchesPrompt } from './petstoryReview';
 
 export interface PromptExportEntry {
   id: string;
@@ -52,7 +52,7 @@ function failedRevisionsFor(p: PetStoryProject, prompt: PetStoryPrompt, target: 
     .map((job): PromptFailedRevision => ({ jobId: job.id, requestId: job.requestId, reasons: job.validationIssues?.length ? job.validationIssues : job.error ? [job.error] : [], candidatePreserved: !!job.rawText })) : [];
 }
 function reviewErrorsFor(p: PetStoryProject, prompt: PetStoryPrompt, target: PromptExportTarget): PromptReviewErrors[] {
-  if (!prompt.needsReview || prompt.edited || prompt.optimized && prompt.optimized !== prompt.final) return [];
+  if (!prompt.needsReview || prompt.edited) return [];
   const key = target.materialId || (target.shotId && target.promptKind ? `${target.shotId}:${target.promptKind}` : undefined);
   return p.jobs.filter((job): boolean => {
     const review = job.kind === 'review' || job.kind === 'repair' && p.jobs.some((parent): boolean => parent.id === job.parentJobId && parent.kind === 'review');
@@ -80,6 +80,7 @@ function exportCandidate(p: PetStoryProject, prompt: PetStoryPrompt, target: Pro
   return undefined;
 }
 function reviewWarnings(p: PetStoryProject, prompt: PetStoryPrompt, target: PromptExportTarget): string[] {
+  if (target.promptKind === 'video' && !hasCurrentPromptReviewError(p, prompt, target)) return [];
   return prompt.needsReview ? ['当前采用正文待复核；以下仅为保留的计划预览，不可直接提交。', ...failedRevisionsFor(p, prompt, target).map((job): string => `修订 ${job.jobId} 未通过：${job.reasons.join('；') || '具体原因见原任务记录'}。失败候选未采用。`),
     ...reviewErrorsFor(p, prompt, target).map((job): string => `审查 ${job.jobId} 报告当前正文 error：${job.issues.map((issue): string => issue.evidence).join('；')}`)] : [];
 }
@@ -88,7 +89,7 @@ function materialEntry(p: PetStoryProject, m: PetStoryMaterial): PromptExportEnt
   const entities = m.kind === 'character' ? p.plan?.characters : m.kind === 'prop' ? p.plan?.props : p.plan?.scenes;
   const entity = entities?.find((value): boolean => value.id === m.entityId);
   const warnings = [...checked.warnings, ...reviewWarnings(p, m.prompt, { materialId: m.id })];
-  const eligibility = inspectPromptEligibility(p, m.prompt, { materialId: m.id, currentReferences: checked.compiled?.references });
+  const eligibility = inspectPromptEligibility(p, m.prompt, { materialId: m.id, currentReferences: checked.compiled?.references }, 'current');
   if (!checked.compiled && eligibility.state !== 'creative_plan') eligibility.state = 'needs_revision';
   warnings.push(...eligibility.reasons);
   if (!m.approved) warnings.push('具体图片尚未接受，不能用于镜头生产。');
@@ -102,7 +103,7 @@ function shotEntry(p: PetStoryProject, shot: PetStoryShot, kind: PetStoryPromptK
   if (!prompt) return [];
   const mode: PetStoryResolvedMode | undefined = p.production?.shots[shot.id]?.resolvedMode || (shot.requestedMode === 'auto' ? undefined : shot.requestedMode);
   const checked = preview((): PetStoryCompiledPrompt => compilePrompt(p, shot.id, kind, kind === 'video' ? mode : undefined, true));
-  const eligibility = inspectPromptEligibility(p, prompt, { shotId: shot.id, promptKind: kind, mode, currentReferences: checked.compiled?.references });
+  const eligibility = inspectPromptEligibility(p, prompt, { shotId: shot.id, promptKind: kind, mode, currentReferences: checked.compiled?.references }, 'current');
   if (!checked.compiled && eligibility.state !== 'creative_plan') eligibility.state = 'needs_revision';
   checked.warnings.push(...eligibility.reasons);
   checked.warnings.push(...reviewWarnings(p, prompt, { shotId: shot.id, promptKind: kind }));

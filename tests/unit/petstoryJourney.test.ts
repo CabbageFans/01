@@ -103,23 +103,39 @@ describe('六阶段与实际成果的只读导航投影', (): void => {
     p.production.shots[shot.id] = { requestedMode: 'first_frame', resolvedMode: 'first_frame', reason: 'TEST', firstFrameId: 'TEST-missing-file' };
     expect(journeyShotAsset(p, shot, 'firstFrame')).toBeUndefined();
   });
+  it('明确关联的视频选择覆盖当前与历史批次指针，后续普通导入不抢走选择', (): void => {
+    const p = project(); const shot = p.plan!.shots[0]; const original = asset(p, 0, 'video');
+    const linked = { ...original, id: 'TEST-linked-video', origin: 'historical_task' as const };
+    const later = { ...original, id: 'TEST-later-video' }; p.assets.push(original, linked, later);
+    p.production = production(); p.production.shots[shot.id] = { requestedMode: shot.requestedMode, resolvedMode: 'reference', reason: 'TEST', videoId: original.id };
+    p.selectedVideos = { [shot.id]: linked.id };
+    expect(journeyShotAsset(p, shot, 'video')?.id).toBe(linked.id);
+    p.productionHistory = [p.production]; p.production = undefined;
+    expect(journeyShotAsset(p, shot, 'video')?.id).toBe(linked.id);
+    p.selectedVideos[shot.id] = 'TEST-missing-video';
+    expect(journeyShotAsset(p, shot, 'video')).toBeUndefined();
+    delete p.selectedVideos;
+    expect(journeyShotAsset(p, shot, 'video')?.id).toBe(original.id);
+  });
   it('明确改为首尾帧后，历史首帧模式不隐藏当前尾帧需求', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; shot.requestedMode = 'first_last_frame'; p.production = production();
     p.production.shots[shot.id] = { requestedMode: 'first_frame', resolvedMode: 'first_frame', reason: 'TEST 历史模式' };
     const projected = selectPetStoryJourney(p).shots[0]; expect(projected.requiresLastFrame).toBe(true); expect(projected.missing).toContain('缺尾帧');
     shot.requestedMode = 'auto'; expect(selectPetStoryJourney(p).shots[0].requiresLastFrame).toBe(false);
   });
-  it('用户上传并采用的图片不依赖生成提示词，但待复核仍明确缺项', (): void => {
+  it('用户上传并采用的图片不依赖生成提示词或历史复核标记，文件指纹仍须一致', (): void => {
     const p = project(); const image = asset(p, 0, 'firstFrame'); delete image.taskId; delete image.runId; delete image.generationFinal;
     adoptFrame(p, image); p.assets.push(image);
     expect(journeyAssetMatchesPrompt(image, undefined)).toBe(true);
-    image.needsReview = true; expect(journeyAssetMatchesPrompt(image, undefined)).toBe(false);
+    image.needsReview = true; expect(journeyAssetMatchesPrompt(image, undefined)).toBe(true);
+    image.imageReview!.sha256 = 'TEST-changed'; expect(journeyAssetMatchesPrompt(image, undefined)).toBe(false);
   });
   it('自由Chat具体回复图片明确采用后可作为当前图，仍保留真实会话来源而不伪造生成正文', (): void => {
     const p = project(); const image = asset(p, 0, 'firstFrame'); delete image.generationFinal; adoptFrame(p, image);
     image.imageReview!.sourceReply = { adjustmentId: 'TEST-adjustment', replyKey: 'TEST-reply', urlHash: 'TEST-url' }; p.assets.push(image);
     expect(image.taskId).toBeDefined(); expect(journeyAssetMatchesPrompt(image, undefined)).toBe(true);
-    image.needsReview = true; expect(journeyAssetMatchesPrompt(image, undefined)).toBe(false);
+    image.needsReview = true; expect(journeyAssetMatchesPrompt(image, undefined)).toBe(true);
+    delete image.imageReview!.adoptedAt; expect(journeyAssetMatchesPrompt(image, undefined)).toBe(false);
   });
   it('所有当前文件已具备后才推荐查看成果，质量结论独立计算', (): void => {
     const p = project(); confirmedMaterial(p);

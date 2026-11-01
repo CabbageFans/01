@@ -12,6 +12,7 @@ import { productionCapability } from '../../main/utils/petstoryCapability';
 import { PetStoryImageOperationService } from '../../main/utils/petstoryImageOperations';
 import { mediaCommand } from '../../main/utils/petstoryMedia';
 import { compileImageFeedback } from '../../main/utils/petstoryImageReview';
+import { compilePrompt } from '../../main/utils/petstoryPromptQuality';
 import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 import snapshot from '../fixtures/storyboard-five-shots.json';
 
@@ -72,6 +73,21 @@ async function finishOperation(operationId: string): Promise<string> {
   for (let i = 0; i < 3; i++) { const result = await operations.advance(p.id, operationId); expect(result.success, result.error).toBe(true); p = result.project!; }
   const operation = p.imageOperations!.find((item): boolean => item.id === operationId)!;
   expect(operation.stage).toBe('complete'); return operation.outputAssetId!;
+}
+/** 只准备原故事中已有的正文及用户已确认的本地图片，不创建任何平台文字／媒体任务。 */
+async function prepareShotGeneration(kind: 'firstFrame' | 'lastFrame', adoptFirst = true): Promise<PetStoryImageTarget> {
+  for (const material of p.materials!) {
+    p = await projects.addMaterialImage(p.id, p.revision, material.id, red);
+    p = await projects.adoptImage(p.id, p.revision, { materialId: material.id }, p.assets.at(-1)!.id);
+  }
+  const shot = kind === 'firstFrame' ? p.plan!.shots[0] : p.plan!.shots.find((item): boolean => !!item.prompts.lastFrame)!;
+  const target: PetStoryImageTarget = { shotId: shot.id, kind };
+  if (kind === 'lastFrame' && adoptFirst) {
+    p = await projects.addShotImage(p.id, p.revision, shot.id, 'firstFrame', red);
+    p = await projects.adoptImage(p.id, p.revision, { shotId: shot.id, kind: 'firstFrame' }, p.assets.at(-1)!.id);
+  }
+  seedOfflinePromptContracts(p); p = await projects.write(p);
+  return target;
 }
 beforeAll(async (): Promise<void> => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'TEST-image-feedback-')); red = path.join(root, 'TEST-red.png'); blue = path.join(root, 'TEST-blue.png');
@@ -204,6 +220,171 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     expect(p.production?.shots[shot.id].firstFrameId).toBeUndefined();
     p = await projects.adoptImage(p.id, p.revision, target, output); expect(p.adoptedImages?.[shot.id].firstFrameId).toBe(output);
     expect(list()).toHaveLength(1);
+  });
+  it.each(['firstFrame', 'lastFrame'] as const)('画布%s生成直达一个图片任务，操作与生产原子关联，正文和采用图片保持不变', async (kind): Promise<void> => {
+    const target = await prepareShotGeneration(kind); const originalPlan = structuredClone(p.plan);
+    const originalJobs = structuredClone(p.jobs); const originalMaterials = structuredClone(p.materials);
+    const originalAdopted = structuredClone(p.adoptedImages); const originalAssets = structuredClone(p.assets);
+    const directory = projects.directory(p.id); let linkedPlanWrites = 0; let linkedTaskWrites = 0;
+    projects = new PetStoryProjects(async (from, to): Promise<void> => {
+      const next = JSON.parse(await fs.readFile(from, 'utf8')) as PetStoryProject;
+      if (next.production) {
+        const operation = next.imageOperations?.find((item): boolean => item.id === next.production?.imageOperationId);
+        expect(operation).toMatchObject({ mode: 'generate', target });
+        expect(operation?.chatJobId).toBeUndefined();
+        expect(next.production.target).toEqual({ shotId: target.shotId, kind });
+        if (!next.production.steps.length) linkedPlanWrites++;
+        for (const step of next.production.steps) {
+          expect(step).toMatchObject({ shotId: target.shotId, kind });
+          if (step.taskId) {
+            expect(list().find((task): boolean => task.id === step.taskId)?.petstory).toMatchObject({ projectId: next.id, stepId: step.id });
+            linkedTaskWrites++;
+          }
+        }
+      }
+      await fs.rename(from, to);
+    });
+    p = await projects.open(directory); services();
+    const requestId = `TEST-shot-${kind}-generate`;
+    const begun = await begin(undefined, undefined, target, requestId);
+    expect(begun.success, begun.error).toBe(true); expect(begun.chatJobId).toBeUndefined();
+    expect(p.imageOperations).toHaveLength(1); expect(list()).toEqual([]);
+    expect(p.imageOperations![0]).toMatchObject({ id: begun.operationId, mode: 'generate', stage: 'generating', target });
+    expect(p.production?.imageOperationId).toBe(begun.operationId); expect(linkedPlanWrites).toBeGreaterThan(0);
+    const repeated = await begin(undefined, undefined, target, requestId);
+    expect(repeated.operationId).toBe(begun.operationId); expect(list()).toEqual([]);
+    const task = await imageTask(begun.operationId!);
+    expect(task).toMatchObject({ mode: 'image', executionIntent: 'hold', assignedAccountId: p.accountId });
+    expect(list()).toHaveLength(1); expect(linkedTaskWrites).toBeGreaterThan(0);
+    const step = p.production!.steps[0]; const source = p.plan!.shots.find((shot): boolean => shot.id === target.shotId)!.prompts[kind]!;
+    expect(task.prompt).toBe(step.compiledPrompt?.text); expect(step.compiledPrompt?.final).toBe(source.final);
+    expect((await imageTask(begun.operationId!)).id).toBe(task.id); expect(list()).toHaveLength(1);
+    const output = await finishOperation(begun.operationId!);
+    expect(list().map((item): string => item.mode)).toEqual(['image']); expect(downloads).toHaveLength(1);
+    expect(p.assets.find((asset): boolean => asset.id === output)?.imageReview).toMatchObject({ state: 'candidate', target });
+    // 制作前重新解码参考图会更新检查时间；文件摘要、归属及采用事实必须完整保留。
+    const assetFacts = (assets: PetStoryProject['assets']): object[] => assets.map((asset): object => ({ ...asset, validation: { ...asset.validation, checkedAt: undefined } }));
+    expect(p.adoptedImages).toEqual(originalAdopted); expect(assetFacts(p.assets.filter((asset): boolean => asset.id !== output))).toEqual(assetFacts(originalAssets));
+    expect(p.plan).toEqual(originalPlan); expect(p.materials).toEqual(originalMaterials); expect(p.jobs).toEqual(originalJobs);
+    const duplicate = await begin(undefined, undefined, target, requestId);
+    expect(duplicate.operationId).toBe(begun.operationId); expect((await operations.advance(p.id, begun.operationId!)).action).toBeUndefined();
+    expect(list()).toHaveLength(1); expect(p.imageOperations).toHaveLength(1);
+  });
+  it.each(['firstFrame', 'lastFrame'] as const)('画布%s重开只读，显式恢复只复用原排队图片任务', async (kind): Promise<void> => {
+    const target = await prepareShotGeneration(kind); const begun = await begin(undefined, undefined, target);
+    const task = await imageTask(begun.operationId!); const originalJobs = structuredClone(p.jobs);
+    const directory = projects.directory(p.id); const before = await fs.readFile(path.join(directory, 'project.json'), 'utf8');
+    projects = new PetStoryProjects(); p = await projects.open(directory); services();
+    const idle = await operations.advance(p.id, begun.operationId!);
+    expect(idle.action).toBeUndefined(); expect(list()).toHaveLength(1);
+    expect(await fs.readFile(path.join(directory, 'project.json'), 'utf8')).toBe(before);
+    const resumed = await operations.resume(p.id, begun.operationId!); expect(resumed.success, resumed.error).toBe(true); p = resumed.project!;
+    const restored = await operations.advance(p.id, begun.operationId!); p = restored.project!;
+    expect(restored).toMatchObject({ action: 'start', taskId: task.id });
+    await operations.resume(p.id, begun.operationId!); expect((await imageTask(begun.operationId!)).id).toBe(task.id);
+    expect(list()).toHaveLength(1); expect(p.imageOperations).toHaveLength(1); expect(p.jobs).toEqual(originalJobs);
+    expect(list()[0].runtime?.submittedAt).toBeUndefined(); expect(downloads).toEqual([]);
+  });
+  it.each([
+    ['firstFrame', 'generate'], ['firstFrame', 'modify'], ['lastFrame', 'generate'], ['lastFrame', 'modify'],
+  ] as const)('画布%s完成%s后重新生成使用当前正式参考图与手改正文，旧图、采用和任务全部保留', async (kind: 'firstFrame' | 'lastFrame', previousMode: 'generate' | 'modify'): Promise<void> => {
+    const target = await prepareShotGeneration(kind); const shotId = target.shotId!;
+    p = await projects.addShotImage(p.id, p.revision, shotId, kind, red); const adopted = p.assets.at(-1)!.id;
+    p = await projects.adoptImage(p.id, p.revision, target, adopted);
+    const previous = await begin(previousMode === 'modify' ? adopted : undefined, previousMode === 'modify' ? '表情稍微自然一点。' : undefined, target);
+    expect(previous.success, previous.error).toBe(true); const previousOutput = await finishOperation(previous.operationId!);
+    const previousTask = list()[0]; const previousOperation = structuredClone(p.imageOperations!.at(-1)!);
+    const original = p.plan!.shots.find((shot): boolean => shot.id === shotId)!.prompts[kind]!.final;
+    const final = `${original}\nTEST本次手改：画面右侧留出空地。`;
+    p = await projects.saveShotPrompt(p.id, p.revision, shotId, kind, final);
+    const originalAdopted = structuredClone(p.adoptedImages); const originalJobs = structuredClone(p.jobs);
+    const originalPlan = structuredClone(p.plan); const expected = compilePrompt(p, shotId, kind);
+    const assetIds = expected.references.map((reference): string => reference.assetId);
+    const attachments = await Promise.all(assetIds.map((assetId): Promise<string> => projects.referenceFile(p.id, assetId)));
+    expect(assetIds.length).toBeGreaterThan(0); expect(assetIds).not.toContain(previousOutput); expect(assetIds).not.toContain(adopted);
+    const regenerated = await begin(undefined, undefined, target);
+    expect(regenerated.success, regenerated.error).toBe(true); expect(regenerated.chatJobId).toBeUndefined();
+    expect(regenerated.operationId).not.toBe(previous.operationId);
+    expect(p.imageOperations!.at(-1)).toMatchObject({ mode: 'generate', target, stage: 'generating' });
+    expect(p.imageOperations!.at(-1)?.baseAssetId).toBeUndefined(); expect(p.imageOperations!.at(-1)?.feedback).toBeUndefined();
+    expect(p.production?.steps).toEqual([]);
+    const next = await imageTask(regenerated.operationId!);
+    expect(next.id).not.toBe(previousTask.id); expect(next.runtime).toBeUndefined();
+    expect(next).toMatchObject({ mode: 'image', executionIntent: 'hold', assignedAccountId: p.accountId, prompt: expected.text, attachments });
+    expect(p.production!.steps[0].compiledPrompt?.final).toBe(final);
+    expect(p.production!.steps[0].attachmentAssetIds).toEqual(assetIds);
+    const output = await finishOperation(regenerated.operationId!);
+    expect(output).not.toBe(previousOutput); expect(list().map((task): string => task.mode)).toEqual(['image', 'image']);
+    expect(list()[0]).toEqual(previousTask); expect(p.imageOperations![0]).toEqual(previousOperation);
+    expect(p.productionHistory?.some((run): boolean => run.imageOperationId === previous.operationId && run.steps[0]?.taskId === previousTask.id)).toBe(true);
+    expect(p.assets.find((asset): boolean => asset.id === previousOutput)?.imageReview?.state).toBe('candidate');
+    expect(p.assets.find((asset): boolean => asset.id === output)?.imageReview).toMatchObject({ state: 'candidate', target });
+    expect(p.adoptedImages).toEqual(originalAdopted); expect(p.plan).toEqual(originalPlan); expect(p.jobs).toEqual(originalJobs);
+    expect(p.assets.find((asset): boolean => asset.id === adopted)?.imageReview?.state).toBe('adopted');
+  });
+  it.each(['firstFrame', 'lastFrame'] as const)('画布%s初始参数失败可恢复同一操作，缺少计划时不另造文字或重复图片任务', async (kind): Promise<void> => {
+    const target = await prepareShotGeneration(kind); const originalPlan = structuredClone(p.plan); const originalJobs = structuredClone(p.jobs);
+    const wrong = productionCapability(p); wrong.accountId = 'TEST-other-account';
+    const failed = await operations.begin(p.id, p.revision, { requestId: `TEST-uncreated-${kind}`, target }, wrong); p = failed.project!;
+    expect(failed.success).toBe(false); expect(failed.error).toContain('账号不符'); expect(p.production).toBeUndefined(); expect(list()).toEqual([]);
+    expect(p.imageOperations).toHaveLength(1); expect(p.imageOperations![0]).toMatchObject({ id: failed.operationId, mode: 'generate', stage: 'failed', target });
+    const directory = projects.directory(p.id); projects = new PetStoryProjects(); p = await projects.open(directory); services();
+    expect((await operations.advance(p.id, failed.operationId!)).action).toBeUndefined(); expect(list()).toEqual([]);
+    const resumed = await operations.resume(p.id, failed.operationId!); expect(resumed.success, resumed.error).toBe(true); p = resumed.project!;
+    expect(p.production?.imageOperationId).toBe(failed.operationId); expect(p.imageOperations).toHaveLength(1); expect(list()).toEqual([]);
+    await finishOperation(failed.operationId!);
+    expect(list().map((task): string => task.mode)).toEqual(['image']); expect(p.jobs).toEqual(originalJobs); expect(p.plan).toEqual(originalPlan);
+    expect(p.imageOperations![0].error).toBeUndefined(); expect(p.assets.at(-1)?.imageReview?.state).toBe('candidate');
+    expect((await operations.resume(p.id, failed.operationId!)).operationId).toBe(failed.operationId); expect(list()).toHaveLength(1);
+  });
+  it.each(['orphan', 'facts'] as const)('画布生成未建计划的失败遇到%s时保持fail-closed，不补建图片或文字任务', async (reason): Promise<void> => {
+    const target = await prepareShotGeneration('firstFrame'); const wrong = productionCapability(p); wrong.accountId = 'TEST-other-account';
+    const failed = await operations.begin(p.id, p.revision, { requestId: 'TEST-uncreated-shot-blocker', target }, wrong); p = failed.project!;
+    const originalJobs = structuredClone(p.jobs);
+    if (reason === 'orphan') create({ prompts: ['TEST孤立hold任务'], mode: 'image', executionIntent: 'hold', projectId: p.studioProjectId, petstory: { projectId: p.id, stepId: 'TEST-orphan-shot-step' } }, p.accountId);
+    else {
+      const shot = p.plan!.shots.find((item): boolean => item.id === target.shotId)!;
+      p = await projects.saveShotPrompt(p.id, p.revision, shot.id, 'firstFrame', `${shot.prompts.firstFrame.final}\nTEST保留本轮手改`);
+    }
+    const tasksBefore = list();
+    await expect(operations.resume(p.id, failed.operationId!)).rejects.toThrow(reason === 'orphan' ? '已有记录或创建结果不明' : '事实已变化');
+    await read(); expect(p.production).toBeUndefined(); expect(p.imageOperations).toHaveLength(1); expect(p.imageOperations![0].stage).toBe('failed');
+    expect(list()).toEqual(tasksBefore); expect(p.jobs).toEqual(originalJobs);
+  });
+  it('画布尾帧缺少用户已采用的首帧时停止，上传候选也不会被偷偷采用或触发补生成', async (): Promise<void> => {
+    const target = await prepareShotGeneration('lastFrame', false);
+    p = await projects.addShotImage(p.id, p.revision, target.shotId!, 'firstFrame', red);
+    const original = structuredClone(p); const failed = await begin(undefined, undefined, target);
+    expect(failed.success).toBe(false); expect(failed.error).toContain('首帧'); expect(p.production).toBeUndefined();
+    expect(list()).toEqual([]); expect(p.jobs).toEqual(original.jobs); expect(p.plan).toEqual(original.plan);
+    expect(p.assets).toEqual(original.assets); expect(p.adoptedImages).toEqual(original.adoptedImages);
+    expect(p.assets.at(-1)?.imageReview?.state).toBe('candidate');
+    const resumed = await operations.resume(p.id, failed.operationId!); expect(resumed.success).toBe(false);
+    expect(resumed.operationId).toBe(failed.operationId); expect(list()).toEqual([]); expect((await read()).imageOperations).toHaveLength(1);
+  });
+  it('画布图片任务已创建但关联写盘失败时保留原hold，恢复只停下核对而不重复创建或发送', async (): Promise<void> => {
+    const target = await prepareShotGeneration('firstFrame'); const originalJobs = structuredClone(p.jobs); const originalPlan = structuredClone(p.plan);
+    const directory = projects.directory(p.id); let failTaskLink = true;
+    projects = new PetStoryProjects(async (from, to): Promise<void> => {
+      const next = JSON.parse(await fs.readFile(from, 'utf8')) as PetStoryProject;
+      if (failTaskLink && next.production?.steps.some((step): boolean => !!step.taskId)) {
+        failTaskLink = false; throw new Error('TEST画布图片关联写盘失败');
+      }
+      await fs.rename(from, to);
+    });
+    p = await projects.open(directory); services(); const begun = await begin(undefined, undefined, target);
+    const failed = await operations.advance(p.id, begun.operationId!); expect(failed.success).toBe(false); p = failed.project!;
+    expect(failed.error).toContain('关联写盘失败'); expect(p.production?.imageOperationId).toBe(begun.operationId);
+    expect(p.production?.steps[0]).toMatchObject({ status: 'preparing' }); expect(p.production?.steps[0].taskId).toBeUndefined();
+    expect(p.imageOperations![0]).toMatchObject({ stage: 'failed', id: begun.operationId });
+    expect(list()).toHaveLength(1); expect(list()[0]).toMatchObject({ mode: 'image', status: 'queued', executionIntent: 'hold' });
+    const originalTask = list()[0];
+    projects = new PetStoryProjects(); p = await projects.open(directory); services();
+    expect((await operations.advance(p.id, begun.operationId!)).action).toBeUndefined(); expect(list()).toEqual([originalTask]);
+    const resumed = await operations.resume(p.id, begun.operationId!); expect(resumed.success, resumed.error).toBe(true);
+    const blocked = await operations.advance(p.id, begun.operationId!); expect(blocked.success).toBe(false); expect(blocked.error).toContain('禁止自动重建');
+    expect(list()).toEqual([originalTask]); expect(list()[0].runtime?.submittedAt).toBeUndefined(); expect(downloads).toEqual([]);
+    await read(); expect(p.imageOperations).toHaveLength(1); expect(p.jobs).toEqual(originalJobs); expect(p.plan).toEqual(originalPlan);
   });
   it('确定未提交的修改失败后可明确提交新意见，保留旧任务与意见且只执行新请求', async (): Promise<void> => {
     p = await projects.addMaterialImage(p.id, p.revision, p.materials![0].id, red); const base = p.assets.at(-1)!.id;

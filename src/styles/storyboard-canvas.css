@@ -1,19 +1,18 @@
 /* 分镜画布只作用于萌宠工作区；账号宿主与全局 Studio 样式保持独立。 */
-.storyboard-workspace { --canvas-teal:#087F72; --canvas-ink:#202A35; color:var(--canvas-ink); background:#F4F6F8; border:1px solid #dfe7e8; border-radius:12px; overflow:hidden; }
-.canvas-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:17px 20px; background:#fff; border-bottom:1px solid #e5ebec; flex-wrap:wrap; }
-.canvas-project-title { display:flex; align-items:center; gap:11px; }
-.canvas-project-title strong { font-size:16px; font-weight:650; }
-.canvas-project-title small { display:block; color:#82909a; margin-top:3px; font-size:11px; }
-.canvas-project-mark { display:grid; place-items:center; width:38px; height:38px; border-radius:11px; background:#e5f6f3; color:#087F72; font-size:19px; }
-.canvas-toolbar-actions { display:flex; gap:8px; align-items:center; }
-.canvas-statusbar { display:flex; align-items:center; gap:16px; flex-wrap:wrap; background:#fcfdfd; padding:10px 18px; color:#7e8d97; font-size:11px; border-bottom:1px solid #e2e9ea; }
-.canvas-statusbar .ant-checkbox-wrapper { font-size:11px; color:#63727d; }
-.canvas-live-status { color:#087F72; }
-.canvas-zoom { margin-left:auto; display:flex; gap:4px; align-items:center; }
+.storyboard-workspace { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; --canvas-teal:#087F72; --canvas-ink:#202A35; color:var(--canvas-ink); background:#F4F6F8; border:1px solid #dfe7e8; border-radius:12px; overflow:hidden; }
+.canvas-toolbar { display:flex; flex:0 0 52px; min-height:52px; align-items:center; gap:16px; padding:0 14px; background:#fff; border-bottom:1px solid #e5ebec; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; }
+.canvas-project-title { display:flex; align-items:center; gap:8px; flex-shrink:1; min-width:100px; }
+.canvas-project-title strong { font-size:14px; font-weight:650; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.canvas-project-title>span { color:#82909a; font-size:12px; white-space:nowrap; }
+.canvas-toolbar-actions { display:flex; gap:8px; align-items:center; min-width:0; }
+.canvas-toolbar .ant-btn { height:32px; padding-inline:12px; font-size:12px; white-space:nowrap; }
+.canvas-batch-progress { color:#697d83; font-size:12px; white-space:nowrap; }
+.canvas-zoom { margin-left:auto; display:flex; gap:2px; align-items:center; flex-shrink:0; }
 .storyboard-workspace button { cursor:pointer; }
 .canvas-zoom button,.canvas-field-label button,.canvas-node header button,.canvas-prompt-actions>button:not(.ant-btn),.canvas-text-button { border:0; background:transparent; color:#72818c; padding:5px; font-size:11px; }
 .canvas-zoom button:hover,.canvas-field-label button:hover,.canvas-node header button:hover,.canvas-text-button:hover { color:#087F72; background:#e9f7f4; border-radius:5px; }
-.canvas-viewport { height:calc(100vh - 430px); min-height:340px; position:relative; overflow:hidden; background-color:#f3f6f6; background-image:linear-gradient(to right,#dfe5e5 1px,transparent 1px),linear-gradient(to bottom,#dfe5e5 1px,transparent 1px); cursor:grab; touch-action:none; overscroll-behavior:contain; }
+/* 画布只通过transform平移；hidden仍允许焦点/scrollIntoView滚动，导致左下导航漂移。 */
+.canvas-viewport { flex:1; min-height:0; min-width:0; position:relative; overflow:clip; background-color:#f3f6f6; background-image:linear-gradient(to right,#dfe5e5 1px,transparent 1px),linear-gradient(to bottom,#dfe5e5 1px,transparent 1px); cursor:grab; touch-action:none; overscroll-behavior:contain; }
 .canvas-viewport:active { cursor:grabbing; }
 .canvas-content { position:absolute; top:0; left:0; width:1744px; transform-origin:0 0; padding-bottom:40px; }
 .canvas-column-titles { display:grid; grid-template-columns:352px 360px 280px 360px 280px; column-gap:28px; height:40px; color:#7f919a; font-size:12px; letter-spacing:.5px; align-items:start; }
@@ -77,6 +76,9 @@
 .canvas-empty-media strong { font-weight:450; font-size:12px; color:#829a9c; }
 .canvas-empty-media span:last-child { font-size:12px; color:#a0b0b4; }
 .canvas-media-actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+.canvas-video-recovery { margin:12px 0; padding:14px; border:1px solid #b7dcd4; border-radius:8px; background:#f0faf7; }
+.canvas-video-recovery p { margin:8px 0; color:#49665f; font-size:13px; line-height:1.7; }
+.canvas-video-parameters { display:block; color:#255c50; font-size:13px; font-weight:500; }
 .canvas-media-caption { color:#8a9b9f; font-size:12px; margin-top:8px; }
 .canvas-hint { color:#93a1a7; font-size:12px; line-height:1.8; margin-top:12px; }
 .canvas-reference-strip { display:flex; flex-wrap:wrap; gap:8px; border-top:1px solid #e6edee; margin-top:20px; padding-top:14px; }
@@ -84,7 +86,7 @@
 .canvas-reference-strip>div { width:calc(50% - 4px); font-size:12px; color:#7c9399; }
 .canvas-reference-strip .canvas-media-preview { height:90px; min-height:0; }
 .canvas-reference-strip img { height:86px; object-fit:contain; }
-.canvas-navigation { position:absolute; bottom:15px; left:18px; display:flex; align-items:center; gap:6px; padding:8px 12px; background:#ffffffed; border:1px solid #dae5e4; box-shadow:0 2px 8px #293b4b08; border-radius:10px; cursor:default; font-size:12px; color:#8d9c9f; }
+.canvas-navigation { position:absolute; z-index:2; bottom:15px; left:18px; display:flex; align-items:center; gap:6px; padding:8px 12px; background:#ffffffed; border:1px solid #dae5e4; box-shadow:0 2px 8px #293b4b08; border-radius:10px; cursor:default; font-size:12px; color:#8d9c9f; }
 .canvas-navigation button { background:#f3f7f6; color:#73918c; border:0; border-radius:6px; width:28px; height:28px; font-size:11px; }
 .canvas-navigation button.active { color:white; background:#087F72; }
 .canvas-navigation-hint { margin-left:12px; font-size:12px; }
@@ -96,26 +98,20 @@
 .canvas-modal-source { color:#84969a; font-size:12px; }
 .canvas-modal-text { padding:15px; background:#eff9f5; color:#41655e; max-height:300px; overflow:auto; }
 .canvas-error { color:#c65c4f; font-size:11px; }
-@media (max-width:1100px) { .canvas-toolbar { padding:12px; }.canvas-toolbar-actions { flex-wrap:wrap; }.canvas-navigation-hint { display:none; }.canvas-statusbar { gap:8px; }.canvas-viewport { min-height:340px; } }
-.workspace-content:has(.canvas-active) { padding:18px 20px 24px; }
-.workspace-content:has(.canvas-active)>.page-heading { margin-bottom:14px; }
-.workspace-content:has(.canvas-active)>.page-heading h1 { font-size:22px; }
-.workspace-content:has(.canvas-active)>.page-heading p { display:none; }
-.canvas-active>.ant-space:first-child { font-size:11px; }
-.canvas-active>.petstory-stages { margin-top:10px; margin-bottom:14px; }
+@media (max-width:1100px) { .canvas-toolbar { gap:8px; padding-inline:10px; }.canvas-project-title strong { max-width:110px; }.canvas-navigation-hint { display:none; }.canvas-batch-progress { max-width:150px; overflow:hidden; text-overflow:ellipsis; } }
 .canvas-active .canvas-node .ant-btn-primary { background:#087F72; color:#fff; }
 .canvas-active .canvas-node .ant-btn:disabled { color:#a9b5ba; border-color:#e2e9e9; background:#f6f8f8; }
 .canvas-character-fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin:14px 0; }
 .canvas-character-fields>div { display:flex; flex-direction:column; gap:8px; padding:14px; border:1px solid #dce8e5; border-radius:9px; background:white; }
 .canvas-active .petstory-stages { display:flex; gap:3px; padding:6px; flex-wrap:nowrap; overflow-x:auto; }
 .canvas-active>.ant-space:first-child .ant-tag { font-size:12px; margin-inline-end:0; }
-.canvas-active.space-y-4>:not([hidden])~:not([hidden]) { margin-top:12px; }
-.canvas-active .canvas-viewport { height:calc(100vh - 430px); min-height:340px; }
+
+.canvas-active .canvas-viewport { flex:1; min-height:0; min-width:0; }
 .canvas-shot-row>.canvas-node { position:relative; }
 .canvas-shot-row>.canvas-node:not(:last-child)::after { content:'→'; position:absolute; top:14px; right:-23px; color:#9ab7b0; font-size:17px; }
 .canvas-history-button { width:100%; margin-top:10px; color:#528c82; background:#f7fbfa; border-color:#d8e9e4; }
 .storyboard-workspace { overflow:clip; }
-.canvas-sticky-head { position:sticky; top:0; z-index:8; background:#fff; border-radius:15px 15px 0 0; }
+
 .canvas-node .ant-input { font-size:14px; line-height:1.9; }
 .storyboard-workspace .ant-btn-primary { background:#087F72 !important; border-color:#087F72 !important; }
 .storyboard-workspace .ant-btn-primary:disabled { color:#a9b5ba !important; background:#f6f8f8 !important; border-color:#e2e9e9 !important; }
@@ -240,3 +236,21 @@
 .petstory-plan-field dt { color:#697584; font-size:12px; }
 .petstory-plan-field dd { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; }
 @media(max-width:900px) { .petstory-plan-field { grid-template-columns:110px minmax(0,1fr); } }
+
+/* 候选全文直接回到节点；滚动正文、点击按钮均不触发画布平移。 */
+.canvas-prompt-readonly { white-space:pre-wrap; overflow-wrap:anywhere; font-family:inherit; font-size:14px; line-height:1.8; color:#304853; padding:10px 12px; margin:0; height:182px; overflow:auto; overscroll-behavior:contain; user-select:text; background:#f8fafb; border:1px solid #e0e8e9; border-radius:7px; }
+.canvas-prompt-readonly.is-candidate { background:#f1faf6; border-color:#cce8df; }
+.canvas-prompt-progress { display:flex; gap:6px; align-items:center; color:#087F72; font-size:12px; margin:9px 0; }
+.canvas-prompt-notice { display:flex; align-items:center; justify-content:space-between; gap:8px; color:#92601b; font-size:12px; margin:9px 0; }
+.canvas-prompt .canvas-hint { margin:7px 0; }
+.canvas-prompt .canvas-prompt-actions { flex-wrap:wrap; }
+.canvas-feedback-label { display:block; color:#334f58; font-weight:500; margin:16px 0 9px; }
+.canvas-feedback-modal textarea.ant-input { font-size:14px; line-height:1.8; resize:vertical; }
+.canvas-current-text { color:#697d83; font-size:13px; }
+.canvas-current-text summary { cursor:pointer; }
+.canvas-prompt-modal .canvas-modal-text { max-height:55vh; }
+.canvas-navigation { max-width:calc(100% - 36px); overflow-x:auto; white-space:nowrap; }
+.canvas-navigation button { flex-shrink:0; }
+@media(max-width:900px) { .canvas-toolbar { gap:6px; }.canvas-project-title { min-width:0; }.canvas-project-title strong { max-width:85px; }.canvas-project-title>span { display:none; }.canvas-batch-progress { max-width:110px; }.canvas-zoom button { font-size:10px; padding:4px; } }
+
+.canvas-toolbar .canvas-batch-progress.canvas-error { color:#ba4e40; max-width:260px; overflow:hidden; text-overflow:ellipsis; }

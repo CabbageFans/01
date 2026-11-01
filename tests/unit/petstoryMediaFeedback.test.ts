@@ -1,9 +1,8 @@
 /** 只测试前端反馈映射和已保存记录投影；不替代真实 Electron 点击或主进程生成资格。 */
-import { describe, expect, it, vi } from 'vitest';
-import type { PetStoryGenerationBlocker, PetStoryMaterial, PetStoryProduction, PetStoryProject } from '@doubao-studio/contracts';
-import { generationBlockerAction } from '../../src/components/PetStoryGenerationBlockers';
+import { describe, expect, it } from 'vitest';
+import type { PetStoryMaterial, PetStoryProduction, PetStoryProject } from '@doubao-studio/contracts';
 import { isPetStoryMaterialImageApproved } from '../../src/components/PetStoryMaterials';
-import { resolveMediaBlocker, selectedPetStoryMedia } from '../../src/components/PetStoryCanvasMedia';
+import { selectedPetStoryMedia } from '../../src/components/PetStoryCanvasMedia';
 import snapshot from '../fixtures/storyboard-five-shots.json';
 
 function project(): PetStoryProject {
@@ -15,21 +14,7 @@ function material(kind: PetStoryMaterial['kind'], id: string): PetStoryMaterial 
 }
 const validation = { decoded: true as const, sha256: 'TEST-sha', bytes: 100, width: 100, height: 100, checkedAt: '2026-10-28T00:00:00.000Z' };
 
-describe('媒体前置处理反馈', (): void => {
-  it.each<[PetStoryGenerationBlocker['code'], string]>([
-    ['story', '查看并确认方案'], ['prompt', '查看本项提示词'], ['materials', '查看并补齐素材'],
-    ['firstFrame', '去制作本镜首帧'], ['lastFrame', '去制作本镜尾帧'], ['capability', '重新读取制作条件'], ['task', '处理当前任务'],
-  ])('主进程%s阻断指向对应动作', (code, action): void => {
-    expect(generationBlockerAction({ code, message: 'TEST' })).toBe(action);
-  });
-  it('连续首帧缺少前镜视频时准确指向前镜视频，不误指向本镜首帧', (): void => {
-    const p = project(); const shot = p.plan!.shots[1];
-    const blocker: PetStoryGenerationBlocker = { code: 'firstFrame', message: 'TEST 前镜视频尚未生成', shotId: p.plan!.shots[0].id, promptKind: 'video' };
-    const navigate = vi.fn();
-    expect(generationBlockerAction(blocker)).toBe('去制作前镜视频');
-    resolveMediaBlocker(blocker, shot, 'firstFrame', vi.fn(), navigate);
-    expect(navigate).toHaveBeenCalledWith('videoPrompt', p.plan!.shots[0].id, 'video');
-  });
+describe('媒体归属与明确确认', (): void => {
   it('选中、文件已校验和本人确认分别投影，旧确认不能算当前图片已确认', (): void => {
     const p = project(); const m = material('scene', 'location'); p.materials = [m];
     expect(isPetStoryMaterialImageApproved(p, m)).toBe(false);

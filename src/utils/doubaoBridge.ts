@@ -23,19 +23,28 @@ import { classifyGenerationConfirmationText } from './generationConfirmation';
 import type { GenerationConfirmationEvidence } from './generationConfirmation';
 import { VideoControlReadinessError, waitForVideoControlReadiness } from './videoControlReadiness';
 import type { VideoControlReadinessResult } from './videoControlReadiness';
-import { inspectChatReadback, readChatPage } from './chatReadback';
-import { isSameDoubaoConversation } from './taskConversationLocator';
+import { diagnoseVideoMessageChain, inspectChatReadback, inspectCreationReadback, readChatPage } from './chatReadback';
+import { readVideoConversationPage, relatedVideoCards } from './videoConversationReadback';
+import type { VideoConversationCard, VideoConversationPage } from './videoConversationReadback';
+import { readCreationHistorySnapshot } from './creationReadbackSnapshot';
+import { getDoubaoConversationId, isSameDoubaoConversation } from './taskConversationLocator';
 import { uploadChatImages } from './chatAttachments';
 import { appendExactComposerText, insertExactComposerText, readExactComposerText } from './exactComposer';
 import { petStoryComposerProbe } from './petstoryControls';
+import { requiresNativePetStoryFrames, usesSharedPetStoryFrames } from './petstoryVideoUpload';
 import { pageSubmissionProbe } from './submissionControls';
 import { setVideoDurationFromPage } from './videoDurationControl';
+import type { VideoDurationControlResult } from './videoDurationControl';
+import { videoParameterControlFromPage } from './videoParameterControl';
+import type { VideoParameterOperation, VideoParameterSnapshot } from './videoParameterControl';
 import { clickWhitelistedPopupControl } from './popupControlClick';
 import { hasHumanVerificationEvidence, HumanVerificationRequiredError, readHumanVerificationEvidence } from './humanVerification';
 import type { PopupControlTarget } from './popupControlClick';
 import type { SendButtonTarget } from './submissionControls';
 export type { SendButtonTarget } from './submissionControls';
 import type { ChatPageSnapshot, ChatReadbackContext, ChatReadbackResult } from './chatReadback';
+import { readVideoBlockerPage } from './videoBlockerReadback';
+import type { VideoBlockerPageSnapshot, VideoBlockerReadbackContext } from './videoBlockerReadback';
 
 // ==================== 类型 ====================
 
@@ -2030,6 +2039,50 @@ export async function getChatPageSnapshot(webview: WebviewHandle): Promise<ChatP
   return safeExecuteJS<ChatPageSnapshot>(webview, `(${readChatPage.toString()})(document)`, 8000, 'getChatPageSnapshot');
 }
 
+export interface CreationReadbackSnapshotOptions {
+  conversationUrl?: string;
+  signal?: AbortSignal;
+  ensureCurrent?: () => void;
+  timeoutMs?: number;
+}
+
+/** 已提交创作只读恢复用；通过当前会话列表补齐虚拟卸载的原消息，不影响发送前严格回执。 */
+export async function getCreationReadbackSnapshot(webview: WebviewHandle, options: CreationReadbackSnapshotOptions = {}): Promise<ChatPageSnapshot> {
+  const conversationUrl = options.conversationUrl || webview.getURL();
+  const assertCurrent = (): void => {
+    if (options.signal?.aborted) throw new DOMException('原视频消息读取已取消', 'AbortError');
+    options.ensureCurrent?.();
+    if (!isSameDoubaoConversation(webview.getURL(), conversationUrl)) throw new Error('原视频消息读取期间会话变化');
+  };
+  assertCurrent();
+  const timeoutMs = Math.max(1, Math.min(8000, options.timeoutMs ?? 6000));
+  const result = await executeCreationReadback<ChatPageSnapshot>(webview, conversationUrl, timeoutMs, false, options.signal);
+  assertCurrent();
+  return result;
+}
+
+function creationReadbackScript(conversationUrl: string, timeoutMs: number, includeVideos: boolean, requestId: string): string {
+  const options = { conversationId: getDoubaoConversationId(conversationUrl) || '', timeoutMs: Math.max(1, Math.min(1800, Math.floor(timeoutMs / 2))), requestId };
+  const read = `(${readCreationHistorySnapshot.toString()})(document, ${readChatPage.toString()}, ${JSON.stringify(options)})`;
+  return includeVideos
+    ? `(async function() { const snapshot = await ${read}; return (${readVideoConversationPage.toString()})(document, function() { return snapshot; }); })()`
+    : read;
+}
+
+async function executeCreationReadback<T>(webview: WebviewHandle, conversationUrl: string, timeoutMs: number, includeVideos: boolean, signal?: AbortSignal): Promise<T> {
+  const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const cancel = (): void => {
+    // 只标记当前 Document 内存中的本次读取令牌；guest 在每次挂载等待前后检查，不影响平台输入。
+    const code = `(function() { const flags = document.__doubaoStudioCreationHistoryCancelled || (document.__doubaoStudioCreationHistoryCancelled = {}); flags[${JSON.stringify(requestId)}] = true; })()`;
+    void webview.executeJavaScript(code).catch((): void => undefined);
+  };
+  signal?.addEventListener('abort', cancel, { once: true });
+  if (signal?.aborted) cancel();
+  try {
+    return await safeExecuteJS<T>(webview, creationReadbackScript(conversationUrl, timeoutMs, includeVideos, requestId), timeoutMs, 'creationReadback');
+  } finally { signal?.removeEventListener('abort', cancel); }
+}
+
 /**
  * 提交后的 fail-closed 回读：只有输入框已清空且已观察到豆包回复请求，
  * 才能认为任务真正离开“仅注入”阶段。
@@ -2662,11 +2715,26 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           el.dispatchEvent(new MouseEvent('click', opts));
           return true;
         }
-        var composerRoot = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface');
+        function readControlText(el) {
+          return String(el && (el.innerText || el.textContent) || '').replace(/\\s+/g, ' ').trim();
+        }
+        function findCurrentComposer() {
+          var editors = Array.from(document.querySelectorAll('textarea,[contenteditable="true"]')).filter(isVisible);
+          var roots = editors.map(function(editor) {
+            if (!editor.closest) return null;
+            return editor.closest('#input-engine-container') || editor.closest('[data-testid="guidance-input-surface"],.guidance-input-surface');
+          }).filter(function(root) { return root && isVisible(root); });
+          roots = roots.filter(function(root, index) { return roots.indexOf(root) === index; });
+          if (roots.length === 1) return roots[0];
+          if (roots.length > 1) return null;
+          var fallback = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface');
+          return fallback && isVisible(fallback) ? fallback : null;
+        }
+        var composerRoot = findCurrentComposer();
         // 窄 Webview 的正文按钮可能位于 x<200；只按当前输入区及其已展开菜单归属定位。
         function inCurrentComposer(el) {
-          composerRoot = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface');
-          if (!composerRoot) return el.getBoundingClientRect().left > 200;
+          composerRoot = findCurrentComposer();
+          if (!composerRoot) return false;
           if (composerRoot.contains(el)) return true;
           return Array.from(composerRoot.querySelectorAll('[aria-expanded="true"][aria-controls]')).some(function(trigger) {
             var menu = document.getElementById(trigger.getAttribute('aria-controls'));
@@ -2674,10 +2742,17 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           });
         }
         function videoControlsReady() {
-          var model = Array.from(document.querySelectorAll('[data-input-engine-actionbar-control-key="video-model"]')).find(isVisible);
-          var composite = Array.from(document.querySelectorAll('[data-creation-params-panel-id]')).find(isVisible);
-          return Boolean(model && composite && model.getBoundingClientRect().width > 20 &&
-            composite.getBoundingClientRect().width > 20);
+          composerRoot = findCurrentComposer();
+          if (!composerRoot) return false;
+          function currentControls(selector) {
+            var controls = Array.from(composerRoot.querySelectorAll(selector)).filter(function(el) {
+              return isVisible(el) && (!el.closest || !el.closest('[role="menu"],[role="listbox"],[role="dialog"],[role="option"],[role="menuitem"]'));
+            });
+            return controls.filter(function(el) { return !controls.some(function(other) { return other !== el && el.contains && el.contains(other); }); });
+          }
+          var models = currentControls('[data-input-engine-actionbar-control-key="video-model"]');
+          var composites = currentControls('[data-creation-params-panel-id],[data-input-engine-actionbar-render-entry-key="video-generation-params-panel"]');
+          return models.length === 1 && composites.length === 1 && models[0].getBoundingClientRect().width > 20 && composites[0].getBoundingClientRect().width > 20;
         }
         async function waitForVideoControls(timeoutMs) {
           var deadline = Date.now() + timeoutMs;
@@ -2690,16 +2765,10 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
         async function waitForModeEntry(timeoutMs) {
           var deadline = Date.now() + timeoutMs;
           while (Date.now() < deadline) {
-            var textarea = document.querySelector('textarea');
-            var textareaRect = textarea ? textarea.getBoundingClientRect() : null;
             var entries = Array.from(document.querySelectorAll('button, [role="tab"], div, span, a'));
             var ready = entries.some(function(el) {
-              var r = el.getBoundingClientRect();
-              var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-              var visible = isVisible(el) && r.top >= 0 && inCurrentComposer(el);
-              var nearEditor = textareaRect && r.top > textareaRect.bottom - 10 && r.top < window.innerHeight;
-              return visible && text.length < 20 && text.indexOf('${tabLabel}') >= 0 &&
-                (nearEditor || r.top > window.innerHeight * 0.5);
+              var text = readControlText(el);
+              return isVisible(el) && inCurrentComposer(el) && el !== composerRoot && text.length < 20 && text.indexOf('${tabLabel}') >= 0;
             });
             if (ready) return true;
             await sleep(250);
@@ -2710,12 +2779,15 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           var deadline = Date.now() + timeoutMs;
           var openedMore = false;
           while (Date.now() < deadline) {
+            var selected = findSelectedSkill();
+            if (selected && readControlText(selected) === '${tabLabel}') return true;
+            if ('${mode}' === 'video' && videoControlsReady()) return true;
             // 新对话编辑器会先于技能栏挂载；只轮询真实入口，不能在 1.5 秒后把正常重建判为失败。
             if (await waitForModeEntry(Math.min(250, deadline - Date.now()))) return true;
-            composerRoot = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface');
+            composerRoot = findCurrentComposer();
             if (!openedMore) {
               var more = composerRoot && Array.from(composerRoot.querySelectorAll('button,[role="button"]')).find(function(el) {
-                return isVisible(el) && (el.innerText || '').trim() === '更多';
+                return isVisible(el) && readControlText(el) === '更多';
               });
               // 菜单只展开一次；后续仅回读，绝不反复点击关闭菜单或触发生成。
               if (activate(more)) openedMore = true;
@@ -2723,34 +2795,43 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           }
           return false;
         }
-        async function findVisibleModeMenuOption(timeoutMs) {
+        async function findVisibleModeMenuOption(timeoutMs, initialElement) {
           var deadline = Date.now() + timeoutMs;
           while (Date.now() < deadline) {
-            var options = Array.from(document.querySelectorAll('#input-engine-container button')).filter(function(el) {
-              var r = el.getBoundingClientRect();
-              return isVisible(el) && (el.innerText || '').replace(/\\s+/g, ' ').trim() === '视频生成';
+            var options = Array.from(document.querySelectorAll('button,[role="option"],[role="menuitem"]')).filter(function(el) {
+              if (el === initialElement || el.matches('[data-valid-btn="mode-select-action-btn"]') || el.closest('[data-testid="skill_input_exit_button"]')) return false;
+              return isVisible(el) && inCurrentComposer(el) && readControlText(el) === '视频生成';
             });
             if (options.length > 0) return options[options.length - 1];
             await sleep(250);
           }
           return null;
         }
-        async function finishVideoModeSelection(initialMethod, initialTag, initialRect) {
+        async function finishVideoModeSelection(initialMethod, initialTag, initialRect, initialElement) {
           if ('${mode}' !== 'video') {
             return { ok: true, method: initialMethod, tag: initialTag, pos: Math.round(initialRect.left) + ',' + Math.round(initialRect.top) };
           }
           if (await waitForVideoControls(1500)) {
             return { ok: true, method: initialMethod + '-verified', tag: initialTag, pos: Math.round(initialRect.left) + ',' + Math.round(initialRect.top) };
           }
+          // 技能已选中而参数异步挂载时只继续回读，不能再次点击模式触发器把它退出。
+          var chosenSkill = findSelectedSkill();
+          if (chosenSkill && readControlText(chosenSkill) === '视频生成') {
+            return await waitForVideoControls(15000)
+              ? { ok: true, method: initialMethod + '-skill-verified', tag: initialTag }
+              : { ok: false, error: '视频技能已选中但参数控件未挂载' };
+          }
 
           // 2026-08 新版首击只展开“模式”菜单，并不会真正选中视频模式。
           // 必须从当前模式触发器再次打开菜单，再点击菜单内的精确“视频生成”，
           // 并以模型/组合控件实际挂载作为唯一成功证据。
-          var modeTrigger = document.querySelector('[data-valid-btn="mode-select-action-btn"]');
-          if (modeTrigger && modeTrigger.getBoundingClientRect().width > 0) {
-            activate(modeTrigger);
+          var option = await findVisibleModeMenuOption(250, initialElement);
+          if (!option) {
+            composerRoot = findCurrentComposer();
+            var modeTrigger = composerRoot && composerRoot.querySelector('[data-valid-btn="mode-select-action-btn"]');
+            if (modeTrigger && modeTrigger.getBoundingClientRect().width > 0) activate(modeTrigger);
+            option = await findVisibleModeMenuOption(5000, initialElement);
           }
-          var option = await findVisibleModeMenuOption(5000);
           if (!activate(option)) {
             return { ok: false, error: '视频模式菜单选项不可见' };
           }
@@ -2761,47 +2842,39 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           return { ok: true, method: initialMethod + '-menu-confirmed', tag: option.tagName, pos: Math.round(optionRect.left) + ',' + Math.round(optionRect.top) };
         }
         function findSelectedSkill() {
-          composerRoot = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface');
+          composerRoot = findCurrentComposer();
           return composerRoot && Array.from(composerRoot.querySelectorAll('[data-testid="skill_input_exit_button"]')).find(function(el) {
             var parentSkill = el.parentElement && el.parentElement.closest('[data-testid="skill_input_exit_button"]');
-            return !parentSkill && isVisible(el) && /^(图像生成|视频生成)$/.test((el.innerText || '').trim());
+            return !parentSkill && isVisible(el) && /^(图像生成|视频生成)$/.test(readControlText(el));
           });
         }
         // 两种创作技能共用输入区。已选目标技能时保持原位，切换时只退出一次，避免把目标标签当入口再次关闭。
         var selectedSkill = findSelectedSkill();
-        if (selectedSkill && (selectedSkill.innerText || '').trim() === '${tabLabel}') {
+        if (selectedSkill && readControlText(selectedSkill) === '${tabLabel}') {
           if ('${mode}' === 'video' && !await waitForVideoControls(15000)) return { ok: false, error: '已选视频技能的参数控件未就绪' };
           return { ok: true, method: 'already-selected-skill', tag: selectedSkill.tagName };
         }
         if (selectedSkill) {
           activate(selectedSkill);
           await sleep(250);
-          composerRoot = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface');
+          composerRoot = findCurrentComposer();
         }
-        if ('${mode}' === 'image' && !await waitForImageModeEntry(10000)) {
+        if (!await waitForImageModeEntry(10000)) {
           return { ok: false, error: '${tabLabel}模式入口未在等待窗口内挂载' };
         }
-        if ('${mode}' === 'image') {
+        {
           // 重建期间可能恢复上次已选技能；等待后重新确认，不能把退出按钮当作入口点击。
           var readyImageSkill = findSelectedSkill();
-          if (readyImageSkill && (readyImageSkill.innerText || '').trim() === '${tabLabel}') {
+          if (readyImageSkill && readControlText(readyImageSkill) === '${tabLabel}') {
+            if ('${mode}' === 'video' && !await waitForVideoControls(15000)) return { ok: false, error: '已选视频技能的参数控件未就绪' };
             return { ok: true, method: 'image-skill-ready-after-wait', tag: readyImageSkill.tagName };
           }
         }
-        if ('${mode}' !== 'image' && !await waitForModeEntry(1500)) {
-          // 当前普通对话将图像入口收在可见的“更多”菜单中，只展开一次，不查询隐藏接口。
-          var more = composerRoot && Array.from(composerRoot.querySelectorAll('button,[role="button"]')).find(function(el) {
-            var r = el.getBoundingClientRect();
-            return isVisible(el) && (el.innerText || '').trim() === '更多';
-          });
-          if (!activate(more) || !await waitForModeEntry(5000)) {
-            return { ok: false, error: '${tabLabel}模式入口未在等待窗口内挂载' };
-          }
-        }
+        if ('${mode}' === 'video' && videoControlsReady()) return { ok: true, method: 'video-controls-ready-after-wait' };
         var allEls = document.querySelectorAll('button, [role="tab"], div, span, a');
 
-        // 先找到 textarea 输入框的位置
-        var textarea = document.querySelector('textarea');
+        // 只读取当前输入区的可见编辑器，兼容新版 contenteditable 与隐藏测量 textarea。
+        var textarea = composerRoot && Array.from(composerRoot.querySelectorAll('textarea,[contenteditable="true"]')).find(isVisible);
         var textareaRect = textarea ? textarea.getBoundingClientRect() : null;
         var viewportHeight = window.innerHeight;
 
@@ -2809,7 +2882,8 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
         var candidates = [];
         for (var i = 0; i < allEls.length; i++) {
           var el = allEls[i];
-          var innerText = (el.innerText || '').trim();
+          if (el === composerRoot || el.querySelector && el.querySelector('textarea,[contenteditable="true"]') || el.closest && el.closest('[data-testid="skill_input_exit_button"]')) continue;
+          var innerText = readControlText(el);
           var directText = '';
           for (var j = 0; j < el.childNodes.length; j++) {
             if (el.childNodes[j].nodeType === 3) directText += el.childNodes[j].textContent || '';
@@ -2822,17 +2896,15 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           var includesMatch = !exactMatch && innerText.length < 20 && innerText.indexOf('${tabLabel}') >= 0;
           if (!exactMatch && !includesMatch) continue;
           if (!isVisible(el)) continue;
-          if (el.offsetParent === null) continue;
 
           var rect = el.getBoundingClientRect();
-          if (rect.top < 0 || rect.left < 0) continue;
           if (rect.width === 0 || rect.height === 0) continue;
 
           candidates.push({
             el: el,
             rect: rect,
             tag: el.tagName,
-            isButton: el.tagName === 'BUTTON' || el.getAttribute('role') === 'tab',
+            isButton: el.tagName === 'BUTTON' || el.getAttribute('role') === 'tab' || el.getAttribute('role') === 'button',
             nearTextarea: textareaRect && rect.top > textareaRect.bottom - 10 && rect.top < viewportHeight,
             inBottomHalf: rect.top > viewportHeight * 0.5,
             notInSidebar: inCurrentComposer(el),
@@ -2846,7 +2918,7 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           var c = candidates[i];
           if (c.isButton && c.nearTextarea && c.notInSidebar) {
             activate(c.el);
-            return await finishVideoModeSelection('button-near-textarea', c.tag, c.rect);
+            return await finishVideoModeSelection('button-near-textarea', c.tag, c.rect, c.el);
           }
         }
 
@@ -2855,7 +2927,7 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           var c = candidates[i];
           if (c.isButton && c.inBottomHalf && c.notInSidebar) {
             activate(c.el);
-            return await finishVideoModeSelection('button-bottom', c.tag, c.rect);
+            return await finishVideoModeSelection('button-bottom', c.tag, c.rect, c.el);
           }
         }
 
@@ -2864,7 +2936,7 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           var c = candidates[i];
           if (c.nearTextarea && c.notInSidebar && c.isSmall) {
             activate(c.el);
-            return await finishVideoModeSelection('near-textarea', c.tag, c.rect);
+            return await finishVideoModeSelection('near-textarea', c.tag, c.rect, c.el);
           }
         }
 
@@ -2873,7 +2945,7 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           var c = candidates[i];
           if (c.notInSidebar) {
             activate(c.el);
-            return await finishVideoModeSelection('not-sidebar', c.tag, c.rect);
+            return await finishVideoModeSelection('not-sidebar', c.tag, c.rect, c.el);
           }
         }
 
@@ -2881,10 +2953,10 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
         var diag = [];
         for (var i = 0; i < allEls.length; i++) {
           var el = allEls[i];
-          var t = (el.innerText || '').trim();
+          var t = readControlText(el);
           if (t.indexOf('${tabLabel}') >= 0 && t.length < 50) {
             var r = el.getBoundingClientRect();
-            diag.push(el.tagName + '|' + t.substring(0,20) + '|' + Math.round(r.left) + ',' + Math.round(r.top) + '|' + Math.round(r.width) + 'x' + Math.round(r.height));
+            diag.push(el.tagName + '|${tabLabel}|' + Math.round(r.left) + ',' + Math.round(r.top) + '|' + Math.round(r.width) + 'x' + Math.round(r.height));
           }
         }
         return { ok: false, error: '未找到${tabLabel}Tab, candidates=' + candidates.length + ', diag=' + diag.join('; ') };
@@ -3326,54 +3398,24 @@ async function configureVideoOptionsV2(
 ): Promise<void> {
   const modelLabel = getVideoModelUiLabel(config.model);
   const durationSeconds = Number.parseInt(config.duration.replace(/s$/i, ''), 10);
-  if (!modelLabel || !Number.isInteger(durationSeconds) || durationSeconds < 4 || durationSeconds > 15 ||
-      !/^(?:auto|[0-9]+:[0-9]+)$/i.test(config.aspectRatio)) {
-    throw new Error('视频配置无效，已在提交前停止');
-  }
-
-  const click = async (position: string | undefined, label: string): Promise<void> => {
-    const stage = label.includes('模型') ? 'model' : label.includes('时长') ? 'duration' : 'aspect_ratio';
-    const missingControl = stage === 'model' ? 'model_control' : stage === 'duration' ? 'duration_control' : 'aspect_ratio_control';
-    const fail = (): never => {
-      throw new VideoControlReadinessError(stage, {
-        ready: false, failureStage: stage, missingControl, attempts: 1, elapsedMs: 0,
-      });
-    };
-    if (!position) return fail();
-    const [x, y] = position.split(',').map(Number);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) fail();
-    // 只激活当前 guest 中已经定位的实际控件，不向系统派发鼠标事件。
-    const activated = await safeExecuteJS<boolean>(webview, `
-      (function () {
-        var x = ${x}; var y = ${y};
-        var target = document.elementFromPoint(x, y);
-        if (!target) return false;
-        var r = target.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) return false;
-        while (target && typeof target.click !== 'function') target = target.parentElement;
-        if (!target || target.disabled || target.getAttribute('aria-disabled') === 'true') return false;
-        target.click();
-        return true;
-      })()
-    `, 5000, `activate_${label}`);
-    if (!activated) fail();
-    await sleep(80);
+  const targetRatio = config.aspectRatio.toLowerCase();
+  if (!modelLabel || !Number.isInteger(durationSeconds) || durationSeconds < 4 || durationSeconds > 15
+    || !['auto', '1:1', '3:4', '4:3', '9:16', '16:9', '21:9'].includes(targetRatio)) throw new Error('视频配置无效，已在提交前停止');
+  const startedAt = Date.now();
+  let attempts = 0;
+  const page = async <T>(code: string, label: string): Promise<T> => safeExecuteJS<T>(webview, code, 5000, label);
+  const probe = async (operation: VideoParameterOperation = 'snapshot', expected?: string, activate: boolean = false): Promise<VideoParameterSnapshot> => {
+    attempts += 1;
+    return page<VideoParameterSnapshot>(`(${videoParameterControlFromPage.toString()})(${JSON.stringify({ operation, expected, activate })})`, `video_parameters_${operation}`)
+      .catch((): VideoParameterSnapshot => ({ modelReady: false, aspectRatioReady: false, durationReady: false, menuOpen: false, failureReason: 'page_unavailable' }));
   };
-
-  const page = async <T>(code: string, label: string): Promise<T> =>
-    safeExecuteJS<T>(webview, code, 5000, label);
-
   const membershipBlocked = async (): Promise<boolean> => page<boolean>(`
     (function () {
       var nodes = Array.from(document.querySelectorAll('[role="dialog"], [role="alert"], [class*="modal"], [class*="toast"], [class*="popover"]'));
-      var visiblePrompt = nodes.some(function (node) {
+      if (nodes.some(function (node) {
         var r = node.getBoundingClientRect();
-        var text = (node.innerText || '').replace(/\\s+/g, '');
-        return r.width > 0 && r.height > 0 && /升级会员|开通会员|会员专享|权益不足|购买会员/.test(text);
-      });
-      if (visiblePrompt) return true;
-      // 2026-08 页面把升级面板放进跨源 iframe，父文档无法读取 innerText；
-      // 只能依据可见 iframe 自身的 title/name/src 做安全判定，不能把它误报成模型回读失败。
+        return r.width > 0 && r.height > 0 && /升级会员|开通会员|会员专享|权益不足|购买会员/.test((node.innerText || '').replace(/\\s+/g, ''));
+      })) return true;
       return Array.from(document.querySelectorAll('iframe')).some(function (frame) {
         var r = frame.getBoundingClientRect();
         var descriptor = [frame.title, frame.name, frame.getAttribute('aria-label'), frame.src].filter(Boolean).join(' ');
@@ -3381,273 +3423,80 @@ async function configureVideoOptionsV2(
       });
     })()
   `, 'video_membership_probe').catch(() => false);
-
-  // 模式切换后 React 会先显示创作栏、再挂载参数控件。必须等两个权威控件
-  // 都实际可用后才继续；15 秒后仍未挂载则 fail-closed，不猜测、更不提交。
-  const waitForAuthoritativeControls = async (): Promise<VideoControlReadinessResult> => {
-    return waitForVideoControlReadiness(async () => page<{ modelReady: boolean; aspectRatioReady: boolean; durationReady: boolean; pageVariant: 'composite-v2' }>(`
-        (function () {
-          function usable(el) {
-            if (!el) return false;
-            var r = el.getBoundingClientRect();
-            return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.5 &&
-              r.bottom <= window.innerHeight + 1 && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
-          }
-          var model = document.querySelector(${JSON.stringify(VIDEO_MODEL_CONTROL_SELECTOR)});
-          var composite = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
-          var compositeText = composite ? (composite.innerText || '').replace(/\\s+/g, ' ').trim() : '';
-          var compositeMatch = compositeText.match(/^(?:自动|[0-9]+:[0-9]+)\\s*·\\s*([0-9]+)s$/);
-          return {
-            modelReady: usable(model),
-            aspectRatioReady: usable(composite) && Boolean(compositeMatch),
-            durationReady: usable(composite) && Boolean(compositeMatch),
-            pageVariant: 'composite-v2'
-          };
-        })()
-      `, 'wait_video_controls').catch(() => ({ modelReady: false, aspectRatioReady: false, durationReady: false, pageVariant: 'composite-v2' as const })), { timeoutMs: 30_000, stableSamples: 3 });
-  };
-
-  const readiness = await waitForAuthoritativeControls();
-  await options?.onReadiness?.(readiness);
-  if (!readiness.ready) {
-    throw new VideoControlReadinessError(readiness.failureStage || 'stable_readback', readiness);
-  }
-
-  const findModelTrigger = async (): Promise<string | undefined> => {
-    const result = await page<{ position?: string }>(`
-      (function () {
-        function usable(el) {
-          if (!el) return false;
-          var r = el.getBoundingClientRect();
-          return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.5 &&
-            r.bottom <= window.innerHeight + 1 && r.width < 320 && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
-        }
-        var authoritative = document.querySelector(${JSON.stringify(VIDEO_MODEL_CONTROL_SELECTOR)});
-        if (usable(authoritative)) {
-          var authoritativeRect = authoritative.getBoundingClientRect();
-          return { position: Math.round(authoritativeRect.left + authoritativeRect.width / 2) + ',' + Math.round(authoritativeRect.top + authoritativeRect.height / 2) };
-        }
-        var candidates = Array.from(document.querySelectorAll('button,[role="button"],div')).filter(function (el) {
-          var r = el.getBoundingClientRect();
-          var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-          return usable(el) && /^模型(?:\\s|$)/.test(text);
-        });
-        candidates.sort(function (a, b) { return a.getBoundingClientRect().top - b.getBoundingClientRect().top; });
-        var el = candidates[candidates.length - 1];
-        if (!el) return {};
-        var r = el.getBoundingClientRect();
-        return { position: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2) };
-      })()
-    `, 'find_video_model_trigger');
-    return result.position;
-  };
-
-  const selectExactOverlayOption = async (expected: string, label: string): Promise<string | undefined> => {
-    const result = await page<{ position?: string }>(`
-      (function () {
-        var expected = ${JSON.stringify(expected)};
-        // 新版比例面板的选项不是扁平 button：文字经常嵌在多层 div/span 中。
-        // 选择“精确文本的最内层可见节点”，不能再以 children.length 猜测结构。
-        var leaves = Array.from(document.querySelectorAll('[role="option"],[role="menuitem"],button,[role="button"],li,div,span')).filter(function (el) {
-          var r = el.getBoundingClientRect();
-          var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-          if (r.width <= 8 || r.height <= 8 || text !== expected) return false;
-          return !Array.from(el.children).some(function (child) {
-            return (child.innerText || '').replace(/\\s+/g, ' ').trim() === expected;
-          });
-        });
-        leaves.sort(function (a, b) { return a.getBoundingClientRect().width * a.getBoundingClientRect().height - b.getBoundingClientRect().width * b.getBoundingClientRect().height; });
-        var el = leaves[0];
-        if (!el) return {};
-        var r = el.getBoundingClientRect();
-        return { position: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2) };
-      })()
-    `, `select_${label}`);
-    return result.position;
-  };
-
-  const waitForExactOverlayOption = async (expected: string, label: string): Promise<string | undefined> => {
-    let found: string | undefined;
-    await pollUntilReady(async () => {
-      const position = await selectExactOverlayOption(expected, label).catch(() => undefined);
-      if (position) {
-        found = position;
-        return true;
-      }
-      if (await membershipBlocked()) {
-        throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
-      }
-      return false;
-    }, { timeoutMs: 10_000 });
-    return found;
-  };
-
-  const verifyModel = async (): Promise<boolean> => page<boolean>(`
-    (function () {
-      function matches(el) {
-        if (!el) return false;
-        var r = el.getBoundingClientRect();
-        var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-        return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.5 &&
-          text.indexOf('模型 ') === 0 && text.slice(3).trim() === ${JSON.stringify(modelLabel)};
-      }
-      var authoritative = document.querySelector(${JSON.stringify(VIDEO_MODEL_CONTROL_SELECTOR)});
-      if (matches(authoritative)) return true;
-      return Array.from(document.querySelectorAll('button,[role="button"],div')).some(function (el) {
-        return matches(el);
-      });
-    })()
-  `, 'verify_video_model');
-
-  const waitForModelVerification = async (): Promise<boolean> => {
-    return pollUntilReady(() => verifyModel().catch(() => false), { timeoutMs: 10_000 });
-  };
-
-  const findCompositeTrigger = async (): Promise<string | undefined> => {
-    const result = await page<{ position?: string }>(`
-      (function () {
-        function usable(el) {
-          if (!el) return false;
-          var r = el.getBoundingClientRect();
-          var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-          return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.5 &&
-            r.bottom <= window.innerHeight + 1 && /^(?:自动|[0-9]+:[0-9]+)\\s*·\\s*[0-9]+s$/.test(text);
-        }
-        var authoritative = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
-        if (usable(authoritative)) {
-          var authoritativeRect = authoritative.getBoundingClientRect();
-          return { position: Math.round(authoritativeRect.left + authoritativeRect.width / 2) + ',' + Math.round(authoritativeRect.top + authoritativeRect.height / 2) };
-        }
-        var buttons = Array.from(document.querySelectorAll('button[aria-haspopup],button,[role="button"],div')).filter(function (el) {
-          return usable(el);
-        });
-        buttons.sort(function (a, b) { return b.getBoundingClientRect().top - a.getBoundingClientRect().top; });
-        var el = buttons[0];
-        if (!el) return {};
-        var r = el.getBoundingClientRect();
-        return { position: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2) };
-      })()
-    `, 'find_video_composite_trigger');
-    return result.position;
-  };
-
-  const openComposite = async (): Promise<void> => {
-    const position = await findCompositeTrigger();
-    await click(position, '比例与时长控件');
-    await sleep(350);
-  };
-
-  // 模型：已与目标一致时绝不重开菜单。新版页面会在触发器文本中直接回显
-  // 当前模型，重复选择反而会因菜单动画而制造“选项不可见”的假失败。
-  if (!await verifyModel()) {
-    await click(await findModelTrigger(), '视频模型控件');
-    if (await membershipBlocked()) throw new Error('membership_required: 视频模型需要会员操作，已停止提交');
-    await click(await waitForExactOverlayOption(modelLabel, 'video_model'), '视频模型选项');
-    if (!await waitForModelVerification()) {
-      throw new VideoControlReadinessError('model', {
-        ready: false, failureStage: 'model', missingControl: 'model_control', attempts: 1, elapsedMs: 10_000,
-        pageStructureVersion: readiness.pageStructureVersion,
-      });
-    }
-  }
-
-  const currentCompositeLabel = async (): Promise<string | undefined> => page<string | undefined>(`
-    (function () {
-      function label(el) {
-        if (!el) return undefined;
-        var r = el.getBoundingClientRect();
-        var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-        return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.5 &&
-          /^(?:自动|[0-9]+:[0-9]+)\\s*·\\s*[0-9]+s$/.test(text) ? text : undefined;
-      }
-      var authoritative = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
-      var authoritativeLabel = label(authoritative);
-      if (authoritativeLabel) return authoritativeLabel;
-      var buttons = Array.from(document.querySelectorAll('button[aria-haspopup],button,[role="button"],div')).filter(function (el) {
-        return Boolean(label(el));
-      });
-      buttons.sort(function (a, b) { return b.getBoundingClientRect().top - a.getBoundingClientRect().top; });
-      return buttons[0] ? label(buttons[0]) : undefined;
-    })()
-  `, 'read_video_composite');
-
-  // 比例已经正确时不要再次点击同一选项。豆包弹层会保持打开，随后再次点击
-  // 组合触发器等价于把弹层关掉，旧代码因此误报“视频时长控件不可见”。
-  const beforeComposite = await currentCompositeLabel();
-  if (!beforeComposite?.startsWith(`${config.aspectRatio} ·`)) {
-    await openComposite();
+  const checkMembership = async (): Promise<void> => {
     if (await membershipBlocked()) throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
-    await click(await waitForExactOverlayOption(config.aspectRatio, 'video_ratio'), '视频比例选项');
-    await sleep(250);
-  }
-  // 比例切换后，豆包会保留当前时长。截图已证明 10s 会直接回显为
-  // “9:16 · 10s”；此时新版面板的滑条没有 role=slider，也不应把
-  // 已满足的配置误判为失败。
-  const expectedComposite = getVideoCompositeLabel(config.aspectRatio, config.duration);
-  const isCompositeAlreadyConfigured = async (): Promise<boolean> => page<boolean>(`
-    (function () {
-      var expected = ${JSON.stringify(expectedComposite)};
-      var authoritative = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
-      if (authoritative && (authoritative.innerText || '').replace(/\\s+/g, ' ').trim() === expected) return true;
-      return Array.from(document.querySelectorAll('button,[role="button"],div')).some(function (node) {
-        var r = node.getBoundingClientRect();
-        return r.width > 20 && r.height > 20 && (node.innerText || '').replace(/\\s+/g, ' ').trim() === expected;
-      });
-    })()
-  `, 'verify_video_composite_before_slider');
-  const verifyFinalStableReadback = async (): Promise<void> => {
-    const finalResult = await waitForVideoControlReadiness(async () => ({
-      modelReady: await verifyModel().catch(() => false),
-      aspectRatioReady: await isCompositeAlreadyConfigured().catch(() => false),
-      durationReady: await isCompositeAlreadyConfigured().catch(() => false),
-      pageVariant: 'composite-v2' as const,
-    }), { timeoutMs: 10_000, stableSamples: 3 });
-    const reported = finalResult.ready ? finalResult : { ...finalResult, failureStage: finalResult.failureStage || 'submission_controls' };
-    await options?.onReadiness?.(reported);
-    if (!finalResult.ready) throw new VideoControlReadinessError(reported.failureStage || 'submission_controls', reported);
   };
-  if (await membershipBlocked()) throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
-  if (await isCompositeAlreadyConfigured()) {
-    await verifyFinalStableReadback();
-    return;
-  }
-
-  const findDurationSlider = async (): Promise<{ position?: string }> => page<{ position?: string }>(
-    `(${setVideoDurationFromPage.toString()})(${durationSeconds}, ${Date.now() + 4500})`, 'set_video_duration_slider');
-  let slider = await findDurationSlider();
-  if (!slider.position) {
-    await openComposite();
-    slider = await findDurationSlider();
-  }
-  if (!slider.position) {
-    throw new VideoControlReadinessError('duration', {
-      ready: false, failureStage: 'duration', missingControl: 'duration_control', attempts: 2, elapsedMs: 700,
-      pageStructureVersion: readiness.pageStructureVersion,
-    });
-  }
-  await sleep(350);
-  const configured = await page<{ slider: boolean; composite: boolean }>(`
-    (function () {
-      var slider = Array.from(document.querySelectorAll('[role="slider"]')).some(function (node) {
-        return node.getAttribute('aria-valuemin') === '0' && node.getAttribute('aria-valuemax') === '11' && Number(node.getAttribute('aria-valuenow')) === ${durationSeconds - 4};
-      });
-      var expected = ${JSON.stringify(expectedComposite)};
-      var authoritative = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
-      var composite = Boolean(authoritative && (authoritative.innerText || '').replace(/\\s+/g, ' ').trim() === expected) || Array.from(document.querySelectorAll('button,[role="button"],div')).some(function (node) {
-        return (node.innerText || '').replace(/\\s+/g, ' ').trim() === expected;
-      });
-      return { slider: slider, composite: composite };
-    })()
-  `, 'verify_video_composite');
-  if (await membershipBlocked()) throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
-  if (!configured.slider || !configured.composite) {
-    const stage = configured.slider ? 'aspect_ratio' : 'duration';
+  const readiness = await waitForVideoControlReadiness(async () => ({ ...await probe(), pageVariant: 'composite-v2' as const }), { timeoutMs: 30_000, stableSamples: 3 });
+  await options?.onReadiness?.(readiness);
+  if (!readiness.ready) throw new VideoControlReadinessError(readiness.failureStage || 'stable_readback', readiness);
+  const fail = (stage: 'model' | 'aspect_ratio' | 'duration', operation: NonNullable<VideoControlReadinessResult['controlOperation']>, reason: NonNullable<VideoControlReadinessResult['failureReason']>): never => {
     throw new VideoControlReadinessError(stage, {
-      ready: false, failureStage: stage, missingControl: configured.slider ? 'aspect_ratio_control' : 'duration_control',
-      attempts: 1, elapsedMs: 350, pageStructureVersion: readiness.pageStructureVersion,
+      ...readiness, ready: false, failureStage: stage, currentStage: stage,
+      missingControl: stage === 'model' ? 'model_control' : stage === 'duration' ? 'duration_control' : 'aspect_ratio_control',
+      attempts, elapsedMs: Date.now() - startedAt, controlOperation: operation, failureReason: reason,
     });
+  };
+  const activate = async (operation: Exclude<VideoParameterOperation, 'snapshot'>, expected: string, stage: 'model' | 'aspect_ratio' | 'duration'): Promise<void> => {
+    let last: VideoParameterSnapshot | undefined;
+    const found = await pollUntilReady(async (): Promise<boolean> => {
+      last = await probe(operation, expected);
+      await checkMembership();
+      return !last.failureReason;
+    }, { timeoutMs: 10_000 });
+    if (!found) fail(stage, operation, last?.failureReason || 'not_found');
+    // 激活时在 guest 内重新定位同一语义目标，不重用轮询时的坐标或元素。
+    const result = await probe(operation, expected, true);
+    if (!result.activated) fail(stage, operation, result.failureReason || 'changed');
+    await sleep(80);
+  };
+  const openMenu = async (stage: 'model' | 'aspect_ratio' | 'duration', expected: string): Promise<void> => {
+    const option = stage === 'model' ? 'model_option' : 'ratio_option';
+    const current = await probe(option, expected);
+    // 菜单可能在选比例后保持打开；再次toggle会把时长控件关闭。
+    if (current.menuOpen) return;
+    await activate(stage === 'model' ? 'model_trigger' : 'parameters_trigger', expected, stage);
+    let last: VideoParameterSnapshot | undefined;
+    if (!await pollUntilReady(async (): Promise<boolean> => {
+      last = await probe(option, expected);
+      await checkMembership();
+      return last.menuOpen;
+    }, { timeoutMs: 5000 })) fail(stage, stage === 'model' ? 'model_trigger' : 'parameters_trigger', last?.failureReason || 'menu_not_open');
+  };
+  const waitForValue = async (stage: 'model' | 'aspect_ratio' | 'duration', matches: (snapshot: VideoParameterSnapshot) => boolean): Promise<void> => {
+    if (!await pollUntilReady(async (): Promise<boolean> => {
+      const current = await probe();
+      await checkMembership();
+      return matches(current);
+    }, { timeoutMs: 10_000 })) fail(stage, 'readback', 'value_not_applied');
+  };
+  if ((await probe()).model !== modelLabel) {
+    await openMenu('model', modelLabel);
+    await activate('model_option', modelLabel, 'model');
+    await waitForValue('model', (snapshot): boolean => snapshot.model === modelLabel);
   }
-  await verifyFinalStableReadback();
+  if ((await probe()).ratio !== targetRatio) {
+    await openMenu('aspect_ratio', targetRatio);
+    await activate('ratio_option', targetRatio, 'aspect_ratio');
+    // 比例单独回读成功后才进入时长步骤，不能只凭click返回值认定已切换。
+    await waitForValue('aspect_ratio', (snapshot): boolean => snapshot.ratio === targetRatio);
+  }
+  if ((await probe()).duration !== durationSeconds) {
+    await openMenu('duration', targetRatio);
+    attempts += 1;
+    const slider = await page<VideoDurationControlResult>(`(${setVideoDurationFromPage.toString()})(${durationSeconds}, ${Date.now() + 4500})`, 'set_video_duration_slider')
+      .catch((): never => fail('duration', 'duration_slider', 'page_unavailable'));
+    if (!slider.position || slider.verified === false) fail('duration', 'duration_slider', slider.failureReason || 'not_found');
+    await waitForValue('duration', (snapshot): boolean => snapshot.duration === durationSeconds);
+  }
+  await checkMembership();
+  const finalResult = await waitForVideoControlReadiness(async () => {
+    const current = await probe();
+    return { modelReady: current.model === modelLabel, aspectRatioReady: current.ratio === targetRatio, durationReady: current.duration === durationSeconds, pageVariant: 'composite-v2' as const };
+  }, { timeoutMs: 10_000, stableSamples: 3 });
+  const reported: VideoControlReadinessResult = { ...finalResult, attempts, elapsedMs: Date.now() - startedAt,
+    ...(!finalResult.ready ? { controlOperation: 'readback' as const, failureReason: 'value_not_applied' as const } : {}) };
+  await options?.onReadiness?.(reported);
+  if (!finalResult.ready) throw new VideoControlReadinessError(finalResult.failureStage || 'submission_controls', reported);
 }
 
 
@@ -4678,7 +4527,18 @@ export function matchBlockerFromLayers(
   return matchBlockerPhrase(allText);
 }
 
-export async function detectVideoGenerationBlocker(webview: WebviewHandle): Promise<string | null> {
+export async function detectVideoGenerationBlocker(webview: WebviewHandle, context?: VideoBlockerReadbackContext): Promise<string | null> {
+  if (context) {
+    // 自动任务受理后只检查具体原会话，不把切页后的错误卡片归到本次运行。
+    if (!isSameDoubaoConversation(webview.getURL(), context.conversationUrl)) return null;
+    try {
+      const snapshot = await safeExecuteJS<VideoBlockerPageSnapshot>(webview,
+        `(${readVideoBlockerPage.toString()})(document, ${JSON.stringify(context.baselineMessageCount)}, ${JSON.stringify(VIDEO_BLOCKER_SELECTORS)}, ${JSON.stringify(context.allowGenerationConfirmation === true)})`,
+        5000, 'readVideoBlockerPage');
+      if (!isSameDoubaoConversation(webview.getURL(), context.conversationUrl)) return null;
+      return matchBlockerFromLayers(snapshot.layerTexts, snapshot.assistantTexts.join('\n'));
+    } catch { return null; }
+  }
   const code = `
     (function() {
       var phrases = ${JSON.stringify(VIDEO_BLOCKER_PHRASES)};
@@ -4871,6 +4731,21 @@ import { tryExperimentalDirectExtract } from './experimentalNoWatermark';
 /**
  * resolveVideoArtifact 的上下文参数。
  */
+export interface VideoArtifactReadbackDiagnostic {
+  stage: 'anchored_snapshot' | 'anchored_related_cards';
+  messageCount: number;
+  assistantMessageCount: number;
+  historyComplete: boolean;
+  promptPublished: boolean;
+  reason?: string;
+  originalMessageIndex?: number;
+  originalAssistantMessageIndices: number[];
+  generationContinuationMessageIndices: number[];
+  cards: { messageIndex: number; hasVid: boolean; urlCount: number; domUrlCount: number }[];
+  relatedCardCount?: number;
+  messageChain: object;
+}
+
 export interface ResolveVideoArtifactContext {
   /** 任务自身的对话 URL，用于会话匹配 */
   conversationUrl?: string;
@@ -4888,6 +4763,13 @@ export interface ResolveVideoArtifactContext {
   experimentalNoWatermark?: boolean;
   /** 可选的中断信号，取消后立即停止解析 */
   signal?: AbortSignal;
+  /** 已提交视频的原正文与正式任务上下文；提供后只扫描原消息关联的视频卡。 */
+  sourcePrompt?: string;
+  readbackContext?: ChatReadbackContext;
+  videoConfig?: { aspectRatio: string; duration: string };
+  generationConfirmationRecorded?: boolean;
+  /** 只输出本次快照的结构计数和顺序，不包含正文、URL、vid、消息或会话 ID。 */
+  onDiagnostic?: (diagnostic: VideoArtifactReadbackDiagnostic) => void;
 }
 
 /**
@@ -4906,6 +4788,84 @@ export async function resolveVideoArtifact(
   webview: WebviewHandle,
   ctx: ResolveVideoArtifactContext = {},
 ): Promise<VideoArtifactResolution> {
+  const matchesOriginalConversation = (): boolean => {
+    if (!ctx.conversationUrl) return true;
+    try { return isSameDoubaoConversation(webview.getURL(), ctx.conversationUrl); } catch { return false; }
+  };
+  const conversationChanged = (attempts: ArtifactAttempt[]): VideoArtifactResolution => createFailedResolution(
+    'needs_manual_selection', '原视频会话已变化或缺少具体定位，未绑定其他会话产物', attempts,
+  );
+  // 发送回读后才传入具体原会话；入口及每个异步策略结束后都核对，禁止导航期间串产物。
+  if (!matchesOriginalConversation()) return conversationChanged([]);
+  if (ctx.signal?.aborted) return createFailedResolution('unavailable', '视频解析已取消', []);
+  const result = ctx.sourcePrompt || ctx.readbackContext
+    ? await resolveAnchoredVideoArtifact(webview, ctx, matchesOriginalConversation)
+    : await resolveVideoArtifactInConversation(webview, ctx, matchesOriginalConversation);
+  return matchesOriginalConversation() ? result : conversationChanged(result.attempts);
+}
+
+/** 同一快照先证明原消息，再读取有界关联卡；后续聊天及其它视频均不参与选择。 */
+async function resolveAnchoredVideoArtifact(webview: WebviewHandle, ctx: ResolveVideoArtifactContext, matchesOriginalConversation: () => boolean): Promise<VideoArtifactResolution> {
+  const deadline = Date.now() + (ctx.timeoutMs ?? 12_000);
+  const attempts: ArtifactAttempt[] = [];
+  if (!ctx.sourcePrompt || !ctx.readbackContext) return createFailedResolution('needs_manual_selection', '原视频只读消息上下文缺失', attempts);
+  const timeoutMs = Math.max(1, Math.min(8000, deadline - Date.now()));
+  const page = await executeCreationReadback<VideoConversationPage>(webview,
+    ctx.conversationUrl || ctx.readbackContext.conversationUrl, timeoutMs, true, ctx.signal);
+  if (ctx.signal?.aborted || !matchesOriginalConversation()) return createFailedResolution('unavailable', '原视频观察已停止或会话已变化', attempts);
+  const readback = inspectCreationReadback(page.snapshot, ctx.sourcePrompt, 'video', 0, ctx.videoConfig, ctx.generationConfirmationRecorded === true,
+    { ...ctx.readbackContext, currentConversationUrl: webview.getURL() });
+  const diagnostic: Omit<VideoArtifactReadbackDiagnostic, 'stage'> = {
+    messageCount: page.snapshot.messages.length, assistantMessageCount: page.snapshot.messages.filter((message): boolean => message.role === 'assistant').length,
+    historyComplete: page.snapshot.historyComplete === true, promptPublished: readback.promptPublished, reason: readback.reason,
+    originalMessageIndex: readback.originalMessageIndex, originalAssistantMessageIndices: readback.originalAssistantMessageIndices || [],
+    generationContinuationMessageIndices: readback.generationContinuationMessageIndices || [],
+    cards: page.cards.map((card: VideoConversationCard): { messageIndex: number; hasVid: boolean; urlCount: number; domUrlCount: number } => ({
+      messageIndex: card.messageIndex, hasVid: typeof card.video.vid === 'string' && !!card.video.vid.trim(), domUrlCount: card.urls.length,
+      urlCount: new Set([...parseConversationScanData({ video: card.video }).candidates.map((candidate: VideoCandidate): string => candidate.url), ...card.urls]).size,
+    })),
+    messageChain: diagnoseVideoMessageChain(page.snapshot, ctx.sourcePrompt, ctx.videoConfig, ctx.generationConfirmationRecorded === true,
+      { ...ctx.readbackContext, currentConversationUrl: webview.getURL() }),
+  };
+  try { ctx.onDiagnostic?.({ ...diagnostic, stage: 'anchored_snapshot' }); } catch { /* 诊断失败不能干扰原视频只读收取。 */ }
+  if (!readback.promptPublished) return createFailedResolution(readback.reason === 'user_ambiguous' || readback.reason === 'context_changed' ? 'needs_manual_selection' : 'unavailable', '原视频消息尚未同步或身份无法唯一核实', attempts);
+  const cards = relatedVideoCards(page, readback);
+  try { ctx.onDiagnostic?.({ ...diagnostic, stage: 'anchored_related_cards', relatedCardCount: cards.length }); } catch { /* 同上。 */ }
+  attempts.push({ strategy: 'anchored_video_messages', result: cards.length ? 'success' : 'fail', reason: cards.length ? '已定位原消息关联卡' : '原消息关联视频卡尚未就绪' });
+  return resolveAnchoredVideoCards(webview, ctx, cards, attempts, deadline, matchesOriginalConversation);
+}
+
+async function resolveAnchoredVideoCards(webview: WebviewHandle, ctx: ResolveVideoArtifactContext, cards: VideoConversationCard[], attempts: ArtifactAttempt[], deadline: number, matchesOriginalConversation: () => boolean): Promise<VideoArtifactResolution> {
+  const vids = [...new Set(cards.flatMap((card: VideoConversationCard): string[] => typeof card.video.vid === 'string' && card.video.vid.trim() ? [card.video.vid.trim()] : []))];
+  if (vids.length > 1 && !ctx.knownVid) return createFailedResolution('needs_manual_selection', '原消息关联多个不同视频，未自动选择最新视频', attempts);
+  const vid = ctx.knownVid || vids[0];
+  const selected = vid ? cards.filter((card: VideoConversationCard): boolean => card.video.vid === vid) : cards;
+  if (!selected.length) return createFailedResolution('unavailable', '原视频卡尚未同步或已保存标识尚未出现', attempts, vid);
+  const candidates = selected.flatMap((card: VideoConversationCard): VideoCandidate[] => [
+    ...parseConversationScanData({ video: card.video }).candidates,
+    ...card.urls.filter(isValidVideoUrl).map((url: string): VideoCandidate => ({ url, source: 'conversation_scan', isOriginal: false, ...(vid ? { vid } : {}) })),
+  ]);
+  const remaining = (): number => Math.max(1, deadline - Date.now());
+  const active = (): boolean => !ctx.signal?.aborted && matchesOriginalConversation() && Date.now() < deadline;
+  if (vid && active() && (!candidates.length || ctx.requireWithoutWatermark)) {
+    const media = ctx.requireWithoutWatermark
+      ? await executeDownloadInfoStrategy(webview, vid, remaining(), ctx.signal)
+      : await executePlayInfoStrategy(webview, vid, remaining(), ctx.signal);
+    attempts.push(media.attempt); if (media.candidate) candidates.push(media.candidate);
+  }
+  if (!vid) {
+    const urls = [...new Set(candidates.map((candidate: VideoCandidate): string => candidate.url))];
+    if (urls.length > 1) return createFailedResolution('needs_manual_selection', '原关联卡存在多个无标识媒体地址，未猜测选择', attempts);
+    if (urls.length === 1 && !ctx.requireWithoutWatermark) return createResolvedResolution(urls[0], 'conversation_scan', undefined, attempts);
+  }
+  return selectBestCandidate(candidates, vid, ctx, attempts);
+}
+
+async function resolveVideoArtifactInConversation(
+  webview: WebviewHandle,
+  ctx: ResolveVideoArtifactContext,
+  matchesOriginalConversation: () => boolean,
+): Promise<VideoArtifactResolution> {
   const totalBudgetMs = ctx.timeoutMs ?? 12000;
   const deadline = Date.now() + totalBudgetMs;
   const attempts: ArtifactAttempt[] = [];
@@ -4913,11 +4873,10 @@ export async function resolveVideoArtifact(
   let resolvedVid: string | undefined = ctx.knownVid;
   /** API 策略（play_info / platform_download_info）是否已成功获取到候选 */
   let apiStrategySucceeded = false;
-
-  /** 检查是否已取消或已超过全局 deadline */
-  const isAborted = () => ctx.signal?.aborted === true || Date.now() >= deadline;
+  /** 每个异步策略的下一阶段同时检查取消、预算和原会话。 */
+  const isAborted = (): boolean => ctx.signal?.aborted === true || Date.now() >= deadline || !matchesOriginalConversation();
   /** 获取剩余时间预算，最少 1 秒以保证请求能发出 */
-  const remainingMs = () => Math.max(1000, deadline - Date.now());
+  const remainingMs = (): number => Math.max(1000, deadline - Date.now());
 
   // ---- 策略 1: 已捕获的 SSE 响应缓存 ----
   const cacheResult = await tryCapturedResponseStrategy(webview);
@@ -5650,11 +5609,69 @@ export async function waitForPetStoryImageComposer(webview: WebviewHandle, signa
   }
   throw new PetStoryControlError('图片输入区尚未就绪，请稍后继续本次任务');
 }
+/** 视频输入区与专用槽位可在参数切换后异步重建；只尝试一次请求模式，之后连续回读真实控件。 */
+export async function waitForPetStoryVideoComposer(webview: WebviewHandle, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, signal: AbortSignal, timeoutMs: number = 6_000): Promise<import('./petstoryControls').PetStoryComposerSnapshot> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  let latest: import('./petstoryControls').PetStoryComposerSnapshot | undefined;
+  let selectedMode = false; let stableSamples = 0; let stableKey = '';
+  const requireActive = (): void => { if (signal.aborted) throw new DOMException('视频任务已暂停', 'AbortError'); };
+  const modeMatches = (snapshot: import('./petstoryControls').PetStoryComposerSnapshot): boolean => snapshot.present && (guard.mode === 'first_last_frame'
+    ? snapshot.first && snapshot.last || usesSharedPetStoryFrames(snapshot, guard.mode) : guard.mode === 'first_frame' ? snapshot.first && !snapshot.last : snapshot.generic);
+  const read = async (operation: import('./petstoryControls').PetStoryComposerOperation = {}): Promise<import('./petstoryControls').PetStoryComposerSnapshot | undefined> => {
+    requireActive();
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return undefined;
+    const snapshot = await raceWithAbort(safeExecuteJS<import('./petstoryControls').PetStoryComposerSnapshot>(webview,
+      `(${petStoryComposerProbe.toString()})(${JSON.stringify(operation)})`, Math.min(5_000, remaining), 'petstory_video_controls'), signal, undefined);
+    requireActive(); return snapshot;
+  };
+  while (Date.now() < deadline) {
+    requireActive();
+    let snapshot: import('./petstoryControls').PetStoryComposerSnapshot | undefined;
+    try { snapshot = await read(); }
+    catch (error: unknown) { if (signal.aborted) throw error; }
+    if (snapshot) {
+      latest = snapshot;
+      if (snapshot.present && !modeMatches(snapshot) && guard.mode && !selectedMode) {
+        // 同模式控件可能是 toggle，不能因等待重试反复点击，更不能自动降级为其他模式。
+        selectedMode = true; stableSamples = 0; stableKey = '';
+        try {
+          const selection = (await read({ selectMode: guard.mode }))?.modeSelection;
+          // 只在网页明确回读“未点击”时再等待按钮；点击回执丢失不能重试 toggle。
+          if (selection === 'missing' || selection === 'ambiguous' || selection === 'disabled') selectedMode = false;
+        }
+        catch (error: unknown) { if (signal.aborted) throw error; }
+      } else {
+        try {
+          checkPetStoryPageGuard(snapshot, guard, true);
+          const key = JSON.stringify([snapshot.present, snapshot.generic, snapshot.first, snapshot.last, snapshot.model, snapshot.duration, snapshot.aspectRatio]);
+          stableSamples = key === stableKey ? stableSamples + 1 : 1; stableKey = key;
+          if (stableSamples >= 2 && Date.now() < deadline) { requireActive(); return snapshot; }
+        } catch (error: unknown) {
+          if (!(error instanceof PetStoryControlError)) throw error;
+          stableSamples = 0; stableKey = '';
+        }
+      }
+    } else { stableSamples = 0; stableKey = ''; }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await raceWithAbort(sleep(Math.min(250, remaining)), signal, undefined);
+  }
+  requireActive();
+  if (latest?.present && latest.generic && (guard.mode === 'first_last_frame' || guard.mode === 'first_frame')) {
+    const slots = guard.mode === 'first_last_frame' ? '独立首尾帧' : '独立首帧';
+    throw new PetStoryControlError(`已选图片已保留；当前豆包入口的${slots}或对应图片上传控件尚未就绪，本次尚未上传或提交。请稍后继续原视频任务。`);
+  }
+  if (latest) checkPetStoryPageGuard(latest, guard, true);
+  throw new PetStoryControlError('视频输入区或生成参数尚未连续稳定就绪；本次尚未上传或提交，请稍后继续本次任务。');
+}
 export function checkPetStoryPageGuard(snapshot: import('./petstoryControls').PetStoryComposerSnapshot, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, video: boolean): void {
   if (!snapshot.present) throw new PetStoryControlError(video ? '当前页面没有找到视频生成输入区' : '当前页面没有找到图片生成输入区');
   if (!video) { if (!snapshot.generic) throw new PetStoryControlError('图片参考输入区尚未适配'); return; }
   const mode = guard.mode;
-  if (mode === 'first_last_frame' ? !snapshot.first || !snapshot.last : mode === 'first_frame' ? !snapshot.first || snapshot.last : !snapshot.generic) throw new PetStoryControlError('当前实际模式槽位与批准模式不符，未上传或提交');
+  const sharedFrames = usesSharedPetStoryFrames(snapshot, mode);
+  if (mode === 'first_last_frame' ? (!snapshot.first || !snapshot.last) && !sharedFrames : mode === 'first_frame' ? !snapshot.first || snapshot.last : !snapshot.generic) throw new PetStoryControlError('当前实际模式槽位与批准模式不符，未上传或提交');
+  if (sharedFrames && (guard.attachmentAssetIds.length !== 2 || requiresNativePetStoryFrames(guard.compiledPrompt?.final || ''))) throw new PetStoryControlError('本镜要求原生首尾槽或首尾图数量不符，当前统一上传方式不能满足；未改变正文或提交');
   const config = guard.capability.videoConfig;
   if (snapshot.duration !== guard.durationSeconds || !config || snapshot.aspectRatio !== config.aspectRatio || snapshot.model !== getVideoModelUiLabel(config.model)) throw new PetStoryControlError('当前模型／时长／比例回读与计划不一致，零提交');
 }
@@ -5670,6 +5687,11 @@ export interface PetStoryUploadReceipt {
 function petStoryUploadSlot(mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image', index: number): PetStoryUploadReceipt['slot'] {
   return mode === 'first_last_frame' ? index === 0 ? 'first_frame' : 'last_frame' : mode === 'first_frame' ? 'first_frame' : 'reference';
 }
+/** 仅决定当前页面的上传通道，镜头首尾用途和合同模式保持原值。 */
+async function petStoryImageUploadMode(webview: WebviewHandle, mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image'): Promise<import('@doubao-studio/contracts').PetStoryResolvedMode | 'image'> {
+  if (mode !== 'first_last_frame') return mode;
+  return usesSharedPetStoryFrames(await readPetStoryComposer(webview), mode) ? 'reference' : mode;
+}
 async function checkedUploadFiles(files: Array<{ name: string; base64: string; mime: string }>, mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image', expectedSha256s?: string[]): Promise<{ fileBytes: Uint8Array<ArrayBuffer>[]; fileDigests: string[] }> {
   if ((mode === 'first_last_frame' && files.length !== 2) || (mode === 'first_frame' && files.length !== 1)) throw new PetStoryControlError('专用首尾模式附件数量冲突');
   if (expectedSha256s && expectedSha256s.length !== files.length) throw new PetStoryControlError('文件摘要清单与实际附件数量不符');
@@ -5683,9 +5705,10 @@ async function checkedUploadFiles(files: Array<{ name: string; base64: string; m
 }
 export async function uploadPetStoryImages(webview: WebviewHandle, files: Array<{ name: string; base64: string; mime: string }>, mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image', signal: AbortSignal, expectedSha256s?: string[]): Promise<PetStoryUploadReceipt[]> {
   const { fileBytes, fileDigests } = await checkedUploadFiles(files, mode, expectedSha256s);
+  const uploadMode = await petStoryImageUploadMode(webview, mode);
   const receipts: PetStoryUploadReceipt[] = [];
   for (let index = 0; index < files.length; index++) {
-    const slot = petStoryUploadSlot(mode, index);
+    const slot = petStoryUploadSlot(uploadMode, index);
     const bytes = fileBytes[index]; const fileSha256 = fileDigests[index];
     const before = await readPetStoryComposer(webview, { slot });
     const expected = slot === 'reference' ? index : 0;
@@ -5732,7 +5755,10 @@ async function resolvePetStoryReferenceMenu(webview: WebviewHandle, receipts: Pe
 }
 
 function validatePetStoryUploadReceipts(compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt, receipts: PetStoryUploadReceipt[]): void {
-  if (receipts.length !== compiled.references.length || receipts.some((r, i): boolean => r.fileIndex !== i || r.slot !== (compiled.references[i].slot === 'first' ? 'first_frame' : compiled.references[i].slot === 'last' ? 'last_frame' : 'reference'))
+  const sharedFrames = compiled.kind === 'video' && compiled.resolvedMode === 'first_last_frame' && compiled.references.length === 2
+    && compiled.references[0].slot === 'first' && compiled.references[1].slot === 'last' && receipts.length === 2
+    && receipts.every((receipt): boolean => receipt.slot === 'reference' && receipt.reference !== 'slot') && !requiresNativePetStoryFrames(compiled.final);
+  if (receipts.length !== compiled.references.length || receipts.some((r, i): boolean => r.fileIndex !== i || !sharedFrames && r.slot !== (compiled.references[i].slot === 'first' ? 'first_frame' : compiled.references[i].slot === 'last' ? 'last_frame' : 'reference'))
     || new Set(receipts.map((r): string => `${r.slot}:${r.key}`)).size !== receipts.length) throw new PetStoryControlError('上传回执的文件次序／槽位与逻辑引用不符');
 }
 
@@ -5780,8 +5806,11 @@ export async function bindPetStoryReferences(webview: WebviewHandle, compiled: i
   return { compiled: resolved, bindings };
 }
 export async function verifyPetStoryReferenceBindings(webview: WebviewHandle, bindings: import('@doubao-studio/contracts').PetStoryPageBinding[]): Promise<void> {
+  if (bindings.some((binding, index): boolean => binding.order !== index + 1)
+    || bindings.some((binding): boolean => binding.reference === 'slot') && bindings.some((binding): boolean => binding.slot === 'reference')) throw new PetStoryControlError('提交前素材顺序或上传方式不一致，零提交');
   for (const binding of bindings) {
     const snapshot = await readPetStoryComposer(webview, { slot: binding.slot });
+    if (binding.slot === 'reference' && (snapshot.count !== bindings.length || snapshot.previews?.length !== bindings.length)) throw new PetStoryControlError('提交前页面素材丢失或数量变化，与本次绑定不符，零提交');
     const candidates = await Promise.all((snapshot.previews || []).map(async (p): Promise<{ key: string; label: string; hash: string; nodeId?: string }> => { const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(p.key)); return { ...p, hash: Array.from(new Uint8Array(bytes)).map((b): string => b.toString(16).padStart(2, '0')).join('') }; }));
     const preview = candidates.find((p): boolean => p.hash === binding.previewHash);
     if (!preview || snapshot.pending) throw new PetStoryControlError('提交前页面素材丢失或编号变化');
@@ -5797,7 +5826,9 @@ export async function verifyPetStoryReferenceBindings(webview: WebviewHandle, bi
 export class PetStoryControlError extends Error {}
 
 export async function verifyPetStoryUploads(webview: WebviewHandle, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, video: boolean): Promise<void> {
-  const slots: Array<'reference' | 'first_frame' | 'last_frame'> = video && guard.mode === 'first_last_frame' ? ['first_frame', 'last_frame'] : [video && guard.mode === 'first_frame' ? 'first_frame' : 'reference'];
+  const composer = await readPetStoryComposer(webview);
+  checkPetStoryPageGuard(composer, guard, video);
+  const slots: Array<'reference' | 'first_frame' | 'last_frame'> = video && guard.mode === 'first_last_frame' && !usesSharedPetStoryFrames(composer, guard.mode) ? ['first_frame', 'last_frame'] : [video && guard.mode === 'first_frame' ? 'first_frame' : 'reference'];
   for (const slot of slots) {
     const snapshot = await readPetStoryComposer(webview, { slot });
     checkPetStoryPageGuard(snapshot, guard, video);

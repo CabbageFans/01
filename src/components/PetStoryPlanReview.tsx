@@ -56,9 +56,10 @@ function reviewState(project: PetStoryProject, job: PetStoryChatJob | undefined,
   return { ...view, ...reviewLabel(view, uncertain) };
 }
 const PlanRecovery: React.FC<{ project: PetStoryProject; view: ReviewState }> = ({ project, view }): React.ReactElement | null => {
+  const repairPreparing = usePetStoryStore((state) => !!view.job && state.promptRepairJobIds.includes(view.job.id));
   if (view.pending && !view.problem) return <><Progress percent={view.task?.runtime?.submittedAt ? 65 : 20} showInfo={false} status="active" /><p role="status">{view.job ? petStoryJobStatus(view.job, view.task).instruction : '正在等待豆包回复。'}</p></>;
   if (!view.problem) return null;
-  return <div className="petstory-plan-attention" role="status"><p>{view.job?.kind === 'repair' && view.job.status === 'invalid' ? petStoryJobStatus(view.job, view.task).instruction : view.job?.staleReason || view.job?.error || view.task?.errorInfo?.message || (view.job ? petStoryJobStatus(view.job, view.task).instruction : '原回复尚未确认归属，请先核对原会话。')}</p><p>受影响对象：本轮分镜方案。当前采用方案和已有成果保留。</p>{view.job && <PetStoryChatRecoveryActions project={project} job={view.job} task={view.task} compact />}</div>;
+  return <div className="petstory-plan-attention" role="status"><p>{view.job && (repairPreparing || view.job.kind === 'repair' && view.job.status === 'invalid') ? petStoryJobStatus(view.job, view.task, repairPreparing).instruction : view.job?.staleReason || view.job?.error || view.task?.errorInfo?.message || (view.job ? petStoryJobStatus(view.job, view.task).instruction : '原回复尚未确认归属，请先核对原会话。')}</p><p>受影响对象：本轮分镜方案。当前采用方案和已有成果保留。</p>{view.job && <PetStoryChatRecoveryActions project={project} job={view.job} task={view.task} compact />}</div>;
 };
 const PlanActions: React.FC<{ project: PetStoryProject; view: ReviewState; disabled: boolean; onMaterials?: () => void }> = ({ project, view, disabled, onMaterials }): React.ReactElement | null => {
   const state = usePetStoryStore();

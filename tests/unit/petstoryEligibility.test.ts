@@ -18,7 +18,7 @@ function project(images = true): PetStoryProject {
   for (const shot of p.plan!.shots) { shot.prompts.video.final = `TEST离线接口正文：${shot.action}`; shot.prompts.video.optimized = shot.prompts.video.final; }
   if (images) attachImages(p);
   p.storyApproval = { hash: storyHash(p), at: p.updatedAt };
-  seedOfflinePromptContracts(p);
+  seedOfflinePromptContracts(p, undefined, { completeVideoBody: true });
   return p;
 }
 function attachImages(p: PetStoryProject): void {
@@ -68,7 +68,7 @@ describe('专用正文媒体资格与计划导出', (): void => {
   });
   it('有效generic计划只补齐一次文字阶段，确定已知模型或改变模式后才重新进入适配', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; p.promptModel = 'generic';
-    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' });
+    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' }, { completeVideoBody: true });
     const t = { shotId: shot.id, promptKind: 'video' as const, mode: shot.prompts.video.promptTask!.mode };
     expect(inspectPromptEligibility(p, shot.prompts.video, t)).toMatchObject({ state: 'creative_plan', writingReady: true });
     expect(inspectPromptEligibility(p, shot.prompts.video, { ...t, model: 'seedance-2.0' }).writingReady).toBe(false);
@@ -77,7 +77,7 @@ describe('专用正文媒体资格与计划导出', (): void => {
   });
   it('auto文字与媒体使用同一输入计划，不以缺少入口检查为由要求重新适配', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; shot.requestedMode = 'auto'; delete shot.prompts.video.promptTask;
-    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' });
+    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' }, { completeVideoBody: true });
     const t = promptWritingTarget(p, { shotId: shot.id, promptKind: 'video' });
     expect(t).toMatchObject({ model: 'seedance-2.0', mode: 'reference' });
     expect(resolvePetStoryMode(shot, productionCapability(p)).resolvedMode).toBe(t.mode);
@@ -134,7 +134,7 @@ describe('专用正文媒体资格与计划导出', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; const body = shot.prompts.video;
     // 只派生原故事文本的技术状态；此处不是新的豆包创作结果。
     if (variant === 'missing_dialogue') shot.dialogue = [{ speakerId: shot.characterIds[0], text: snapshot.mobileStory.slice(0, 8), tone: 'TEST', pace: 'TEST' }];
-    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' });
+    seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' }, { completeVideoBody: true });
     body.basisJobId = body.sourceJobId || body.basisJobId; body.sourceJobId = undefined; body.edited = true;
     const labels = body.promptTask!.references.map((ref): string => `@图片${ref.order}`).join(' ');
     body.final = `${variant === 'missing_reference' ? '' : labels}\n${variant === 'xml_sound' ? '<声音>TEST</声音>' : ''}\n全程无字幕、无对白文字叠加。`;

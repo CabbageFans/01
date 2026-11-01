@@ -9,7 +9,7 @@ import { PetStoryProjects, projectPath } from '../../main/utils/petstoryProject'
 import { checkFinalBindings, finalTaskInput, PetStoryChatService, type PetStoryTaskPort } from '../../main/utils/petstoryChat';
 import { TaskService } from '../../main/core/TaskService';
 import { normalizeTasks } from '../../main/utils/persistenceNormalization';
-import { analysisPrompt, optimizationPrompt, mobileStoryPrompt } from '../../src/utils/petstoryPrompts';
+import { analysisPrompt, optimizationPrompt, mobileStoryPrompt, repairPrompt } from '../../src/utils/petstoryPrompts';
 
 const now = '2026-10-24T02:00:00.000Z';
 function testPrompt(label: string): PetStoryPrompt {
@@ -345,7 +345,7 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     expect(tasks()).toHaveLength(1);
     expect((await new PetStoryProjects().open(directory)).jobs[0].rawText).toBe(raw);
   });
-  it('stores malformed JSON before parsing and permits only one bound repair task', async (): Promise<void> => {
+  it('stores malformed JSON before parsing, reuses each parent repair and continues failed repairs', async (): Promise<void> => {
     const { port, core, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
     await chat.prepare(project.id, 'TEST bad format', 'analysis');
@@ -353,12 +353,23 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     const id = (await projects.read(project.id)).jobs[0].id;
     expect(await chat.collect(project.id, id)).toMatchObject({ success: false, needsRepair: true });
     expect((await projects.read(project.id)).jobs[0].rawText).toBe('{invalid TEST JSON');
-    await chat.prepare(project.id, 'TEST repair', 'repair', id);
+    const failed = await projects.read(project.id);
+    await chat.prepare(project.id, repairPrompt(failed, failed.jobs[0]), 'repair', id);
+    expect(tasks()[1].prompt).toContain('后台持续迭代，直到校验通过');
+    expect(tasks()[1].prompt).not.toMatch(/唯一一次自动格式纠正|最多一次自动修订/);
     await complete(core, tasks()[1], 'still invalid TEST JSON');
     const repair = (await projects.read(project.id)).jobs[1];
-    expect(await chat.collect(project.id, repair.id)).toMatchObject({ success: false, needsRepair: false });
-    await expect(chat.prepare(project.id, 'TEST repair again', 'repair', id)).rejects.toThrow('已使用一次');
+    expect(await chat.collect(project.id, repair.id)).toMatchObject({ success: false, needsRepair: true });
+    expect(await chat.prepare(project.id, 'TEST repair again', 'repair', id)).toMatchObject({ success: true, repairJobId: repair.id });
     expect(tasks()).toHaveLength(2);
+    const current = await projects.read(project.id); const latestFailed = current.jobs.find((job): boolean => job.id === repair.id)!;
+    const continued = await chat.prepare(project.id, repairPrompt(current, latestFailed), 'repair', repair.id); expect(continued.success).toBe(true);
+    expect(tasks()[2].prompt).toContain('still invalid TEST JSON');
+    expect(tasks()[2].prompt).not.toMatch(/唯一一次自动格式纠正|最多一次自动修订/);
+    expect(tasks()).toHaveLength(3); await complete(core, tasks()[2], testAnswer());
+    const latest = (await projects.read(project.id)).jobs.at(-1)!;
+    expect(await chat.collect(project.id, latest.id)).toMatchObject({ success: true });
+    expect((await projects.read(project.id)).jobs.slice(0, 2).map((job): string | undefined => job.rawText)).toEqual(['{invalid TEST JSON', 'still invalid TEST JSON']);
   });
   it('keeps the pasted original on insufficient stories, creates no media tasks, and allows correcting the same project link', async (): Promise<void> => {
     const { port, core, tasks } = taskPort();

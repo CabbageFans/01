@@ -91,7 +91,8 @@ describe('明确采用方案才保留并核对受影响成果', (): void => {
       if (prompt && old) expect(prompt).toEqual({ ...old, ...(shot.order <= 3 ? { needsReview: true } : {}) });
     }
     expect(p.assets).toHaveLength(before.assets.length);
-    for (const asset of p.assets) expect(asset.needsReview).toBe(Number(asset.shotId!.split('_')[1]) <= 3 ? true : undefined);
+    // 已采用图片沿用原决定；变化后的文字仍按上面的正文规则标记。
+    expect(p.assets).toEqual(before.assets);
     expect(p.productionHistory).toEqual(before.productionHistory); expect(p.adoptedImages).toEqual(before.adoptedImages);
     for (const asset of p.assets) expect(await fs.readFile(path.join(directory, asset.relativePath), 'utf8')).toBe('TEST');
     expect(tasks).toHaveLength(1);
@@ -117,7 +118,7 @@ describe('明确采用方案才保留并核对受影响成果', (): void => {
     const job = await candidate(incoming); await adopt(job);
     for (const shot of p.plan!.shots) expect(shot.prompts.firstFrame.needsReview).toBe(shot.sceneId === 'road' ? true : undefined);
     expect(p.materials!.find((material): boolean => material.id === 'scene:other-road')).toEqual(before.materials!.find((material): boolean => material.id === 'scene:other-road'));
-    expect(p.assets.filter((asset): boolean => !asset.needsReview).map((asset): string => asset.shotId!)).toEqual(['shot_4', 'shot_5']);
+    expect(p.assets.filter((asset): boolean => !asset.needsReview).map((asset): string => asset.shotId!)).toEqual(before.plan!.shots.map((shot): string => shot.id));
     expect(p.assets.find((asset): boolean => asset.id === sceneImage.id)?.needsReview).toBe(true);
     expect(p.materials!.find((item): boolean => item.id === material.id)?.prompt).toEqual({ ...material.prompt, needsReview: true });
     expect(p.materials!.find((item): boolean => item.id === material.id)?.approved).toBeUndefined();
@@ -131,7 +132,7 @@ describe('明确采用方案才保留并核对受影响成果', (): void => {
     expect(p.plan!.shots.at(-1)!.prompts.firstFrame).toMatchObject({ final: '', optimized: '', draft: added.prompts.firstFrame.optimized });
     expect(p.plan!.shots.at(-1)!.prompts.firstFrame.sourceJobId).toBeUndefined();
     expect(p.adoptedImages?.[removed.id]).toBeUndefined(); expect(p.assets).toHaveLength(oldAssets.length);
-    expect(p.assets.find((asset): boolean => asset.shotId === removed.id)?.needsReview).toBe(true); expect(p.productionHistory).toHaveLength(1); expect(tasks).toHaveLength(1);
+    expect(p.assets.find((asset): boolean => asset.shotId === removed.id)).toEqual(oldAssets.find((asset): boolean => asset.shotId === removed.id)); expect(p.productionHistory).toHaveLength(1); expect(tasks).toHaveLength(1);
   });
 
   it('方案取消尾帧时只移出当前引用，旧尾帧文件和历史仍保留', async (): Promise<void> => {
