@@ -117,6 +117,10 @@ describe('专用正文媒体资格与计划导出', (): void => {
   });
   it('同一角色改选真实图片A到B会进入正常Chat适配，不能只在媒体提交时才发现旧引用', (): void => {
     const p = project(); const t = target(p); const original = p.assets[0]; const hash = promptDesignHash(p, t);
+    // 本例明确覆盖旧规则正文；新按图驱动正文的职责不变时另走确定性重绑。
+    delete first(p).promptTask!.visualPolicy;
+    const source = p.jobs.find((job): boolean => job.id === (first(p).sourceJobId || first(p).basisJobId))!;
+    delete source.promptTask!.visualPolicy;
     p.assets.push({ ...original, id: 'TEST-replacement-image' }); p.plan!.characters[0].referenceAssetId = 'TEST-replacement-image';
     expect(promptDesignHash(p, t)).toBe(hash);
     const result = inspectPromptEligibility(p, first(p), t);

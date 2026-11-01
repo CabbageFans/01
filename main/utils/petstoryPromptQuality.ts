@@ -1,13 +1,14 @@
 import { currentReferenceContinuation } from './petstoryReferenceContinuation';
-import type { PetStoryAsset, PetStoryCompiledPrompt, PetStoryProject, PetStoryPrompt, PetStoryPromptKind, PetStoryPromptProfile, PetStoryPromptReference, PetStoryResolvedMode, PetStoryShot } from '@doubao-studio/contracts';
+import type { PetStoryAsset, PetStoryCompiledPrompt, PetStoryProject, PetStoryPrompt, PetStoryPromptKind, PetStoryPromptReference, PetStoryResolvedMode, PetStoryShot } from '@doubao-studio/contracts';
 import presets from './petstoryPresets.json';
+export { defaultPromptProfile, effectivePromptProfile } from './petstoryPromptProfile';
 import { materialAsset, requireApprovedMaterials, requireMaterialPromptSource, shotMaterialReferences } from './petstoryMaterials';
 import { renderReferenceSegments } from './petstoryReferenceText';
 import { requirePromptEligibility } from './petstoryEligibility';
 import { selectedShotImageId } from './petstoryImageReview';
+import { petStoryProductionLabel } from './petstoryCharacterLabels';
 
 export const PROMPT_RULES_VERSION = presets.version;
-export function defaultPromptProfile(): PetStoryPromptProfile { return structuredClone(presets.profile) as PetStoryPromptProfile; }
 export function assetCharacterIds(asset: PetStoryAsset): string[] { return asset.characterIds || (asset.characterId ? [asset.characterId] : []); }
 export function identityAsset(p: PetStoryProject, characterId: string): PetStoryAsset | undefined {
   const char = p.plan?.characters.find((c): boolean => c.id === characterId);
@@ -21,7 +22,7 @@ export function orderedChatAssets(p: PetStoryProject, shotId?: string): PetStory
     const selected = keys.flatMap((key): PetStoryAsset[] => { const m = p.materials?.find((m): boolean => m.id === key); const a = p.assets.find((a): boolean => a.id === m?.selectedAssetId); return a ? [a] : []; });
     return [...new Map(selected.map((a): [string, PetStoryAsset] => [a.id, a])).values()];
   }
-  const ids = shot?.characterIds || p.plan?.characters.map((c): string => c.id) || ['lulu', 'lumei'];
+  const ids = shot?.characterIds || p.plan?.characters.map((c): string => c.id) || [];
   const selected = ids.flatMap((id): PetStoryAsset[] => { const a = identityAsset(p, id); return a ? [a] : []; });
   if (shot) selected.push(...(shot.sceneReferenceAssetIds || []).flatMap((id): PetStoryAsset[] => p.assets.filter((a): boolean => a.id === id && a.kind === 'scene' && a.shotId === shot.id)));
   return [...new Map(selected.map((a): [string, PetStoryAsset] => [a.id, a])).values()];
@@ -101,7 +102,7 @@ export function checkPromptReferences(final: string, p: PetStoryProject, refs: P
     const ref = refs.find((item): boolean => item.order === referenceNumber(match[1] || match[2] || match[3]));
     if (!ref) throw new Error('最终提示词图片编号没有对应实际上传');
     const after = final.slice((match.index || 0) + match[0].length).match(/^[\s：:=（(、]*(?:是|为|对应)?([^，。；;\n)）]{1,60})/u)?.[1] || '';
-    const named = p.plan?.characters.find((c): boolean => after === c.name || after === c.id || after.startsWith(`${c.name}身份`) || after.startsWith(`${c.name}的身份`));
+    const named = p.plan?.characters.find((c): boolean => [c.id, c.name, petStoryProductionLabel(p.plan?.characters || [], c.id)].some((label): boolean => !!label && (after === label || after.startsWith(`${label}身份`) || after.startsWith(`${label}的身份`))));
     if (named && (ref.purpose !== 'identity' || !ref.characterIds.includes(named.id))) throw new Error('角色与实际图片顺序错绑；场景首帧不能冒充单独角色图');
     const material = p.materials?.find((m): boolean => after === m.name || after === m.id);
     if (material && ref.materialId !== material.id && !(material.kind === 'character' && ref.characterIds.includes(material.entityId))) throw new Error('逻辑资产名称与实际图片用途错绑，请使用逻辑引用');
@@ -109,17 +110,18 @@ export function checkPromptReferences(final: string, p: PetStoryProject, refs: P
     if (/^(?:本镜)?首帧/.test(after) && !['firstFrame', 'actualEndFrame'].includes(ref.purpose)) throw new Error('首帧引用与实际上传顺序不符');
   }
 }
-type ReferenceBinding = 'original_assets' | 'current_frames' | 'authorized_frame_references';
+type ReferenceBinding = 'original_assets' | 'current_frames' | 'authorized_frame_references' | 'reference_first';
 function isFrameReference(ref: PetStoryPromptReference): boolean { return ['firstFrame', 'actualEndFrame', 'plannedEndImage'].includes(ref.purpose); }
-/** 候选锁原素材；已采用视频的首尾角色按当前明确选图绑定，其他素材仍锁原资产。 */
+/** 候选锁原素材；新规则的纯表演正文仅允许同一职责的角色图换版，旧合同仍锁原资产。 */
 export function plannedReferenceMap(source: PetStoryPromptReference[], current: PetStoryPromptReference[], binding: ReferenceBinding = 'original_assets'): Map<number, PetStoryPromptReference> {
   const result = new Map<number, PetStoryPromptReference>();
   for (const ref of source) {
     if (!Number.isSafeInteger(ref.order) || ref.order < 1 || ref.order > source.length || result.has(ref.order)) throw new Error('正文来源的素材标签表编号无效，请重新生成');
     const planned = ref.assetId.startsWith('pending:');
     const currentFrame = binding !== 'original_assets' && isFrameReference(ref);
+    const currentIdentity = binding === 'reference_first' && ref.purpose === 'identity' && ref.characterIds.length > 0;
     const found = current.find((item): boolean => {
-      if (!planned && !currentFrame && item.assetId !== ref.assetId) return false;
+      if (!planned && !currentFrame && !currentIdentity && item.assetId !== ref.assetId) return false;
       const samePurpose = item.purpose === ref.purpose || (planned && ref.assetId === 'pending:first' && ref.purpose === 'firstFrame' && item.purpose === 'actualEndFrame')
         || (currentFrame && ['firstFrame', 'actualEndFrame'].includes(ref.purpose) && ['firstFrame', 'actualEndFrame'].includes(item.purpose));
       const sameSlot = item.slot === ref.slot || binding === 'authorized_frame_references' && currentFrame && item.slot === undefined;
@@ -146,7 +148,7 @@ export function compileReferencedText(p: PetStoryProject, final: string, refs: P
     segments.push({ text: final.slice(cursor, match.index) });
     const key = match[1];
     const sourceRef = key ? logicalReference(source, key) : undefined;
-    const ref = key ? logicalReference(refs, key) || (binding === 'current_frames' && sourceRef && isFrameReference(sourceRef) ? mapped.get(sourceRef.order) : undefined)
+    const ref = key ? logicalReference(refs, key) || (sourceRef && ((binding === 'current_frames' || binding === 'reference_first') && isFrameReference(sourceRef) || binding === 'reference_first' && sourceRef.purpose === 'identity') ? mapped.get(sourceRef.order) : undefined)
       : mapped.get(Number(match[2] || match[3]));
     if (!ref) throw new Error(`逻辑引用 ${key || match[2] || match[3]} 没有对应素材`);
     segments.push({ referenceOrder: ref.order, ...(key ? {} : { sourceText: match[0] }) }); cursor = (match.index || 0) + match[0].length;
@@ -180,7 +182,7 @@ export function compilePrompt(p: PetStoryProject, shotId: string, kind: PetStory
   if (kind === 'video' && !planned) validateVideoPromptTarget(p, prompt, mode, shotId);
   // 正文由 Chat 或用户撰写。编译仅解析已存在的引用，绝不补写目的、保持项或素材说明。
   const continuation = kind === 'video' && mode === 'reference' ? currentReferenceContinuation(p, shotId) : undefined;
-  const compiled = compileReferencedText(p, final, refs, prompt.promptTask?.references, continuation ? 'authorized_frame_references' : kind === 'video' ? 'current_frames' : 'original_assets');
+  const compiled = compileReferencedText(p, final, refs, prompt.promptTask?.references, continuation ? 'authorized_frame_references' : prompt.promptTask?.visualPolicy === 'reference-first-v1' ? 'reference_first' : kind === 'video' ? 'current_frames' : 'original_assets');
   if (continuation && compiled.text !== continuation.sourceCompiledPrompt.text) throw new Error('两参考图授权不能改写原编译全文，未提交');
   return { ...compiled, final, kind, requestedMode: shot.requestedMode, resolvedMode: kind === 'video' ? mode : undefined,
     rulesVersion: prompt.rulesVersion, references: refs };

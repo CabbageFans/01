@@ -31,6 +31,10 @@ export interface PetStoryPromptTaskContract {
   /** 当次确认设计与已采用边界；不包含上传顺序或计划文件解析结果。 */
   designHash?: string;
   references: PetStoryPromptReference[];
+  /** 当前角色采用图的指纹；只用于阻止旧形象任务回流，不包含旧造型文字。 */
+  characterVisualBasis?: Record<string, string>;
+  /** 正文由当前按图驱动规则创作，允许素材职责不变时只重绑实际图片。 */
+  visualPolicy?: 'reference-first-v1';
   dialect: 'seedance20' | 'seedance25' | 'seedream' | 'generic';
   mode?: PetStoryResolvedMode;
 }
@@ -59,6 +63,10 @@ export interface PetStoryPrompt {
   candidateJobId?: string;
   sourceJobId?: string;
   needsReview?: boolean;
+  /** 此正文因角色视觉替换退出活跃使用，区别于真实审查错误。 */
+  visualBasisStale?: boolean;
+  /** 历史基础图正文已被采用图替代；正文与来源保留，但不得再作为有效写作输入。 */
+  supersededByAssetId?: string;
   /** 已采用的有界编辑计划，实际媒体仍须用户另行操作。 */
   editIntent?: PetStoryMaterialEditIntent;
   /** 采用该正文时一并保存，后续只允许对其中引用做确定性素材映射。 */
@@ -72,6 +80,8 @@ export interface PetStoryMaterialEditIntent {
 }
 export interface PetStoryCharacter {
   id: string;
+  /** 与来源称谓分开的稳定中性制作标签，供动作、引用及说话者共用。 */
+  productionLabel?: string;
   name: string;
   role: 'main' | 'supporting';
   purpose: string;
@@ -112,7 +122,9 @@ export interface PetStoryMaterial {
   designHash: string;
   prompt: PetStoryPrompt;
   selectedAssetId?: string;
-  approved?: { assetId: string; sha256: string; at: string; identity?: { description: string; assetId: string } };
+  approved?: { assetId: string; sha256: string; at: string; identity?: { description?: string; assetId: string } };
+  /** 用户明确采用的角色视觉依据，与剧情描述及基础图历史提示词分开。 */
+  visualBasis?: { assetId: string; sha256: string; adoptedAt: string };
 }
 export interface PetStoryPageBinding {
   assetId: string;
@@ -232,6 +244,8 @@ export interface PetStoryAsset {
   imageReview?: PetStoryImageReview;
   /** 输入素材已替换，旧文件保留，须人工复核或重新制作。 */
   needsReview?: boolean;
+  /** 实际角色图被替换；旧关键帧保留历史但不再代表当前形象。 */
+  visualBasisStale?: boolean;
   sourceVideo?: { assetId: string; taskId: string; runId: string; sha256: string; atSeconds: number };
 }
 export interface PetStoryMediaValidation {

@@ -137,3 +137,5 @@ data/
 
 # 画布主工作区：真实项目备份、任务与截图只保留本机
 /artifacts/canvas-first-workspace/
+# 本机真实请求、原回复、账号关联和素材证据只留本地。
+/artifacts/script-driven-cast-reference/

@@ -1,7 +1,7 @@
 /** 角色身份按已保存标签严格解析；括号别名兼容不改写原台词或放宽发声契约。 */
 import { describe, expect, it } from 'vitest';
 import type { PetStoryCharacter, PetStoryChatJob, PetStoryProject, PetStoryPromptTaskContract } from '@doubao-studio/contracts';
-import { seedanceSpeakerLabels } from '../../main/utils/petstoryCharacterLabels';
+import { assignPetStoryProductionLabels, petStoryCharacterLabelOwners, petStoryProductionLabel, seedanceSpeakerLabels } from '../../main/utils/petstoryCharacterLabels';
 import { runtimePromptIssues } from '../../main/utils/petstoryValidation';
 import examples from '../fixtures/petstory-prompt-quality.json';
 
@@ -30,8 +30,8 @@ function body(label: string, line: string = originalLine, language: string = '�
 describe('Seedance 说话者标签绑定唯一已保存角色', (): void => {
   it.each(['seedance20', 'seedance25'] as const)('%s接受完整名、明确别名和可由括号别名证明的主名', (dialect: 'seedance20' | 'seedance25'): void => {
     const { project, job } = fixture(dialect);
-    for (const label of ['噜妹（黑衣男子）', '黑衣男子', '噜妹']) expect(runtimePromptIssues(project, job, body(label))).toEqual([]);
-    expect(seedanceSpeakerLabels(project.plan!.characters, 'ch02')).toEqual(['噜妹（黑衣男子）', '黑衣男子', '噜妹']);
+    for (const label of ['噜妹（黑衣男子）', '黑衣男子', '噜妹', '角色2']) expect(runtimePromptIssues(project, job, body(label))).toEqual([]);
+    expect(seedanceSpeakerLabels(project.plan!.characters, 'ch02')).toEqual(['噜妹（黑衣男子）', '黑衣男子', '噜妹', '角色2']);
   });
 
   it('英文括号和已登记标签的字符宽度规范不影响同一角色身份', (): void => {
@@ -111,4 +111,45 @@ describe('角色标签兼容保持台词内容、语言和发声次数严格校�
     project.plan!.shots[0].dialogue!.push({ ...project.plan!.shots[0].dialogue![0], speakerId: 'ch01' });
     expect(runtimePromptIssues(project, job, `${body('噜妹')} {噜哥用中文说：“${originalLine}”}`)).toEqual([]);
   });
+  it('外观称谓对应中性制作标签，角色与逐字服装对白不改变', (): void => {
+    const { project, job } = fixture(); const characters = project.plan!.characters;
+    characters[1].name = '黑衣男'; characters[1].aliases = ['马尾青年'];
+    const text = '黑衣服和红帽子都给我！'; project.plan!.shots[0].dialogue![0].text = text;
+    const label = petStoryProductionLabel(characters, 'ch02')!;
+    expect(label).toBe('角色2'); expect(runtimePromptIssues(project, job, body(label, text))).toEqual([]);
+    expect(runtimePromptIssues(project, job, body(petStoryProductionLabel(characters, 'ch01')!, text)).join('')).toContain('说话者不匹配');
+    characters[0].name = label;
+    expect(petStoryProductionLabel(characters, 'ch02')).toBe('制作角色2');
+    expect(runtimePromptIssues(project, job, body('制作角色2', text))).toEqual([]);
+    expect(project.plan!.shots[0].dialogue![0]).toMatchObject({ speakerId: 'ch02', text });
+  });
+
+  it('采用方案保存中性标签，同ID角色在重新排序及追加配角后不交换说话者', (): void => {
+    const { project, job } = fixture(); const previous = structuredClone(project.plan!.characters);
+    assignPetStoryProductionLabels(previous);
+    const oldLabel = petStoryProductionLabel(previous, 'ch02')!;
+    const reordered = [character('new-role', '新角色'), ...structuredClone(previous).reverse()];
+    assignPetStoryProductionLabels(reordered, previous);
+    expect(petStoryProductionLabel(reordered, 'ch02')).toBe(oldLabel);
+    expect(petStoryProductionLabel(reordered, 'ch01')).toBe(petStoryProductionLabel(previous, 'ch01'));
+    expect(new Set(reordered.map((item): string | undefined => item.productionLabel)).size).toBe(reordered.length);
+    project.plan!.characters = reordered;
+    expect(runtimePromptIssues(project, job, body(oldLabel))).toEqual([]);
+    expect(runtimePromptIssues(project, job, body(reordered[0].productionLabel!)).join('')).toContain('说话者不匹配');
+  });
+
+  it.each(['name', 'alias'] as const)('新角色真实%s占用旧中性标签时重新分配制作标签，逐字台词与角色ID不变', (source): void => {
+    const { project, job } = fixture(); const previous = structuredClone(project.plan!.characters);
+    assignPetStoryProductionLabels(previous); const oldLabel = previous[1].productionLabel!;
+    const guest = character('new-role', source === 'name' ? oldLabel : '新角色', source === 'alias' ? [oldLabel] : []);
+    const current = [...structuredClone(previous), guest];
+    assignPetStoryProductionLabels(current, previous);
+    expect(current[1].id).toBe(previous[1].id); expect(current[1].productionLabel).not.toBe(oldLabel);
+    expect(petStoryCharacterLabelOwners(current).get(oldLabel.toLocaleLowerCase())).toEqual(['new-role']);
+    project.plan!.characters = current;
+    expect(runtimePromptIssues(project, job, body(current[1].productionLabel!))).toEqual([]);
+    expect(runtimePromptIssues(project, job, body(oldLabel)).join('')).toContain('说话者不匹配');
+    expect(project.plan!.shots[0].dialogue![0]).toMatchObject({ speakerId: 'ch02', text: originalLine });
+  });
+
 });

@@ -85,6 +85,12 @@ function reviewWarnings(p: PetStoryProject, prompt: PetStoryPrompt, target: Prom
     ...reviewErrorsFor(p, prompt, target).map((job): string => `审查 ${job.jobId} 报告当前正文 error：${job.issues.map((issue): string => issue.evidence).join('；')}`)] : [];
 }
 function materialEntry(p: PetStoryProject, m: PetStoryMaterial): PromptExportEntry {
+  if (m.kind === 'character' && m.prompt.supersededByAssetId) return {
+    id: m.id, category: m.kind, name: m.name, final: '', modelPrompt: null, referencePlan: [],
+    review: { warnings: ['角色形象由当前采用图确定，无需基础生图正文；旧正文仅保留为历史。'], eligibility: 'creative_plan', submissionBlocked: true,
+      metadata: { visualBasis: m.visualBasis, selectedAssetId: m.selectedAssetId, approved: m.approved || null,
+        historicalPrompt: structuredClone(m.prompt), ...promptProvenance(p, m.prompt, { materialId: m.id }) } },
+  };
   const checked = preview((): PetStoryCompiledPrompt => compileMaterialPrompt(p, m.id, true));
   const entities = m.kind === 'character' ? p.plan?.characters : m.kind === 'prop' ? p.plan?.props : p.plan?.scenes;
   const entity = entities?.find((value): boolean => value.id === m.entityId);

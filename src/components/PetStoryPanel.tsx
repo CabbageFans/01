@@ -69,7 +69,11 @@ export const ProductionControls: React.FC<{ project: PetStoryProject; disabled: 
   const counts = state.productionCounts;
   const production = project.production;
   const readyForShots = !production || (production.phase === 'materials' && production.state === 'complete');
-  const materialsReady = !!project.storyApproval && !!project.materials?.length && project.materials.every((m): boolean => m.approved?.assetId === m.selectedAssetId && !!m.approved && (m.kind !== 'character' || (m.approved.identity?.assetId === m.selectedAssetId && m.approved.identity?.description === project.plan?.characters.find((c): boolean => c.id === m.entityId)?.description)));
+  const materialsReady = !!project.storyApproval && !!project.materials?.length && project.materials.every((m): boolean => {
+    const asset = project.assets.find((item): boolean => item.id === m.selectedAssetId);
+    return !!asset?.validation?.decoded && !asset.needsReview && m.approved?.assetId === asset.id && m.approved.sha256 === asset.validation.sha256
+      && (m.kind !== 'character' || m.approved.identity?.assetId === asset.id);
+  });
   const pendingTaskId = production?.steps.find((step): boolean => step.status !== 'complete')?.taskId;
   const pendingTask = useTaskStore((s) => s.tasks.find((task): boolean => task.id === pendingTaskId));
   const productionTasks = useTaskStore((store) => store.tasks);
@@ -264,8 +268,8 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
         <Card size="small" title="故事与角色">
           <Text>原片梗概</Text><TextArea aria-label="原片梗概" value={plan.sourceSummary} onChange={(e): void => edit((v: PetStoryPlan): void => { v.sourceSummary = e.target.value; })} autoSize={{ minRows: 2, maxRows: 5 }} />
           <div className="mt-3"><Text>相似故事</Text><TextArea aria-label="相似故事" value={plan.adaptedStory} onChange={(e): void => edit((v: PetStoryPlan): void => { v.adaptedStory = e.target.value; })} autoSize={{ minRows: 2, maxRows: 5 }} /></div>
-          <Collapse className="mt-4" items={[{ key: 'characters', label: `角色档案 · ${plan.characters.length} 位 · 默认主演与必要配角`, children: <div className="character-grid">{plan.characters.map((c: PetStoryCharacter, index: number): React.ReactNode => <div key={c.id} className="rounded border border-gray-700 p-2 space-y-2">
-            <Space><Tag>{c.role === 'main' ? '默认主演' : '必要配角'}</Tag></Space>
+          <Collapse className="mt-4" items={[{ key: 'characters', label: `角色档案 · ${plan.characters.length} 位 · 剧本角色`, children: <div className="character-grid">{plan.characters.map((c: PetStoryCharacter, index: number): React.ReactNode => <div key={c.id} className="rounded border border-gray-700 p-2 space-y-2">
+            <Space><Tag>{c.role === 'main' ? '主要角色' : '配角'}</Tag></Space>
             <Input aria-label={`${c.id}名称`} value={c.name} disabled={state.busy || planLocked(p)} onChange={(e): void => edit((v: PetStoryPlan): void => { v.characters[index].name = e.target.value; })} />
             <Input aria-label={`${c.id}剧情作用`} placeholder="剧情作用" value={c.purpose} onChange={(e): void => edit((v: PetStoryPlan): void => { v.characters[index].purpose = e.target.value; })} />
             <Input aria-label={`${c.id}外观设定`} placeholder="外观与服装" value={c.description} onChange={(e): void => edit((v: PetStoryPlan): void => { v.characters[index].description = e.target.value; })} />

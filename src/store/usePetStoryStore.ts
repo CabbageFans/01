@@ -14,6 +14,7 @@ import { isBackgroundProductionVideoTask } from '../utils/petstoryBackground';
 import { automationEngine } from '../automation/AutomationEngine';
 import { isPetStoryPromptPreparationMessage } from '../components/petStoryCanvasShared';
 import { matchesVerificationRecoveryRun, type TaskVerificationRecoveryDetail } from '../utils/verificationRecovery';
+import { needsPetStoryReferenceAdaptation } from '../utils/petstoryVisualBasis';
 
 interface PetStoryState {
   activeImageOperationId: string | null;
@@ -1031,23 +1032,23 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     catch (error: unknown) { if (activeImageOperation === context) { activeImageOperation = null; set({ activeImageOperationId: null }); } throw error; }
   };
   /** 视频点击沿原文字链准备合格候选；尚未确认正文时不创建媒体任务。 */
-  const prepareVideoPrompt = async (shotId: string): Promise<boolean> => {
+  const prepareShotPrompt = async (shotId: string, kind: PetStoryPromptKind): Promise<boolean> => {
     const project = get().project; const shot = project?.plan?.shots.find((item): boolean => item.id === shotId);
     if (!project) throw new Error('请先打开原项目');
     if (project.production && project.production.state !== 'complete') return true;
     if (!shot) throw new Error('镜头不存在，请重新选择当前镜头');
-    if (shot.prompts.video.final.trim()) return true;
+    if (!needsPetStoryReferenceAdaptation(project, shotId, kind)) return true;
     if (pendingPetStoryDrafts(project.id).length) throw new Error('请先保存或放弃尚未保存的修改，再开始本镜制作');
-    const original = [...project.jobs].reverse().find((job): boolean => job.shotId === shotId && job.promptKind === 'video' && isPromptWritingJob(job));
+    const original = [...project.jobs].reverse().find((job): boolean => job.shotId === shotId && job.promptKind === kind && isPromptWritingJob(job));
     const job = original ? latestRepair(project, original) : undefined;
-    if (job?.endedWaitingAt || unresolvedEndedPromptKeys(project).has(promptTargetKey({ shotId, kind: 'video' }))) throw new Error('本镜原文字任务已结束等待，请先核对原结果；未重复发送');
+    if (job?.endedWaitingAt || unresolvedEndedPromptKeys(project).has(promptTargetKey({ shotId, kind }))) throw new Error('本镜原文字任务已结束等待，请先核对原结果；未重复发送');
     if (pendingChatJob(job)) { await recoverBatchJob(job); return false; }
     if (job?.status === 'invalid' && job.resultStatus !== 'stale') {
       if (!hasRepairablePromptReply(job)) throw new Error(job.error || '本镜提示词的原回复尚需核对归属或当前依据，未重复发送');
       liveJobs.add(job.id); await collectResult(job.id, true); return false;
     }
     if (job?.status === 'applied' && job.resultStatus === 'candidate' && job.parsedResult?.optimized?.trim()) return false;
-    await prepareRuntime('optimize', { shotId, promptKind: 'video', background: 'canvas' });
+    await prepareRuntime('optimize', { shotId, promptKind: kind, background: 'canvas' });
     return false;
   };
   return {
@@ -1326,14 +1327,17 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     generateShotMedia: async (shotId: string, kind: PetStoryPromptKind): Promise<void> => {
       if (kind === 'firstFrame' || kind === 'lastFrame') {
         // 与基础图及图片修改共用真实进度、后台宿主和原任务恢复，不另建执行器。
-        await run((): Promise<void> => beginImageOperation({ shotId, kind }));
+        await run(async (): Promise<void> => {
+          if (!await prepareShotPrompt(shotId, kind)) return;
+          await beginImageOperation({ shotId, kind });
+        });
         await tickPetStoryImageOperation();
         return;
       }
       await run(async (): Promise<void> => {
         const p = get().project; const capability = get().capability;
         if (!p) throw new Error('请先打开原项目');
-        if (!await prepareVideoPrompt(shotId)) return;
+        if (!await prepareShotPrompt(shotId, kind)) return;
         const result = await window.electronAPI.petstory.generateShotMedia(p.id, p.revision, shotId, kind, capability || undefined, get().fallbacks);
         accept(result); if (result.success) { activeProductionId = p.id; observingProductionTasks.clear(); set({ productionCounts: null }); }
       });

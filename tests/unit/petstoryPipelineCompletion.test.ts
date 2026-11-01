@@ -286,7 +286,11 @@ describe('主进程当前阶段资格清单', (): void => {
     const result = await chat.promptStageTargets(p.id, p.revision);
     expect(result.promptTargets?.[0]).toEqual({ shotId: 'shot_1', kind: 'video' });
     expect(result.promptTargets?.slice(1, 4)).toEqual([{ shotId: 'shot_2', kind: 'firstFrame' }, { shotId: 'shot_2', kind: 'lastFrame' }, { shotId: 'shot_2', kind: 'video' }]);
-    expect(result.promptTargets).toHaveLength(12); expect(stored).toEqual([]);
+    const expected = [...p.plan!.shots].sort((a, b): number => a.order - b.order).flatMap((shot): { shotId: string; kind: 'firstFrame' | 'lastFrame' | 'video' }[] => [
+      ...(shot.transition === 'continue' ? [{ shotId: shot.id, kind: 'firstFrame' as const }, ...(shot.prompts.lastFrame ? [{ shotId: shot.id, kind: 'lastFrame' as const }] : [])] : []),
+      { shotId: shot.id, kind: 'video' as const },
+    ]);
+    expect(result.promptTargets).toEqual(expected); expect(stored).toEqual([]);
   });
   it('改起始设计后同批补齐本镜首尾视频和后镜已采用边界依赖', async (): Promise<void> => {
     await withDedicatedPlans(); p.plan!.shots[1].startState += '\n'; p = await projects.write(p);

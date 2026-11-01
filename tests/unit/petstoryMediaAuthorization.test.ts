@@ -30,6 +30,7 @@ beforeEach((): void => {
   const entry = { state: 'supported' as const, reason: 'TEST 已保存检查' };
   capability = { accountId: 'TEST-account', checkedAt: now, durations: [5], image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' } };
   project = { schemaVersion: 1, id: 'TEST-project', studioProjectId: 'TEST-studio', accountId: 'TEST-account', revision: 1, source: { kind: 'script', url: '', status: 'review_required' }, mobileStory: { id: 'TEST-story', text: snapshot.mobileStory, importedAt: now }, plan: structuredClone(snapshot.plan) as PetStoryPlan, assets: [], jobs: [], updatedAt: now, storyApproval: { hash: 'TEST', at: now }, materials: [{ id: 'scene:location', entityId: 'location', kind: 'scene', name: 'TEST地点', designHash: 'TEST', selectedAssetId: 'TEST-image', approved: { assetId: 'TEST-image', sha256: 'TEST', at: now }, prompt: { original: 'TEST', optimized: 'TEST', final: 'TEST', edited: false, rulesVersion: 'TEST' } }] };
+  project.assets = [{ id: 'TEST-image', kind: 'scene', materialId: 'scene:location', relativePath: 'TEST.png', validation: { decoded: true, sha256: 'TEST', bytes: 100, width: 64, height: 96, checkedAt: now } }];
   usePetStoryStore.setState({ project, busy: false, capability, generateShotMedia: generate, productionCounts: { shots: 5, supporting: 1, newCharacters: 0, firstFrames: 5, lastFrames: 3, videos: 5 }, productionResolutions: {}, fallbacks: {} });
   useTaskStore.setState({ tasks: [] });
 });

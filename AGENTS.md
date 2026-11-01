@@ -100,6 +100,10 @@ Dola 当前只有账号平台字段、Session/URL 边界和 CSV 账号消歧接�
 
 基础素材页遵循 `docs/PRODUCT_REQUIREMENTS.md` v1.9 与 `petstory-image-feedback-flow`：用户只操作生成图片、图片反馈和明确采用，必要文字由本次图片操作后台准备。不得恢复提示词生成／编辑／采用、生成记录／诊断、更多或省略号替代菜单、局部编辑计划。修改绑定预览中具体选中的图片，支持上传／未采用／历史候选和连续修改，不强制原会话。图片先候选、后正式采用；画布布局和视频流程保持原规则。
 
+### 剧本角色与图片依据
+
+2026-11-01 起遵循 `docs/PRODUCT_REQUIREMENTS.md` v2.1 与 `script-driven-cast-reference-first`：新项目角色为空，从剧本提取；不注入噜噜／噜妹、物种或特定美术。人物图正式采用后决定当前形象，旧基础提示词保留历史但退出活跃读取，上传采用不依赖文字任务或旧 description。关键帧安排画面，视频安排表演、逐字对白与运镜，不重新规定外观。角色稳定 ID、speakerId、制作标签及真实图片映射一致；换图只处理实际镜头和连续依赖，历史媒体保留，无新增技术确认。旧默认、旧规范和旧测试断言不得重新覆盖此规则。
+
 ### IPC 通信
 主进程通过 `ipcMain.handle` 注册处理器，渲染进程通过 `contextBridge.exposeInMainWorld` 暴露的 `window.electronAPI` 调用，严格遵循 contextIsolation + 无 nodeIntegration 的安全模式。
 

@@ -27,7 +27,7 @@ describe('媒体归属与明确确认', (): void => {
     m.selectedAssetId = 'TEST-image'; p.assets[0].validation = { ...validation, sha256: 'TEST-changed' };
     expect(isPetStoryMaterialImageApproved(p, m)).toBe(false);
   });
-  it('人物确认必须同时对应当前图片与当前身份外观文字', (): void => {
+  it('人物采用由当前图片绑定决定，旧外观文字变化不取消真实采用', (): void => {
     const p = project(); const character = p.plan!.characters[0]; const m = material('character', character.id); p.materials = [m];
     p.assets = [{ id: 'TEST-image', kind: 'character', characterId: character.id, materialId: m.id, relativePath: 'TEST.png', validation }];
     m.approved = { assetId: 'TEST-image', sha256: validation.sha256, at: validation.checkedAt };
@@ -35,6 +35,10 @@ describe('媒体归属与明确确认', (): void => {
     m.approved.identity = { assetId: 'TEST-image', description: character.description };
     expect(isPetStoryMaterialImageApproved(p, m)).toBe(true);
     character.description += 'TEST变更';
+    expect(isPetStoryMaterialImageApproved(p, m)).toBe(true);
+    character.referenceAssetId = 'TEST-other-image';
+    expect(isPetStoryMaterialImageApproved(p, m)).toBe(false);
+    character.referenceAssetId = 'TEST-image'; m.approved.identity.assetId = 'TEST-other-image';
     expect(isPetStoryMaterialImageApproved(p, m)).toBe(false);
   });
   it('候选、待复核或采用摘要不一致的素材不能计入已采用数量', (): void => {

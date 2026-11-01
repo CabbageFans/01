@@ -1,7 +1,7 @@
 /** 编译仅负责既有引用的确定性映射；本文件不代表真实 Chat 创作验收。 */
 import { describe, expect, it } from 'vitest';
 import type { PetStoryCompiledPrompt, PetStoryPageBinding, PetStoryProject, PetStoryPrompt, PetStoryPromptReference } from '@doubao-studio/contracts';
-import { compileMaterialPrompt, compilePrompt, compileReferencedText, promptReferences } from '../../main/utils/petstoryPromptQuality';
+import { compileMaterialPrompt, compilePrompt, compileReferencedText, plannedReferenceMap, promptReferences } from '../../main/utils/petstoryPromptQuality';
 import { inspectPromptEligibility } from '../../main/utils/petstoryEligibility';
 import { bindReferenceText } from '../../main/utils/petstoryReferenceText';
 
@@ -72,6 +72,24 @@ describe('原正文与目标媒体素材映射', (): void => {
     expect((): unknown => compileReferencedText(p, '@图片1中的甲。', refs, changedPurpose)).toThrow('素材或用途已变化');
     const changedIdentity: PetStoryPromptReference[] = [{ ...refs[0], characterIds: ['actor-b'] }, refs[1]];
     expect((): unknown => compileReferencedText(p, '@图片1中的甲。', refs, changedIdentity)).toThrow('素材或用途已变化');
+  });
+  it('新规则按同一角色与用途换图，旧合同和错误角色／用途仍拒绝，不改正文', (): void => {
+    const p = project(); const refs = promptReferences(p, p.plan!.shots[0], 'firstFrame');
+    const replacement = [{ ...refs[0], assetId: 'new-image-a' }, refs[1]];
+    const final = '@图片1中的角色1伸手接住@图片2中的角色2递来的围巾；眉头收紧。';
+    expect((): unknown => plannedReferenceMap(refs, replacement)).toThrow('素材或用途已变化');
+    expect(compileReferencedText(p, final, replacement, refs, 'reference_first').text).toBe(final);
+    expect(refs[0].assetId).toBe('image-a');
+    expect((): unknown => plannedReferenceMap(refs, [{ ...replacement[0], characterIds: ['actor-b'] }, replacement[1]], 'reference_first')).toThrow('素材或用途已变化');
+    expect((): unknown => plannedReferenceMap(refs, [{ ...replacement[0], purpose: 'scene' }, replacement[1]], 'reference_first')).toThrow('素材或用途已变化');
+    const prop: PetStoryPromptReference = { assetId: 'old-prop', purpose: 'prop', characterIds: [], materialId: 'prop:p', entityId: 'p', order: 1 };
+    expect((): unknown => plannedReferenceMap([prop], [{ ...prop, assetId: 'new-prop' }], 'reference_first')).toThrow('素材或用途已变化');
+  });
+  it('中性制作标签也校验身份对应，不能用场景图冒充角色肖像', (): void => {
+    const p = project(); const refs = promptReferences(p, p.plan!.shots[0], 'firstFrame');
+    expect(compileReferencedText(p, '@图片1对应角色1身份。', refs).text).toBe('@图片1对应角色1身份。');
+    expect((): unknown => compileReferencedText(p, '@图片2对应角色1身份。', refs)).toThrow('错绑');
+    expect((): unknown => compileReferencedText(p, '@图片1对应角色1身份。', [{ ...refs[0], purpose: 'firstFrame' }, refs[1]])).toThrow('场景首帧不能冒充');
   });
   it('旧稿计划仍可预览，方言不匹配或缺合同手改不能借计划导出取得提交资格', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; const video = shot.prompts.video;

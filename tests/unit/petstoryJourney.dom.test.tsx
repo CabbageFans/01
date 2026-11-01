@@ -736,7 +736,8 @@ describe('媒体直接开始与真实制作条件', (): void => {
     await act(async (): Promise<void> => undefined); expect(inspectGeneration).toHaveBeenCalled();
     expect(screen.queryByText('TEST 后台要求先核对当前正文')).toBeNull();
     expect(screen.queryByRole('button', { name: '查看本项提示词' })).toBeNull();
-    expect(button.hasAttribute('disabled')).toBe(kind !== 'video'); expect(generate).not.toHaveBeenCalled();
+    // 缺少正文的图片入口可以准备文字候选；已有正文仍由正式图片资格约束。
+    expect(button.hasAttribute('disabled')).toBe(kind !== 'video' && !!shot.prompts[kind]?.final.trim()); expect(generate).not.toHaveBeenCalled();
     expect(screen.queryByText('生成设置／入口检查')).toBeNull();
     backendReady = true;
     await act(async (): Promise<void> => {

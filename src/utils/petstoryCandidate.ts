@@ -86,7 +86,7 @@ export function reviewMatchesPrompt(job: PetStoryChatJob, targetId: string, curr
 /** 以正式目标 ID 读取当前 final；不把未采用 optimized 候选作为已确认正文。 */
 export function currentReviewPrompt(project: PetStoryProject, targetId: string): string | undefined {
   const material = project.materials?.find((item): boolean => item.id === targetId);
-  if (material) return material.prompt.final;
+  if (material) return material.prompt.supersededByAssetId ? undefined : material.prompt.final;
   for (const shot of project.plan?.shots || []) {
     for (const kind of ['firstFrame', 'lastFrame', 'video'] as const) {
       if (targetId === `${shot.id}:${kind}`) return shot.prompts[kind]?.final;

@@ -5,6 +5,7 @@ import type { Account, PetStoryAsset, PetStoryCompiledPrompt, PetStoryPlan, PetS
 import { petStoryResubmissionTask, petStoryUnsubmittedVideoTask, usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { PetStoryImageReview } from './PetStoryImageReview';
+import { needsPetStoryReferenceAdaptation } from '../utils/petstoryVisualBasis';
 import { pendingImageCandidates } from '../utils/petstoryImageCandidates';
 import { canvasJobLabel, isCanvasPlanLocked, isPetStoryPromptPreparationMessage, petStoryVideoRecoveryMessage } from './petStoryCanvasShared';
 import { usePetStoryGenerationEligibility } from './usePetStoryGenerationEligibility';
@@ -99,6 +100,7 @@ const ExistingMedia: React.FC<{ project: PetStoryProject; shot: PetStoryShot; as
 
 function mediaStatus(asset: PetStoryAsset | undefined, waiting: boolean, task: Task | undefined, hasCandidate: boolean): string {
   if (hasCandidate) return '图片待确认';
+  if (asset?.visualBasisStale) return '角色图已更新 · 保留旧版本';
   if (asset?.validation) return asset.kind === 'video' && asset.needsReview ? '文件已校验 · 需要复核' : '文件校验通过';
   if (asset) return '已有文件 · 待校验';
   if (!waiting) return '未生成';
@@ -314,7 +316,7 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
     {video && pendingTask?.status === 'manual_submission_observing' && <p className="canvas-hint" role="status">{pendingTask.runtime?.message || '正在同步原会话并检查视频结果，请稍候。'}</p>}
     {video && <details className="petstory-secondary-tools"><summary>本镜制作设置</summary><CanvasVideoSettings project={project} shot={shot} onDirtyChange={setSettingsDirty} /></details>}
     {!video ? <PetStoryImageReview project={project} target={{ shotId: shot.id, kind: kind as 'firstFrame' | 'lastFrame' }} title={`镜头 ${shot.order} · ${kind === 'firstFrame' ? '首帧' : '尾帧'}`} currentAssetId={asset?.id}
-      disabled={disabled} generationDisabled={waiting || !readiness.eligibility?.ready} generating={readiness.loading}
+      disabled={disabled} generationDisabled={waiting || promptPreparing || (!needsPetStoryReferenceAdaptation(project, shot.id, kind) && !readiness.eligibility?.ready)} generating={readiness.loading}
       onUpload={async (): Promise<void> => state.uploadShotImage(shot.id, kind as 'firstFrame' | 'lastFrame')}
       onGenerate={async (): Promise<void> => state.generateShotMedia(shot.id, kind)}
       onAdopt={async (assetId: string): Promise<void> => state.adoptShotImage(shot.id, kind as 'firstFrame' | 'lastFrame', assetId)}

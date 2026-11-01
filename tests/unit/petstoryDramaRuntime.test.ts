@@ -131,11 +131,12 @@ describe('drama runtime 完整正文与候选采用', (): void => {
   it('旧hash兼容必须有原选中尾帧的完整边界证据，缺失时不能推测放行', async (): Promise<void> => {
     p.plan!.shots[0].prompts.lastFrame = { ...prompt('TEST采用尾帧'), sourceJobId: 'TEST-last-source' }; p = await projects.write(p);
     const candidate = await prepare('optimize', { shotId: 'shot-1', promptKind: 'firstFrame' });
+    p.jobs.at(-1)!.promptTask!.designHash = legacyPromptDesignHash(p, candidate);
     p.jobs.at(-1)!.previousBoundaryHash = undefined; p = await projects.write(p);
     await finish(candidate, { optimized: '第1张参考图控制场景，TEST原合同候选。' });
     p.plan!.shots[0].prompts.video = { ...prompt('TEST后来采用视频'), sourceJobId: 'TEST-later-video' }; p = await projects.write(p);
     expect(inspectPromptCandidate(p, p.jobs.at(-1)!).writingReady).toBe(false);
-    await expect(chat.adoptPromptCandidate(p.id, p.revision, candidate.id)).rejects.toThrow('当前候选需按当前事实修订');
+    await expect(chat.adoptPromptCandidate(p.id, p.revision, candidate.id)).rejects.toThrow('过期');
   });
 
   it.each(['lastFrame', 'videoFallback', 'story'] as const)('真实%s创作依赖发生变化仍拒绝旧候选，不靠兼容放宽', async (change): Promise<void> => {
@@ -342,11 +343,11 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     }
     p = await projects.write(p); const previous = structuredClone(p.plan); const job = await prepare('analysis');
     await finish(job, { ...incoming, storyUsable: true, contentBasis: { beginning: 'TEST开头', middle: 'TEST变化', ending: 'TEST结局' } });
-    const result = p.jobs.at(-1)!; const expected = state === 'approved' ? previous!.characters[0].description : newDescription;
+    const result = p.jobs.at(-1)!; const expected = newDescription;
     expect(result.status).toBe('applied'); expect(result.rawText).toContain(newDescription); expect(result.parsedResult?.plan?.characters[0].description).toBe(expected); expect(p.plan).toEqual(previous);
     const adopted = await chat.adoptPlanCandidate(p.id, p.revision, result.id); p = adopted.project!;
     expect(p.plan!.characters[0].description).toBe(expected); expect((await new PetStoryProjects().open(directory)).plan!.characters[0].description).toBe(expected);
-    expect(tasks()).toHaveLength(1); expect(p.materials!.find((item): boolean => item.id === material.id)?.approved?.identity).toEqual(state === 'approved' ? material.approved!.identity : undefined);
+    expect(tasks()).toHaveLength(1); expect(p.materials!.find((item): boolean => item.id === material.id)?.approved?.identity).toEqual(['approved', 'stale-identity-image'].includes(state) ? material.approved!.identity : undefined);
     if (state === 'selected-unapproved') expect(p.plan!.characters[0].referenceAssetId).toBeUndefined();
     else if (!['no-approval', 'legacy-no-profile'].includes(state)) expect(p.plan!.characters[0].referenceAssetId).toBe('TEST-identity');
   });
@@ -373,7 +374,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     const repair = await prepare('repair', { parentJobId: job.id }); expect(repair.analysisCastBindings).toEqual(job.analysisCastBindings);
     await finish(repair, { ...plan, storyUsable: true, contentBasis: { beginning: 'TEST开头', middle: 'TEST变化', ending: 'TEST结局' } });
     expect(p.plan).toBeUndefined(); await adoptPlan(repair);
-    expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'adopted' }); expect(p.plan?.characters).toEqual(plan.characters); expect(tasks()).toHaveLength(2);
+    expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'adopted' }); expect(p.plan?.characters).toMatchObject(plan.characters); expect(p.plan?.characters.map((character): string | undefined => character.productionLabel)).toEqual(['角色1', '角色2', '角色3']); expect(tasks()).toHaveLength(2);
     expect(p.jobs[0].rawText).not.toBe(p.jobs[1].rawText); expect(p.jobs[0].status).toBe('invalid');
     expect(await chat.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: job.id })).toMatchObject({ success: true, repairJobId: repair.id }); expect(tasks()).toHaveLength(2);
     const next = await prepare('analysis'); const wrongRole = structuredClone(plan); wrongRole.characters[1].role = 'supporting';

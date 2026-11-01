@@ -5,12 +5,14 @@ import { orderedChatAssets, promptContextHashInput, PROMPT_RULES_VERSION, assetC
 import type { PetStoryProjects } from './petstoryProject';
 import { archiveCompletedPetStoryProduction } from './petstoryProductionLifecycle';
 import { parsePetStoryAnswer, record, validatePetStoryPlan, runtimePromptIssues, normalizeAnalysisCuts, PetStoryContentValidationError, planRepairPreservationIssues, collectPetStoryPlanIssues } from './petstoryValidation';
-import { confirmedCharacterIdentity, materialAsset, requiredMaterialKeys, syncMaterials } from './petstoryMaterials';
+import { confirmedCharacterIdentity, materialRequestAfterVisualAdoption, materialAsset, requiredMaterialKeys, syncMaterials } from './petstoryMaterials';
 import { pendingChatConflicts } from './petstoryPending';
 import { inspectPromptCandidate, inspectPromptEligibility, promptContractFactsCurrent, promptWritingTarget } from './petstoryEligibility';
+import { previousBoundaryHashMatches } from './petstoryBoundary';
 import { promptTextContext } from './petstoryTextContext';
 import { buildDramaRequest, previousAdoptedBoundary, type DramaRequest } from './petstoryRuntimeRequest';
 import { reviewedPromptFinal, reviewMatchesPrompt } from './petstoryReview';
+import { assignPetStoryProductionLabels } from './petstoryCharacterLabels';
 import { analysisCastIssues } from './petstoryCast';
 import { reconcileAdoptedImages } from './petstoryImageReview';
 import { claimConversationGuard, hasConversationGuard } from './accountConversationGuard';
@@ -56,7 +58,12 @@ function previousBoundaryHash(p: PetStoryProject, target: PetStoryRuntimeTarget)
   return shot && target.promptKind ? hash(JSON.stringify(previousAdoptedBoundary(p, shot) || null)) : undefined;
 }
 export function boundaryStillCurrent(p: PetStoryProject, job: PetStoryChatJob): boolean {
-  try { return job.previousBoundaryHash === undefined || job.previousBoundaryHash === previousBoundaryHash(p, job); } catch { return false; }
+  if (job.previousBoundaryHash === undefined) return true;
+  try {
+    const context = promptTextContext(p, job);
+    const shot = context.plan?.shots.find((item): boolean => item.id === job.shotId);
+    return !!shot && previousBoundaryHashMatches(context, shot, job.previousBoundaryHash);
+  } catch { return false; }
 }
 export function frameStillCurrent(p: PetStoryProject, job: PetStoryChatJob): boolean {
   try { return job.frameContextHash === undefined || job.frameContextHash === frameContextHash(p, job); } catch { return false; }
@@ -98,6 +105,11 @@ export function settlePromptBatchTarget(p: PetStoryProject, target: PetStoryRunt
   batch.status = batch.targets.length || batch.failedTargets?.length ? 'paused' : 'complete';
   return true;
 }
+/** 换图前的自由回复只能留作历史；换图后明确发起的新图片文字操作仍可正常采用。 */
+function assertCurrentMaterialConversation(p: PetStoryProject, source: PetStoryChatJob, target: PetStoryRuntimeTarget): void {
+  if (target.materialId && promptFor(p, target)?.supersededByAssetId && !materialRequestAfterVisualAdoption(p, source)) throw new Error('角色图已更新，旧文字会话回复仅保留历史；请从当前图片提出修改');
+}
+
 /** 同一镜头的首尾／视频共享状态，按整个镜头互斥；基础素材按稳定素材 ID 互斥。 */
 function explicitPromptScope(p: PetStoryProject, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget): string | undefined {
   if (!['optimize', 'materialPrompt', 'review', 'revise', 'repair'].includes(kind)) return undefined;
@@ -294,13 +306,14 @@ function hasSavedPrompt(prompt: PetStoryPrompt): boolean {
 }
 function markPlanProductionReview(p: PetStoryProject, materials: PetStoryMaterial[], changedMaterials: Set<string>, affected: Set<string>): void {
   for (const material of materials) if (changedMaterials.has(material.id)) {
+    if (material.kind === 'character' && material.visualBasis && confirmedCharacterIdentity(p, material.entityId)) continue;
     material.approved = undefined;
     if (hasSavedPrompt(material.prompt)) material.prompt = { ...material.prompt, needsReview: true };
   }
   for (const asset of p.assets) {
     const materialIds = [asset.materialId, asset.imageReview?.target.materialId, ...(asset.kind === 'character' ? assetCharacterIds(asset).map((id): string => `character:${id}`) : [])];
     if (asset.shotId && affected.has(asset.shotId) && !['firstFrame', 'plannedEndImage'].includes(asset.kind)
-      || materialIds.some((id): boolean => !!id && changedMaterials.has(id))) asset.needsReview = true;
+      || materialIds.some((id): boolean => !!id && changedMaterials.has(id) && !materials.some((material): boolean => material.id === id && material.kind === 'character' && !!material.visualBasis && !!material.approved))) asset.needsReview = true;
   }
 }
 function reconcilePlanImageTargets(p: PetStoryProject, plan: PetStoryPlan): void {
@@ -329,6 +342,7 @@ export class PetStoryChatService {
   applyConversationReply(p: PetStoryProject, adjustment: PetStoryChatAdjustment, reply: PetStoryConversationReply): void {
     const source = p.jobs.find((j): boolean => j.id === adjustment.sourceJobId);
     if (!source?.requestId || !source.requestText || !source.rulesVersion || !source.promptTask && (adjustment.target.materialId || adjustment.target.shotId)) throw new Error('原会话缺少本项创作依据，请先通过豆包生成本项提示词');
+    assertCurrentMaterialConversation(p, source, adjustment.target);
     // 明确短追问需要用户决定；先识别，不能被后面的缺引用错误误导成内容修订。
     if (reply.text.trim().length < 100 && /[？?]\s*$/.test(reply.text)) throw new Error('这条回复包含追问，请先在豆包中回答并选择完整结果');
     const job: PetStoryChatJob = { ...structuredClone(source), id: randomUUID(), ...adjustment.target, inputFinal: adjustment.target.materialId ? p.materials?.find((m): boolean => m.id === adjustment.target.materialId)?.prompt.final : p.plan?.shots.find((s): boolean => s.id === adjustment.target.shotId)?.prompts[adjustment.target.promptKind || 'video']?.final,
@@ -352,7 +366,8 @@ export class PetStoryChatService {
     if (!qualification.writingReady) throw new Error(`这条回复与当前制作依据不符，请在豆包中整理：${qualification.reasons[0]}`);
     const target = promptFor(p, adjustment.target);
     if (!target) throw new Error('调整对象已不存在');
-    target.final = body; target.optimized = body; target.edited = false; target.needsReview = undefined; target.sourceJobId = job.id; target.candidateJobId = job.id;
+    target.supersededByAssetId = undefined;
+    target.final = body; target.optimized = body; target.edited = false; target.needsReview = undefined; target.visualBasisStale = undefined; target.sourceJobId = job.id; target.candidateJobId = job.id;
     target.rulesVersion = source.rulesVersion; target.promptTask = structuredClone(source.promptTask); job.resultStatus = 'adopted'; p.jobs.push(job);
   }
 
@@ -417,16 +432,19 @@ export class PetStoryChatService {
         const adopted = hypothetical.jobs.find((job): boolean => job.id === candidate.id);
         if (adopted) adopted.resultStatus = 'adopted';
         const result = inspectPromptEligibility(hypothetical, { ...prompt, final: candidate.parsedResult.optimized, rulesVersion: candidate.rulesVersion || prompt.rulesVersion,
-          edited: false, sourceJobId: candidate.id, promptTask: candidate.promptTask, editIntent: candidate.editIntent, needsReview: undefined }, writingTarget, 'candidate');
+          edited: false, sourceJobId: candidate.id, promptTask: candidate.promptTask, editIntent: candidate.editIntent, needsReview: undefined, visualBasisStale: undefined }, writingTarget, 'candidate');
         if (result.writingReady) { pendingCandidateJobIds.push(candidate.id); return false; }
       }
       return !inspectPromptEligibility(p, prompt, writingTarget, 'current').writingReady;
     };
-    const materials = (scope === 'shots' ? [] : p.materials || []).filter((material): boolean => !material.approved && missing({ materialId: material.id }));
+    const materials = (scope === 'shots' ? [] : p.materials || []).filter((material): boolean => {
+      const imageReady = material.kind === 'character' ? !!confirmedCharacterIdentity(p, material.entityId) : !!material.approved && material.approved.assetId === material.selectedAssetId;
+      return !imageReady && missing({ materialId: material.id });
+    });
     const targets: NonNullable<PetStoryResult['promptTargets']> = materials.map((material): { materialId: string } => ({ materialId: material.id }));
     let previousBoundaryQueued = false;
     if (!materials.length) for (const shot of [...plan.shots].sort((a, b): number => a.order - b.order)) {
-      let upstreamQueued = previousBoundaryQueued;
+      let upstreamQueued = shot.transition === 'continue' && previousBoundaryQueued;
       let boundaryQueued = false;
       for (const kind of ['firstFrame', ...(shot.prompts.lastFrame || shot.requestedMode === 'first_last_frame' ? ['lastFrame' as const] : []), 'video'] as const) {
         // 新采用的帧会改变下游正文依赖；同一授权批次需一并补齐，不能沿用旧帧合同。
@@ -865,7 +883,8 @@ export class PetStoryChatService {
     const editedDuringRequest = job.inputFinal !== undefined && selected?.final !== job.inputFinal;
     const frameChanged = !frameStillCurrent(p, job);
     const previousChanged = !boundaryStillCurrent(p, job);
-    const factsCurrent = contextStillCurrent(p, job);
+    const materialSuperseded = !!job.materialId && !!selected?.supersededByAssetId && !materialRequestAfterVisualAdoption(p, job);
+    const factsCurrent = !materialSuperseded && contextStillCurrent(p, job);
     const current = !newer && !editedDuringRequest && !frameChanged && !previousChanged && job.sourceStoryId === p.mobileStory?.id && factsCurrent;
     job.resultStatus = current ? 'candidate' : 'stale';
     job.staleReason = current ? undefined : newer ? '同一目标已有更新请求；旧回复仅保留为过期候选' : editedDuringRequest ? '请求发出后用户已修改本项 final；旧回复仅保留为过期候选，不覆盖用户新版本' : frameChanged ? '请求发出后已采用首帧或尾帧正文发生变化；旧回复仅保留为过期候选，请按当前共同状态重新生成' : previousChanged ? '请求发出后前镜已采用边界发生变化；旧回复仅保留为过期候选，请按当前连续状态重新生成' : '请求发出后剧本、镜头设计或图片事实已变化；仅保留原始回复与候选，不覆盖当前正文';
@@ -953,8 +972,7 @@ export class PetStoryChatService {
   private preserveIdentities(p: PetStoryProject, plan: PetStoryPlan): void {
     for (const character of plan.characters) {
       const accepted = confirmedCharacterIdentity(p, character.id);
-      // 未确认旧设计不能替换本次 Chat 身份；真实选图只保留绑定，不自动升级为批准。
-      if (accepted) character.description = accepted.description;
+      // 图片只保留视觉引用，不把旧身份文字复制成图片内容或覆盖本次剧情角色设计。
       const material = p.materials?.find((m): boolean => m.id === `character:${character.id}`);
       const selected = material?.approved?.assetId === material?.selectedAssetId ? material?.selectedAssetId : accepted?.assetId;
       character.referenceAssetId = p.assets.find((asset): boolean => asset.id === selected && asset.kind === 'character' && assetCharacterIds(asset).includes(character.id))?.id;
@@ -964,7 +982,9 @@ export class PetStoryChatService {
   private adoptPlan(p: PetStoryProject, job: PetStoryChatJob): void {
     const candidate = job.parsedResult?.plan;
     if (!candidate) throw new Error('该回复没有可采用的分镜候选');
-    const plan = validatePetStoryPlan(structuredClone(candidate)); this.preserveIdentities(p, plan);
+    const plan = validatePetStoryPlan(structuredClone(candidate));
+    assignPetStoryProductionLabels(plan.characters, p.plan?.characters);
+    this.preserveIdentities(p, plan);
     for (const shot of plan.shots) for (const kind of ['firstFrame', 'lastFrame', 'video'] as const) {
       const prompt = shot.prompts[kind];
       if (prompt) { prompt.sourceJobId = undefined; prompt.candidateJobId = undefined; prompt.promptTask = undefined; }
@@ -1019,6 +1039,7 @@ export class PetStoryChatService {
       const { shotId: _shotId, ...fields } = binding;
       return { ...shot, ...fields, dialogue: shot.dialogue?.length ? shot.dialogue : fields.dialogue };
     });
+    assignPetStoryProductionLabels(plan.characters, p.plan?.characters);
     this.preserveIdentities(p, plan);
     p.plan = validatePetStoryPlan(plan); p.materials = syncMaterials(p); reconcileAdoptedImages(p); p.storyApproval = undefined; job.resultStatus = 'adopted';
   }
@@ -1053,6 +1074,8 @@ export class PetStoryChatService {
     if (!frameStillCurrent(p, job)) throw new Error('已采用首帧或尾帧正文已变化，请按当前共同状态重新生成候选');
     if (!boundaryStillCurrent(p, job)) throw new Error('前镜已采用边界发生变化，请按当前连续状态重新生成候选');
     const target = promptFor(p, job); const body = job.parsedResult?.optimized;
+    const material = p.materials?.find((item): boolean => item.id === job.materialId);
+    if (material?.prompt.supersededByAssetId && !materialRequestAfterVisualAdoption(p, job)) throw new Error('角色图已更新，旧基础文字候选只保留历史，不恢复旧造型');
     if (!target || !body?.trim()) throw new Error('该回复没有可采用的正文');
     // 先分出明确正文缺项；结构合法而内容不合格的候选不能被资格错误直接短路。
     const issues = runtimePromptIssues(p, job, body);
@@ -1062,8 +1085,9 @@ export class PetStoryChatService {
       if (!qualification.writingReady) throw new Error(`当前候选需按当前事实修订：${qualification.reasons.join('；')}`);
     } else if (!runtimeContextStillCurrent(p, job)) throw new Error('当前事实已变化，请重新生成本项候选');
     job.replacedPrompt = structuredClone(target);
+    target.supersededByAssetId = undefined;
     target.final = body; target.optimized = body; target.edited = false; target.sourceJobId = job.id; target.candidateJobId = job.id;
-    target.rulesVersion = job.rulesVersion || PROMPT_RULES_VERSION; target.needsReview = undefined; target.editIntent = job.editIntent ? structuredClone(job.editIntent) : undefined; job.resultStatus = 'adopted';
+    target.rulesVersion = job.rulesVersion || PROMPT_RULES_VERSION; target.needsReview = undefined; target.visualBasisStale = undefined; target.editIntent = job.editIntent ? structuredClone(job.editIntent) : undefined; job.resultStatus = 'adopted';
     target.promptTask = job.promptTask ? structuredClone(job.promptTask) : undefined;
     this.settlePausedPromptTarget(p, job);
     return { success: true, project: await this.projects.write(p) };
@@ -1079,6 +1103,8 @@ export class PetStoryChatService {
     if (typeof answer.optimized !== 'string' || !answer.optimized.trim()) throw new Error('缺少 optimized 文本');
     const material = p.materials?.find((m): boolean => m.id === job.materialId);
     if (!material) throw new Error('基础素材已删除，不覆盖其他内容');
+    job.parsedResult = { optimized: answer.optimized };
+    if (material.prompt.supersededByAssetId && !materialRequestAfterVisualAdoption(p, job)) { job.resultStatus = 'stale'; job.staleReason = '当前角色图已替代原基础生图文字；迟到回复仅保留历史'; return; }
     material.prompt.optimized = answer.optimized;
     const unchanged = job.contextHash === hash(JSON.stringify({ id: material.id, designHash: material.designHash }));
     material.prompt.candidateJobId = job.id; job.parsedResult = { optimized: answer.optimized }; job.resultStatus = unchanged ? 'candidate' : 'stale';

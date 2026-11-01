@@ -50,6 +50,7 @@ export function journeyShotAsset(project: PetStoryProject, shot: PetStoryShot, k
 /** 当前正文一致性只是成果显示事实；是否允许发送仍由主进程资格服务决定。 */
 export function journeyAssetMatchesPrompt(asset: PetStoryAsset | undefined, prompt: PetStoryPrompt | undefined): boolean {
   if (!asset?.validation?.decoded) return false;
+  if (asset.visualBasisStale) return false;
   // 首尾帧以用户已作出的采用决定为准，不因后续文字或视频设置变化要求重复确认。
   if (['firstFrame', 'plannedEndImage'].includes(asset.kind) && asset.imageReview?.state === 'adopted') {
     return asset.imageReview.sha256 === asset.validation.sha256 && !!asset.imageReview.adoptedAt;
@@ -79,7 +80,7 @@ export function journeyMaterialImageApproved(project: PetStoryProject, material:
   if (asset.imageReview?.state === 'adopted' && (asset.imageReview.sha256 !== asset.validation.sha256 || !asset.imageReview.adoptedAt)) return false;
   if (material.kind !== 'character') return true;
   const character = project.plan?.characters.find((item): boolean => item.id === material.entityId);
-  return !!character && material.approved.identity?.assetId === asset.id && material.approved.identity.description === character.description
+  return !!character && material.approved.identity?.assetId === asset.id
     && (!character.referenceAssetId || character.referenceAssetId === asset.id);
 }
 

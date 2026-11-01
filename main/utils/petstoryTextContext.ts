@@ -1,3 +1,4 @@
+import { characterVisualBasis } from './petstoryMaterials';
 import type { PetStoryChatJob, PetStoryProject, PetStoryPrompt } from '@doubao-studio/contracts';
 
 function targetPrompt(project: PetStoryProject, job: PetStoryChatJob): PetStoryPrompt | undefined {
@@ -12,13 +13,15 @@ export function promptTextContext(project: PetStoryProject, job: Pick<PetStoryCh
   for (const id of job.textContextJobIds) {
     const source = snapshot.jobs.find((item): boolean => item.id === id);
     const prompt = source ? targetPrompt(snapshot, source) : undefined;
+    // 换图后已失效的基础文字及其旧镜头候选只留在任务历史，不投影回当前有效正文。
+    if (prompt?.supersededByAssetId || source?.shotId && JSON.stringify(source.promptTask?.characterVisualBasis || {}) !== JSON.stringify(characterVisualBasis(snapshot, source.shotId))) continue;
     if (!source || !job.promptBatchId || source.promptBatchId !== job.promptBatchId || source.status !== 'applied'
       || !['candidate', 'adopted'].includes(source.resultStatus || '') || source.endedWaitingAt
       || !source.parsedResult?.optimized || !prompt) throw new Error('本批前序候选来源已变化，请保留结果并重新核对本项');
     const body = source.parsedResult.optimized;
     // 用户随后保存的不同正文优先，不能借临时上下文隐藏这类冲突。
     if (prompt.final !== body && source.inputFinal !== undefined && prompt.final !== source.inputFinal) throw new Error('前序正文已由用户修改，请基于当前正文重新生成本项');
-    prompt.final = body; prompt.sourceJobId = source.id; prompt.edited = false; prompt.needsReview = undefined;
+    prompt.final = body; prompt.sourceJobId = source.id; prompt.edited = false; prompt.needsReview = undefined; prompt.visualBasisStale = undefined;
     prompt.promptTask = source.promptTask ? structuredClone(source.promptTask) : undefined;
     prompt.rulesVersion = source.rulesVersion || prompt.rulesVersion;
     source.resultStatus = 'adopted';

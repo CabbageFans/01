@@ -41,12 +41,11 @@ const MaterialCard: React.FC<MaterialCardProps> = ({ project, material, disabled
   const candidateCount = materialCandidateCount(project, material);
   const selected = project.assets.find((asset): boolean => asset.id === material.selectedAssetId && imageBelongsToTarget(project, asset, target));
   const current = selected && selected.imageReview?.state !== 'candidate' && (approved || selected.imageReview?.state === 'adopted' || material.approved?.assetId === selected.id) ? selected : undefined;
-  const character = project.plan?.characters.find((item): boolean => material.kind === 'character' && item.id === material.entityId);
   const used = project.plan?.shots.filter((shot): boolean => material.kind === 'character' ? shot.characterIds.includes(material.entityId) : material.kind === 'prop' ? !!shot.propIds?.includes(material.entityId) : shot.sceneId === material.entityId).map((shot): string => String(shot.order)).join('、');
   const status = materialImageStatus(progress, candidateCount, !!current, approved);
   return <Card className="petstory-material-card" id={`material-${material.id}`} size="small" data-material-id={material.id} data-material-state={status} title={<Space wrap><Tag>{labels[material.kind]}</Tag>{material.name}<Tag color={approved && !candidateCount ? 'green' : candidateCount || current ? 'orange' : 'default'}>{status}</Tag></Space>}>
     <Typography.Paragraph className="petstory-material-purpose" type="secondary">{used ? `用于镜头 ${used}` : '可复用基础素材'}</Typography.Paragraph>
-    <PetStoryImageReview project={project} target={target} title={`${material.name} · ${labels[material.kind]}参考图`} currentAssetId={current?.id} currentNeedsReview={!!current && !approved} identity={character?.description}
+    <PetStoryImageReview project={project} target={target} title={`${material.name} · ${labels[material.kind]}参考图`} currentAssetId={current?.id} currentNeedsReview={!!current && !approved}
       disabled={disabled || !project.storyApproval} generationDisabled={generationBlocked || !!block || progress.busy || progress.resumable} generating={progress.busy}
       onUpload={async (): Promise<void> => state.addMaterialImage(material.id)}
       onGenerate={async (): Promise<void> => state.generateMaterialImage(material.id)}

@@ -1,14 +1,20 @@
 import { createHash } from 'node:crypto';
 import type { PetStoryAsset, PetStoryCompiledPrompt, PetStoryImageOperation, PetStoryImageTarget, PetStoryMaterial, PetStoryProject } from '@doubao-studio/contracts';
+import { petStoryProductionLabel } from './petstoryCharacterLabels';
 
 function feedbackFacts(project: PetStoryProject, material: PetStoryMaterial | undefined, target: PetStoryImageTarget): unknown {
   if (!material) {
     const shot = project.plan?.shots.find((item): boolean => item.id === target.shotId);
     if (!shot) return undefined;
-    const { prompts: _prompts, ...facts } = shot;
-    return facts;
+    // 具体图片编辑以基图和本轮意见为依据，不重放整镜旧造型／旧正文。
+    return { id: shot.id, order: shot.order, characterIds: shot.characterIds, propIds: shot.propIds, sceneId: shot.sceneId, imagePurpose: target.kind,
+      characters: shot.characterIds.map((id): object => ({ id, productionLabel: petStoryProductionLabel(project.plan?.characters || [], id) })),
+      policy: '这些标识只用于图片归属；保留基图中未要求改变的表演、道具和空间，不从来源称谓或旧镜头文字重建外观。' };
   }
-  if (material.kind === 'character') return project.plan?.characters.find((item): boolean => item.id === material.entityId);
+  if (material.kind === 'character') {
+    const character = project.plan?.characters.find((item): boolean => item.id === material.entityId);
+    return character ? { id: character.id, role: character.role, purpose: character.purpose, visualSource: 'selected_base_image', policy: '人物外观只取本次实际基图；剧本称谓与旧设计文字不作为外观要求。' } : undefined;
+  }
   if (material.kind === 'prop') return project.plan?.props?.find((item): boolean => item.id === material.entityId);
   return project.plan?.scenes?.find((item): boolean => item.id === material.entityId);
 }
@@ -46,16 +52,19 @@ export function imageTargetBasis(project: PetStoryProject, target: PetStoryImage
   if (target.materialId) {
     const material = project.materials?.find((item): boolean => item.id === target.materialId);
     if (!material) throw new Error('图片目标素材不存在');
-    facts = { story: project.mobileStory?.id, target, design: material.designHash, prompt: material.prompt.final };
+    facts = material.kind === 'character' && material.visualBasis
+      ? { story: project.mobileStory?.id, target, visualBasis: material.visualBasis }
+      : { story: project.mobileStory?.id, target, design: material.designHash, prompt: material.prompt.final };
   } else {
     const shot = project.plan?.shots.find((item): boolean => item.id === target.shotId);
     if (!shot || !['firstFrame', 'lastFrame'].includes(target.kind || '')) throw new Error('图片目标镜头不存在');
     const kind = target.kind;
     if (!kind) throw new Error('图片用途无效');
-    const { prompts, ...design } = shot;
+    const { prompts, appearanceOverrides: _appearanceOverrides, ...design } = shot;
     facts = { story: project.mobileStory?.id, target, design, prompt: prompts[kind]?.final,
       materials: project.materials?.filter((item): boolean => shot.characterIds.includes(item.entityId) || !!shot.propIds?.includes(item.entityId) || shot.sceneId === item.entityId)
-        .map((item): object => ({ id: item.id, designHash: item.designHash, approved: item.approved })),
+        .map((item): object => item.kind === 'character' && item.visualBasis
+          ? { id: item.id, visualBasis: item.visualBasis } : { id: item.id, designHash: item.designHash, approved: item.approved }),
       firstFrame: target.kind === 'lastFrame' ? selectedShotImageId(project, shot.id, 'firstFrame') : undefined };
   }
   return createHash('sha256').update(JSON.stringify(facts)).digest('hex');
@@ -64,7 +73,7 @@ export function imageTargetBasis(project: PetStoryProject, target: PetStoryImage
 /** 当前首尾帧沿用用户的明确采用决定；提示词和参考变化不撤销这次选图。 */
 function selectedAdoptedShotImage(project: PetStoryProject, asset: PetStoryAsset): boolean {
   if (!asset.shotId || !asset.validation?.decoded || !['firstFrame', 'plannedEndImage'].includes(asset.kind)
-    || !project.plan?.shots.some((shot): boolean => shot.id === asset.shotId)) return false;
+    || asset.visualBasisStale || !project.plan?.shots.some((shot): boolean => shot.id === asset.shotId)) return false;
   const kind = asset.kind === 'firstFrame' ? 'firstFrame' : 'lastFrame';
   const review = asset.imageReview;
   return review?.state === 'adopted' && !!review.adoptedAt && review.sha256 === asset.validation?.sha256
@@ -75,12 +84,11 @@ function selectedAdoptedShotImage(project: PetStoryProject, asset: PetStoryAsset
 /** 旧基础素材的明确确认继续有效；关键帧须有采用记录，不能仅凭文件自动采用。 */
 export function isPetStoryImageAdopted(project: PetStoryProject, asset: PetStoryAsset): boolean {
   if (asset.kind === 'video' || !asset.validation?.decoded || asset.imageReview?.state === 'candidate') return false;
-  if (asset.needsReview && !selectedAdoptedShotImage(project, asset)) return false;
+  if (asset.visualBasisStale || asset.needsReview && !selectedAdoptedShotImage(project, asset)) return false;
   if (asset.kind === 'actualEndFrame') return !!asset.sourceVideo;
   if (asset.imageReview?.state === 'adopted') return asset.imageReview.sha256 === asset.validation.sha256 && !!asset.imageReview.adoptedAt;
   return !!project.materials?.some((item): boolean => item.selectedAssetId === asset.id && item.approved?.assetId === asset.id
-    && item.approved.sha256 === asset.validation?.sha256
-    && (item.kind !== 'character' || item.approved.identity?.assetId === asset.id && item.approved.identity.description === project.plan?.characters.find((character): boolean => character.id === item.entityId)?.description));
+    && item.approved.sha256 === asset.validation?.sha256);
 }
 
 function selectedShotImage(project: PetStoryProject, shotId: string, kind: 'firstFrame' | 'lastFrame'): PetStoryAsset | undefined {
@@ -102,6 +110,7 @@ export function selectedShotImageId(project: PetStoryProject, shotId: string, ki
 export function shotImageUnavailableReason(project: PetStoryProject, shotId: string, kind: 'firstFrame' | 'lastFrame'): string {
   const name = kind === 'firstFrame' ? '首帧' : '尾帧';
   const asset = selectedShotImage(project, shotId, kind);
+  if (asset?.visualBasisStale) return `角色图或制作依据已更新，本镜${name}保留为历史；请生成或上传当前形象图片并采用。`;
   if (asset && !asset.validation?.decoded) return `本镜${name}图片已存在，但文件尚未通过校验，请检查原文件或上传替代图片。`;
   if (asset?.imageReview?.state === 'adopted' && asset.imageReview.sha256 !== asset.validation?.sha256) return `本镜${name}图片的文件校验记录已变化，请核对原文件后重新确认，或上传替代图片。`;
   const hasImage = !!asset || project.assets.some((item): boolean => imageTargetMatches(item, { shotId, kind }));

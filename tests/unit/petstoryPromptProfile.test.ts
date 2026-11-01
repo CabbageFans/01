@@ -5,8 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import type { PetStoryPromptProfile } from '@doubao-studio/contracts';
 import { PetStoryProjects, validatePromptProfile } from '../../main/utils/petstoryProject';
-import { defaultPromptProfile } from '../../main/utils/petstoryPromptQuality';
+import { defaultPromptProfile, effectivePromptProfile } from '../../main/utils/petstoryPromptQuality';
 import fixture from '../fixtures/drama-runtime-input.json';
+import legacyDefaults from '../../main/utils/petstoryLegacyDefaults.json';
 
 let directory: string;
 beforeEach(async (): Promise<void> => { directory = await fs.mkdtemp(path.join(os.tmpdir(), 'petstory-cast-profile-')); });
@@ -33,11 +34,19 @@ describe('动态演员来源别名与主配角配置', (): void => {
       expect(validatePromptProfile(profile)).toEqual(profile);
     }
   });
-  it('新项目默认两主演仅明确main，默认不制造来源A/B映射', async (): Promise<void> => {
-    const profile = defaultPromptProfile(); expect(Object.values(profile.characters)).toHaveLength(2);
-    for (const character of Object.values(profile.characters)) { expect(character.role).toBe('main'); expect(character).not.toHaveProperty('aliases'); }
+  it('新项目没有内置演员或特定美术，不制造来源映射', async (): Promise<void> => {
+    const profile = defaultPromptProfile(); expect(profile.characters).toEqual({}); expect(profile.style).toBe(''); expect(profile.assetStyles?.common).toBe('');
     expect(validatePromptProfile(profile)).toEqual(profile);
     const project = await new PetStoryProjects().create(directory, 'TEST-studio', 'TEST-account'); expect(project.promptProfile).toEqual(profile);
+  });
+  it('旧预设仅在有效投影中退出，用户修改和原保存值均保留', (): void => {
+    const inherited: PetStoryPromptProfile = { style: '', characters: structuredClone(legacyDefaults.characters) as PetStoryPromptProfile['characters'], assetStyles: { common: legacyDefaults.commonStyle } };
+    const snapshot = structuredClone(inherited);
+    expect(effectivePromptProfile(inherited)).toMatchObject({ characters: {}, assetStyles: { common: '' } });
+    expect(inherited).toEqual(snapshot);
+    inherited.characters.lulu.appearance = 'TEST用户明确设计'; inherited.characters.lumei.aliases = ['TEST用户已绑定'];
+    expect(Object.keys(effectivePromptProfile(inherited).characters)).toEqual(['lulu', 'lumei']);
+    expect(effectivePromptProfile({ style: '', characters: { lulu: { identity: '噜噜是本剧角色', appearance: '' } } }).characters.lulu.identity).toBe('噜噜是本剧角色');
   });
   it.each([null, 'A', [], [''], ['   '], ['A', 1], Array(1), Array(101).fill('A'), ['x'.repeat(201)]])('拒绝非法来源别名%j，不自动清洗为合法数据', (aliases: unknown): void => {
     expect((): unknown => validatePromptProfile({ style: '', characters: { actor: { identity: '', appearance: '', aliases } } })).toThrow('角色来源别名无效');

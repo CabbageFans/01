@@ -187,6 +187,9 @@ function validateMaterials(result: PetStoryProject): void {
       if (keys.has(m.id) || m.id !== `${m.kind}:${m.entityId}` || !['character', 'prop', 'scene'].includes(m.kind) || !/^[a-zA-Z0-9_-]{1,80}$/.test(m.entityId)
         || !/^[a-f0-9]{64}$/.test(m.designHash) || typeof m.prompt?.final !== 'string') throw new Error('基础素材条目无效');
       keys.add(m.id);
+      if (m.prompt.supersededByAssetId !== undefined && (m.kind !== 'character' || typeof m.prompt.supersededByAssetId !== 'string'
+        || !result.assets.some((asset): boolean => asset.id === m.prompt.supersededByAssetId && imageTargetMatches(asset, { materialId: m.id })))) throw new Error('基础图历史正文的图片替代关系无效');
+      if (m.visualBasis && (m.kind !== 'character' || m.visualBasis.assetId !== m.selectedAssetId || m.visualBasis.sha256 !== result.assets.find((asset): boolean => asset.id === m.visualBasis?.assetId)?.validation?.sha256 || !Number.isFinite(Date.parse(m.visualBasis.adoptedAt)))) throw new Error('角色视觉依据绑定无效');
       if (m.prompt.promptTask) m.prompt.promptTask = validatePromptTask(m.prompt.promptTask);
       if (m.selectedAssetId) materialAsset(result, m.id, false);
       if (m.approved && (m.approved.assetId !== m.selectedAssetId || !/^[a-f0-9]{64}$/.test(m.approved.sha256))) throw new Error('具体图片确认绑定无效');
@@ -484,7 +487,7 @@ export class PetStoryProjects {
       target.rulesVersion = source.rulesVersion || PROMPT_RULES_VERSION; target.promptTask = source.promptTask ? structuredClone(source.promptTask) : undefined;
       target.editIntent = source.editIntent ? structuredClone(source.editIntent) : undefined; target.needsReview = undefined;
     } else target.basisJobId = target.sourceJobId || target.basisJobId;
-    target.final = final; target.edited = true; target.sourceJobId = undefined;
+    target.final = final; target.edited = true; target.sourceJobId = undefined; target.visualBasisStale = undefined;
     if (basis) {
       target.candidateJobId = undefined;
       // 旧回复留在历史中；明确确认的手改正文不能被此前未采用候选或坏回复遮挡。
@@ -500,7 +503,7 @@ export class PetStoryProjects {
   async bindSharedReference(id: string, revision: number, characterId: string, assetId: string): Promise<PetStoryProject> {
     const p = await this.read(id);
     if (p.revision !== revision || p.production) throw new Error('项目版本变化或制作已锁定');
-    if (!['lulu', 'lumei', ...(p.plan?.characters.map((c): string => c.id) || [])].includes(characterId)) throw new Error('角色不存在');
+    if (!p.plan?.characters.some((character): boolean => character.id === characterId)) throw new Error('角色不存在');
     const asset = p.assets.find((a): boolean => a.id === assetId && a.kind === 'character');
     if (!asset) throw new Error('请选已登记的身份参考图');
     // 为新目标保存独立候选记录；原图片的采用、身份映射与历史保持不变。
@@ -584,6 +587,7 @@ export class PetStoryProjects {
   private async adoptProjectImage(p: PetStoryProject, target: PetStoryImageTarget, assetId: string): Promise<void> {
     const asset = p.assets.find((item): boolean => item.id === assetId);
     if (!asset || !imageTargetMatches(asset, target)) throw new Error('图片不属于当前目标');
+    if (asset.visualBasisStale && target.shotId) throw new Error('角色图已更新，旧帧仅保留历史；请生成、上传或修改当前形象图片后采用');
     const material = target.materialId ? p.materials?.find((item): boolean => item.id === target.materialId) : undefined;
     if (target.materialId && (!material || material.kind !== asset.kind)) throw new Error('图片用途与素材不符');
     const basisHash = imageTargetBasis(p, target);
@@ -607,9 +611,17 @@ export class PetStoryProjects {
     if (material) {
       material.selectedAssetId = asset.id;
       const character = material.kind === 'character' ? p.plan?.characters.find((item): boolean => item.id === material.entityId) : undefined;
-      material.approved = { assetId: asset.id, sha256: sha256, at: adoptedAt, ...(character ? { identity: { assetId: asset.id, description: character.description } } : {}) };
-      if (character) character.referenceAssetId = asset.id;
-      if (oldId && oldId !== asset.id) invalidateMaterialDependents(p, material.id);
+      material.approved = { assetId: asset.id, sha256, at: adoptedAt, ...(character ? { identity: { assetId: asset.id } } : {}) };
+      if (character) {
+        character.referenceAssetId = asset.id;
+        material.visualBasis = { assetId: asset.id, sha256, adoptedAt };
+        // 保留旧正文、原回复和来源，不给上传图补造任何文字身份或 Chat 来源。
+        material.prompt = { ...material.prompt, supersededByAssetId: asset.id, needsReview: undefined };
+        for (const job of p.jobs) if (job.materialId === material.id && job.resultStatus !== 'adopted') {
+          job.resultStatus = 'stale'; job.staleReason = '角色图已采用，原基础图文字仅保留历史。';
+        }
+      }
+      if (oldId !== asset.id) invalidateMaterialDependents(p, material.id);
     } else if (target.shotId) {
       p.adoptedImages ||= {};
       const selected = p.adoptedImages[target.shotId] ||= {};

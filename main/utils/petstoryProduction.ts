@@ -6,7 +6,7 @@ import type { DownloadJob, PetStoryAsset, PetStoryCapability, PetStoryChatJob, P
 import { PetStoryProjects, projectPath } from './petstoryProject';
 import { compilePrompt, compileMaterialPrompt, checkPromptReferences, assetCharacterIds, requiresNativeFirstLastSlots } from './petstoryPromptQuality';
 import { bindReferenceText } from './petstoryReferenceText';
-import { approvedMaterialHash, materialAsset, requireApprovedMaterials, requireMaterialInventory, requireMaterialPromptSource, requiredMaterialKeys } from './petstoryMaterials';
+import { approvedMaterialHash, legacyApprovedMaterialHash, materialAsset, requireApprovedMaterials, requireMaterialInventory, requireMaterialPromptSource, requiredMaterialKeys } from './petstoryMaterials';
 import type { PetStoryPageBinding, PetStoryRuntimeTarget, PetStoryGenerationBlocker, PetStoryGenerationEligibilityResult, PetStoryModeResolution } from '@doubao-studio/contracts';
 import { boundaryStillCurrent, finalTaskInput, frameStillCurrent, hasSupersedingJob, runtimeContextStillCurrent } from './petstoryChat';
 import { runtimePromptIssues, validatePetStoryPlan } from './petstoryValidation';
@@ -116,8 +116,34 @@ function referenceVideoFrames(p: PetStoryProject, production: NonNullable<PetSto
     || JSON.stringify(step.attachmentAssetIds) !== JSON.stringify([request.firstFrameId, request.lastFrameId]) || step.attachmentAssetIds.length !== 2) throw new Error('仅允许原生首尾任务当前已选的两张图片按原顺序改作参考图');
   return { media, shot };
 }
+/** 旧运行只按原算法精确核对，不能将新hash回写为旧任务的授权。 */
+export function legacyProductionPlanHash(plan: PetStoryPlan): string {
+  return hash({ ...plan, characters: plan.characters.map((character): object => ({ ...character, referenceAssetId: undefined })) });
+}
+/** 角色图绑定后只锁定剧情角色和实际图片；旧造型描述不再属于下游制作事实。 */
 export function productionPlanHash(plan: PetStoryPlan): string {
-  return hash({ ...plan, characters: plan.characters.map((c): object => ({ ...c, referenceAssetId: undefined })) });
+  const imageBacked = new Set(plan.characters.filter((character): boolean => !!character.referenceAssetId).map((character): string => character.id));
+  const characters = plan.characters.map((character): object => {
+    if (!imageBacked.has(character.id)) return { ...character, referenceAssetId: undefined };
+    const { description: _description, continuity: _continuity, ...facts } = character;
+    return facts;
+  });
+  const shots = plan.shots.map((shot): object => {
+    if (!shot.appearanceOverrides) return shot;
+    const remaining = Object.fromEntries(Object.entries(shot.appearanceOverrides).filter(([id]): boolean => !imageBacked.has(id)));
+    return { ...shot, appearanceOverrides: Object.keys(remaining).length ? remaining : undefined };
+  });
+  return hash({ ...plan, characters, shots });
+}
+function productionPlanMatches(p: PetStoryProject): boolean {
+  if (!p.plan || !p.production) return false;
+  return p.production.planHash === productionPlanHash(p.plan) || p.production.planHash === legacyProductionPlanHash(p.plan);
+}
+function productionMaterialsMatch(p: PetStoryProject, production: NonNullable<PetStoryProject['production']>): boolean {
+  const scope = productionShotScope(production);
+  if (production.materialHash === approvedMaterialHash(p, scope) || production.materialHash === legacyApprovedMaterialHash(p, scope)) return true;
+  // 旧单节点运行曾保存全清单摘要，仍只在原摘要精确匹配时兼容。
+  return !!production.target && (production.materialHash === approvedMaterialHash(p) || production.materialHash === legacyApprovedMaterialHash(p));
 }
 export function productionCounts(p: PetStoryProject, capability: PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): PetStoryProductionCounts {
   const plan = validatePetStoryPlan(p.plan);
@@ -363,7 +389,7 @@ export class PetStoryProductionService {
   async resume(id: string, capability?: PetStoryCapability): Promise<PetStoryProductionResult> {
     const p = await this.projects.read(id);
     capability = productionCapability(p, capability);
-    if (!p.production || !p.plan || productionPlanHash(p.plan) !== p.production.planHash) throw new Error('原制作计划不存在或已经改变');
+    if (!p.production || !productionPlanMatches(p)) throw new Error('原制作计划不存在或已经改变');
     const pending = p.production.steps.find((s): boolean => s.status !== 'complete');
     const pendingTask = pending?.taskId ? this.originalTask(p, pending) : undefined;
     const readOnly = pendingTask?.status === 'done' || !!pendingTask?.runtime?.submittedAt;
@@ -498,11 +524,8 @@ export class PetStoryProductionService {
     this.tasks.bindPageInput(task.id, task.runtime.runId, source.text);
   }
   private checked(p: PetStoryProject): NonNullable<PetStoryProject['production']> {
-    if (!p.production || !p.plan || p.production.planHash !== productionPlanHash(p.plan)) throw new Error('制作计划与原确认不一致');
-    const currentHash = approvedMaterialHash(p, productionShotScope(p.production));
-    // 旧单节点批次保存过全清单摘要；仅在旧摘要本身仍完全匹配时沿用，绝不伪造迁移。
-    const matchesLegacyTarget = !!p.production.target && p.production.materialHash === approvedMaterialHash(p);
-    if (p.production.phase === 'shots' && p.production.materialHash !== currentHash && !matchesLegacyTarget) throw new Error('基础素材确认绑定已变化，保留原成果，不能沿用旧制作授权');
+    if (!p.production || !productionPlanMatches(p)) throw new Error('制作计划与原确认不一致');
+    if (p.production.phase === 'shots' && !productionMaterialsMatch(p, p.production)) throw new Error('基础素材确认绑定已变化，保留原成果，不能沿用旧制作授权');
     return p.production;
   }
   private async checkApprovedFiles(p: PetStoryProject, shotIds?: string[]): Promise<void> {

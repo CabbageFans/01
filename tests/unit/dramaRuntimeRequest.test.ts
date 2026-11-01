@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { PetStoryCapability, PetStoryChatJob, PetStoryMaterial, PetStoryProject, PetStoryProduction, PetStoryShot } from '@doubao-studio/contracts';
 import fixture from '../fixtures/drama-runtime-input.json';
 import resources from '../../main/resources/drama/runtime.json';
-import presets from '../../main/utils/petstoryPresets.json';
+import { petStoryProductionLabel } from '../../main/utils/petstoryCharacterLabels';
 import { buildDramaRequest, dramaChatAssets } from '../../main/utils/petstoryRuntimeRequest';
 import { storyHash, syncMaterials } from '../../main/utils/petstoryMaterials';
 import { compileMaterialPrompt, compilePrompt } from '../../main/utils/petstoryPromptQuality';
@@ -42,42 +42,45 @@ function production(model: NonNullable<PetStoryCapability['videoConfig']>['model
 }
 
 describe('drama-skills 真实请求构造的离线边界', (): void => {
-  it.each([false, true])('分析有旧plan=%s时都独立发送当前动态制作配置，来源原文和未确认旧设计不覆盖它', (hasPlan: boolean): void => {
+  it.each([false, true])('分析有旧plan=%s时从剧本提取角色，显式初始图意图不能替换已有剧情角色', (hasPlan: boolean): void => {
     const p = project(); const identities = p.plan!.characters.map((item): string => item.description);
     p.promptProfile = { style: '', characters: { lulu: { identity: identities[0], appearance: '', aliases: ['A', '乐'], role: 'main' }, guest_role: { identity: identities[2], appearance: 'TEST用户配置的补充', aliases: ['C'], role: 'supporting' } } };
     if (!hasPlan) p.plan = undefined;
     else p.plan!.characters[0].description = 'TEST上次未确认的角色设计';
     p.assets = []; const before = structuredClone(p);
     const request = buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-cast-current' }); const data = facts(request.prompt);
-    expect(data.productionCast).toMatchObject({ source: 'current_project_configuration', characters: p.promptProfile.characters, confirmedIdentities: [], actualIdentityImages: [] });
-    expect(request.analysisCastBindings).toEqual({ lulu: { aliases: ['A', '乐'], role: 'main' }, guest_role: { aliases: ['C'], role: 'supporting' } });
+    expect(data.productionCast).toMatchObject({ source: hasPlan ? 'saved_script_roles' : 'explicit_user_configuration', initialImageIntents: p.promptProfile.characters, confirmedIdentities: [], actualIdentityImages: [] });
+    if (hasPlan) expect((data.productionCast as { characters: { id: string }[] }).characters.map((item): string => item.id)).toEqual(p.plan!.characters.map((item): string => item.id));
+    expect(request.analysisCastBindings).toMatchObject({ lulu: { aliases: ['A', '乐'], role: 'main' }, ...(hasPlan ? { lumei: { role: 'main' }, friend: { role: 'supporting' } } : { guest_role: { aliases: ['C'], role: 'supporting' } }) });
+    if (hasPlan) expect(request.analysisCastBindings).not.toHaveProperty('guest_role');
     expect(data).not.toHaveProperty('characters'); expect(data.source).toMatchObject({ originalText: p.mobileStory!.text, originalPreserved: true });
     if (hasPlan) expect(data.currentPlanStatus).toMatchObject({ storyApproved: false, promptBodiesUsedAsIdentity: false });
-    expect(request.prompt).toContain('由你在understanding及characters.aliases中明确落实来源人物');
+    expect(request.prompt).toContain('由剧本提取全部必要角色、姓名／称谓、关系、剧情职责和逐字对白');
     expect(request.prompt).toContain('来源人物的称谓与外观用于来源落实，不自动成为本项目制作演员的外观要求');
-    expect(request.prompt).toContain('已保存的aliases是来源称谓到该演员的已知对应'); expect(request.prompt).toContain('未展示的前置动作只能标为推断，不写成已发生事实');
+    expect(request.prompt).toContain('已有角色保持ID和已知来源对应，不互换角色、说话者或重写逐字台词'); expect(request.prompt).toContain('未展示前置动作只能标为推断');
     expect(request.prompt).not.toContain('这是用户可编辑的默认主演配置；实际图片和明确文字优先'); expect(p).toEqual(before);
   });
   it('旧项目缺profile时投影当前plan全部角色原文，不注入默认物种或固定双主演', (): void => {
     const p = project(); delete p.promptProfile; p.assets = [];
     p.plan!.characters[0].description = 'TEST当前项目已保存的角色身份原文';
     const data = facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-old-cast' }).prompt);
-    expect(data.productionCast).toMatchObject({ source: 'saved_plan_characters', characters: p.plan!.characters });
+    expect(data.productionCast).toMatchObject({ source: 'saved_script_roles', characters: p.plan!.characters.map((item): object => ({ id: item.id, name: item.name, role: item.role, purpose: item.purpose })) });
+    expect(JSON.stringify(data.productionCast)).not.toContain('TEST当前项目已保存的角色身份原文');
     expect((data.productionCast as { characters: unknown[] }).characters).toHaveLength(p.plan!.characters.length);
   });
-  it('无profile亦无plan才使用默认配置；显式空配置不暗中补默认角色', (): void => {
+  it('无profile亦无plan以及显式空配置都从剧本开始，不补默认角色', (): void => {
     const p = project(); delete p.promptProfile; p.plan = undefined; p.assets = [];
-    expect(facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-default-cast' }).prompt).productionCast).toMatchObject({ source: 'default_configuration', characters: presets.profile.characters });
+    expect(facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-default-cast' }).prompt).productionCast).toMatchObject({ source: 'extract_from_current_script', characters: [] });
     p.promptProfile = { style: '', characters: {} };
-    expect(facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-empty-config' }).prompt).productionCast).toMatchObject({ source: 'current_project_configuration', characters: {} });
+    expect(facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-empty-config' }).prompt).productionCast).toMatchObject({ source: 'extract_from_current_script', characters: [] });
   });
   it('analysis格式纠正仍携带当前制作配置与来源映射职责，不退回旧plan身份', (): void => {
     const p = project(); p.promptProfile = { style: '', characters: { custom_actor: { identity: p.plan!.characters[0].description, appearance: '' } } };
     const parent: PetStoryChatJob = { id: 'TEST-analysis-parent', taskId: 'TEST-original-task', kind: 'analysis', status: 'invalid', inputHash: 'a'.repeat(64), sourceUrl: p.source.url,
       requestId: 'TEST-original-request', requestText: 'TEST原分析请求', rawText: 'TEST结构错误原回复', validationIssues: ['TEST结构缺项'], analysisCastBindings: { custom_actor: { aliases: ['TEST父请求来源别名'], role: 'supporting' } } };
     const request = buildDramaRequest(p, { kind: 'repair', requestId: 'TEST-cast-repair', parentJob: parent });
-    expect(request.stage).toBe('analysis+assets+storyboard'); expect(facts(request.prompt).productionCast).toMatchObject({ source: 'current_project_configuration', characters: p.promptProfile.characters });
-    expect(request.prompt).toContain('【本次分析的来源人物与制作演员】'); expect(facts(request.prompt).parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: parent.rawText });
+    expect(request.stage).toBe('analysis+assets+storyboard'); expect(facts(request.prompt).productionCast).toMatchObject({ source: 'saved_script_roles', initialImageIntents: p.promptProfile.characters });
+    expect(request.prompt).toContain('【本次分析的剧本角色】'); expect(facts(request.prompt).parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: parent.rawText });
     expect(request.analysisCastBindings).toEqual(parent.analysisCastBindings);
     delete parent.analysisCastBindings;
     expect(buildDramaRequest(p, { kind: 'repair', requestId: 'TEST-legacy-cast-repair', parentJob: parent }).analysisCastBindings).toBeUndefined();
@@ -93,17 +96,17 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     for (const kind of ['analysis', 'repair'] as const) {
       const request = buildDramaRequest(p, { kind, requestId: 'TEST-analysis-omits-' + kind, ...(kind === 'repair' ? { parentJob: parent } : {}) }); const data = facts(request.prompt);
       expect(data.source).toEqual({ originalText: p.mobileStory!.text, originalPreserved: true, ...(approval === 'approved' ? { adoptedStory: p.plan!.adaptedStory, storyApproved: true } : {}) });
-      expect(data.productionCast).toMatchObject({ characters: p.promptProfile.characters });
+      expect(data.productionCast).toMatchObject({ initialImageIntents: p.promptProfile.characters });
       if (kind === 'analysis') {
         expect(data).not.toHaveProperty('currentPlan'); expect(data.currentPlanStatus).toMatchObject({ storyApproved: approval === 'approved', role: expect.stringContaining('已省略既有镜头与未确认设计') });
         for (const omitted of ['TEST旧方案摘要', 'TEST旧理解', 'TEST旧空间设计', 'TEST旧未确认人物设计', 'TEST旧整组镜头答案']) expect(request.prompt).not.toContain(omitted);
         if (approval !== 'approved') expect(request.prompt).not.toContain('TEST旧改编稿');
       } else {
-        expect(data.currentPlan).toMatchObject({ status: approval === 'approved' ? 'confirmed_current_plan' : 'saved_unconfirmed_not_locked', storyApproval: { current: approval === 'approved' }, characters: p.plan!.characters, shots: p.plan!.shots.map((shot): object => ({ id: shot.id, action: shot.action })) });
+        expect(data.currentPlan).toMatchObject({ status: approval === 'approved' ? 'confirmed_current_plan' : 'saved_unconfirmed_not_locked', storyApproval: { current: approval === 'approved' }, characters: p.plan!.characters.map((item): object => ({ id: item.id })), shots: p.plan!.shots.map((shot): object => ({ id: shot.id, action: shot.action })) });
         expect(data.currentPlanStatus).toMatchObject({ storyApproved: approval === 'approved', role: expect.stringContaining('不将旧未确认设计当成锁定事实') });
         expect(data.parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: parent.rawText });
         expect(data.parentResult).not.toHaveProperty('rawForFormatRepairOnly');
-        expect(request.prompt).toContain('其原请求与原回复是待纠正材料，不是当前演员权威');
+        expect(request.prompt).toContain('原请求和回复只作待修历史材料');
       }
     }
     expect(p).toEqual(before);
@@ -115,8 +118,8 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     const parent: PetStoryChatJob = { id: 'TEST-other-parent', taskId: 'TEST-other-task', kind, ...target, status: 'invalid', inputHash: 'a'.repeat(64), sourceUrl: p.source.url, rawText: 'TEST原回复' };
     for (const options of [{ kind, ...target }, { kind: 'repair' as const, ...target, parentJob: parent }]) {
       const data = facts(buildDramaRequest(p, { ...options, requestId: 'TEST-unchanged-' + kind }).prompt);
-      expect(data.source).toEqual(JSON.parse(JSON.stringify(expected))); expect(data).not.toHaveProperty('productionCast');
-      if (kind === 'assets' || kind === 'review') expect(data.currentPlan).toMatchObject({ characters: p.plan!.characters, props: p.plan!.props, scenes: p.plan!.scenes, shots: p.plan!.shots.map((shot): object => ({ id: shot.id, action: shot.action })) });
+      expect(data.source).toMatchObject(target.shotId ? { originalText: p.mobileStory!.text, originalPreserved: true, adoptedStory: p.plan!.adaptedStory, provenancePolicy: expect.stringContaining('旧外观仅供溯源') } : JSON.parse(JSON.stringify(expected))); expect(data).not.toHaveProperty('productionCast');
+      if (kind === 'assets' || kind === 'review') expect(data.currentPlan).toMatchObject({ characters: p.plan!.characters.map((item): object => ({ id: item.id })), props: p.plan!.props, scenes: p.plan!.scenes, shots: p.plan!.shots.map((shot): object => ({ id: shot.id, action: shot.action })) });
     }
   });
   it.each(['analysis', 'assets'] as const)('%s输出合同明确每个道具对应一条非空状态，静置道具不强塞持有人', (kind): void => {
@@ -131,19 +134,19 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     asset.validation = { decoded: true, sha256: 'a'.repeat(64), bytes: 1, width: 64, height: 64, checkedAt: '2026-10-27T00:00:00.000Z' };
     material.approved = { assetId: asset.id, sha256: asset.validation.sha256, at: '2026-10-27T00:00:00.000Z', identity: { assetId: asset.id, description: 'TEST配角已确认身份原文' } };
     const data = facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-confirmed-cast' }).prompt);
-    expect(data.productionCast).toMatchObject({ characters: p.promptProfile.characters, confirmedIdentities: [{ id: 'friend', description: material.approved.identity!.description, assetId: asset.id, chatImage: expect.any(Number) }] });
+    expect(data.productionCast).toMatchObject({ initialImageIntents: p.promptProfile.characters, confirmedIdentities: [{ id: 'friend', visualAuthority: 'user_adopted_image', assetId: asset.id, chatImage: expect.any(Number) }] });
+    expect(JSON.stringify(data.productionCast)).not.toContain(material.approved.identity!.description);
     expect((data.productionCast as { actualIdentityImages: unknown[] }).actualIdentityImages).toHaveLength(3);
     expect(data.currentPlanStatus).toMatchObject({ storyApproved: true, identityApproval: expect.stringContaining('剧本确认不代表逐项人物身份') });
     delete material.approved;
     expect(facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-story-not-identity' }).prompt).productionCast).toMatchObject({ confirmedIdentities: [] });
   });
-  it.each(['selected', 'digest', 'identity-image', 'date'] as const)('失效%s确认不伪称当前身份批准，配置与实际附件仍可见', (change): void => {
+  it.each(['selected', 'digest', 'date'] as const)('失效%s确认不伪称当前身份批准，配置与实际附件仍可见', (change): void => {
     const p = enriched(); const material = p.materials!.find((item): boolean => item.id === 'character:lulu')!; const asset = p.assets.find((item): boolean => item.id === material.selectedAssetId)!;
     asset.validation = { decoded: true, sha256: 'a'.repeat(64), bytes: 1, width: 64, height: 64, checkedAt: '2026-10-27T00:00:00.000Z' };
     material.approved = { assetId: asset.id, sha256: asset.validation.sha256, at: '2026-10-27T00:00:00.000Z', identity: { assetId: asset.id, description: p.plan!.characters[0].description } };
     if (change === 'selected') material.selectedAssetId = 'TEST-different-selected';
     if (change === 'digest') asset.validation.sha256 = 'b'.repeat(64);
-    if (change === 'identity-image') material.approved.identity!.assetId = 'TEST-other-image';
     if (change === 'date') material.approved.at = 'TEST-invalid-date';
     const data = facts(buildDramaRequest(p, { kind: 'analysis', requestId: 'TEST-expired-cast' }).prompt);
     expect(data.productionCast).toMatchObject({ confirmedIdentities: [] });
@@ -241,7 +244,7 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     current.previousShotId = undefined; current.transition = 'cut';
     previous.prompts.video.final = 'TEST-用户采用的前镜视频终点上下文'; previous.prompts.video.edited = true; previous.prompts.video.needsReview = true;
     const data = facts(buildDramaRequest(p, { kind: 'optimize', requestId: 'TEST-boundary-three', shotId: current.id, promptKind: 'firstFrame' }).prompt);
-    expect(data.previousAdoptedBoundary).toMatchObject({ shotId: previous.id, boundarySource: 'previous_in_current_order', relation: 'cut', promptKind: 'video', source: 'user_edited_final', promptText: previous.prompts.video.final, needsReview: true });
+    expect(data.previousAdoptedBoundary).toMatchObject({ shotId: previous.id, boundarySource: 'previous_in_current_order', relation: 'cut', promptKind: 'video', source: 'user_edited_final', historicalPromptText: previous.prompts.video.final, needsReview: true });
     expect((data.previousAdoptedBoundary as { policy: string }).policy).toContain('cut允许换机位和构图，也不能无解释重置持续状态');
     previous.prompts.video.edited = false;
     const noTrusted = facts(buildDramaRequest(p, { kind: 'optimize', requestId: 'TEST-boundary-untrusted', shotId: current.id, promptKind: 'firstFrame' }).prompt).previousAdoptedBoundary;
@@ -282,12 +285,12 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     for (const request of [initial, repair]) {
       const data = facts(request.prompt);
       expect(data.dialogueContract).toMatchObject({ shotId: shot.id, source: 'current_shot_dialogue_by_speakerId', utterances: [
-        { order: 1, speakerId: character.id, speakerLabel: character.name, language: '中文', text, delivery: 'onscreen', occurrence: 1, expectedOccurrences: 2, requiredSpokenBlock: `{噜妹（黑衣男子）用中文说：“${text}”}` },
+        { order: 1, speakerId: character.id, speakerLabel: petStoryProductionLabel(p.plan!.characters, character.id), language: '中文', text, delivery: 'onscreen', occurrence: 1, expectedOccurrences: 2, requiredSpokenBlock: `{${petStoryProductionLabel(p.plan!.characters, character.id)}用中文说：“${text}”}` },
         { order: 2, speakerId: 'lulu', text: '你说“什么”？', occurrence: 1, expectedOccurrences: 1 },
         { order: 3, speakerId: character.id, text, delivery: 'offscreen', occurrence: 2, expectedOccurrences: 2 },
       ] });
       const utterances = (data.dialogueContract as { utterances: { acceptedSpeakerLabels: string[] }[] }).utterances;
-      expect(utterances[0].acceptedSpeakerLabels).toEqual(expect.arrayContaining(['噜妹（黑衣男子）', '黑衣男子', '男青年', '噜妹']));
+      expect(utterances[0].acceptedSpeakerLabels).toEqual([petStoryProductionLabel(p.plan!.characters, character.id)]);
       expect(request.prompt).toContain('不能照抄通用“角色”占位符');
     }
     expect(facts(repair.prompt).parentResult).toMatchObject({ originalRequest: parent.requestText, originalReply: previous.rawText,
@@ -302,7 +305,8 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     const shot = p.plan!.shots[1]; shot.dialogue = [{ speakerId: character.id, text: 'TEST同一说话者', tone: '', pace: '' }];
     const data = facts(buildDramaRequest(p, { kind: 'optimize', requestId: 'TEST-collision-label', shotId: shot.id, promptKind: 'video' }).prompt);
     const utterances = (data.dialogueContract as { utterances: { acceptedSpeakerLabels: string[] }[] }).utterances;
-    expect(utterances[0].acceptedSpeakerLabels).toContain(character.name);
+    expect(utterances[0].acceptedSpeakerLabels).toEqual([petStoryProductionLabel(p.plan!.characters, character.id)]);
+    expect(utterances[0].acceptedSpeakerLabels).not.toContain(character.name);
     expect(utterances[0].acceptedSpeakerLabels).not.toContain('噜妹');
     for (const promptKind of ['firstFrame', 'lastFrame'] as const) expect(facts(buildDramaRequest(p, { kind: 'optimize', requestId: `TEST-no-dialogue-${promptKind}`, shotId: shot.id, promptKind }).prompt)).not.toHaveProperty('dialogueContract');
     p.promptCapability = undefined;
@@ -361,6 +365,7 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     const material = p.materials![0]; material.prompt.rulesVersion = resources.version; material.prompt.needsReview = true;
     adoptedMaterialReply(p, material, 'TEST已采用材料正文');
     seedOfflinePromptContracts(p, { materialId: material.id });
+    material.prompt.needsReview = true;
     expect((): unknown => compileMaterialPrompt(p, material.id)).toThrow('待复核'); expect(compileMaterialPrompt(p, material.id, true).rulesVersion).toBe(resources.version);
     shot.dialogue = [{ speakerId: 'lulu', text: 'TEST逐字原台词', tone: '', pace: '' }];
     p.promptModel = 'seedance-2.0'; seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' });
@@ -401,4 +406,64 @@ describe('drama-skills 真实请求构造的离线边界', (): void => {
     expect(compiled.references).toEqual([{ assetId: 'TEST-base', materialId: material.id, entityId: material.entityId, purpose: 'scene', characterIds: [], order: 1 }]);
     material.prompt.editIntent.baseAssetId = 'TEST-missing'; expect((): unknown => compileMaterialPrompt(p, material.id, true)).toThrow('对应实际基图');
   });
+  it('采用图片后仅投影角色ID和图片职责，旧外观／基础正文／旧分析不再是镜头有效事实', (): void => {
+    const p = enriched(); const character = p.plan!.characters[0]; const shot = p.plan!.shots[0];
+    character.name = '黑衣男'; character.aliases = ['男青年']; character.description = 'TEST-失效真人穿黑衣扎马尾';
+    const material = p.materials!.find((item): boolean => item.id === `character:${character.id}`)!;
+    const asset = p.assets.find((item): boolean => item.id === material.selectedAssetId)!;
+    asset.validation = { decoded: true, sha256: 'a'.repeat(64), bytes: 1, width: 64, height: 64, checkedAt: '2026-11-01T00:00:00.000Z' };
+    material.approved = { assetId: asset.id, sha256: asset.validation.sha256, at: '2026-11-01T00:00:00.000Z', identity: { assetId: 'TEST-obsolete-identity', description: 'TEST-失效身份文字' } };
+    material.visualBasis = { assetId: asset.id, sha256: asset.validation.sha256, adoptedAt: material.approved.at };
+    material.prompt.final = 'TEST-失效基础生图正文'; material.prompt.optimized = 'TEST-失效基础候选'; material.prompt.supersededByAssetId = asset.id;
+    shot.appearanceOverrides = { [character.id]: 'TEST-失效帽饰和服装' };
+    shot.dialogue = [{ speakerId: character.id, text: '把黑衣服和红帽子递给我。', tone: '着急', pace: '短促' }];
+    shot.action = '黑衣男转头、眉头收紧、伸手接过围巾。'; shot.performance = '先看向同伴，听见声音后退半步，随后伸手';
+    p.plan!.understanding = 'TEST-旧分析夹带造型'; p.plan!.sceneDesign = 'TEST-旧场次设计夹带造型';
+    p.promptCapability = production('seedance-2.0-fast').capability;
+    for (const promptKind of ['firstFrame', 'lastFrame', 'video'] as const) {
+      const built = buildDramaRequest(p, { kind: 'optimize', requestId: `TEST-reference-first-${promptKind}`, shotId: shot.id, promptKind }); const data = facts(built.prompt);
+      const role = (data.characters as { id: string; productionLabel: string }[]).find((item): boolean => item.id === character.id)!;
+      expect(role).toMatchObject({ productionLabel: petStoryProductionLabel(p.plan!.characters, character.id), visualSource: { type: 'user_adopted_image', assetId: asset.id } });
+      expect(role).not.toHaveProperty('description'); expect(role).not.toHaveProperty('approvedIdentity'); expect(role).not.toHaveProperty('initialImageDesign');
+      expect(data.shot).not.toHaveProperty('appearanceOverrides');
+      for (const outdated of ['TEST-失效真人穿黑衣扎马尾', 'TEST-失效身份文字', 'TEST-失效基础生图正文', 'TEST-失效基础候选', 'TEST-失效帽饰和服装', 'TEST-旧分析夹带造型', 'TEST-旧场次设计夹带造型']) expect(built.prompt).not.toContain(outdated);
+      expect(built.promptTask).toMatchObject({ visualPolicy: 'reference-first-v1', characterVisualBasis: { [`character:${character.id}`]: `${asset.id}:${asset.validation.sha256}` } });
+      if (promptKind === 'video') {
+        expect(data.shot).toMatchObject({ action: shot.action, performance: shot.performance, dialogue: shot.dialogue });
+        expect(data.dialogueContract).toMatchObject({ utterances: [{ speakerId: character.id, speakerLabel: petStoryProductionLabel(p.plan!.characters, character.id), text: shot.dialogue[0].text }] });
+      }
+    }
+  });
+  it('没有选图时基础图可创作初始形象，编辑未采用候选只使用本次具体基图和反馈', (): void => {
+    const p = enriched(); const material = p.materials!.find((item): boolean => item.kind === 'character')!;
+    const character = p.plan!.characters.find((item): boolean => item.id === material.entityId)!;
+    material.selectedAssetId = undefined; material.approved = undefined; material.visualBasis = undefined;
+    character.description = 'TEST-初始角色由剧本明确提供的视觉设计';
+    const initial = facts(buildDramaRequest(p, { kind: 'materialPrompt', requestId: 'TEST-initial-design', materialId: material.id }).prompt);
+    expect((initial.characters as object[])[0]).toMatchObject({ initialImageDesign: character.description });
+    const candidate = { id: 'TEST-not-adopted-edit-base', kind: 'character' as const, characterId: character.id, relativePath: 'TEST/selected-candidate.png' }; p.assets.push(candidate);
+    const built = buildDramaRequest(p, { kind: 'materialPrompt', requestId: 'TEST-candidate-image-edit', materialId: material.id, editIntent: { baseAssetId: candidate.id, changes: '眉头收紧并抬手', preserve: '其余保持', validity: '当前单幅图片' } });
+    const data = facts(built.prompt);
+    expect(built.assets.map((item): string => item.id)).toEqual([candidate.id]);
+    expect((data.characters as object[])[0]).toMatchObject({ visualSource: { type: 'selected_image_for_this_edit', assetId: candidate.id } });
+    expect(data.material).toMatchObject({ design: { visualSource: { type: 'this_edit_base_image', assetId: candidate.id } } });
+    expect(built.prompt).not.toContain(character.description); expect(data.editIntent).toMatchObject({ changes: '眉头收紧并抬手' });
+  });
+  it('三种视频模式只按真实目标清单引用，帧图不冒充单人身份图', (): void => {
+    const p = enriched(); withFrames(p); p.promptCapability = production('seedance-2.0-fast').capability;
+    const shot = p.plan!.shots[1];
+    for (const mode of ['first_frame', 'first_last_frame', 'reference'] as const) {
+      shot.requestedMode = mode;
+      const built = buildDramaRequest(p, { kind: 'optimize', requestId: `TEST-mapping-${mode}`, shotId: shot.id, promptKind: 'video' });
+      const data = facts(built.prompt); const targets = data.targetReferenceList as { assetId: string; targetLabel: string; purpose: string; characterMapping: { role: string }[] }[];
+      expect(targets.map((item): string => item.assetId)).toEqual(built.promptTask!.references.map((item): string => item.assetId));
+      expect(targets.map((item): string => item.targetLabel)).toEqual(targets.map((_item, index): string => `@图片${index + 1}`));
+      for (const reference of built.promptTask!.references) if (['firstFrame', 'actualEndFrame', 'plannedEndImage'].includes(reference.purpose)) {
+        const target = targets.find((item): boolean => item.assetId === reference.assetId)!;
+        expect(target.characterMapping.every((item): boolean => item.role === 'locate_role_in_this_frame_by_blocking_and_action_not_new_identity_image')).toBe(true);
+      }
+      expect(built.prompt).toContain('不能把场景或多人帧冒充单人身份图');
+    }
+  });
+
 });

@@ -11,6 +11,7 @@ export function seedOfflinePromptContracts(p: PetStoryProject, only?: PetStoryRu
     ...(p.plan?.shots || []).flatMap((shot): { target: PetStoryRuntimeTarget; prompt: PetStoryPrompt }[] => (['firstFrame', 'lastFrame', 'video'] as const).flatMap((kind): { target: PetStoryRuntimeTarget; prompt: PetStoryPrompt }[] => shot.prompts[kind] ? [{ target: { shotId: shot.id, promptKind: kind }, prompt: shot.prompts[kind]! }] : [])),
   ];
   for (const { target, prompt } of targets) {
+    if (prompt.supersededByAssetId) continue;
     if (!prompt.final || only && (only.materialId !== target.materialId || only.shotId !== target.shotId || only.promptKind !== target.promptKind)) continue;
     const request = buildDramaRequest(p, { ...target, kind: target.materialId ? 'materialPrompt' : 'optimize', requestId: 'TEST-offline-eligibility', editIntent: prompt.editIntent, capability: p.production?.capability || p.promptCapability });
     // 媒体链路的有效场景使用完整离线正文；负向契约用例默认保留故意缺项的原文。
@@ -28,6 +29,8 @@ export function seedOfflinePromptContracts(p: PetStoryProject, only?: PetStoryRu
       prompt.optimized = prompt.final;
     }
     const id = `TEST-offline-source-${p.jobs.length}`;
+    // 此辅助创建的是新采用的离线 Chat 来源，按正式采用语义结束旧正文的待复核状态。
+    prompt.needsReview = undefined; prompt.visualBasisStale = undefined;
     prompt.promptTask = request.promptTask;
     prompt.rulesVersion = request.rulesVersion;
     if (prompt.edited) prompt.basisJobId = id; else prompt.sourceJobId = id;

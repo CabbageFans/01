@@ -56,20 +56,20 @@ describe('角色上下文与实际用途', (): void => {
   it.each([[['lulu']], [['lumei']], [['lulu', 'lumei']], [['lulu', 'clerk']]])('只注入本镜 %j 的档案，保留配角自己的身份', (ids: string[]): void => {
     const p = fixture(); p.plan!.shots[0].characterIds = ids;
     const input = characterContext(p, 's1');
-    const data = JSON.parse(input.split('\n')[0].replace('角色与风格数据：', ''));
+    const data = JSON.parse(input.split('\n')[0].replace('剧情角色及图片对应：', ''));
     expect(data.characters.map((c: { id: string }): string => c.id)).toEqual(ids);
-    if (ids.includes('clerk')) expect(data.characters.find((c: { id: string }): boolean => c.id === 'clerk').identitySupplement).toBe('');
+    if (ids.includes('clerk')) expect(data.characters.find((c: { id: string }): boolean => c.id === 'clerk')).toMatchObject({ id: 'clerk', sourceName: '牛店员', referenceAssetId: 'c' });
+    expect(data.characters.every((character: object): boolean => !('description' in character) && !('identitySupplement' in character))).toBe(true);
   });
-  it('新草稿含分离的完整橘子与盘环嫩芽；既有换装和场景覆盖不退回默认', (): void => {
+  it('新项目无默认角色，后续关键帧只投影采用图片而不回流旧造型', (): void => {
     const p = fixture();
-    expect(p.promptProfile?.characters.lulu.appearance).toContain('完整小橘子');
-    expect(p.promptProfile?.characters.lumei.appearance).toContain('盘／环状');
-    const data = JSON.parse(characterContext(p, 's1').split('\n')[0].replace('角色与风格数据：', ''));
-    expect(data.characters[0].confirmedProjectDescription).toBe('本项目蓝色外套');
-    expect(data.characters[0].fallbackAppearanceOnlyWhenUnspecified).toBe('');
-    expect(data.characters[1].confirmedShotAppearance).toContain('不披斗篷');
-    p.plan!.shots[0].appearanceOverrides!.lumei = '本场浅黄色柑橘图案斗篷';
-    expect(optimizationPrompt(p, 's1', 'firstFrame')).toContain('本场浅黄色柑橘图案斗篷');
+    expect(p.promptProfile?.characters).toEqual({});
+    const data = JSON.parse(characterContext(p, 's1').split('\n')[0].replace('剧情角色及图片对应：', ''));
+    expect(data.characters.map((character: { id: string; referenceAssetId: string }): object => ({ id: character.id, referenceAssetId: character.referenceAssetId }))).toEqual([{ id: 'lulu', referenceAssetId: 'a' }, { id: 'lumei', referenceAssetId: 'b' }]);
+    p.plan!.shots[0].appearanceOverrides!.lumei = 'TEST已被图替代的旧衣装';
+    const request = optimizationPrompt(p, 's1', 'firstFrame');
+    expect(request).not.toContain('TEST已被图替代的旧衣装'); expect(request).not.toContain('本项目蓝色外套');
+    expect(p.plan!.characters[0].description).toBe('本项目蓝色外套');
   });
   it('Chat、首帧生成使用同一显式选择与上传次序，反转顺序同步引用', (): void => {
     const p = fixture();
@@ -295,10 +295,10 @@ describe('发送前真实序列化回读脚本', (): void => {
     actual = text.replace('原台词', '改台词');
     expect(await verifyPromptReadyForSubmission(webview, text, true)).toBe(false);
   });
-  it('首次请求包含完整专用预设及必要规则，不伪称看过原视频', (): void => {
+  it('首次请求从原故事提取角色，保留必要规则且不默认演员或美术', (): void => {
     const p = fixture(); p.plan = undefined; p.assets = [];
     const input = analysisPrompt(p);
-    expect(input).toContain('完整小橘子'); expect(input).toContain('盘／环状'); expect(input).toContain('不声称看过原视频');
+    expect(input).not.toContain('完整小橘子'); expect(input).not.toContain('盘／环状'); expect(input).not.toContain('短绒毛毡'); expect(input).toContain('从剧本动态提取全部实际角色'); expect(input).toContain('不声称看过原视频');
   });
 });
 

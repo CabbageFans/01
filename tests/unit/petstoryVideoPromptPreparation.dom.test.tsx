@@ -50,6 +50,15 @@ async function startWithError(message: string): Promise<void> {
 }
 
 describe('视频节点的后台提示词准备', (): void => {
+  it('缺少关键帧正文时正常图片按钮可进入文字准备，不被媒体预检的缺正文状态卡住', async (): Promise<void> => {
+    const shot = project.plan!.shots[0]; shot.prompts.firstFrame.final = '';
+    const generate = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ project, generateShotMedia: generate });
+    render(<CanvasMediaNode project={project} shot={shot} kind="firstFrame" disabled={false} />);
+    const button = await screen.findByRole('button', { name: '生成图片' });
+    await waitFor((): void => expect(button.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(button); expect(generate).toHaveBeenCalledExactlyOnceWith(shot.id, 'firstFrame');
+  });
   it('没有正式正文仍可启动本镜制作；后台修订进度由实际在途记录呈现，不增加修复按钮', async (): Promise<void> => {
     const generate = vi.fn(async (): Promise<void> => {
       const saved = structuredClone(project); saved.revision++;

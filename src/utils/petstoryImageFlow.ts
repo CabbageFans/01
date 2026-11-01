@@ -65,7 +65,7 @@ function completedImageMessage(project: PetStoryProject, target: PetStoryImageTa
   const review = current.imageReview;
   const adoptedAt = review?.adoptedAt || material?.approved?.at;
   const validTime = !!adoptedAt && Number.isFinite(Date.parse(adoptedAt));
-  const fileValid = !!current.validation?.decoded && !!current.validation.sha256 && (!target.materialId || !current.needsReview);
+  const fileValid = !!current.validation?.decoded && !!current.validation.sha256 && !current.visualBasisStale && (!target.materialId || !current.needsReview);
   const approved = fileValid && (material ? journeyMaterialImageApproved(project, material)
     : review?.state === 'adopted' && review.sha256 === current.validation?.sha256);
   return approved && validTime ? '图片已采用' : material ? '图片需要复核' : '图片采用记录或文件校验不完整';

@@ -5,12 +5,13 @@ import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DownloadJob, PetStoryCapability, PetStoryPageBinding, PetStoryPlan, PetStoryProductionResult, PetStoryProject, Task, TaskAddParams } from '@doubao-studio/contracts';
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
-import { PetStoryProductionService, productionCounts, checkProductionReferences, productionPlanHash } from '../../main/utils/petstoryProduction';
+import { PetStoryProductionService, productionCounts, checkProductionReferences, productionPlanHash, legacyProductionPlanHash } from '../../main/utils/petstoryProduction';
 import { resolvePetStoryMode } from '../../main/utils/petstoryModes';
 import { productionCapability } from '../../main/utils/petstoryCapability';
 import { PetStoryExistingMediaService } from '../../main/utils/petstoryExistingMedia';
 import { extractActualEndFrame, mediaCommand, validatePetStoryMedia } from '../../main/utils/petstoryMedia';
 import { TaskService } from '../../main/core/TaskService';
+import { legacyApprovedMaterialHash, syncMaterials } from '../../main/utils/petstoryMaterials';
 import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 import { normalizeTasks } from '../../main/utils/persistenceNormalization';
 
@@ -143,6 +144,27 @@ beforeEach(async (): Promise<void> => {
 });
 
 describe('P4 实际入口和请求模式', (): void => {
+  it('同一采用图的旧人物设计文字变化不撤销当前制作，实际角色剧情改变仍拒绝原授权', async (): Promise<void> => {
+    await approve(); const originalHash = p.production!.planHash; const materialHash = p.production!.materialHash;
+    p.plan!.characters[0].description = 'TEST仅修改已被采用图替代的旧造型文字';
+    p.materials = syncMaterials(p); p = await projects.write(p);
+    const resumed = await service.resume(p.id, capability()); expect(resumed.success).toBe(true);
+    p = resumed.project!; expect(p.production).toMatchObject({ planHash: originalHash, materialHash });
+    const next = await service.advance(p.id); expect(next.success, next.error).toBe(true);
+    p = await projects.read(p.id); p.plan!.characters[0].purpose += 'TEST实际剧情职责改变'; p = await projects.write(p);
+    await expect(service.resume(p.id, capability())).rejects.toThrow('计划不存在或已经改变');
+  });
+  it('旧制作摘要仅精确兼容原内容，继续不重写planHash或素材hash', async (): Promise<void> => {
+    await approve(); const planHash = legacyProductionPlanHash(p.plan!); const materialHash = legacyApprovedMaterialHash(p);
+    p.production!.planHash = planHash; p.production!.materialHash = materialHash; p = await projects.write(p);
+    p = (await service.resume(p.id, capability())).project!;
+    expect(p.production).toMatchObject({ planHash, materialHash });
+    const next = await service.advance(p.id); expect(next.success, next.error).toBe(true);
+    p = await projects.read(p.id); expect(p.production).toMatchObject({ planHash, materialHash });
+    p.plan!.characters[0].purpose += 'TEST真实剧情改变'; p = await projects.write(p);
+    await expect(service.resume(p.id, capability())).rejects.toThrow('计划不存在或已经改变');
+  });
+
   it.each(['firstFrame', 'lastFrame', 'video'] as const)('空final的%s原回复校验失败时说明后台持续修订，不要求用户修复', async (kind): Promise<void> => {
     const shot = p.plan!.shots[2]; p.promptCapability = capability();
     seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: kind }, { completeVideoBody: true });
@@ -413,7 +435,7 @@ describe('P4 实际入口和请求模式', (): void => {
     await expect(service.preview(p.id, c, {})).rejects.toThrow('未收取');
     await expect(service.approve(p.id, p.revision, c, {})).rejects.toThrow('未收取');
     await expect(service.generateShotMedia(p.id, p.revision, p.plan!.shots[0].id, 'firstFrame', c, {})).rejects.toThrow('未收取');
-    await expect(service.generateMaterials(p.id, p.revision, [p.materials![0].id], c)).rejects.toThrow('尚无最终正文');
+    await expect(service.generateMaterials(p.id, p.revision, [p.materials![0].id], c)).rejects.toThrow('采用图');
     expect(tasks).toEqual([]); expect(createdInputs).toEqual([]); expect((await projects.read(p.id)).production).toBeUndefined();
   });
   it('strict native mode never uses two generic images as first/last; explicit fallback retains requested mode', (): void => {

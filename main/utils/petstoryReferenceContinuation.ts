@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { PetStoryAsset, PetStoryProduction, PetStoryProductionStep, PetStoryProject, PetStoryPrompt, PetStoryVideoReferenceContinuation } from '@doubao-studio/contracts';
+import { characterVisualBasis } from './petstoryMaterials';
 import { selectedShotImageId } from './petstoryImageReview';
 import { renderReferenceSegments } from './petstoryReferenceText';
 
@@ -87,6 +88,7 @@ function validateContinuationBindings(record: PetStoryVideoReferenceContinuation
       || binding.fileSha256 !== (index === 0 ? record.firstSha256 : record.lastSha256))) invalidContinuation();
 }
 function continuationTargetMatches(p: PetStoryProject, production: PetStoryProduction, shotId: string, record: PetStoryVideoReferenceContinuation, prompt: PetStoryPrompt, step: PetStoryProductionStep): boolean {
+  if (prompt.promptTask?.characterVisualBasis && JSON.stringify(prompt.promptTask.characterVisualBasis) !== JSON.stringify(characterVisualBasis(p, shotId))) return false;
   if (production.fallbacks[shotId] !== 'reference' || production.shots[shotId]?.resolvedMode !== 'reference'
     || record.shotId !== shotId || !record.authorizationId || !record.authorizedAt || !record.originalRunId
     || record.model !== production.capability.videoConfig?.model || prompt.promptTask?.mode !== 'first_last_frame'
@@ -97,7 +99,7 @@ function continuationTargetMatches(p: PetStoryProject, production: PetStoryProdu
 }
 function continuationFramesMatch(record: PetStoryVideoReferenceContinuation, final: string, first: PetStoryAsset | undefined, last: PetStoryAsset | undefined): boolean {
   const source = record.sourceCompiledPrompt;
-  if (!first?.validation?.decoded || !last?.validation?.decoded || first.validation.sha256 !== record.firstSha256 || last.validation.sha256 !== record.lastSha256
+  if (first?.visualBasisStale || last?.visualBasisStale || !first?.validation?.decoded || !last?.validation?.decoded || first.validation.sha256 !== record.firstSha256 || last.validation.sha256 !== record.lastSha256
     || source.kind !== 'video' || source.final !== final || source.resolvedMode !== 'first_last_frame' || source.references.length !== 2
     || source.references[0].assetId !== first.id || source.references[0].slot !== 'first' || !['firstFrame', 'actualEndFrame'].includes(source.references[0].purpose)
     || source.references[1].assetId !== last.id || source.references[1].slot !== 'last' || source.references[1].purpose !== 'plannedEndImage') return false;

@@ -69,8 +69,9 @@ describe('分类与阶段投影', (): void => {
   });
   it('参考图与规范文字存在时不再添加默认物种／服装；用户 final 和素材保留', (): void => {
     const p = setPlan('library'); p.assets.push({ id:'portrait',kind:'character',characterId:'lulu',relativePath:'characters/portrait.png' }); p.plan!.characters[0].referenceAssetId='portrait';
-    const context = JSON.parse(characterContext(p,'beat-0').split('\n')[0].replace('角色与风格数据：','')) as {characters:{id:string;identitySupplement:string;confirmedProjectDescription:string;fallbackAppearanceOnlyWhenUnspecified:string}[]};
-    expect(context.characters[0]).toMatchObject({ id:'lulu',identitySupplement:'',confirmedProjectDescription:p.plan!.characters[0].description,fallbackAppearanceOnlyWhenUnspecified:'' });
+    const context = JSON.parse(characterContext(p,'beat-0').split('\n')[0].replace('剧情角色及图片对应：','')) as {characters:{id:string;sourceName:string;referenceAssetId:string}[]};
+    expect(context.characters[0]).toMatchObject({ id:'lulu',sourceName:p.plan!.characters[0].name,referenceAssetId:'portrait' });
+    expect(context.characters[0]).not.toHaveProperty('confirmedProjectDescription');
     p.materials![0].prompt.final='用户手改多段\n保持眼镜。'; p.materials![0].prompt.edited=true;
     p.plan!.characters[0].purpose='其他人后续行为变化'; p.materials=syncMaterials(p);
     expect(p.materials[0].prompt.final).toBe('用户手改多段\n保持眼镜。'); expect(p.assets[0].id).toBe('portrait');

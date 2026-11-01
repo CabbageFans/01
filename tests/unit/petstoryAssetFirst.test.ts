@@ -8,6 +8,7 @@ import { TaskService } from '../../main/core/TaskService';
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
 import { PetStoryProductionService } from '../../main/utils/petstoryProduction';
 import { PetStoryChatService } from '../../main/utils/petstoryChat';
+import { PetStoryImageOperationService } from '../../main/utils/petstoryImageOperations';
 import { compilePrompt } from '../../main/utils/petstoryPromptQuality';
 import { requiredMaterialKeys } from '../../main/utils/petstoryMaterials';
 import { validatePetStoryPlan } from '../../main/utils/petstoryValidation';
@@ -124,13 +125,13 @@ describe('通用剧本资产与确认', (): void => {
     p.plan!.shots[0].requestedMode = 'first_last_frame'; p = await h.projects.savePlan(p.id, p.revision, p.plan!); seedOfflinePromptContracts(p, undefined, { completeVideoBody: true }); p = await h.projects.write(p);
     expect((await h.service.inspectGeneration(p.id, p.revision, { shotId, promptKind: 'video' }, capability())).eligibility).toMatchObject({ ready: false, resolvedMode: 'first_last_frame', blockers: expect.arrayContaining([expect.objectContaining({ code: 'lastFrame', shotId, promptKind: 'lastFrame' })]) });
   });
-  it('直接保存剧本无需来源链接；无人物环境镜头与默认主演配置彼此独立', async (): Promise<void> => {
+  it('直接保存剧本无需来源链接；无人物环境镜头不会建立默认主演', async (): Promise<void> => {
     const directory = await fs.mkdtemp(path.join(root, 'direct-script-')); const projects = new PetStoryProjects();
     let p = await projects.create(directory, 'TEST-studio', 'TEST-account');
     p = await projects.saveMobileStory(p.id, p.revision, '清晨阳光穿过温室玻璃，镜头落到整齐的幼苗。');
     expect(p.source.kind).toBe('script'); expect(p.source.reason).not.toContain('原视频'); expect(p.source.url).toBe(''); expect(analysisPrompt(p)).toContain('直接提供的剧本');
     const plan = story('music'); plan.characters = []; plan.props = []; plan.shots = [plan.shots[0]]; plan.shots[0].characterIds = []; plan.shots[0].propIds = []; plan.shots[0].propStates = [];
-    expect(validatePetStoryPlan(plan).characters).toEqual([]); expect(p.promptProfile?.characters.lulu).toBeDefined();
+    expect(validatePetStoryPlan(plan).characters).toEqual([]); expect(p.promptProfile?.characters).toEqual({});
   });
   it('同物别名重复、同地误拆和派生循环都会要求修正逻辑引用', (): void => {
     const duplicateProp = story('repair'); duplicateProp.props!.push({ ...duplicateProp.props![0], id: 'duplicate', name: '校准装置' });
@@ -185,15 +186,31 @@ describe('通用剧本资产与确认', (): void => {
     const optimized = await chat.prepare(p.id, 'TEST仅完善分镜提示词', 'optimize', undefined, 'moment-0', 'firstFrame');
     expect(optimized.project?.production).toBeUndefined(); expect(optimized.project?.productionHistory?.[0].phase).toBe('materials'); expect(h.list()[1].mode).toBe('chat');
   });
-  it('重新生成已接受角色时真实上传原身份图，完成后新图重新待确认', async (): Promise<void> => {
+  it('重新生成已采用角色通过本次图片操作准备新正文，旧图仍采用且新图为候选', async (): Promise<void> => {
     const h = await harness('music'); let p = await accepted(h); const material = p.materials!.find((m): boolean => m.kind === 'character')!; const old = material.selectedAssetId!;
-    p = await h.projects.saveMaterialPrompt(p.id, p.revision, material.id, '沿用身份，只把外套改成用户确认的绿色。');
-    p.promptCapability = capability(); seedOfflinePromptContracts(p, undefined, { completeVideoBody: true }); p = await h.projects.write(p);
-    await h.service.generateMaterials(p.id, p.revision, [material.id], capability()); const next = await h.service.advance(p.id);
-    expect(next.success, next.error).toBe(true); expect(h.list()[0].attachments).toEqual([await h.projects.referenceFile(p.id, old)]);
-    expect(h.list()[0].prompt).toContain('只把外套改成用户确认的绿色'); await h.finish(next.taskId!); await h.service.advance(p.id); await h.service.advance(p.id);
+    const create = (params: TaskAddParams, accountId: string): Task => {
+      const created = h.core.create(params); if (!created.success) throw new Error(created.error);
+      const assigned = h.core.assign({ taskId: created.data[0].id, accountId }); if (!assigned.success) throw new Error(assigned.error); return assigned.data;
+    };
+    const chats = new PetStoryChatService(h.projects, { list: h.list, create });
+    const operations = new PetStoryImageOperationService(h.projects, chats, h.service, h.list);
+    const begun = await operations.begin(p.id, p.revision, { requestId: 'TEST-regenerate-adopted-character', target: { materialId: material.id } }, capability());
+    expect(begun.success, begun.error).toBe(true); p = begun.project!;
+    const job = p.jobs.find((item): boolean => item.id === begun.chatJobId)!; expect(job).toBeDefined();
+    const body = '以第1张参考图为当前人物形象，生成单幅完整人物图，保留实际图片中的形象。';
+    const now = new Date().toISOString(); const runId = 'TEST-character-regenerate-chat'; const task = h.list().find((item): boolean => item.id === job.taskId)!;
+    expect(task.mode).toBe('chat'); expect(task.attachments).toEqual([await h.projects.referenceFile(p.id, old)]);
+    expect(h.core.updateRuntime({ taskId: task.id, status: 'done', runtime: { runId, attempt: 1, stage: 'completed', message: 'TEST离线回复', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
+      input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] }, chatResponse: { text: JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, optimized: body }), capturedAt: now } } }).success).toBe(true);
+    p = (await chats.bindRun(p.id, job.id, runId)).project!; p = (await chats.collect(p.id, job.id)).project!;
+    const prepared = await operations.advance(p.id, begun.operationId!); expect(prepared.success, prepared.error).toBe(true);
+    const next = await operations.advance(p.id, begun.operationId!); expect(next.success, next.error).toBe(true);
+    const imageTask = h.list().find((item): boolean => item.id === next.taskId)!;
+    expect(imageTask.mode).toBe('image'); expect(imageTask.attachments).toEqual([await h.projects.referenceFile(p.id, old)]); expect(imageTask.prompt).toBe(body);
+    await h.finish(imageTask.id); await operations.advance(p.id, begun.operationId!); await operations.advance(p.id, begun.operationId!);
     p = await h.projects.read(p.id); const generated = p.materials!.find((m): boolean => m.id === material.id)!;
     expect(generated.selectedAssetId).toBe(old); expect(generated.approved?.assetId).toBe(old); expect(p.assets.at(-1)?.imageReview?.state).toBe('candidate'); expect(p.assets.some((a): boolean => a.id === old)).toBe(true);
+    expect(h.list().map((item): string => item.mode)).toEqual(['chat', 'image']);
   });
   it('派生视角必须从已确认主场景生成，而非独立造景', async (): Promise<void> => {
     const h = await harness('music'); let p = h.project; const plan = p.plan!; const main = plan.scenes![0];

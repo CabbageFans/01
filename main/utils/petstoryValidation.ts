@@ -60,6 +60,11 @@ function characterArray(value: unknown): unknown[] {
   if (!Array.isArray(value)) throw new Error('characters必须是数组');
   return value;
 }
+/** 只保留本地保存的明确复核标记，模型回复不能声明既有采用或失效事实。 */
+function savedPromptReviewFlags(p: Record<string, unknown>, model: boolean): Pick<PetStoryPrompt, 'needsReview' | 'visualBasisStale'> {
+  return { needsReview: !model && p.needsReview === true ? true : undefined,
+    visualBasisStale: !model && p.visualBasisStale === true ? true : undefined };
+}
 /** 分析只保存兼容草稿；正式正文必须来自专用任务。 */
 function prompt(value: unknown, field: string, model: boolean): PetStoryPrompt {
   const p = value === undefined ? {} : record(value);
@@ -71,7 +76,8 @@ function prompt(value: unknown, field: string, model: boolean): PetStoryPrompt {
     basisJobId: !model && typeof p.basisJobId === 'string' ? p.basisJobId : undefined,
     edited: !model && p.edited === true, rulesVersion: !model && typeof p.rulesVersion === 'string' ? p.rulesVersion : PETSTORY_RULES_VERSION,
     candidateJobId: !model && typeof p.candidateJobId === 'string' ? p.candidateJobId : undefined,
-    sourceJobId: !model && typeof p.sourceJobId === 'string' ? p.sourceJobId : undefined, needsReview: !model && p.needsReview === true ? true : undefined,
+    ...savedPromptReviewFlags(p, model),
+    sourceJobId: !model && typeof p.sourceJobId === 'string' ? p.sourceJobId : undefined,
     editIntent: !model && p.editIntent ? validateEditIntent(p.editIntent) : undefined,
     promptTask: !model && p.promptTask ? validatePromptTask(p.promptTask) : undefined };
 }
@@ -89,7 +95,10 @@ export function validatePromptTask(value: unknown): PetStoryPromptTaskContract {
       characterIds: [...ref.characterIds] as string[], materialId: optionalText(ref.materialId, '目标素材ID'), entityId: optionalText(ref.entityId, '目标实体ID'), slot: ref.slot as PetStoryPromptReference['slot'] };
   });
   if (task.designHash !== undefined && (typeof task.designHash !== 'string' || !/^[a-f0-9]{64}$/.test(task.designHash))) throw new Error('正文设计快照无效');
-  return { designHash: task.designHash as string | undefined, references, dialect: task.dialect as PetStoryPromptTaskContract['dialect'], mode: task.mode as PetStoryPromptTaskContract['mode'] };
+  if (task.visualPolicy !== undefined && task.visualPolicy !== 'reference-first-v1') throw new Error('正文的视觉规则无效');
+  if (task.characterVisualBasis !== undefined && (Object.prototype.toString.call(task.characterVisualBasis) !== '[object Object]'
+    || Object.entries(task.characterVisualBasis as Record<string, unknown>).some(([key, value]): boolean => !/^character:[a-zA-Z0-9_-]{1,80}$/.test(key) || typeof value !== 'string' || !/^.+:[a-f0-9]{64}$/.test(value)))) throw new Error('正文的角色图片快照无效');
+  return { designHash: task.designHash as string | undefined, ...(task.characterVisualBasis ? { characterVisualBasis: structuredClone(task.characterVisualBasis) as Record<string, string> } : {}), ...(task.visualPolicy ? { visualPolicy: task.visualPolicy as 'reference-first-v1' } : {}), references, dialect: task.dialect as PetStoryPromptTaskContract['dialect'], mode: task.mode as PetStoryPromptTaskContract['mode'] };
 }
 
 function runtimeReferenceIssues(project: PetStoryProject, job: PetStoryChatJob, body: string): string[] {
@@ -245,7 +254,8 @@ function validatePetStoryPlanStrict(value: unknown, model: boolean, allowHistori
   const characters = characterArray(p.characters).map((value: unknown): PetStoryCharacter => {
     const c = record(value);
     if (!['main', 'supporting'].includes(String(c.role))) throw new Error('角色 role 无效');
-    return { id: id(c.id, '角色 ID'), name: text(c.name, '角色名称'), role: c.role as PetStoryCharacter['role'],
+    if (c.productionLabel !== undefined && (typeof c.productionLabel !== 'string' || !/^(?:制作)*角色[1-9]\d{0,5}$/.test(c.productionLabel))) throw new Error('角色制作标签无效');
+    return { id: id(c.id, '角色 ID'), ...(!model && typeof c.productionLabel === 'string' ? { productionLabel: c.productionLabel } : {}), name: text(c.name, '角色名称'), role: c.role as PetStoryCharacter['role'],
       purpose: text(c.purpose, '剧情作用'), description: text(c.description, '角色外观'),
       designOrigin: c.designOrigin === undefined ? undefined : origin(c.designOrigin), continuity: optionalText(c.continuity, '稳定特征'),
       aliases: c.aliases === undefined ? undefined : Array.isArray(c.aliases) && c.aliases.every((v: unknown): boolean => typeof v === 'string') ? c.aliases as string[] : (() : never => { throw new Error('角色别名无效'); })(),
@@ -253,6 +263,7 @@ function validatePetStoryPlanStrict(value: unknown, model: boolean, allowHistori
   });
   unique(characters.map((c: PetStoryCharacter): string => c.id), 'characters');
   uniqueEntities(characters);
+  unique(characters.flatMap((character): string[] => character.productionLabel ? [character.productionLabel] : []), 'productionLabel');
   const planProps = props(p.props); const planScenes = scenes(p.scenes);
   if ((planProps === undefined) !== (planScenes === undefined)) throw new Error('道具和场景集合必须一起提供');
   unique((planProps || []).map((p): string => p.id), 'props'); unique((planScenes || []).map((s): string => s.id), 'scenes');

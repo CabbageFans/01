@@ -136,7 +136,7 @@ describe('图片候选与明确采用', (): void => {
     p = await f.projects.adoptImage(p.id, p.revision, { shotId: 'shot-1', kind: 'firstFrame' }, frame.id);
     expect(selectedShotImageId(p, 'shot-1', 'firstFrame')).toBe(frame.id);
   });
-  it('基础素材替换后保留已采用关键帧，无需重复复核', async (): Promise<void> => {
+  it('角色图替换后旧关键帧保留历史，不能冒充当前形象', async (): Promise<void> => {
     const f = await fixture(); let p = await f.projects.addMaterialImage(f.p.id, f.p.revision, 'character:actor', red);
     p = await f.projects.approveMaterials(p.id, p.revision, [{ materialId: 'character:actor', assetId: p.assets.at(-1)!.id }]);
     p = await f.projects.addShotImage(p.id, p.revision, 'shot-1', 'firstFrame', red); const frame = p.assets.at(-1)!;
@@ -144,8 +144,10 @@ describe('图片候选与明确采用', (): void => {
     p = await f.projects.addMaterialImage(p.id, p.revision, 'character:actor', blue); const replacement = p.assets.at(-1)!;
     expect(p.assets.find((a): boolean => a.id === frame.id)?.needsReview).toBeUndefined();
     p = await f.projects.adoptImage(p.id, p.revision, { materialId: 'character:actor' }, replacement.id);
-    expect(p.assets.find((a): boolean => a.id === frame.id)?.needsReview).toBeUndefined(); expect(p.assets).toHaveLength(3);
-    expect(selectedShotImageId(p, 'shot-1', 'firstFrame')).toBe(frame.id);
+    expect(p.assets.find((a): boolean => a.id === frame.id)?.needsReview).toBe(true); expect(p.assets).toHaveLength(3);
+    expect(p.assets.find((a): boolean => a.id === frame.id)?.imageReview?.state).toBe('adopted');
+    expect(selectedShotImageId(p, 'shot-1', 'firstFrame')).toBeUndefined();
+    expect(await f.projects.referenceFile(p.id, frame.id)).toBe(path.join(f.projects.directory(p.id), frame.relativePath));
   });
   it('新方案删除旧镜头时只清理当前采用指针，旧文件及记录仍可读取', async (): Promise<void> => {
     const f = await fixture(); let p = await f.projects.addShotImage(f.p.id, f.p.revision, 'shot-1', 'firstFrame', red);
