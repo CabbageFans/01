@@ -1,0 +1,473 @@
+{
+  "schemaVersion": 1,
+  "qaLocalDate": "2026-11-02",
+  "boundary": "只读复核既有原项目、上传内容、独立preview及真实媒体；仅新增此QA记录。未调用平台或生成任务。",
+  "overall": "pass",
+  "sourceOriginalSha256": "6cc6c86932ea80138d08109bc7b610b14d78f083ceffb7b821c83869c372d7d3",
+  "checks": [
+    {
+      "check": "original_project_json_sha256_unchanged",
+      "passed": true
+    },
+    {
+      "check": "portable_content_sha256_matches_extraction",
+      "passed": true
+    },
+    {
+      "check": "all_shot_navigation_exact_ids_and_order",
+      "passed": true
+    },
+    {
+      "check": "complete_original_script",
+      "passed": true
+    },
+    {
+      "check": "complete_characters",
+      "passed": true
+    },
+    {
+      "check": "complete_props_scenes",
+      "passed": true
+    },
+    {
+      "check": "complete_shot_content_and_all_prompt_text_variants",
+      "passed": true
+    },
+    {
+      "check": "all_materials_full_prompt_text_variants",
+      "passed": true
+    },
+    {
+      "check": "all_asset_metadata_and_generation_text",
+      "passed": true
+    },
+    {
+      "check": "all_media_source_hashes_unchanged",
+      "passed": true
+    },
+    {
+      "check": "selection_facts_equal_source",
+      "passed": true
+    },
+    {
+      "check": "preview_explicit_read_only_no_ipc_no_requests_no_fake_success",
+      "passed": true
+    },
+    {
+      "check": "preview_references_resolve_real_project_shot_prompts_assets",
+      "passed": true
+    },
+    {
+      "check": "preview_records_historical_candidate_resolved_boundary",
+      "passed": true
+    },
+    {
+      "check": "portable_ui_state_not_replaced_by_simulated_state",
+      "passed": true
+    },
+    {
+      "check": "upload_text_privacy_path_url_scan",
+      "passed": true
+    },
+    {
+      "check": "all_upload_media_magic_probe_valid",
+      "passed": true
+    },
+    {
+      "check": "keyframe_is_byte_exact_copy",
+      "passed": true
+    },
+    {
+      "check": "uploaded_reference_media_still_match_provenance",
+      "passed": true
+    },
+    {
+      "check": "final_upload_exactly_10_expected_regular_files",
+      "passed": true
+    },
+    {
+      "check": "final_manifest_file_count_names_sizes_hashes",
+      "passed": true
+    },
+    {
+      "check": "final_03_unchanged_since_full_source_comparison",
+      "passed": true
+    },
+    {
+      "check": "final_original_project_unchanged",
+      "passed": true
+    },
+    {
+      "check": "final_03_full_shot_and_prompt_content_still_exact",
+      "passed": true
+    },
+    {
+      "check": "final_03_script_material_entity_media_content_still_exact",
+      "passed": true
+    },
+    {
+      "check": "final_all_upload_text_privacy_absolute_path_internal_signed_url_scan",
+      "passed": true
+    },
+    {
+      "check": "final_6_png_and_1_h264_video_valid",
+      "passed": true
+    },
+    {
+      "check": "final_upload_screenshots_exact_source_hash_viewport_dpr",
+      "passed": true,
+      "detail": {
+        "sourceMap": {
+          "04_CURRENT_CANVAS.png": "32-canvas-skeleton-1440.png",
+          "05_CURRENT_IMAGE_REVIEW.png": "15-image-history-review-1440.png",
+          "06_CURRENT_FEEDBACK.png": "16-image-feedback-1440.png"
+        },
+        "contentViewportCssPx": [
+          1440,
+          900
+        ],
+        "dpr": 2,
+        "pngPixels": [
+          2880,
+          1800
+        ]
+      }
+    },
+    {
+      "check": "final_evidence_both_required_content_sizes_hash_verified",
+      "passed": true
+    },
+    {
+      "check": "final_preview_still_read_only_simulation_isolated",
+      "passed": true
+    },
+    {
+      "check": "final_worktree_only_design_handoff_additions",
+      "passed": true,
+      "detail": {
+        "changedTrackedFiles": 0,
+        "untrackedHandoffFiles": 134
+      }
+    },
+    {
+      "check": "final_readme_counts_representative_prompt_lengths_media_match",
+      "passed": true
+    },
+    {
+      "check": "final_readme_real_simulated_privacy_limits_present",
+      "passed": true
+    }
+  ],
+  "textScan": [
+    {
+      "file": "upload/01_DESIGN_BRIEF.md",
+      "sha256": "c67c7d3ea95b6719b23c40b9c46e17a76167a770cc14b8bccfb8c6a2057c1825",
+      "findings": []
+    },
+    {
+      "file": "upload/02_INTERACTION_MAP.md",
+      "sha256": "174674e1be47a0040c5bf6ed43bc0b042b486f331b344e81ecefc86d4e72b94b",
+      "findings": []
+    },
+    {
+      "file": "upload/03_SAMPLE_CONTENT.json",
+      "sha256": "ee000c50f429168936d3668f099d80cd6cbaa00139e058c96ad570ddabfb40d2",
+      "findings": []
+    }
+  ],
+  "mediaValidation": [
+    {
+      "file": "upload/04_CURRENT_CANVAS.png",
+      "sha256": "275fc084498b1c4c2cdcf4ed568d73ba1d0f66863cb100ef827e4ec2ace65e50",
+      "facts": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "png",
+            "width": 2880,
+            "height": 1800
+          }
+        ],
+        "format": {
+          "size": "1104262"
+        },
+        "pngSignatureValid": true
+      },
+      "valid": true
+    },
+    {
+      "file": "upload/05_CURRENT_IMAGE_REVIEW.png",
+      "sha256": "09b46a6b85ea18373fd42e3c3d9da24a41061ccafcec5c096b5708980e07bd6e",
+      "facts": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "png",
+            "width": 2880,
+            "height": 1800
+          }
+        ],
+        "format": {
+          "size": "1497372"
+        },
+        "pngSignatureValid": true
+      },
+      "valid": true
+    },
+    {
+      "file": "upload/06_CURRENT_FEEDBACK.png",
+      "sha256": "910d41d33b2a5d301c9a698da210d99e3a1becad2d3b0b5f93bbae34ec6f8f83",
+      "facts": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "png",
+            "width": 2880,
+            "height": 1800
+          }
+        ],
+        "format": {
+          "size": "852630"
+        },
+        "pngSignatureValid": true
+      },
+      "valid": true
+    },
+    {
+      "file": "upload/07_CHARACTER.png",
+      "sha256": "c347580cfb1b2fad5989e72c171643a1cf527491bd378702b84636c38875d0e7",
+      "facts": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "png",
+            "width": 1280,
+            "height": 2278
+          }
+        ],
+        "format": {
+          "size": "1022180"
+        },
+        "pngSignatureValid": true
+      },
+      "valid": true
+    },
+    {
+      "file": "upload/08_KEYFRAME.png",
+      "sha256": "2d6b7dde31559e1d2f78f7e6fabd60c0b69d500ede41bd63106bbc2cb4e58d18",
+      "facts": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "png",
+            "width": 1152,
+            "height": 2048
+          }
+        ],
+        "format": {
+          "size": "3671808"
+        },
+        "pngSignatureValid": true
+      },
+      "valid": true
+    },
+    {
+      "file": "upload/09_VIDEO_POSTER.png",
+      "sha256": "1d4df0cd299cba5a30adccc8f9df9e8e44e7f948a16e27a1ec87657063d04ed4",
+      "facts": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "png",
+            "width": 720,
+            "height": 1280
+          }
+        ],
+        "format": {
+          "size": "1124896"
+        },
+        "pngSignatureValid": true
+      },
+      "valid": true
+    },
+    {
+      "file": "upload/10_SAMPLE_VIDEO.mp4",
+      "sha256": "8e9c33f458b51cf36ac2ed5b69f7ef948de41b173a4e2f5296b527106dfdc15f",
+      "facts": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "width": 720,
+            "height": 1280,
+            "duration": "5.041667"
+          },
+          {
+            "codec_name": "aac",
+            "duration": "5.056009"
+          }
+        ],
+        "format": {
+          "duration": "5.056009",
+          "size": "1671155"
+        }
+      },
+      "valid": true
+    }
+  ],
+  "uploadSnapshotFiles": [
+    "01_DESIGN_BRIEF.md",
+    "02_INTERACTION_MAP.md",
+    "03_SAMPLE_CONTENT.json",
+    "04_CURRENT_CANVAS.png",
+    "05_CURRENT_IMAGE_REVIEW.png",
+    "06_CURRENT_FEEDBACK.png",
+    "07_CHARACTER.png",
+    "08_KEYFRAME.png",
+    "09_VIDEO_POSTER.png",
+    "10_SAMPLE_VIDEO.mp4"
+  ],
+  "packageInProgressMissingNumberedFiles": [],
+  "issues": [],
+  "knownRealDataLimits": [
+    {
+      "kind": "project-count-difference",
+      "detail": "最初打开的ui-project副本是5镜8媒体；本完整内容样板取自另一个既有真实测试项目，6镜38媒体。不是同一版本，不得混写。"
+    },
+    {
+      "kind": "missing-media",
+      "shotId": "sh06",
+      "detail": "有完整首帧/尾帧/视频提示词，无媒体文件、采用图或已选视频。"
+    },
+    {
+      "kind": "partial-media",
+      "shotId": "sh05",
+      "detail": "有已采用首帧及历史候选，未见已采用尾帧或视频。"
+    },
+    {
+      "kind": "unselected-video",
+      "shotId": "sh01",
+      "detail": "有历史视频文件，但selectedVideos无sh01选择。"
+    },
+    {
+      "kind": "duration-difference",
+      "shotId": "sh03",
+      "requestedSeconds": 7,
+      "actualVideoStreamSeconds": 5.041667,
+      "actualContainerSeconds": 5.056009,
+      "detail": "保留源文件真实差异；不称该镜头已满足全部当前制作要求。"
+    },
+    {
+      "kind": "historical-character-reference",
+      "detail": "3张角色图均为历史已采用图。它们决定既有项目当前形象；历史description/基础提示词不得重新覆盖图片。"
+    }
+  ],
+  "note": "最终10文件已到齐；保留最初19项检查并追加最终包校验。上传文件未修改，仅更新本QA记录。",
+  "initialChecks": [
+    {
+      "check": "original_project_json_sha256_unchanged",
+      "passed": true
+    },
+    {
+      "check": "portable_content_sha256_matches_extraction",
+      "passed": true
+    },
+    {
+      "check": "all_shot_navigation_exact_ids_and_order",
+      "passed": true
+    },
+    {
+      "check": "complete_original_script",
+      "passed": true
+    },
+    {
+      "check": "complete_characters",
+      "passed": true
+    },
+    {
+      "check": "complete_props_scenes",
+      "passed": true
+    },
+    {
+      "check": "complete_shot_content_and_all_prompt_text_variants",
+      "passed": true
+    },
+    {
+      "check": "all_materials_full_prompt_text_variants",
+      "passed": true
+    },
+    {
+      "check": "all_asset_metadata_and_generation_text",
+      "passed": true
+    },
+    {
+      "check": "all_media_source_hashes_unchanged",
+      "passed": true
+    },
+    {
+      "check": "selection_facts_equal_source",
+      "passed": true
+    },
+    {
+      "check": "preview_explicit_read_only_no_ipc_no_requests_no_fake_success",
+      "passed": true
+    },
+    {
+      "check": "preview_references_resolve_real_project_shot_prompts_assets",
+      "passed": true
+    },
+    {
+      "check": "preview_records_historical_candidate_resolved_boundary",
+      "passed": true
+    },
+    {
+      "check": "portable_ui_state_not_replaced_by_simulated_state",
+      "passed": true
+    },
+    {
+      "check": "upload_text_privacy_path_url_scan",
+      "passed": true
+    },
+    {
+      "check": "all_upload_media_magic_probe_valid",
+      "passed": true
+    },
+    {
+      "check": "keyframe_is_byte_exact_copy",
+      "passed": true
+    },
+    {
+      "check": "uploaded_reference_media_still_match_provenance",
+      "passed": true
+    }
+  ],
+  "finalPackageChecked": true,
+  "finalOriginalSha256": "6cc6c86932ea80138d08109bc7b610b14d78f083ceffb7b821c83869c372d7d3",
+  "readmeConsistencyReview": {
+    "status": "consistent_with_data",
+    "notes": [
+      "README的真实6镜内容、历史5镜副本区别、代表正文长度、媒体时长和隔离限制与数据一致。",
+      "本检查不声称能从文件独立复验原窗口恢复、关闭进程或未提交任务等操作事实；这些由走查和截图记录负责。"
+    ]
+  },
+  "screenshotVisualReview": {
+    "files": [
+      "04_CURRENT_CANVAS.png",
+      "05_CURRENT_IMAGE_REVIEW.png",
+      "06_CURRENT_FEEDBACK.png"
+    ],
+    "method": "工具显示后人工视觉复核",
+    "findings": [],
+    "notes": [
+      "均为真实产品画面且无可见昵称、账号ID、令牌、绝对素材路径、内部URL或签名URL。",
+      "04出现的归属不符错误在README已解释为隔离台账缺失，不当作原项目失败。"
+    ]
+  }
+}

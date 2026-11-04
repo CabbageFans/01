@@ -310,18 +310,26 @@ describe('P4 current composer and actual slot readback', (): void => {
     current.complete = true; current.naturalWidth = 64;
     expect((await readPetStoryComposer(test.view, { slot: 'reference' })).count).toBe(1);
   });
-  it('recovers accepted image results only by observing the original session and existing extractors', async (): Promise<void> => {
+  it('recovers accepted image results only from the original request and its associated assistant card', async (): Promise<void> => {
     vi.useFakeTimers();
     try {
-      const view = { executeJavaScript: vi.fn(async (code: string): Promise<unknown> => code.includes('messages.push') ? { messages: [], editorPresent: true, editorText: '', generating: false } : JSON.stringify(['https://TEST.invalid/generated.png'])),
+      const prompt = 'TEST原图片完整请求';
+      const context = { prompt, runId: 'TEST-run' }; const options = { ensureCurrent: (): void => undefined };
+      const view = { executeJavaScript: vi.fn(async (): Promise<unknown> => ({ messages: [
+        { role: 'user', text: `生成图片：${prompt}`, messageId: 'TEST-original-user' },
+        { role: 'assistant', text: 'TEST原图片', messageId: 'TEST-original-reply', replyId: 'TEST-original-user', imageArtifactUrls: ['https://TEST.invalid/generated.png'] },
+        { role: 'user', text: 'TEST后续请求', messageId: 'TEST-next-user' },
+        { role: 'assistant', text: 'TEST后续图片', messageId: 'TEST-next-reply', replyId: 'TEST-next-user', imageArtifactUrls: ['https://TEST.invalid/foreign.png'] },
+      ], editorPresent: true, editorText: '', generating: false })),
         getURL: (): string => 'https://www.doubao.com/chat/TEST-original', loadURL: vi.fn(), sendInputEvent: vi.fn() };
-      const result = readAcceptedImageOutputs(view, view.getURL(), new AbortController().signal, 3000);
+      const result = readAcceptedImageOutputs(view, view.getURL(), new AbortController().signal, 3000, context, options);
       await vi.advanceTimersByTimeAsync(2000);
       expect(await result).toEqual(['https://TEST.invalid/generated.png']);
       expect(view.loadURL).not.toHaveBeenCalled(); expect(view.sendInputEvent).not.toHaveBeenCalled();
       const aborted = new AbortController(); aborted.abort();
-      await expect(readAcceptedImageOutputs(view, view.getURL(), aborted.signal, 3000)).rejects.toThrow('暂停');
-      await expect(readAcceptedImageOutputs(view, 'https://www.doubao.com/chat/TEST-other', undefined, 3000)).rejects.toThrow('会话已变化');
+      await expect(readAcceptedImageOutputs(view, view.getURL(), aborted.signal, 3000, context, options)).rejects.toThrow('暂停');
+      await expect(readAcceptedImageOutputs(view, 'https://www.doubao.com/chat/TEST-other', undefined, 3000, context, options)).rejects.toThrow('会话已变化');
+      await expect(readAcceptedImageOutputs(view, view.getURL(), undefined, 3000)).rejects.toThrow('缺少原图片请求');
     } finally { vi.useRealTimers(); }
   });
   it('input.files alone and an aborted upload cannot pass actual image readiness', async (): Promise<void> => {

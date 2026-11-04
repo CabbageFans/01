@@ -1,0 +1,25 @@
+{
+  "file": "25-plan-1280.png",
+  "capturedAt": "2026-11-02T12:36:06.303Z",
+  "metrics": {
+    "width": 1280,
+    "height": 800,
+    "dpr": 2,
+    "canvasTransform": "translate(-261.836px, -2430.39px) scale(0.752199)",
+    "canvasBounds": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0,
+      "top": 0,
+      "right": 0,
+      "bottom": 0,
+      "left": 0
+    }
+  },
+  "headings": [
+    "sample-project",
+    "方案已采用"
+  ],
+  "dialogs": 0
+}

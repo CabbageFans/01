@@ -1,4 +1,4 @@
-/** 完整方案只读预览：字段、引用名称与未填写内容都不能在采用前被省略。 */
+/** 完整方案只读预览：保留创作方案与引用名称，制作提示词不向方案用户展示。 */
 import React from 'react';
 import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
@@ -22,18 +22,21 @@ function plan(): PetStoryPlan {
 }
 
 describe('完整只读方案预览', (): void => {
-  it('显示所有创作字段、提示词各版本和引用名称，渲染不改写方案', (): void => {
+  it('显示创作方案和引用名称，不展示制作提示词且渲染不改写方案', (): void => {
     const value = plan(); const before = structuredClone(value);
     const contentBasis: PetStoryProject['contentBasis'] = { beginning: 'TEST起始事件', middle: 'TEST发展过程', ending: 'TEST结尾结果' };
     const { container } = render(<PetStoryPlanPreview plan={value} contentBasis={contentBasis} />);
     for (const text of ['TEST故事梗概', 'TEST故事理解', 'TEST本次故事', 'TEST空间安排', 'TEST起始事件', 'TEST发展过程', 'TEST结尾结果', 'TEST人物称谓', 'TEST人物作用', 'TEST人物外观', 'TEST人物连续性', 'TEST道具称谓', 'TEST道具描述', 'TEST道具关键状态', 'TEST道具比例', 'TEST道具静态状态', 'TEST主场地点', 'TEST主场时间', 'TEST主场光线', 'TEST主场布局', 'TEST主场视角', 'TEST分场地点', 'TEST分场时间', 'TEST分场光线', 'TEST分场布局', 'TEST分场视角']) expect(screen.getAllByText(text, { exact: true }).length).toBeGreaterThan(0);
     const second = screen.getByRole('article', { name: '镜头 2 完整方案' });
     for (const text of ['TEST第二镜画面', 'TEST第二镜视角', 'TEST镜头目的', 'TEST原文段落', 'TEST景别构图', 'TEST站位调度', 'TEST主要动作', 'TEST开始状态', 'TEST结束状态', 'TEST表演', 'TEST表情', 'TEST视线', 'TEST互动', 'TEST运镜', 'TEST声音', 'TEST节奏安排', 'TEST镜头连续性', '8 秒', '首尾帧', '延续上一镜', '镜头 1 · 厨房', '阿青：TEST本场造型', '白瓷杯 · 阿青：TEST手持道具状态', 'TEST原台词', 'TEST语气', 'TEST台词节奏', '画外说话']) expect(within(second).getAllByText(text, { exact: true }).length).toBeGreaterThan(0);
-    for (const kind of ['首帧', '尾帧', '视频']) {
-      const section = within(second).getByRole('region', { name: `镜头 2 · ${kind}提示词` });
-      for (const version of ['原始', '候选', '采用', '草稿', '变化', '保留', '用途']) expect(within(section).getByText(`TEST第二镜${kind}${version}`, { exact: true })).toBeDefined();
-      expect(within(section).getByText('图片 1 · 人物身份参考 · 阿青 · 首帧位置')).toBeDefined();
+    for (const shot of value.shots) {
+      for (const kind of ['首帧', '尾帧', '视频']) expect(screen.queryByRole('region', { name: `镜头 ${shot.order} · ${kind}提示词` })).toBeNull();
+      for (const prompt of Object.values(shot.prompts)) {
+        if (!prompt) continue;
+        for (const body of [prompt.original, prompt.optimized, prompt.final, prompt.draft, prompt.editIntent?.changes, prompt.editIntent?.preserve, prompt.editIntent?.validity]) if (body) expect(container.textContent).not.toContain(body);
+      }
     }
+    for (const label of ['当前采用正文', '候选正文', '原始正文', '参考草稿', '编辑与复核', '编辑基图', '本次变化', '保留内容', '适用范围', '提示词适用模型', '提示词适用模式', '图片引用与顺序', '本方案没有尾帧提示词。', 'Seedream', '图片 1 · 人物身份参考 · 阿青 · 首帧位置']) expect(container.textContent).not.toContain(label);
     expect(container.textContent).not.toContain('INTERNAL-');
     expect(screen.queryAllByRole('textbox')).toHaveLength(0); expect(screen.queryAllByRole('button')).toHaveLength(0);
     expect(value).toEqual(before);

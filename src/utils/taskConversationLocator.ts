@@ -4,7 +4,7 @@ const DOUBAO_ORIGIN = 'https://www.doubao.com';
 const CONVERSATION_URL = /^https:\/\/www\.doubao\.com\/chat\/([A-Za-z0-9_-]{1,128})\/?(?:[?#].*)?$/i;
 
 export type TaskConversationTarget =
-  | { ok: true; url: string; conversationId: string; source: 'runtime' | 'artifact' }
+  | { ok: true; url: string; conversationId: string; source: 'runtime' | 'receipt' | 'artifact' }
   | {
       ok: false;
       reason: 'CONVERSATION_URL_MISSING' | 'CONVERSATION_URL_AMBIGUOUS' | 'CONVERSATION_BINDING_CONFLICT';
@@ -52,33 +52,71 @@ export function supportsDoubaoConversationLocator(platform: Account['platform'] 
   return (platform || 'doubao') === 'doubao';
 }
 
+type ConversationTask = Pick<Task, 'runtime' | 'artifacts'> & Partial<Pick<Task, 'assignedAccountId' | 'mode'>>;
+type MediaReceipt = NonNullable<NonNullable<Task['runtime']>['mediaSubmissionReceipt']>;
+function serverMediaMessageId(value: string | undefined): boolean {
+  return typeof value === 'string' && /^[a-zA-Z0-9_:.=-]{1,256}$/.test(value) && !/^local_/i.test(value);
+}
+function receiptRunMatches(receipt: MediaReceipt, runtime: NonNullable<Task['runtime']>): boolean {
+  return receipt.schemaVersion === 1 && receipt.source === 'published_message' && !!runtime.runId && receipt.runId === runtime.runId
+    && !!runtime.submittedAt && receipt.submittedAt === runtime.submittedAt && Number.isFinite(Date.parse(receipt.submittedAt))
+    && Number.isFinite(Date.parse(receipt.observedAt)) && Date.parse(receipt.observedAt) >= Date.parse(receipt.submittedAt);
+}
+function receiptIdentityMatches(receipt: MediaReceipt, task: ConversationTask): boolean {
+  return !!receipt.accountId && (task.assignedAccountId === undefined || task.assignedAccountId === receipt.accountId)
+    && (task.mode === undefined || ['image', 'video'].includes(task.mode))
+    && (task.runtime?.input?.mode === undefined || ['image', 'video'].includes(task.runtime.input.mode))
+    && (serverMediaMessageId(receipt.userMessageId) || serverMediaMessageId(receipt.userTurnId))
+    && (receipt.userMessageId === undefined || serverMediaMessageId(receipt.userMessageId))
+    && (receipt.userTurnId === undefined || serverMediaMessageId(receipt.userTurnId));
+}
+function receiptConversationTarget(task: ConversationTask | null | undefined, runtimeUrl: string | null): { ok: true; url: string | null } | { ok: false } {
+  const runtime = task?.runtime; const receipt = runtime?.mediaSubmissionReceipt;
+  if (!receipt) return { ok: true, url: null };
+  const url = normalizeDoubaoConversationUrl(receipt.conversationUrl);
+  if (!task || !url || !runtime || !receiptRunMatches(receipt, runtime) || !receiptIdentityMatches(receipt, task)
+    || runtimeUrl && !isSameDoubaoConversation(runtimeUrl, url)) return { ok: false };
+  return { ok: true, url };
+}
+
 /**
- * runtime 是权威定位；存在 acceptance binding 时，两处 URL 与 run 必须完全同步。
+ * runtime 优先；缺定位时可消费原运行持久化媒体收据，任何已记录身份冲突均拒绝。
+ * 存在 acceptance binding 时，权威 URL 与 run 必须完全同步。
  * 旧任务只能回退到当前 run 的唯一 artifact，绝不跨 run 猜测。
  */
 export function resolveTaskConversationTarget(
-  task: Pick<Task, 'runtime' | 'artifacts'> | null | undefined,
+  task: ConversationTask | null | undefined,
 ): TaskConversationTarget {
   const runtime = task?.runtime;
   const runtimeUrl = normalizeDoubaoConversationUrl(runtime?.conversationUrl);
+  const receipt = runtime?.mediaSubmissionReceipt;
+  const receiptTarget = receiptConversationTarget(task, runtimeUrl);
+  if (!receiptTarget.ok) return { ok: false, reason: 'CONVERSATION_BINDING_CONFLICT' };
+  const receiptUrl = receiptTarget.url;
+  const locatedUrl = runtimeUrl || receiptUrl;
   const binding = runtime?.acceptanceObservation;
   if (binding) {
     const bindingUrl = normalizeDoubaoConversationUrl(binding.conversationUrl);
-    if (!runtimeUrl || !bindingUrl || binding.runId !== runtime?.runId || !isSameDoubaoConversation(runtimeUrl, bindingUrl)) {
+    if (!locatedUrl || !bindingUrl || binding.runId !== runtime?.runId || !isSameDoubaoConversation(locatedUrl, bindingUrl)
+      || receipt && binding.accountId !== receipt.accountId) {
       return { ok: false, reason: 'CONVERSATION_BINDING_CONFLICT' };
     }
   }
+  const currentRunId = runtime?.runId;
+  const urls = currentRunId ? [...new Set((task?.artifacts || [])
+    .filter((artifact) => artifact.runId === currentRunId)
+    .map((artifact) => normalizeDoubaoConversationUrl(artifact.conversationUrl))
+    .filter((url): url is string => !!url))] : [];
+  if (receiptUrl && urls.some((url: string): boolean => !isSameDoubaoConversation(url, receiptUrl))) return { ok: false, reason: 'CONVERSATION_BINDING_CONFLICT' };
   if (runtimeUrl) {
     const conversationId = getDoubaoConversationId(runtimeUrl);
     if (conversationId) return { ok: true, url: runtimeUrl, conversationId, source: 'runtime' };
   }
-
-  const currentRunId = runtime?.runId;
+  if (receiptUrl) {
+    const conversationId = getDoubaoConversationId(receiptUrl);
+    if (conversationId) return { ok: true, url: receiptUrl, conversationId, source: 'receipt' };
+  }
   if (!currentRunId) return { ok: false, reason: 'CONVERSATION_URL_MISSING' };
-  const urls = [...new Set((task?.artifacts || [])
-    .filter((artifact) => artifact.runId === currentRunId)
-    .map((artifact) => normalizeDoubaoConversationUrl(artifact.conversationUrl))
-    .filter((url): url is string => !!url))];
   if (urls.length === 0) return { ok: false, reason: 'CONVERSATION_URL_MISSING' };
   if (urls.length > 1) return { ok: false, reason: 'CONVERSATION_URL_AMBIGUOUS' };
   const conversationId = getDoubaoConversationId(urls[0]);
@@ -88,7 +126,7 @@ export function resolveTaskConversationTarget(
 }
 
 /** 根页及空值都属于缺少具体定位；冲突／多候选不能借当前页面兜底。 */
-export function isTaskConversationMissing(task: Pick<Task, 'runtime' | 'artifacts'> | null | undefined): boolean {
+export function isTaskConversationMissing(task: ConversationTask | null | undefined): boolean {
   const target = resolveTaskConversationTarget(task);
   return !target.ok && target.reason === 'CONVERSATION_URL_MISSING';
 }

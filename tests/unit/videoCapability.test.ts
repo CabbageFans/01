@@ -453,11 +453,11 @@ describe('新版视频控件适配契约', () => {
     expect(await clickAITab(webview, 'video')).toBe(false);
 
     const panelSource = readFileSync(resolve(__dirname, '../../src/components/BrowserPanel.tsx'), 'utf8');
-    const switchGuard = panelSource.indexOf('const switched = await clickAITab(webview, mode)');
+    const switchGuard = panelSource.indexOf('const switched = await clickAITab(webview, mode,');
     const configureCall = panelSource.indexOf('await configureVideoOptions(webview, videoConfig)');
     expect(switchGuard).toBeGreaterThan(-1);
     expect(panelSource.slice(switchGuard, configureCall)).toContain('if (!switched)');
-    expect(panelSource.slice(switchGuard, configureCall)).toContain('已在提交前停止');
+    expect(panelSource.slice(switchGuard, configureCall)).toContain("throw new VideoControlReadinessError('mode_entry'");
   });
 
   it('权威控件和精确模型选项均采用有界轮询，不依赖固定菜单等待', () => {

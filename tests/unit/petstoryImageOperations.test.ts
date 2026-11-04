@@ -33,6 +33,7 @@ function services(): void {
     adopt: (id, binding, prompt): Task => { const result = core.bindPetStory(id, binding, prompt); if (!result.success) throw new Error(result.error); return result.data; },
     bindPageInput: (id, runId, prompt): Task => { const result = core.bindPetStoryPageInput(id, runId, prompt); if (!result.success) throw new Error(result.error); return result.data; },
     retryUnsubmitted: (id): Task => { const result = core.retry(id, 'hold'); if (!result.success) throw new Error(result.error); return result.data; },
+    resubmitUncertain: (request): Task => { const result = core.resubmitUncertain(request); if (!result.success) throw new Error(result.error); return result.data; },
     downloads: (): DownloadJob[] => structuredClone(downloads), download: async (params): Promise<{ success: boolean; count: number; failed: number; jobIds?: string[] }> => {
       if (failedDownload) return { success: false, count: 0, failed: 1 };
       const output = params.outputs[0]; const id = `TEST-download-${downloads.length}`; const now = new Date().toISOString();
@@ -412,6 +413,51 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     await production.bindRun(p.id, pending.id, runId); p = (await operations.advance(p.id, second.operationId!)).project!;
     const blocked = await begin(base, '换成新的意见。');
     expect(blocked).toMatchObject({ success: false, operationId: second.operationId }); expect(blocked.error).toContain('已有图片任务'); expect(list()).toHaveLength(2);
+  });
+  it('显式重发图片沿原操作绑定唯一关联任务，完成后候选可见且保留原提交和已采用图', async (): Promise<void> => {
+    const materialId = p.materials![0].id;
+    p = await projects.addMaterialImage(p.id, p.revision, materialId, red); const base = p.assets.at(-1)!.id;
+    p = await projects.adoptImage(p.id, p.revision, { materialId }, base);
+    const begun = await begin(base, '表情稍微放松一些。'); const original = await imageTask(begun.operationId!);
+    const now = new Date().toISOString(); const runId = `TEST-uncertain-${original.id}`;
+    expect(core.updateRuntime({ taskId: original.id, status: 'executing', runtime: { runId, attempt: 1, stage: 'submitting', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
+      input: { prompt: original.prompt, mode: original.mode, attachments: original.attachments || [], videoConfig: original.videoConfig, petstory: original.petstory } } }).success).toBe(true);
+    await production.bindRun(p.id, original.id, runId);
+    core.updateRuntime({ taskId: original.id, status: 'paused', runtime: { submittedAt: now }, errorInfo: { code: 'submission_uncertain', message: 'TEST 原图片受理不明', recoverable: true, detectedAt: now } });
+    await production.pause(p.id); p = (await operations.advance(p.id, begun.operationId!)).project!;
+    expect(p.imageOperations!.at(-1)?.stage).toBe('failed'); const originalRun = list()[0].runtime;
+    const request = { taskId: original.id, runId, submittedAt: now, authorizationId: 'TEST-explicit-image-replacement', acceptDuplicateRisk: true as const };
+    const replacement = await production.resubmit(p.id, p.revision, request); p = replacement.project!;
+    expect(p.imageOperations!.at(-1)).toMatchObject({ id: begun.operationId, taskId: replacement.taskId, stage: 'generating' });
+    expect(p.imageOperations!.at(-1)?.error).toBeUndefined(); expect(list()).toHaveLength(2);
+    expect((await production.resubmit(p.id, p.revision, request)).taskId).toBe(replacement.taskId); expect(list()).toHaveLength(2);
+    await operations.resume(p.id, begun.operationId!); const next = await imageTask(begun.operationId!);
+    expect(next.id).toBe(replacement.taskId); await finishImage(next);
+    await operations.advance(p.id, begun.operationId!); p = (await operations.advance(p.id, begun.operationId!)).project!;
+    const operation = p.imageOperations!.at(-1)!;
+    expect(operation).toMatchObject({ stage: 'complete', taskId: replacement.taskId, outputAssetId: expect.any(String) });
+    expect(p.assets.find((asset): boolean => asset.id === operation.outputAssetId)).toMatchObject({ taskId: replacement.taskId, imageReview: { state: 'candidate' }, validation: { decoded: true } });
+    expect(p.materials![0].selectedAssetId).toBe(base); expect(list().find((task): boolean => task.id === original.id)?.runtime).toEqual(originalRun);
+    expect(p.production?.steps[0].resubmissionHistory?.[0]).toMatchObject({ taskId: original.id, runId }); expect(list()).toHaveLength(2);
+  });
+  it('已完成下载的本地缓存缺失时只重下原图片，失败可继续且不永久排除原产物', async (): Promise<void> => {
+    const materialId = p.materials![0].id;
+    p = await projects.addMaterialImage(p.id, p.revision, materialId, red); const base = p.assets.at(-1)!.id;
+    const begun = await begin(base, '光线稍微柔和一些。'); const task = await imageTask(begun.operationId!); await finishImage(task);
+    const original = list()[0]; const artifact = original.artifacts![0]; const now = new Date().toISOString();
+    downloads.push({ id: 'TEST-missing-cache', taskId: task.id, accountId: p.accountId, mode: 'image', url: artifact.url,
+      status: 'done', attempts: 1, saveDir: root, filePath: path.join(root, 'TEST-moved-cache.png'), createdAt: now, updatedAt: now });
+    failedDownload = true;
+    const stopped = await operations.advance(p.id, begun.operationId!); p = stopped.project!;
+    expect(stopped.success).toBe(false); expect(stopped.error).toContain('下载失败');
+    expect(p.production?.steps[0].rejectedArtifactIds).toBeUndefined(); expect(list()).toHaveLength(1);
+    failedDownload = false; await operations.resume(p.id, begun.operationId!);
+    await operations.advance(p.id, begun.operationId!); p = (await operations.advance(p.id, begun.operationId!)).project!;
+    const operation = p.imageOperations!.at(-1)!;
+    expect(operation).toMatchObject({ stage: 'complete', taskId: task.id, outputAssetId: expect.any(String) });
+    expect(p.assets.find((asset): boolean => asset.id === operation.outputAssetId)).toMatchObject({ artifactId: artifact.id, taskId: task.id,
+      downloadJobId: 'TEST-download-1', imageReview: { state: 'candidate' }, validation: { decoded: true } });
+    expect(p.production?.steps[0].rejectedArtifactIds).toBeUndefined(); expect(list()).toEqual([original]); expect(downloads).toHaveLength(2);
   });
   it('图片准备根任务与操作关联一次原子保存，重入只能取得同一任务', async (): Promise<void> => {
     const directory = projects.directory(p.id); let linkedWrites = 0;

@@ -28,6 +28,7 @@ import type {
 } from '@doubao-studio/contracts';
 import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
 import { parseCsv } from '../utils/csv';
+import { normalizeMediaSubmissionReceipt } from '../utils/persistenceNormalization';
 
 /** JSON 落盘省略 undefined 并重排白名单字段；仅比较实际数据，原回复字符串仍逐字比较。 */
 function samePersistedChatEvidence(stored: unknown, requested: unknown): boolean {
@@ -94,11 +95,29 @@ function normalizeBlockedByTaskIds(value: unknown): string[] | undefined {
   return result.sort();
 }
 
+/** 兼容旧版发送前误分类；精确白名单不能覆盖任何已提交、观察或产物事实。 */
+function isLegacyUnsubmittedPreflight(task: Task): boolean {
+  const runtime = task.runtime;
+  return task.errorInfo?.code === 'submission_uncertain' && task.errorInfo.message === '最终全文或段落回读不一致，未提交'
+    && !(runtime?.submittedAt || runtime?.acceptanceObservation || runtime?.mediaSubmissionReceipt || runtime?.chatResponse
+      || runtime?.chatReadback || runtime?.chatReadbackReview || runtime?.manualObservation || task.outputs.length || task.artifacts?.length);
+}
+
 function requiresSubmissionReconciliation(task: Task): boolean {
   if (task.runtime?.acceptanceObservation?.outcome === 'observing') return true;
   if (task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing') return true;
+  if (task.errorInfo?.code === 'submission_uncertain' && !['executing', 'generating', 'done'].includes(task.status)
+    && !isLegacyUnsubmittedPreflight(task)) return true;
   if (!task.runtime?.submittedAt) return false;
   return !['executing', 'generating', 'done'].includes(task.status);
+}
+
+/** 原只读检查没有可接续观察器时，重启后必须释放假活动占位而保留提交保护。 */
+function isOrphanedSubmissionObservation(task: Task): boolean {
+  const accepted = task.runtime?.acceptanceObservation;
+  return task.status === 'manual_submission_observing'
+    && !(accepted?.outcome === 'observing' && accepted.runId === task.runtime?.runId)
+    && task.runtime?.manualObservation?.outcome !== 'observing';
 }
 
 /** CSV 导入时传入 Core 的最小账号投影 */
@@ -612,6 +631,7 @@ export class TaskService {
 
     for (const task of tasks) {
       const acceptedObservation = task.runtime?.acceptanceObservation;
+      const orphanedObservation = isOrphanedSubmissionObservation(task);
       if (task.status === 'generating' && acceptedObservation?.outcome === 'observing' &&
         acceptedObservation.runId === task.runtime?.runId) {
         task.status = 'manual_submission_observing';
@@ -634,7 +654,7 @@ export class TaskService {
         changed = true;
         continue;
       }
-      if (task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing') {
+      if (task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing' && !orphanedObservation) {
         if (task.lock) {
           task.lock = undefined;
           clearedLocks++;
@@ -652,9 +672,9 @@ export class TaskService {
       }
 
       task.status = 'paused';
-      task.result = '程序上次退出时任务仍在运行，可重新执行';
+      task.result = orphanedObservation ? '程序重启，原结果检查已中断，请继续只读核对原会话；未重新发送' : '程序上次退出时任务仍在运行，可重新执行';
       task.errorInfo = {
-        code: 'cancelled',
+        code: orphanedObservation ? 'submission_uncertain' : 'cancelled',
         message: task.result,
         recoverable: true,
         detectedAt: timestamp,
@@ -663,7 +683,7 @@ export class TaskService {
         task.runtime = {
           ...task.runtime,
           stage: 'paused',
-          message: '程序重启，任务已安全暂停',
+          message: orphanedObservation ? task.result : '程序重启，任务已安全暂停',
           stageStartedAt: timestamp,
           lastHeartbeatAt: timestamp,
         };
@@ -681,7 +701,7 @@ export class TaskService {
           activeRun.finishedAt = timestamp;
           activeRun.finalStage = 'paused';
           activeRun.outcome = 'paused';
-          activeRun.errorCode = 'cancelled';
+          activeRun.errorCode = task.errorInfo.code;
           activeRun.durationMs = Math.max(0, new Date(timestamp).getTime() - new Date(activeRun.startedAt).getTime());
         }
       }
@@ -732,6 +752,31 @@ export class TaskService {
     const chatEvidenceRunIds = [params.runtime?.chatReadback?.runId, params.runtime?.chatReadbackReview?.runId].filter((runId): runId is string => runId !== undefined);
     if (chatEvidenceRunIds.some((runId): boolean => !runId || runId !== (params.runtime?.runId || task.runtime?.runId)
       || task.mode !== 'chat' || !task.runtime?.submittedAt)) return { success: false, error: 'Chat 只读证据与原已提交运行不符，未绑定' };
+
+    // 收据只能附着于已有原提交；同一运行的后续 patch 也不能使既有定位与输入失配。
+    const newRun = !!params.runtime?.runId && !!task.runtime?.runId && params.runtime.runId !== task.runtime.runId;
+    const receipt = params.runtime?.mediaSubmissionReceipt ?? (!newRun ? task.runtime?.mediaSubmissionReceipt : undefined);
+    const receiptRequested = !!params.runtime && Object.prototype.hasOwnProperty.call(params.runtime, 'mediaSubmissionReceipt');
+    if (receipt || receiptRequested) {
+      const originalRuntime = task.runtime;
+      const prospective = { ...originalRuntime, ...params.runtime };
+      const normalized = normalizeMediaSubmissionReceipt(receipt, task.mode, prospective, task.assignedAccountId);
+      const input = originalRuntime?.input;
+      const previousReceipt = originalRuntime?.mediaSubmissionReceipt;
+      if (!originalRuntime?.submittedAt || newRun || !normalized || receiptRequested && !params.runtime?.mediaSubmissionReceipt
+        || !samePersistedChatEvidence(normalized, receipt)
+        || !!previousReceipt && (previousReceipt.conversationUrl !== receipt?.conversationUrl
+          || !!previousReceipt.userMessageId && previousReceipt.userMessageId !== receipt?.userMessageId
+          || !!previousReceipt.userTurnId && previousReceipt.userTurnId !== receipt?.userTurnId)
+        || !samePersistedChatEvidence(input, prospective.input)
+        || input?.mode !== task.mode || input.prompt !== task.prompt
+        || !samePersistedChatEvidence(input.attachments || [], task.attachments || [])
+        || !samePersistedChatEvidence(input.audioAttachment, task.audioAttachment)
+        || !samePersistedChatEvidence(input.videoConfig, task.videoConfig)
+        || !samePersistedChatEvidence(input.petstory, task.petstory)) {
+        return { success: false, error: '媒体原消息证据与原账号、运行、提交或输入不符，未绑定' };
+      }
+    }
 
     const timestamp = this.now();
 
@@ -789,6 +834,13 @@ export class TaskService {
         || params.runtime.chatReadback && !samePersistedChatEvidence(saved.runtime?.chatReadback, params.runtime.chatReadback)
         || params.runtime.chatReadbackReview && !samePersistedChatEvidence(saved.runtime?.chatReadbackReview, params.runtime.chatReadbackReview)) {
         return { success: false, error: 'Chat 只读证据写入后回读不一致，禁止重新发送', task: saved || undefined };
+      }
+    }
+    if (params.runtime?.mediaSubmissionReceipt) {
+      const saved = this.readPersistedTask(params.taskId);
+      if (!saved || saved.runtime?.runId !== task.runtime?.runId
+        || !samePersistedChatEvidence(saved.runtime?.mediaSubmissionReceipt, params.runtime.mediaSubmissionReceipt)) {
+        return { success: false, error: '媒体原消息证据写入后回读不一致，禁止重新发送', task: saved || undefined };
       }
     }
     if (params.runtime?.chatResponse) {
@@ -1190,11 +1242,16 @@ export class TaskService {
   /** Chat正文只留在本机任务／项目，不进入 CLI、MCP 或诊断导出。 */
   private diagnosticRuntime(runtime: TaskRunSnapshot | undefined): TaskRunSnapshot | undefined {
     if (!runtime) return undefined;
+    const mediaReceipt = runtime.mediaSubmissionReceipt;
+    const diagnosticMediaReceipt = mediaReceipt ? { ...mediaReceipt, conversationUrl: '[已脱敏]',
+      userMessageId: undefined, userTurnId: undefined,
+      messageIdentityCount: Number(!!mediaReceipt.userMessageId) + Number(!!mediaReceipt.userTurnId) } : undefined;
     return {
       ...runtime,
       chatResponse: undefined,
       chatReadbackReview: undefined,
       conversationUrl: runtime.conversationUrl ? '[已脱敏]' : undefined,
+      mediaSubmissionReceipt: diagnosticMediaReceipt,
       acceptanceObservation: runtime.acceptanceObservation ? { ...runtime.acceptanceObservation, conversationUrl: '[已脱敏]' } : undefined,
       input: {
         ...runtime.input,

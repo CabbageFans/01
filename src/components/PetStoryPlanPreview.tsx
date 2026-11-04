@@ -1,5 +1,5 @@
 import React from 'react';
-import type { PetStoryPlan, PetStoryProject, PetStoryPrompt, PetStoryPromptReference, PetStoryShot } from '@doubao-studio/contracts';
+import type { PetStoryPlan, PetStoryProject, PetStoryShot } from '@doubao-studio/contracts';
 import { planDisplayText } from '../utils/petstoryPlanReview';
 
 export interface PetStoryPlanPreviewProps {
@@ -21,27 +21,6 @@ function designSource(origin: 'script' | 'proposed' | undefined): string {
   return origin === 'script' ? '剧本明确' : origin === 'proposed' ? '方案补充，待确认' : '未标注';
 }
 const modes: Record<PetStoryShot['requestedMode'], string> = { auto: '自动选择', first_frame: '首帧', first_last_frame: '首尾帧', reference: '多参考图片' };
-const dialects: Record<NonNullable<PetStoryPrompt['promptTask']>['dialect'], string> = { seedance20: 'Seedance 2.0', seedance25: 'Seedance 2.5', seedream: 'Seedream', generic: '未限定模型' };
-const referenceUses: Record<PetStoryPromptReference['purpose'], string> = { identity: '人物身份参考', prop: '道具参考', scene: '场景参考', firstFrame: '首帧', plannedEndImage: '尾帧', actualEndFrame: '前镜视频末帧' };
-
-function referenceLabel(plan: PetStoryPlan, reference: PetStoryPromptReference): string {
-  const characters = reference.characterIds.map((id): string => entityName(plan.characters, id, '未对应人物')).join('、');
-  const slot = reference.slot === 'first' ? ' · 首帧位置' : reference.slot === 'last' ? ' · 尾帧位置' : '';
-  return `图片 ${reference.order} · ${referenceUses[reference.purpose]}${characters ? ` · ${characters}` : ''}${slot}`;
-}
-
-/** 只读展示方案将更新的创作正文；技术来源与内部标识不作为用户确认内容。 */
-const PromptPreview: React.FC<{ plan: PetStoryPlan; prompt: PetStoryPrompt; title: string }> = ({ plan, prompt, title }): React.ReactElement => <section className="petstory-plan-prompt" aria-label={title}>
-  <h5>{title}</h5><dl>
-    <PreviewField label="当前采用正文" value={prompt.final} />
-    <PreviewField label="候选正文" value={prompt.optimized} />
-    <PreviewField label="原始正文" value={prompt.original} />
-    <PreviewField label="参考草稿" value={prompt.draft} />
-    <PreviewField label="编辑与复核" value={`${prompt.edited ? '包含用户修改' : '没有用户修改标记'} · ${prompt.needsReview ? '需要复核' : '没有待复核标记'}`} />
-    {prompt.editIntent && <><PreviewField label="编辑基图" value="使用已关联图片" /><PreviewField label="本次变化" value={prompt.editIntent.changes} /><PreviewField label="保留内容" value={prompt.editIntent.preserve} /><PreviewField label="适用范围" value={prompt.editIntent.validity} /></>}
-    {prompt.promptTask && <><PreviewField label="提示词适用模型" value={dialects[prompt.promptTask.dialect]} /><PreviewField label="提示词适用模式" value={prompt.promptTask.mode ? modes[prompt.promptTask.mode] : '未限定模式'} /><PreviewField label="图片引用与顺序" value={prompt.promptTask.references.map((reference): string => referenceLabel(plan, reference)).join('\n') || '没有图片引用'} /></>}
-  </dl>
-</section>;
 
 const ShotPreview: React.FC<{ plan: PetStoryPlan; shot: PetStoryShot }> = ({ plan, shot }): React.ReactElement => {
   const previous = plan.shots.find((item): boolean => item.id === shot.previousShotId);
@@ -66,9 +45,6 @@ const ShotPreview: React.FC<{ plan: PetStoryPlan; shot: PetStoryShot }> = ({ pla
       <PreviewField label="道具状态与持有者" value={shot.propStates?.map((state): string => `${entityName(plan.props, state.propId, '未对应道具')} · ${state.holderId ? entityName(plan.characters, state.holderId, '未对应持有者') : '未指定持有者'}：${state.state || '未填写状态'}`).join('\n')} />
     </dl>
     <section aria-label={`镜头 ${shot.order} 原台词`}><h5>原台词与演绎</h5>{shot.dialogue?.length ? shot.dialogue.map((line, index): React.ReactNode => <dl key={index} className="petstory-plan-dialogue"><PreviewField label="说话人物" value={entityName(plan.characters, line.speakerId, '未对应人物')} /><PreviewField label="台词" value={line.text} /><PreviewField label="语气" value={line.tone} /><PreviewField label="节奏" value={line.pace} /><PreviewField label="演绎位置" value={line.delivery ? { onscreen: '画内说话', offscreen: '画外说话', voiceover: '旁白' }[line.delivery] : '未指定'} /></dl>) : <p>没有安排台词。</p>}</section>
-    <PromptPreview plan={plan} prompt={shot.prompts.firstFrame} title={`镜头 ${shot.order} · 首帧提示词`} />
-    {shot.prompts.lastFrame ? <PromptPreview plan={plan} prompt={shot.prompts.lastFrame} title={`镜头 ${shot.order} · 尾帧提示词`} /> : <p>本方案没有尾帧提示词。</p>}
-    <PromptPreview plan={plan} prompt={shot.prompts.video} title={`镜头 ${shot.order} · 视频提示词`} />
   </article>;
 };
 

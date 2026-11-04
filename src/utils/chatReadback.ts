@@ -3,7 +3,7 @@ import { classifyGenerationConfirmationText } from './generationConfirmation';
 
 /** 普通 Chat 只读取消息区；不把侧栏、编辑器或页面脚本当成回复。 */
 export interface ChatPageSnapshot {
-  messages: { role: 'user' | 'assistant'; text: string; rawText?: string; renderedSource?: string; codeSpans?: number; fencedCode?: { language: string; text: string }[]; headingCount?: number; attachmentOnly?: boolean; hasAttachments?: boolean; turnId?: string; messageId?: string; replyId?: string; imageUrls?: string[]; videoReady?: boolean }[];
+  messages: { role: 'user' | 'assistant'; text: string; rawText?: string; renderedSource?: string; codeSpans?: number; fencedCode?: { language: string; text: string }[]; headingCount?: number; attachmentOnly?: boolean; hasAttachments?: boolean; turnId?: string; messageId?: string; replyId?: string; imageUrls?: string[]; imageArtifactUrls?: string[]; imageArtifactPending?: boolean; imageArtifactFailure?: string; videoReady?: boolean }[];
   editorPresent: boolean;
   editorText: string;
   generating: boolean;
@@ -80,6 +80,70 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
     const headingCount = content?.querySelectorAll?.('h1,h2,h3,h4,h5,h6')?.length || 0;
     return { ...(codeSpans ? { codeSpans } : {}), ...(fencedCode.length ? { fencedCode } : {}), ...(headingCount ? { headingCount } : {}) };
   };
+  // 自包含：此函数随消息读取器一起序列化，不依赖宿主模块或整页全局媒体缓存。
+  const readOriginalImageCards = (node: Element, suppliedModel?: Record<string, unknown>): Pick<ChatPageSnapshot['messages'][number], 'imageArtifactUrls' | 'imageArtifactPending' | 'imageArtifactFailure'> => {
+    if (node.getAttribute('data-testid') !== 'receive_message') return {};
+    const cards = Array.from(node.querySelectorAll('[data-testid="message_image_content"]'));
+    if (!cards.length) return {};
+    type Value = Record<string, unknown>;
+    const object = (value: unknown): Value | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Value : undefined;
+    const modelForMessage = (): Value | undefined => {
+      const keys = Object.getOwnPropertyNames(node).filter((key: string): boolean => key.startsWith('__reactFiber$'));
+      if (keys.length !== 1) return undefined;
+      let fiber = object((node as unknown as Value)[keys[0]]); let found: Value | undefined;
+      for (let depth = 0; fiber && depth < 8; depth++, fiber = object(fiber.return)) {
+        const props = object(fiber.memoizedProps); const value = object(props?.value);
+        const model = object(value?.message) || object(props?.message);
+        if (!model) continue;
+        if (typeof model.message_id !== 'string' || typeof model.conversation_id !== 'string') return undefined;
+        if (found && (found.message_id !== model.message_id || found.conversation_id !== model.conversation_id)) return undefined;
+        found = model;
+      }
+      const declared = node.getAttribute('data-message-id') || node.getAttribute('data-msg-id');
+      return found && (!declared || declared === found.message_id) ? found : undefined;
+    };
+    const model = suppliedModel || modelForMessage();
+    const creationsIn = (blocks: unknown, normalized: boolean): Value[] => Array.isArray(blocks) ? blocks.flatMap((value: unknown): Value[] => {
+      const block = object(value); if (!block || block.is_deleted) return [];
+      const content = normalized ? object(block.content_obj) : object(object(block.content)?.creation_block);
+      return Array.isArray(content?.creations) ? content.creations.flatMap((creation: unknown): Value[] => {
+        const item = object(creation); return item ? [{ image: item.image, finished: block.is_finish }] : [];
+      }) : [];
+    }) : [];
+    const normalized = creationsIn(model?.content_blocks, true);
+    const modern = normalized.length ? normalized : creationsIn(model?.content_blocks_v2, false);
+    const creations = modern.length ? modern : creationsIn(model?.content_block, false);
+    const remoteUrl = (value: unknown): value is string => {
+      if (typeof value !== 'string' || !/^https:\/\//i.test(value)) return false;
+      try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password; } catch { return false; }
+    };
+    const failureFor = (card: Element): string | undefined => (card.textContent || '').normalize('NFKC').trim()
+      .match(/^(?:图片生成失败|生成图片失败|图片生成异常|图片生成出错|生成失败|图片生成次数已用完|图片生成额度不足|请求未通过内容审核)/)?.[0];
+    let imageArtifactFailure: string | undefined; let imageArtifactPending = false;
+    const matchedCards = new Set<Element>(); const urls: string[] = [];
+    for (const creation of creations) {
+      const image = object(creation.image); if (!image) continue;
+      const variants = ['image_thumb', 'image_ori', 'image_preview', 'image_ori_raw', 'image_preview_resize'].flatMap((key: string): string[] => {
+        const variant = object(image[key]); return remoteUrl(variant?.url) ? [variant.url] : [];
+      });
+      // 原图字段必须与本消息图片卡的某个真实渲染源精确关联；不按最大尺寸猜地址。
+      const owned = cards.filter((card: Element): boolean => Array.from(card.querySelectorAll('img')).some((element: HTMLImageElement): boolean => !element.closest('video')
+        && (variants.includes(element.currentSrc || element.src) || variants.includes(element.src))));
+      if (!owned.length) { imageArtifactPending = true; continue; }
+      for (const card of owned) matchedCards.add(card);
+      const original = ['image_ori', 'image_ori_raw'].map((key: string): Value | undefined => object(image[key])).find((variant: Value | undefined): variant is Value => !!variant && remoteUrl(variant.url)
+        && typeof variant.width === 'number' && Number.isFinite(variant.width) && variant.width > 0
+        && typeof variant.height === 'number' && Number.isFinite(variant.height) && variant.height > 0);
+      if (!original || image.status !== 2 || creation.finished === false) { imageArtifactPending = true; continue; }
+      // 已由平台显式给出的原图不依赖懒渲染、display:none 或缩略图解码完成。
+      urls.push(original.url as string);
+    }
+    for (const card of cards) {
+      const failure = failureFor(card); if (failure) imageArtifactFailure = failure;
+      if (card.getAttribute('data-finished') === 'false' || !matchedCards.has(card) && !failure) imageArtifactPending = true;
+    }
+    return { imageArtifactUrls: [...new Set(urls)], imageArtifactPending, ...(imageArtifactFailure ? { imageArtifactFailure } : {}) };
+  };
   const readMessage = (node: Element): ChatPageSnapshot['messages'][number] | undefined => {
     const content = node.querySelector('[data-testid="message_text_content"]');
     const turnId = node.closest?.('[data-testid="union_message"]')?.getAttribute('data-target-id') || undefined;
@@ -91,6 +155,7 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
       if (!/^https:\/\//i.test(src) || /(?:avatar|emoji|icon|logo|badge)/i.test(src) || image.closest('video') || image.naturalWidth < 100 || image.naturalHeight < 100) return [];
       return [src];
     }))] : [];
+    const imageArtifacts = readOriginalImageCards(node);
     // 普通 Chat 的同一 union_message 会把附件和正文分别渲染成 send_message。
     // 只合并有明确共同 turn、图片及唯一正文的附件块；未知／跨 turn 空消息仍保留并阻断。
     if (attachmentIsGrouped(node)) return undefined;
@@ -106,6 +171,7 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
       ...(turnId ? { turnId } : {}),
       ...(messageId ? { messageId } : {}),
       ...(imageUrls.length ? { imageUrls } : {}),
+      ...imageArtifacts,
       ...(node.getAttribute('data-testid') === 'receive_message' && node.querySelector('[class*="block-video"],video') ? { videoReady: true } : {}),
     };
   };

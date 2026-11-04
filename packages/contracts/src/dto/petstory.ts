@@ -392,6 +392,8 @@ export interface PetStoryRuntimeTarget {
   /** 只供本轮文字创作的明确候选来源，不是采用或媒体输入。 */
   textContextJobIds?: string[];
   promptFeedback?: { text: string; baseJobId?: string; baseText?: string };
+  /** 本次方案调整意图；requestId 标识同一次用户提交，不代表先采用来源方案。 */
+  planFeedback?: { text: string; baseJobId?: string; requestId: string };
   /** 自动修订只消耗原轮次一次；显式新轮次由用户操作授权。 */
   repairMode?: 'automatic' | 'explicit';
   shotId?: string;
@@ -422,6 +424,8 @@ export interface PetStoryChatJob {
   textContextJobIds?: string[];
   /** 用户主动反馈独立于每轮一次的自动格式修订预算。 */
   promptFeedback?: { text: string; baseJobId?: string; baseText?: string };
+  /** 完整方案反馈职责，后台格式修订沿父链原样继承。 */
+  planFeedback?: { text: string; baseJobId?: string; requestId: string };
   /** 修订所依据的选定自由回复；原回复全文只保存在父快照，不冒充本任务回复。 */
   repairReplySource?: { adjustmentId: string; replyKey: string };
   /** repair 的创作职责，沿父链继承，不能把视频／尾帧修订当作分析。 */

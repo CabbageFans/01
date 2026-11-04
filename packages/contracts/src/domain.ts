@@ -135,6 +135,18 @@ export interface TaskRunSnapshot {
   lastHeartbeatAt: string;
   submittedAt?: string;
   conversationUrl?: string;
+  /** 媒体原消息的耐久定位；仅在真实唯一全文及 provider 会话身份均已证明后保存。 */
+  mediaSubmissionReceipt?: {
+    schemaVersion: 1;
+    runId: string;
+    accountId: string;
+    submittedAt: string;
+    conversationUrl: string;
+    userMessageId?: string;
+    userTurnId?: string;
+    observedAt: string;
+    source: 'published_message';
+  };
   /** 平台明确受理后的可恢复观察绑定；不包含提示词、素材路径或账号凭据。 */
   acceptanceObservation?: {
     schemaVersion: 1;

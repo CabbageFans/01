@@ -1,0 +1,11 @@
+{
+  "capturedAt": "2026-11-02T12:29:14.807Z",
+  "profile": "isolated mac-test",
+  "originalProfileUntouched": true,
+  "accountCount": 0,
+  "taskCount": 0,
+  "network": "external HTTP aborted; no platform requests",
+  "directoryPicker": "one-shot native dialog selection automation; project loaded via normal Open button, original IPC and validation",
+  "source": "working tree React served by existing local Vite; compiled main from current clean worktree",
+  "sampleRevision": 734
+}

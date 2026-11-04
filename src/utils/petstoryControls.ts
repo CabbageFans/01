@@ -2,6 +2,8 @@
 export interface PetStoryComposerSnapshot {
   present: boolean;
   generic: boolean;
+  /** 当前输入区已选中的真实创作技能；通用上传入口本身不能证明图片模式。 */
+  selectedSkill?: 'image' | 'video' | 'none' | 'ambiguous';
   /** 统一上传入口是否明确允许多图；不把它冒充平台原生首尾槽。 */
   referenceMultiple?: boolean;
   first: boolean;
@@ -43,16 +45,31 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
     return rect.width > 0 && rect.height > 0;
   };
   const text = (el: Element): string => (el.textContent || '').replace(/\s+/g, ' ').trim();
-  const editor = Array.from(document.querySelectorAll('textarea,[contenteditable="true"]')).find(visible);
-  let root = editor?.closest('[data-testid="guidance-input-surface"],.guidance-input-surface') || null;
-  if (!root && editor) {
+  const editors = Array.from(document.querySelectorAll('textarea,[contenteditable="true"]')).filter(visible);
+  const locateRoot = (editor: Element): Element | null => {
+    // 实页技能栏和已选技能位于 engine 的兄弟分支，必须使用共同的输入区 surface。
+    const selected = editor.closest('[data-testid="guidance-input-surface"],.guidance-input-surface') || editor.closest('#input-engine-container');
+    if (selected) return selected;
     let candidate: Element | null = editor.parentElement;
     for (let depth = 0; candidate && candidate !== document.body && depth < 7; depth++, candidate = candidate.parentElement) {
-      if (candidate.querySelector('input[type="file"]')) { root = candidate; break; }
+      if (candidate.querySelector('input[type="file"]')) return candidate;
     }
-  }
+    return null;
+  };
+  const roots = [...new Set(editors.map(locateRoot).filter((candidate: Element | null): candidate is Element => !!candidate && visible(candidate)))];
+  const root = roots.length === 1 ? roots[0] : null;
+  const editor = root ? editors.find((candidate: Element): boolean => root.contains(candidate)) : undefined;
   const empty: PetStoryComposerSnapshot = { present: false, generic: false, first: false, last: false, nativeLabel: false, firstLabel: false, model: '', duration: 0, aspectRatio: '', durations: [], count: 0, pending: false };
   if (!root || !visible(root)) return empty;
+  const readSelectedSkill = (): PetStoryComposerSnapshot['selectedSkill'] => {
+    const selected = Array.from(root.querySelectorAll('[data-testid="skill_input_exit_button"]')).filter((element: Element): boolean => visible(element)
+      && !element.parentElement?.closest('[data-testid="skill_input_exit_button"]'));
+    if (!selected.length) return 'none';
+    if (selected.length !== 1) return 'ambiguous';
+    const label = text(selected[0]);
+    if (label === '图像生成') return 'image';
+    return label === '视频生成' ? 'video' : 'ambiguous';
+  };
   // 平台上传预览使用 lazy；后台／重新布局时可一直不解码。仅唤醒当前输入区的原预览，
   // 不改 src、不把占位图计为就绪，后续仍检查真实 naturalWidth／complete。
   const wakePreviews = (container: Element): void => {
@@ -193,7 +210,7 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
   }
     return { uploaded, ...(uploadedFile ? { uploadedFile } : {}) };
   };
-  return { ...readParameters(), present: true, generic, first: !!first, last: !!last && first !== last,
+  return { ...readParameters(), present: true, generic, selectedSkill: readSelectedSkill(), first: !!first, last: !!last && first !== last,
     referenceMultiple: generic ? inputs[0].multiple : false,
     ...(modeSelection ? { modeSelection } : {}),
     count: target ? images(target).length : images(root).length, pending: pending(target || root), ...uploadFile(), ...readReferences() };

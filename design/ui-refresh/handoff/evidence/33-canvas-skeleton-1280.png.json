@@ -1,0 +1,22 @@
+{
+  "file": "33-canvas-skeleton-1280.png",
+  "capturedAt": "2026-11-02T12:39:04.583Z",
+  "metrics": {
+    "width": 1280,
+    "height": 800,
+    "dpr": 2,
+    "canvasTransform": "translate(-17.7691px, 67.7166px) scale(0.597711)",
+    "canvasBounds": {
+      "x": 193,
+      "y": 160,
+      "width": 1074,
+      "height": 627,
+      "top": 160,
+      "right": 1267,
+      "bottom": 787,
+      "left": 193
+    }
+  },
+  "headings": [],
+  "dialogs": 0
+}

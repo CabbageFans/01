@@ -1,0 +1,22 @@
+{
+  "file": "11-prompt-full-1440.png",
+  "capturedAt": "2026-11-02T12:28:21.612Z",
+  "metrics": {
+    "width": 1440,
+    "height": 900,
+    "dpr": 2,
+    "canvasTransform": "translate(-303.067px, 9.57185px) scale(0.860704)",
+    "canvasBounds": {
+      "x": -686.5,
+      "y": 160,
+      "width": 1222,
+      "height": 727,
+      "top": 160,
+      "right": 535.5,
+      "bottom": 887,
+      "left": -686.5
+    }
+  },
+  "headings": [],
+  "dialogs": 0
+}

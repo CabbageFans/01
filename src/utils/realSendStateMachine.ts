@@ -67,9 +67,20 @@ export function verifiedSubmissionConversationUrl(
 export interface SubmissionRecoveryTask {
   mode?: string;
   status?: string;
-  runtime?: { submittedAt?: string; acceptanceObservation?: { outcome?: string } };
+  runtime?: { submittedAt?: string; acceptanceObservation?: { outcome?: string }; mediaSubmissionReceipt?: unknown;
+    chatResponse?: unknown; chatReadback?: unknown; chatReadbackReview?: unknown; manualObservation?: unknown };
   errorInfo?: { code?: string; message?: string };
   result?: string | null;
+  outputs?: readonly unknown[];
+  artifacts?: readonly unknown[];
+}
+
+/** 与主进程同口径的旧发送前精确白名单；未知文案及任何提交事实均不能放行。 */
+function isLegacyUnsubmittedPreflight(task: SubmissionRecoveryTask): boolean {
+  const runtime = task.runtime;
+  return task.errorInfo?.code === 'submission_uncertain' && task.errorInfo.message === '最终全文或段落回读不一致，未提交'
+    && !(runtime?.submittedAt || runtime?.acceptanceObservation || runtime?.mediaSubmissionReceipt || runtime?.chatResponse
+      || runtime?.chatReadback || runtime?.chatReadbackReview || runtime?.manualObservation || task.outputs?.length || task.artifacts?.length);
 }
 
 /**
@@ -79,6 +90,8 @@ export interface SubmissionRecoveryTask {
 export function requiresSubmissionReconciliation(task: SubmissionRecoveryTask | undefined): boolean {
   if (task?.runtime?.acceptanceObservation?.outcome === 'observing') return true;
   if (task?.status === 'waiting_generation_confirmation' || task?.status === 'manual_submission_observing') return true;
+  if (task?.errorInfo?.code === 'submission_uncertain' && !['executing', 'generating', 'done'].includes(task.status || '')
+    && !isLegacyUnsubmittedPreflight(task)) return true;
   if (!task?.runtime?.submittedAt) return false;
   // 媒体与 Chat 均以提交意图为准；验证、下载或未知错误文案不能恢复同一运行的发送权限。
   return !['executing', 'generating', 'done'].includes(task.status || '');

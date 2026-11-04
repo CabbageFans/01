@@ -834,6 +834,32 @@ describe('TaskService recoverInterruptedTasks', () => {
     expect(service.retry('accepted-observe').success).toBe(false);
   });
 
+  it.each(['missing', 'manual_review', 'wrong-run'] as const)('没有有效观察器的%s原观察状态跨重启收束暂停，保留原运行并禁止重发', (kind): void => {
+    const item = activeTask('orphan-observe', 'manual_submission_observing');
+    item.runtime!.stage = 'manual_submission_observing'; item.runtime!.submittedAt = RECOVERY_STARTED_AT;
+    if (kind === 'manual_review') item.runtime!.manualObservation = { startedAt: RECOVERY_STARTED_AT, expiresAt: RECOVERY_NOW, source: 'stored_conversation', outcome: 'manual_review' };
+    if (kind === 'wrong-run') item.runtime!.acceptanceObservation = {
+      schemaVersion: 1, accountId: 'a1', runId: 'other-run', conversationUrl: 'https://www.doubao.com/chat/other', acceptedAt: RECOVERY_STARTED_AT,
+      evidence: { kind: 'prompt_published' }, cursor: { messageCount: 1, pollCount: 0 }, expectedArtifact: { kind: 'video', runId: 'other-run' },
+      lease: { ownerId: 'old', acquiredAt: RECOVERY_STARTED_AT, expiresAt: RECOVERY_NOW, lastHeartbeatAt: RECOVERY_STARTED_AT }, outcome: 'observing',
+    };
+    const original = structuredClone(item.runtime!); const test = recoveryFixture([item]);
+    expect(test.service.recoverInterruptedTasks()).toEqual({ success: true, data: { recoveredTasks: 1, clearedLocks: 1 } });
+    expect(test.stored()[0]).toMatchObject({ status: 'paused', lock: undefined, errorInfo: { code: 'submission_uncertain', recoverable: true },
+      runtime: { stage: 'paused', runId: original.runId, submittedAt: original.submittedAt, input: original.input } });
+    expect(test.stored()[0].runHistory?.[0]).toMatchObject({ outcome: 'paused', errorCode: 'submission_uncertain' });
+    expect(test.service.retry(item.id).success).toBe(false);
+    const writes = test.writeCount(); expect(test.service.recoverInterruptedTasks()).toEqual({ success: true, data: { recoveredTasks: 0, clearedLocks: 0 } });
+    expect(test.writeCount()).toBe(writes);
+  });
+
+  it('原观察状态缺失提交快照时也不因启动收束而重新获得发送权限', (): void => {
+    const item = activeTask('orphan-no-intent', 'manual_submission_observing');
+    const test = recoveryFixture([item]); test.service.recoverInterruptedTasks();
+    expect(test.stored()[0]).toMatchObject({ status: 'paused', errorInfo: { code: 'submission_uncertain' } });
+    expect(test.stored()[0].runtime?.submittedAt).toBeUndefined(); expect(test.service.retry(item.id).success).toBe(false);
+  });
+
   it('非活动任务只清除遗留 lock，无 lock 时完全不变', () => {
     const withLock = base('t1', 'done');
     withLock.lock = { ownerId: 'old', acquiredAt: 'old', expiresAt: 'old' };

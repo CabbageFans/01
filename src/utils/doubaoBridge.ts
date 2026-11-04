@@ -27,7 +27,9 @@ import { diagnoseVideoMessageChain, inspectChatReadback, inspectCreationReadback
 import { readVideoConversationPage, relatedVideoCards } from './videoConversationReadback';
 import type { VideoConversationCard, VideoConversationPage } from './videoConversationReadback';
 import { readCreationHistorySnapshot } from './creationReadbackSnapshot';
-import { getDoubaoConversationId, isSameDoubaoConversation } from './taskConversationLocator';
+import { readCurrentCreationConversation } from './creationConversationIdentity';
+import type { CurrentCreationConversationReadback } from './creationConversationIdentity';
+import { getDoubaoConversationId, isSameDoubaoConversation, normalizeDoubaoConversationUrl } from './taskConversationLocator';
 import { uploadChatImages } from './chatAttachments';
 import { appendExactComposerText, insertExactComposerText, readExactComposerText } from './exactComposer';
 import { petStoryComposerProbe } from './petstoryControls';
@@ -45,6 +47,8 @@ export type { SendButtonTarget } from './submissionControls';
 import type { ChatPageSnapshot, ChatReadbackContext, ChatReadbackResult } from './chatReadback';
 import { readVideoBlockerPage } from './videoBlockerReadback';
 import type { VideoBlockerPageSnapshot, VideoBlockerReadbackContext } from './videoBlockerReadback';
+import { ImageArtifactObservationError, waitForImageArtifactReadback } from './imageArtifactReadback';
+import type { ImageArtifactObservationOptions, ImageArtifactReadbackContext } from './imageArtifactReadback';
 
 // ==================== 类型 ====================
 
@@ -2039,25 +2043,46 @@ export async function getChatPageSnapshot(webview: WebviewHandle): Promise<ChatP
   return safeExecuteJS<ChatPageSnapshot>(webview, `(${readChatPage.toString()})(document)`, 8000, 'getChatPageSnapshot');
 }
 
+/** 当前真实消息 provider 的只读身份；不从首页、侧栏或任意对象猜测原会话。 */
+export async function getCurrentCreationConversation(webview: WebviewHandle, options: {
+  signal?: AbortSignal; ensureCurrent?: () => void; timeoutMs?: number;
+} = {}): Promise<CurrentCreationConversationReadback> {
+  const assertCurrent = (): void => {
+    if (options.signal?.aborted) throw new DOMException('原图片会话读取已暂停', 'AbortError');
+    options.ensureCurrent?.();
+  };
+  assertCurrent();
+  const page = await safeExecuteJS<CurrentCreationConversationReadback>(webview,
+    `(${readCurrentCreationConversation.toString()})(document, ${readChatPage.toString()})`, options.timeoutMs ?? 5000, 'getCurrentCreationConversation');
+  assertCurrent();
+  const route = normalizeDoubaoConversationUrl(webview.getURL());
+  if (route && page.conversationUrl && !isSameDoubaoConversation(route, page.conversationUrl)) throw new Error('页面路由与真实图片会话不一致，未绑定其他结果');
+  return page;
+}
+
 export interface CreationReadbackSnapshotOptions {
   conversationUrl?: string;
   signal?: AbortSignal;
   ensureCurrent?: () => void;
   timeoutMs?: number;
+  allowProviderConversation?: boolean;
 }
 
 /** 已提交创作只读恢复用；通过当前会话列表补齐虚拟卸载的原消息，不影响发送前严格回执。 */
 export async function getCreationReadbackSnapshot(webview: WebviewHandle, options: CreationReadbackSnapshotOptions = {}): Promise<ChatPageSnapshot> {
   const conversationUrl = options.conversationUrl || webview.getURL();
-  const assertCurrent = (): void => {
+  const assertCurrent = async (): Promise<void> => {
     if (options.signal?.aborted) throw new DOMException('原视频消息读取已取消', 'AbortError');
     options.ensureCurrent?.();
-    if (!isSameDoubaoConversation(webview.getURL(), conversationUrl)) throw new Error('原视频消息读取期间会话变化');
+    if (isSameDoubaoConversation(webview.getURL(), conversationUrl)) return;
+    if (!options.allowProviderConversation || normalizeDoubaoConversationUrl(webview.getURL())) throw new Error('原创作消息读取期间会话变化');
+    const current = await getCurrentCreationConversation(webview, options);
+    if (!current.conversationUrl || !isSameDoubaoConversation(current.conversationUrl, conversationUrl)) throw new Error('原图片真实会话已变化，停止读取');
   };
-  assertCurrent();
+  await assertCurrent();
   const timeoutMs = Math.max(1, Math.min(8000, options.timeoutMs ?? 6000));
   const result = await executeCreationReadback<ChatPageSnapshot>(webview, conversationUrl, timeoutMs, false, options.signal);
-  assertCurrent();
+  await assertCurrent();
   return result;
 }
 
@@ -2677,12 +2702,24 @@ export function switchMode(webview: WebviewHandle, mode: string): void {
   webview.loadURL(targetUrl);
 }
 
+export interface CreationModeEntryDiagnostic {
+  ready: boolean;
+  elapsedMs: number;
+  reason?: string;
+  method?: string;
+}
+
 /**
  * 在 AI 创作页面点击 Tab 切换模式（图像/视频）
  * 豆包统一页面底部输入框下方有「图像」「视频」Tab
  * 注意：必须排除左侧边栏菜单中的同名元素
  */
-export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'): Promise<boolean> {
+export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video', onDiagnostic?: (diagnostic: CreationModeEntryDiagnostic) => void): Promise<boolean> {
+  const startedAt = Date.now();
+  const report = (diagnostic: Omit<CreationModeEntryDiagnostic, 'elapsedMs'>): void => {
+    try { onDiagnostic?.({ ...diagnostic, elapsedMs: Math.max(0, Date.now() - startedAt) }); }
+    catch { /* 诊断记录不能改变真实控件动作及回读结果。 */ }
+  };
   const tabLabel = mode === 'image' ? '图像生成' : '视频生成';
   const code = `
     (async function() {
@@ -2722,13 +2759,17 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           var editors = Array.from(document.querySelectorAll('textarea,[contenteditable="true"]')).filter(isVisible);
           var roots = editors.map(function(editor) {
             if (!editor.closest) return null;
-            return editor.closest('#input-engine-container') || editor.closest('[data-testid="guidance-input-surface"],.guidance-input-surface');
+            // 已观测 DOM：engine 与 skill-bar/skill-exit 分属同一 surface 的兄弟节点。
+            return editor.closest('[data-testid="guidance-input-surface"],.guidance-input-surface') || editor.closest('#input-engine-container');
           }).filter(function(root) { return root && isVisible(root); });
           roots = roots.filter(function(root, index) { return roots.indexOf(root) === index; });
           if (roots.length === 1) return roots[0];
           if (roots.length > 1) return null;
-          var fallback = document.querySelector('#input-engine-container') || document.querySelector('.guidance-input-surface');
-          return fallback && isVisible(fallback) ? fallback : null;
+          var surfaces = Array.from(document.querySelectorAll('[data-testid="guidance-input-surface"],.guidance-input-surface')).filter(isVisible);
+          if (surfaces.length === 1) return surfaces[0];
+          if (surfaces.length > 1) return null;
+          var engines = Array.from(document.querySelectorAll('#input-engine-container')).filter(isVisible);
+          return engines.length === 1 ? engines[0] : null;
         }
         var composerRoot = findCurrentComposer();
         // 窄 Webview 的正文按钮可能位于 x<200；只按当前输入区及其已展开菜单归属定位。
@@ -2761,6 +2802,17 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
             await sleep(250);
           }
           return videoControlsReady();
+        }
+        async function waitForSelectedImageSkill(timeoutMs) {
+          var deadline = Date.now() + timeoutMs;
+          var stable = 0;
+          while (Date.now() < deadline) {
+            var selected = findSelectedSkill();
+            stable = selected && readControlText(selected) === '图像生成' ? stable + 1 : 0;
+            if (stable >= 2) return true;
+            await sleep(Math.min(250, Math.max(0, deadline - Date.now())));
+          }
+          return false;
         }
         async function waitForModeEntry(timeoutMs) {
           var deadline = Date.now() + timeoutMs;
@@ -2800,7 +2852,7 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           while (Date.now() < deadline) {
             var options = Array.from(document.querySelectorAll('button,[role="option"],[role="menuitem"]')).filter(function(el) {
               if (el === initialElement || el.matches('[data-valid-btn="mode-select-action-btn"]') || el.closest('[data-testid="skill_input_exit_button"]')) return false;
-              return isVisible(el) && inCurrentComposer(el) && readControlText(el) === '视频生成';
+              return isVisible(el) && inCurrentComposer(el) && readControlText(el) === '${tabLabel}';
             });
             if (options.length > 0) return options[options.length - 1];
             await sleep(250);
@@ -2809,7 +2861,27 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
         }
         async function finishVideoModeSelection(initialMethod, initialTag, initialRect, initialElement) {
           if ('${mode}' !== 'video') {
-            return { ok: true, method: initialMethod, tag: initialTag, pos: Math.round(initialRect.left) + ',' + Math.round(initialRect.top) };
+            var imageModeTrigger = initialElement && initialElement.closest && initialElement.closest('[data-valid-btn="mode-select-action-btn"]');
+            // 真实 skill-bar 入口直接切换技能，冷启动可异步重建数秒；期间只能回读。
+            // 只有本次实际点击模式触发器才读取菜单，不能因短暂缺失再点新挂载的触发器。
+            if (!imageModeTrigger) return await waitForSelectedImageSkill(15000)
+              ? { ok: true, method: initialMethod + '-image-verified', tag: initialTag }
+              : { ok: false, error: '图像入口已点击，但目标技能尚未连续稳定选中' };
+            var imageMenuDeadline = Date.now() + 5000;
+            var imageOption = null;
+            while (Date.now() < imageMenuDeadline) {
+              var selectedImage = findSelectedSkill();
+              // 某些控件带有模式触发器标记，但点击后直接选中技能，不会再挂载菜单。
+              if (selectedImage && readControlText(selectedImage) === '图像生成') return await waitForSelectedImageSkill(15000)
+                ? { ok: true, method: initialMethod + '-image-direct-verified', tag: initialTag }
+                : { ok: false, error: '图像模式已切换但技能未连续稳定选中' };
+              imageOption = await findVisibleModeMenuOption(Math.min(250, Math.max(0, imageMenuDeadline - Date.now())), initialElement);
+              if (imageOption) break;
+            }
+            if (!activate(imageOption)) return { ok: false, error: '图像模式尚未真实选中，未找到可见模式选项' };
+            return await waitForSelectedImageSkill(15000)
+              ? { ok: true, method: initialMethod + '-image-menu-verified', tag: imageOption.tagName }
+              : { ok: false, error: '图像模式已点击但技能未连续稳定选中' };
           }
           if (await waitForVideoControls(1500)) {
             return { ok: true, method: initialMethod + '-verified', tag: initialTag, pos: Math.round(initialRect.left) + ',' + Math.round(initialRect.top) };
@@ -2843,15 +2915,17 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
         }
         function findSelectedSkill() {
           composerRoot = findCurrentComposer();
-          return composerRoot && Array.from(composerRoot.querySelectorAll('[data-testid="skill_input_exit_button"]')).find(function(el) {
+          var selected = composerRoot && Array.from(composerRoot.querySelectorAll('[data-testid="skill_input_exit_button"]')).filter(function(el) {
             var parentSkill = el.parentElement && el.parentElement.closest('[data-testid="skill_input_exit_button"]');
             return !parentSkill && isVisible(el) && /^(图像生成|视频生成)$/.test(readControlText(el));
           });
+          return selected && selected.length === 1 ? selected[0] : null;
         }
         // 两种创作技能共用输入区。已选目标技能时保持原位，切换时只退出一次，避免把目标标签当入口再次关闭。
         var selectedSkill = findSelectedSkill();
         if (selectedSkill && readControlText(selectedSkill) === '${tabLabel}') {
           if ('${mode}' === 'video' && !await waitForVideoControls(15000)) return { ok: false, error: '已选视频技能的参数控件未就绪' };
+          if ('${mode}' === 'image' && !await waitForSelectedImageSkill(15000)) return { ok: false, error: '图像技能未连续稳定选中' };
           return { ok: true, method: 'already-selected-skill', tag: selectedSkill.tagName };
         }
         if (selectedSkill) {
@@ -2867,6 +2941,7 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           var readyImageSkill = findSelectedSkill();
           if (readyImageSkill && readControlText(readyImageSkill) === '${tabLabel}') {
             if ('${mode}' === 'video' && !await waitForVideoControls(15000)) return { ok: false, error: '已选视频技能的参数控件未就绪' };
+            if ('${mode}' === 'image' && !await waitForSelectedImageSkill(15000)) return { ok: false, error: '图像技能未连续稳定选中' };
             return { ok: true, method: 'image-skill-ready-after-wait', tag: readyImageSkill.tagName };
           }
         }
@@ -2975,9 +3050,12 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
     } else {
       console.warn(`[doubaoBridge] 点击${tabLabel}Tab 失败:`, result.error);
     }
+    report({ ready: result.ok, ...(result.error ? { reason: result.error } : {}), ...(result.method ? { method: result.method } : {}) });
     return result.ok;
-  } catch (err: any) {
-    console.error('[doubaoBridge] clickAITab 异常:', err.message);
+  } catch (err: unknown) {
+    const reason = getErrorMessage(err);
+    console.error('[doubaoBridge] clickAITab 异常:', reason);
+    report({ ready: false, reason });
     return false;
   }
 }
@@ -5602,9 +5680,12 @@ export async function waitForPetStoryImageComposer(webview: WebviewHandle, signa
   let stableSamples = 0;
   while (Date.now() < deadline) {
     if (signal.aborted) throw new DOMException('图片任务已暂停', 'AbortError');
-    const snapshot = await readPetStoryComposer(webview);
-    stableSamples = snapshot.present && snapshot.generic ? stableSamples + 1 : 0;
-    if (stableSamples >= 2 && !signal.aborted) return snapshot;
+    const snapshot = await raceWithAbort(safeExecuteJS<import('./petstoryControls').PetStoryComposerSnapshot>(webview,
+      `(${petStoryComposerProbe.toString()})({})`, Math.min(5000, Math.max(1, deadline - Date.now())), 'petstory_image_controls'), signal, undefined);
+    if (signal.aborted) throw new DOMException('图片任务已暂停', 'AbortError');
+    if (Date.now() >= deadline) break;
+    stableSamples = snapshot?.present && snapshot.generic && snapshot.selectedSkill === 'image' ? stableSamples + 1 : 0;
+    if (snapshot && stableSamples >= 2 && !signal.aborted) return snapshot;
     await sleep(250);
   }
   throw new PetStoryControlError('图片输入区尚未就绪，请稍后继续本次任务');
@@ -5837,23 +5918,32 @@ export async function verifyPetStoryUploads(webview: WebviewHandle, guard: impor
   }
 }
 
-/** 图片恢复复用原会话与原结果提取器，只读等待；绝不进入新会话、上传或发送路径。 */
-export async function readAcceptedImageOutputs(webview: WebviewHandle, conversationUrl: string, signal?: AbortSignal, timeoutMs = 15 * 60_000): Promise<string[]> {
-  const startedAt = Date.now();
-  let previous = ''; let stable = 0;
-  while (Date.now() - startedAt < timeoutMs) {
+/** 图片产物仅来自原请求关联助手的严格图片卡；虚拟历史按真实消息 ID 补齐。 */
+export async function readAcceptedImageOutputs(
+  webview: WebviewHandle, conversationUrl: string, signal?: AbortSignal, timeoutMs: number = 15 * 60_000,
+  context?: ImageArtifactReadbackContext, options?: ImageArtifactObservationOptions,
+): Promise<string[]> {
+  if (!context || !options?.ensureCurrent) throw new PetStoryControlError('缺少原图片请求或运行保护，未绑定产物');
+  const ensureCurrent = (): void => {
     if (signal?.aborted) throw new DOMException('用户已暂停图片观察', 'AbortError');
-    if (!isSameDoubaoConversation(webview.getURL(), conversationUrl)) throw new PetStoryControlError('原图片会话已变化，未绑定其他会话产物');
-    const state = await getChatPageSnapshot(webview);
-    const raw = await getResultUrl(webview, 10000, true);
-    let urls: unknown;
-    try { urls = JSON.parse(raw); } catch { urls = raw ? [raw] : []; }
-    const outputs = Array.isArray(urls) ? [...new Set(urls.filter((value: unknown): value is string => typeof value === 'string' && /^https?:\/\//i.test(value)))] : [];
-    const key = JSON.stringify(outputs);
-    stable = outputs.length > 0 && state.generating === false && key === previous ? stable + 1 : 0;
-    if (stable >= 3) return outputs;
-    previous = key;
-    await sleep(500);
+    options.ensureCurrent();
+    const currentUrl = normalizeDoubaoConversationUrl(webview.getURL());
+    if (currentUrl && !isSameDoubaoConversation(currentUrl, conversationUrl)) throw new PetStoryControlError('原图片会话已变化，未绑定其他会话产物');
+  };
+  try {
+    const outputs = await waitForImageArtifactReadback({
+      context, ensureCurrent, signal, timeoutMs, wait: sleep, onProgress: options.onProgress,
+      read: (): Promise<ChatPageSnapshot> => getCreationReadbackSnapshot(webview, { conversationUrl, signal, ensureCurrent, allowProviderConversation: true }),
+    });
+    ensureCurrent();
+    if (!isSameDoubaoConversation(webview.getURL(), conversationUrl)) {
+      const current = await getCurrentCreationConversation(webview, { signal, ensureCurrent });
+      ensureCurrent();
+      if (!current.conversationUrl || !isSameDoubaoConversation(current.conversationUrl, conversationUrl)) throw new PetStoryControlError('原图片真实会话已变化，未绑定其他会话产物');
+    }
+    return outputs;
+  } catch (error: unknown) {
+    if (error instanceof ImageArtifactObservationError) throw new PetStoryControlError(error.message);
+    throw error;
   }
-  throw new PetStoryControlError('原图片任务仍未取得稳定真实产物，请保留原会话继续核对，未重复发送');
 }

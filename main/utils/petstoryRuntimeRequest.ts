@@ -30,6 +30,7 @@ export interface DramaRequestOptions {
   promptBatchId?: string;
   textContextJobIds?: string[];
   promptFeedback?: { text: string; baseJobId?: string; baseText?: string };
+  planFeedback?: NonNullable<PetStoryChatJob['planFeedback']>;
 }
 export interface DramaRequest {
   prompt: string;
@@ -65,7 +66,7 @@ function creativeKind(project: PetStoryProject, options: DramaRequestOptions): P
 
 /** 没有隐式会话记忆：每一次请求都重新投影当前故事、适用方法和实际附件。 */
 export function buildDramaRequest(project: PetStoryProject, options: DramaRequestOptions): DramaRequest {
-  project = promptTextContext(project, options);
+  project = planFeedbackContext(promptTextContext(project, options), options);
   if (!project.mobileStory?.text.trim()) throw new Error('请先保存当前剧本');
   const creativeOptions: DramaRequestOptions = { ...options, kind: creativeKind(project, options) };
   const shot = project.plan?.shots.find((item: PetStoryShot): boolean => item.id === options.shotId);
@@ -104,6 +105,14 @@ export function buildDramaRequest(project: PetStoryProject, options: DramaReques
   // 不通过静默截取换取提交成功；由用户选择单项/分阶段处理超长项目。
   if (request.length > 100_000) throw new Error('本次规则与事实超过单次 Chat 容量，请按选中素材或镜头拆批；未截断、未提交');
   return { prompt: request, assets, rulesVersion: rules.version, ruleFiles: [...new Set(selected.flatMap((entry): string[] => entry.sources).concat(adapter ? ['src/rules/petstory/seedream.md'] : []))], expectedIds: [target], stage: stages.join('+'), promptTask, reviewInputFinals, analysisCastBindings };
+}
+
+/** 明确选中的完整方案只投影为本次写作依据，不能先写入当前采用方案。 */
+function planFeedbackContext(project: PetStoryProject, options: DramaRequestOptions): PetStoryProject {
+  if (!options.planFeedback) return project;
+  const selected = options.planFeedback.baseJobId ? project.jobs.find((job): boolean => job.id === options.planFeedback?.baseJobId)?.parsedResult?.plan : project.plan;
+  if (!selected) throw new Error('本次调整的完整方案来源缺失，未生成请求');
+  return { ...project, plan: structuredClone(selected) };
 }
 
 
@@ -248,6 +257,11 @@ function requestFacts(project: PetStoryProject, options: DramaRequestOptions, as
   if (material) result.material = materialFacts(project, material, options.editIntent?.baseAssetId);
   else if (shot) Object.assign(result, selectedShotFacts(project, shot, options.promptKind));
   else result.currentPlan = currentPlanFacts(project, options);
+  if (options.planFeedback) result.userPlanFeedback = {
+    ...options.planFeedback, selectedPlan: project.plan ? { ...project.plan, shots: project.plan.shots.map(({ prompts: _prompts, ...shot }): object => shot) } : undefined,
+    sourceStatus: options.planFeedback.baseJobId ? 'explicit_saved_candidate_not_adopted' : 'current_saved_plan',
+    policy: '本次用户意图仅由text说明。以selectedPlan完整方案为基准，只调整用户明确要求及其必要连续依赖；保留未请求的事件、因果、人物关系、镜头设计、稳定人物/道具/场景/镜头ID、speakerId和逐字台词。确需新增实体或拆镜时仅新增必要ID，不给已有实体改ID；不从旧提示词重定义人物外观。原剧本完整保留在source.originalText。本次返回完整analysis方案及contentBasis，不返回补丁、提示词或解释，不自动采用，不声称已生成媒体。',
+  };
   // 当前正文只用于审核或定点修订；普通重新生成不拿旧错误文当创作依据。
   if (options.kind === 'review' || options.kind === 'revise') {
     result.actualCandidates = candidateFacts(project, options, material, shot);
@@ -321,7 +335,7 @@ function requestCastFacts(project: PetStoryProject, options: DramaRequestOptions
   if (!isAnalysisRequest(project, options)) return { characters: characterFacts(project, material, shot, options.promptKind, options.editIntent?.baseAssetId) };
   return { productionCast: productionCastFacts(project, assets), ...(project.plan ? { currentPlanStatus: {
     storyApproved: isStoryApproved(project), identityApproval: '剧本确认不代表逐项人物身份或服装批准；仅以productionCast.confirmedIdentities及本次实际图片为相应身份依据',
-    role: options.kind === 'repair' ? '当前已保存方案另列确认状态，仅作对照；本次修订以原回复和明确问题为目标，不将旧未确认设计当成锁定事实，也不覆盖当前方案' : '完整重分析已省略既有镜头与未确认设计；原方案保留，本次只形成新候选不覆盖', promptBodiesUsedAsIdentity: false } } : {}) };
+    role: options.planFeedback ? '本次明确选定方案完整列于userPlanFeedback.selectedPlan，按用户要求形成完整新候选；当前采用事实与媒体不变' : options.kind === 'repair' ? '当前已保存方案另列确认状态，仅作对照；本次修订以原回复和明确问题为目标，不将旧未确认设计当成锁定事实，也不覆盖当前方案' : '完整重分析已省略既有镜头与未确认设计；原方案保留，本次只形成新候选不覆盖', promptBodiesUsedAsIdentity: false } } : {}) };
 }
 function isAnalysisRequest(project: PetStoryProject, options: DramaRequestOptions): boolean { return creativeKind(project, options) === 'analysis'; }
 /** 从本次投影所用演员资料提取显式绑定，不从正文猜别名，不给旧修订补快照。 */
@@ -474,6 +488,7 @@ function reviewedFinalSnapshot(data: Record<string, unknown>, options: DramaRequ
 }
 
 function taskPurpose(options: DramaRequestOptions, hasPlan: boolean): string {
+  if (options.planFeedback) return '这是用户对明确选中完整方案提出的调整。读取完整原剧本、userPlanFeedback.selectedPlan与text，只按本次要求调整并返回完整新方案候选。保留未要求变化的内容、稳定实体ID、说话者与原台词；不能把本次反馈当成无基准的重新创作，也不要求先采用方案。格式纠正仍保留相同用户意图，不新增创作要求。';
   if (options.kind === 'analysis') return hasPlan ? '重新理解同一当前剧本，完整设计全场并动态拆镜，形成新候选，不覆盖现有镜头。禁止复制旧shots数组冒充新设计。' : '理解当前剧本、落实来源事件及对白，提取动态资产并设计全场与分镜；保留剧情，不默认改写。';
   if (options.kind === 'assets') return '保持现有镜头ID、数量、主要动作、起终和参数，提取／补齐当前剧本资产、来源、空间、台词与镜头关系。不得重新拆镜或用旧prompt猜事实。';
   if (options.kind === 'materialPrompt') return '按当前选中资产类型，撰写完整可用的基础素材图片正文；不只是给旧短文加前缀或标签。';
@@ -493,5 +508,5 @@ function outputContract(project: PetStoryProject, options: DramaRequestOptions, 
   const director = 'sourceRefs:[原文段落或逐字片段],narrativePurpose,framing:景别机位构图及注意中心,blocking:世界站位轴线朝向视线手物接触与身体依托,performance:触发处理反应和互动,sound:已有对白与声音意图,timing:动作和发声窗口预算,continuity:起终交接与状态锁';
   const propStates = '每镜propStates必须逐项且仅一次覆盖该镜propIds，state为非空的具体状态说明；有持有人时holderId须为本镜角色ID，静置或无持有人时说明位置与状态并省略holderId。只有propIds为空时propStates才可为[]，continuity不能替代此结构字段。';
   if (options.kind === 'assets') return `${envelope}\n返回 understanding:string（场次、事件、因果、人物别名对应、原台词及说话者、揭示点和状态的来源映射），sceneDesign:string（全场世界锚点、工作侧、人物走位及信息揭示，设计候选明确标记），${entities}\nshotBindings:[{shotId:已有镜头ID,characterIds:保留原出场角色ID并允许必要追加,propIds:保留已有道具ID并允许必要追加,propStates:[{propId,holderId?:本镜角色ID,state}],sceneId:已有则保留、原缺失才补齐,sceneView,dialogue?:[{speakerId,text:当前原文逐字台词,tone,pace,delivery?:onscreen/offscreen/voiceover}],${director}}]。${propStates}shotBindings精确覆盖当前镜头 ${JSON.stringify(project.plan?.shots.map((shot): string => shot.id) || [])}，无遗漏重复；原有dialogue不改，缺失的只从当前剧本逐字补，不从旧prompt补。不要返回／修改action、startState、endState、durationSeconds、requestedMode、prompts。`;
-  return `${envelope}\n返回 storyUsable:boolean、reason:string、contentBasis:{beginning,middle,ending}、sourceSummary:string、adaptedStory:string（保留本次source中有效确认的adoptedStory；无此项则依据originalText整理原故事，演员映射按productionCast落实，不复用旧未确认改编稿）、understanding:string（落实来源与演员对应，未展示的前置动作仅作明确推断）、sceneDesign:string、${entities}\nshots:[{id:稳定英文字符串,order:1起顺序,characterIds:[],propIds:[],propStates:[{propId,holderId?,state}],sceneId,scene,sceneView,action,startState,endState,durationSeconds:5至10秒的有限整秒number（5、6、7、8、9、10；不能是字符串）,transition:"cut"|"continue",previousShotId?:仅continue指相邻前镜,requestedMode:"auto"|"first_frame"|"first_last_frame"|"reference",dialogue:[{speakerId,text:剧本原台词逐字,tone,pace,delivery?:onscreen/offscreen/voiceover}],camera,expression,gaze,interaction,${director}}]。${propStates}此次仅理解、资产和镜头设计，不返回prompts或媒体正文；专用正文由后续分阶段Chat任务完成。画内说话者须属于本镜；画外OS/旁白VO的speakerId须是已有角色并标delivery，不强制其入画，旁白不得擅自让全员开口。镜头数由剧情、动作负载和时长决定，不复制现镜头结构；每项完整，不以短摘要冒充待完成。故事不足时返回storyUsable:false及具体reason，不编造。`;
+  return `${envelope}\n返回 storyUsable:boolean、reason:string、contentBasis:{beginning,middle,ending}、sourceSummary:string、adaptedStory:string（保留本次source中有效确认的adoptedStory；无此项则依据originalText整理原故事，演员映射按productionCast落实，不复用旧未确认改编稿）、understanding:string（落实来源与演员对应，未展示的前置动作仅作明确推断）、sceneDesign:string、${entities}\nshots:[{id:稳定英文字符串,order:1起顺序,characterIds:[],propIds:[],propStates:[{propId,holderId?,state}],sceneId,scene,sceneView,action,startState,endState,durationSeconds:5至10秒的有限整秒number（5、6、7、8、9、10；不能是字符串）,transition:"cut"|"continue",previousShotId?:仅continue指相邻前镜,requestedMode:"auto"|"first_frame"|"first_last_frame"|"reference",dialogue:[{speakerId,text:剧本原台词逐字,tone,pace,delivery?:onscreen/offscreen/voiceover}],camera,expression,gaze,interaction,${director}}]。${propStates}此次仅理解、资产和镜头设计，不返回prompts或媒体正文；专用正文由后续分阶段Chat任务完成。画内说话者须属于本镜；画外OS/旁白VO的speakerId须是已有角色并标delivery，不强制其入画，旁白不得擅自让全员开口。${options.planFeedback ? '本次保留selectedPlan已有实体和镜头ID、未请求变动的设计与逐字台词；只为明确反馈及必要连续依赖调整，确需新增或拆镜才分配新ID' : '镜头数由剧情、动作负载和时长决定，不复制现镜头结构'}；每项完整，不以短摘要冒充待完成。故事不足时返回storyUsable:false及具体reason，不编造。`;
 }

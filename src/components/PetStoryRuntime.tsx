@@ -1,5 +1,5 @@
 import React from 'react';
-import { Alert, Button, Input, Select, Space, Tag } from 'antd';
+import { Alert, Button, Tag } from 'antd';
 import type { PetStoryChatJob, PetStoryProject, PetStoryReviewIssue, PetStoryRuntimeTarget } from '@doubao-studio/contracts';
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
@@ -8,7 +8,7 @@ import { planRequestRoot } from '../utils/petstoryPlanReview';
 import { PromptProvenance } from './PetStoryCanvasPrompt';
 import { canvasPromptNames } from './petStoryCanvasShared';
 import { ReviewIssueSelection } from './PetStoryReviewIssues';
-import { currentReviewPrompt, isSavedReviewResult, petStoryWritingModel, reviewMatchesCurrentPrompts, reviewMatchesPrompt } from '../utils/petstoryCandidate';
+import { currentReviewPrompt, isSavedReviewResult, reviewMatchesCurrentPrompts, reviewMatchesPrompt } from '../utils/petstoryCandidate';
 export { PetStoryCurrentTasks } from './PetStoryTaskRecovery';
 
 const stageNames: Record<PetStoryChatJob['kind'], string> = { analysis: '剧本理解与动态分镜', assets: '资产拆解与关联', optimize: '镜头正文创作', materialPrompt: '基础素材正文创作', review: '内容审查', revise: '局部修订', repair: '具体缺项修订' };
@@ -55,23 +55,13 @@ const RuntimeReview: React.FC<{ project: PetStoryProject; job: PetStoryChatJob; 
 };
 
 /** 与画布共用项目和 Chat 任务，展示理解、空间方案及候选，不创建第二份状态。 */
-export const PetStoryRuntime: React.FC<{ project: PetStoryProject; disabled: boolean; showPlanCandidates?: boolean }> = ({ project, disabled, showPlanCandidates = true }): React.ReactElement => {
+export const PetStoryRuntime: React.FC<{ project: PetStoryProject; disabled: boolean; showPlanCandidates?: boolean }> = ({ project, disabled, showPlanCandidates = true }): React.ReactElement | null => {
   const state = usePetStoryStore(); const tasks = useTaskStore((store) => store.tasks);
-  const [reviewFocus, setReviewFocus] = React.useState('');
-  const trimmedReviewFocus = reviewFocus.trim();
   const pending = project.jobs.some((job): boolean => !job.endedWaitingAt && ['bound', 'captured'].includes(job.status));
   const generationDisabled = disabled || pending;
   const jobs = project.jobs.filter((job): boolean => !!job.requestId && ['analysis', 'assets', 'review', 'revise', 'repair'].includes(job.kind) && !planRequestRoot(project, job) && (showPlanCandidates || !job.parsedResult?.assets));
+  if (!showPlanCandidates && !jobs.length) return null;
   return <div className="canvas-runtime" aria-label="剧本理解与创作候选">
-    <details className="petstory-secondary-tools"><summary>更多操作</summary><Space wrap><span>创作目标模型</span><Select aria-label="文字创作目标模型" value={petStoryWritingModel(project)} disabled={disabled || pending} style={{ width: 210 }} options={[
-      { value: 'generic', label: '通用计划（模型未定）' }, { value: 'seedance-2.0-fast', label: 'Seedance 2.0 Fast' }, { value: 'seedance-2.0', label: 'Seedance 2.0' }, { value: 'seedance-2.0-mini', label: 'Seedance 2.0 Mini' }, { value: 'seedance-2.5', label: 'Seedance 2.5' },
-    ]} onChange={(value: string): void => { void state.savePromptModel(value as PetStoryProject['promptModel']); }} /></Space>
-    <p className="canvas-hint">请选择后续制作使用的模型；开始任务后会自动设置并读取页面参数。</p>
-    <Space wrap><Button size="small" disabled={generationDisabled || !project.mobileStory} onClick={(): void => { void state.analyze(); }}>{project.plan ? '重新分析，生成新方案候选' : '分析剧本并生成方案'}</Button><Button size="small" disabled={generationDisabled || !project.plan} onClick={(): void => { void state.extractAssets(); }}>补齐人物／道具／场景</Button><Button size="small" disabled={generationDisabled || !project.plan} onClick={(): void => { void state.reviewContent(trimmedReviewFocus ? { reviewFocus: trimmedReviewFocus } : undefined); }}>审查当前方案与提示词</Button></Space>
-    <Input.TextArea aria-label="内容审查关注点" placeholder="可选：希望重点核对的疑点" maxLength={2000} rows={2} value={reviewFocus} disabled={generationDisabled} onChange={(event): void => setReviewFocus(event.target.value)} />
-    <p className="canvas-hint">只填写希望核对的疑点，豆包仍须以来源和实际正文判断；不会直接替换正文</p>
-    <p className="canvas-hint">重新拆镜保存为候选。采用资产清单保留当前镜头；图片仍须逐张确认。</p>
-    </details>
     {showPlanCandidates && <PetStoryPlanReview project={project} disabled={disabled} />}
     {jobs.length > 0 && <details className="canvas-runtime-results"><summary>其他候选与内容问题 · {jobs.length} 次</summary>{[...jobs].reverse().map((job): React.ReactNode => <article key={job.id} className="canvas-runtime-result"><strong>{stageNames[job.kind]}</strong><Tag>{job.resultStatus === 'adopted' ? '已采用' : job.resultStatus === 'stale' ? '过期候选' : job.status === 'applied' ? '已保存候选' : job.status === 'invalid' ? '待核对' : '等待原任务'}</Tag>
       {job.resultStatus === 'stale' && <Alert type="warning" message={job.staleReason || '当前内容已更新，请核对这条历史回复。'} />}

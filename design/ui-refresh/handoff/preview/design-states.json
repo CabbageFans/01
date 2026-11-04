@@ -1,0 +1,137 @@
+{
+  "schemaVersion": "1.0",
+  "title": "短剧工作室独立设计模拟状态",
+  "boundary": {
+    "kind": "design_simulation",
+    "visibleLabel": "设计模拟",
+    "contentFile": "../upload/03_SAMPLE_CONTENT.json",
+    "contentReadOnly": true,
+    "productionIPCAllowed": false,
+    "platformRequestsAllowed": false,
+    "projectWritesAllowed": false,
+    "automaticFakeSuccessAllowed": false
+  },
+  "referenceBindingStatus": "validated_against_03_SAMPLE_CONTENT",
+  "contentRefs": {
+    "projectId": "070f3d8f-28b1-419e-9ed5-777a1790ca7d",
+    "representativeShotId": "sh03",
+    "promptIds": ["sh03:firstFrame", "sh03:lastFrame", "sh03:video"],
+    "currentKeyframeAssetId": "8c4cd80a-7ec8-465b-8676-60b2ea3afe4a",
+    "candidateKeyframeAssetId": "a76a5de5-1eaf-4176-9259-a5b610cb7e31",
+    "videoAssetId": "487e566e-152a-4045-a69d-1affdaecf01c"
+  },
+  "navigation": {
+    "source": "content.shots",
+    "orderBy": "order",
+    "showEveryShot": true,
+    "fixedShotCount": null
+  },
+  "states": [
+    {
+      "id": "preview-generating",
+      "kind": "design_simulation",
+      "visibleLabel": "设计模拟 · 生成中",
+      "contentRef": { "shotId": "sh03", "promptId": "sh03:video" },
+      "sourceTruth": "样板没有经本轮观察确认的实时生成状态；只借用真实镜头与完整正文演示界面层，不创建任务。",
+      "presentation": {
+        "nodeState": "generating",
+        "statusText": "正在生成…",
+        "progressType": "indeterminate_stage",
+        "percentage": null,
+        "estimatedSeconds": null,
+        "keepCurrentTextReadable": true,
+        "keepAdoptedImagesReadable": true,
+        "preserveCanvasViewport": true,
+        "suppressDuplicateStart": true,
+        "automaticCompletion": false
+      },
+      "interactionNotes": [
+        "可定位所有真实镜头、阅读已有全文、查看已有图像；不因模拟生成锁住整张画布。",
+        "状态切换由原型演示控件手动选择；禁止用计时器把该状态自动改成生成成功。"
+      ],
+      "productionConnection": {
+        "existing": "usePetStoryStore.generateCanvasPrompts / revisePrompt → prepareRuntime → 现有 Chat 服务；真实任务状态回读驱动节点进度。",
+        "limitation": "本轮不调用生成。模拟的生成中不能证明当前原任务正在运行，也不能证明平台文字或视频链通过。"
+      }
+    },
+    {
+      "id": "preview-exception",
+      "kind": "design_simulation",
+      "visibleLabel": "设计模拟 · 异常与提交受理不明",
+      "contentRef": { "shotId": "sh03", "promptId": "sh03:video" },
+      "sourceTruth": "样板没有经本轮现场确认的当前错误或提交未明；以下仅按现有组件文案和恢复合同派生，不能当作真实错误截图或真实失败记录。",
+      "variants": [
+        {
+          "id": "not-submitted",
+          "presentation": {
+            "nodeState": "failed_before_submission",
+            "statusText": "本项生成尚未完成",
+            "errorSource": "当前 CanvasPromptProgress 既有文案；不是声称样板发生该错误",
+            "availableActionLabels": ["重试"],
+            "explanation": "只有原任务明确未发送、原请求与事实仍匹配时，才复用原运行；原型不分配虚假 taskId。",
+            "preserveCurrentTextAndMedia": true
+          }
+        },
+        {
+          "id": "submission-uncertain",
+          "presentation": {
+            "nodeState": "submission_uncertain",
+            "statusText": "本次结果尚未取得",
+            "errorSource": "当前 CanvasPromptProgress 既有文案及 VERIFICATION_RECOVERY 合同；不是声称样板本次已提交",
+            "availableActionLabels": ["检查原结果", "确认重发一次"],
+            "primaryAction": "检查原结果",
+            "explicitResubmissionConfirmationRequired": true,
+            "authenticationAndVerificationFirst": true,
+            "automaticResubmissionAllowed": false,
+            "preserveOriginalInputsRunAndLateOutputs": true,
+            "explanation": "确认重发仅示意既有一次授权合同；原型里不得发送、创建关联任务或伪造检查回执。"
+          }
+        }
+      ],
+      "productionConnection": {
+        "existing": "未发送文字 resumeCanvasPrompt；视频 resumeUnsubmittedVideo；原结果读取和明确一次重发分别复用 PetStoryTaskRecovery / resubmitProduction。",
+        "limitation": "各动作必须由真实 taskId、runId、submittedAt、账号与输入事实决定；此契约故意不制造这些运行事实。删除常驻诊断与待处理面板前，须把必要恢复接到具体方案或节点。"
+      }
+    },
+    {
+      "id": "preview-candidate",
+      "kind": "design_simulation",
+      "visibleLabel": "设计模拟 · 候选待采用",
+      "contentRef": {
+        "shotId": "sh03",
+        "currentAssetId": "8c4cd80a-7ec8-465b-8676-60b2ea3afe4a",
+        "historicalUnadoptedAssetId": "a76a5de5-1eaf-4176-9259-a5b610cb7e31"
+      },
+      "sourceTruth": "使用同一真实镜头中现存已采用首帧与历史未采用候选。历史a76a虽保留candidate字段，已被当前首帧resolvedCandidateIds收束，不是当前待处理候选。待采用仅是独立界面投影；完整采用关系以03内容和uiState为准，不改写。",
+      "assetAvailability": {
+        "localPreviewAssetId": "a76a5de5-1eaf-4176-9259-a5b610cb7e31",
+        "localPreviewAvailability": "local-evidence-only",
+        "uploadOnlyFallbackAssetId": "8c4cd80a-7ec8-465b-8676-60b2ea3afe4a",
+        "uploadOnlyFallbackFile": "08_KEYFRAME.png",
+        "uploadOnlyFallbackLabel": "设计模拟 · 已采用图片的候选界面投影",
+        "doNotInventMissingCandidateImage": true
+      },
+      "presentation": {
+        "nodeState": "candidate_pending_adoption",
+        "statusText": "图片待确认",
+        "showImageUse": true,
+        "showCurrentAdoptedComparison": true,
+        "showCandidateAndHistorySelection": true,
+        "availableActionLabels": ["暂不采用", "不满意，修改图片", "满意，采用图片"],
+        "feedbackBindsSelectedAsset": true,
+        "adoptionChangesPrototypeMemoryOnly": true,
+        "doesNotAutoGenerateVideo": true,
+        "doesNotRewriteCharacterAppearance": true
+      },
+      "interactionNotes": [
+        "本地预览用历史未采用图的普通文件；仅首批upload的Make原型缺该文件时，使用08的同一真实图演示界面并显示投影说明。来源内容不换成网络示例图。",
+        "反馈只打开选图、名称、单个自然语言输入及取消/提交；模拟提交不调用服务，也不制造修改成功图。",
+        "模拟采用可以预览原型内的选择结果，标记仍为设计模拟，重载恢复03中的只读真实状态。"
+      ],
+      "productionConnection": {
+        "existing": "PetStoryImageReview → modifyImage / adoptShotImage；素材采用另复用 approveMaterials；候选文件经 readReference 读取。",
+        "limitation": "本轮仅查看与复制现有媒体，不替用户采用或修改任何正式图片，不证明新的生成或反馈链完成。"
+      }
+    }
+  ]
+}

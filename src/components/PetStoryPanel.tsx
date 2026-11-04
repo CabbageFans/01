@@ -255,7 +255,7 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
         </Card>
       </div>
       <div hidden={stage !== 1} className={stage === 1 ? 'stage-content space-y-4':'page-hidden'}>
-        <PetStoryPlanReview project={p} disabled={state.busy || dirty || sourceDirty || planLocked(p)} onMaterials={(): void => setStage(2)} onEdit={(): void => setStage(7)} />
+        <PetStoryPlanReview project={p} disabled={state.busy || dirty || sourceDirty || planLocked(p)} onMaterials={(): void => setStage(2)} />
         <PetStoryRuntime project={p} disabled={state.busy || dirty || sourceDirty || planLocked(p)} showPlanCandidates={false} />
       </div>
       <div id="petstory-materials" hidden={stage !== 2} className={stage === 2 ? 'stage-content':'page-hidden'}><PetStoryMaterials project={p} disabled={state.busy || dirty} generationBlocked={sourceDirty} onNavigate={(target,objectId): void => navigate(target==='plan'?'plan':'keyframes',objectId)} /></div>

@@ -1,0 +1,423 @@
+{
+  "auditDate": "2026-11-02",
+  "primaryScreenshot": "32-canvas-skeleton-1440.png",
+  "representativeDetail": "12-canvas-sh03-1440.png",
+  "liveHistoricalVideoEvidence": "41-native-video-playback.png",
+  "exactSizeCoverage": {
+    "1440x900": true,
+    "1280x800": true,
+    "dpr": 2
+  },
+  "screenshots": [
+    {
+      "file": "12-canvas-sh03-1440.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1440,
+        900
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-303.067px, -2787.32px) scale(0.860704)",
+      "canvasScale": 0.860704,
+      "sourceSha256": "cac0a2c3e3603c5cea4da58682ee6555cd545c83ed3a11a4120996030f6461be",
+      "capturedAt": "2026-11-02T12:30:10.263Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "13-prompt-full-1440.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1440,
+        900
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-303.067px, -2787.32px) scale(0.860704)",
+      "canvasScale": 0.860704,
+      "sourceSha256": "a2707058be419185f7681f11f8845d6b7e0e135df7e0fdd1afb77e7f105b5016",
+      "capturedAt": "2026-11-02T12:30:19.096Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "14-image-review-1440.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1440,
+        900
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-303.067px, -2787.32px) scale(0.860704)",
+      "canvasScale": 0.860704,
+      "sourceSha256": "654fac716c352ff0ba3d52d2ec07c30c89e1e3dc1660e88b18a8e5addc481c45",
+      "capturedAt": "2026-11-02T12:30:30.139Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "15-image-history-review-1440.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1440,
+        900
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-303.067px, -2787.32px) scale(0.860704)",
+      "canvasScale": 0.860704,
+      "sourceSha256": "09b46a6b85ea18373fd42e3c3d9da24a41061ccafcec5c096b5708980e07bd6e",
+      "capturedAt": "2026-11-02T12:31:04.095Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "16-image-feedback-1440.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1440,
+        900
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-303.067px, -2787.32px) scale(0.860704)",
+      "canvasScale": 0.860704,
+      "sourceSha256": "910d41d33b2a5d301c9a698da210d99e3a1becad2d3b0b5f93bbae34ec6f8f83",
+      "capturedAt": "2026-11-02T12:31:10.810Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "17-image-feedback-1280.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1280,
+        800
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-377.067px, -2837.32px) scale(0.860704)",
+      "canvasScale": 0.860704,
+      "sourceSha256": "40825c625f039f2790613862a7f5940438182e473f03d5ae856e3062a49cacd3",
+      "capturedAt": "2026-11-02T12:31:11.109Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "18-image-review-1280.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1280,
+        800
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-377.067px, -2837.32px) scale(0.860704)",
+      "canvasScale": 0.860704,
+      "sourceSha256": "c472fab6ac04011bedd4275427980a9b92617baaf1bfec7d29238197957c1df8",
+      "capturedAt": "2026-11-02T12:31:51.142Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "19-canvas-detail-1280.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1280,
+        800
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-261.836px, -2430.39px) scale(0.752199)",
+      "canvasScale": 0.752199,
+      "sourceSha256": "c3625852359ca20b2a656755e52e067ce1ffbefe7bbfc27fcdb2225c129f912d",
+      "capturedAt": "2026-11-02T12:32:18.208Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "21-video-stage-1280.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1280,
+        800
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-261.836px, -2430.39px) scale(0.752199)",
+      "canvasScale": 0.752199,
+      "sourceSha256": "34e23e9377a1b994f61c10ca7b7589ed1be3f98d99bd2c79bc51d62339bd0bb7",
+      "capturedAt": "2026-11-02T12:34:34.738Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "22-results-1280.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1280,
+        800
+      ],
+      "dpr": 2,
+      "canvasTransform": null,
+      "canvasScale": null,
+      "sourceSha256": "f0afa0a8d2366dd34ed5d94ac93e222cd2abeb2ed9750fbe60d942ae9810a8dc",
+      "capturedAt": "2026-11-02T12:34:35.140Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "23-results-1440.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1440,
+        900
+      ],
+      "dpr": 2,
+      "canvasTransform": null,
+      "canvasScale": null,
+      "sourceSha256": "3fa665b1f2fa50bc9725e26e54daf3dcc39cc566b863b6c3c02adecf39451125",
+      "capturedAt": "2026-11-02T12:36:05.770Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "24-plan-1440.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1440,
+        900
+      ],
+      "dpr": 2,
+      "canvasTransform": null,
+      "canvasScale": null,
+      "sourceSha256": "19a984afcd7371874ebf253cfa37db76aeb79162575e17e99cd1c397eecaa60c",
+      "capturedAt": "2026-11-02T12:36:06.086Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "25-plan-1280.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1280,
+        800
+      ],
+      "dpr": 2,
+      "canvasTransform": null,
+      "canvasScale": null,
+      "sourceSha256": "fa4c121ce7c9e96da7692ae9e9133573d2f029d68fab848676fa294df915f3fb",
+      "capturedAt": "2026-11-02T12:36:06.303Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "26-materials-1280.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1280,
+        800
+      ],
+      "dpr": 2,
+      "canvasTransform": null,
+      "canvasScale": null,
+      "sourceSha256": "3101938e74a71b7afc09448912f55f21bad1af14434cab5541811d094c2e1cc6",
+      "capturedAt": "2026-11-02T12:36:06.586Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "27-materials-1440.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1440,
+        900
+      ],
+      "dpr": 2,
+      "canvasTransform": null,
+      "canvasScale": null,
+      "sourceSha256": "1917574be7bcf17609bb607eb8b1c89e0d87c60066f4768197ef54025b5287cc",
+      "capturedAt": "2026-11-02T12:36:06.902Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "30-settings-1280.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1280,
+        800
+      ],
+      "dpr": 2,
+      "canvasTransform": null,
+      "canvasScale": null,
+      "sourceSha256": "9c7f66883028b032026e40688e478ce88bee1b9322c2db3c808dd5bdafa13785",
+      "capturedAt": "2026-11-02T12:36:07.669Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "31-settings-1440.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1440,
+        900
+      ],
+      "dpr": 2,
+      "canvasTransform": null,
+      "canvasScale": null,
+      "sourceSha256": "e32c65a2ba0e078985609027afeb292e862ccde3bbb672865236bcbe535d23cc",
+      "capturedAt": "2026-11-02T12:36:07.852Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "32-canvas-skeleton-1440.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1440,
+        900
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(56.2309px, 117.717px) scale(0.597711)",
+      "canvasScale": 0.597711,
+      "sourceSha256": "275fc084498b1c4c2cdcf4ed568d73ba1d0f66863cb100ef827e4ec2ace65e50",
+      "capturedAt": "2026-11-02T12:38:14.884Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "33-canvas-skeleton-1280.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1280,
+        800
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-17.7691px, 67.7166px) scale(0.597711)",
+      "canvasScale": 0.597711,
+      "sourceSha256": "5d36dda7d32123688de892ee59165c4c1dd5906bd81d8a6907746b436423afad",
+      "capturedAt": "2026-11-02T12:39:04.583Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "34-prompt-full-1280.png",
+      "classification": "real_electron_isolated_profile",
+      "accepted": true,
+      "contentViewportCssPx": [
+        1280,
+        800
+      ],
+      "dpr": 2,
+      "canvasTransform": "translate(-261.836px, -2430.39px) scale(0.752199)",
+      "canvasScale": 0.752199,
+      "sourceSha256": "cb9203094d23f32561acabad3887b7ad530695c3cb4fe5172ed6572186640d26",
+      "capturedAt": "2026-11-02T12:39:04.949Z",
+      "scope": "真实React/IPC/项目副本；账号、任务、Session未复制；无平台网络，无新生成"
+    },
+    {
+      "file": "00-current-window.png",
+      "classification": "real_native_electron_existing_profile",
+      "accepted": true,
+      "outerCapturePixels": [
+        2800,
+        1800
+      ],
+      "contentViewportCssPx": null,
+      "contentViewportNote": "原窗口未直接脚本读回；原生标题栏保留，不能冒称1440×900截图",
+      "dpr": null,
+      "dprNote": "同显示器隔离窗口实测2；原窗口未直接脚本读回",
+      "canvasScaleDisplay": null,
+      "sourceSha256": "380679d6dcfd3d96541a1be4fb52377d6384fd5ae209ca097149cd3a84fe33cb",
+      "uploadAllowed": true,
+      "privacyNote": "无令牌、内部会话URL或账号ID"
+    },
+    {
+      "file": "40-native-canvas-sh03.png",
+      "classification": "real_native_electron_existing_profile",
+      "accepted": true,
+      "outerCapturePixels": [
+        2800,
+        1800
+      ],
+      "contentViewportCssPx": null,
+      "contentViewportNote": "原窗口未直接脚本读回；原生标题栏保留，不能冒称1440×900截图",
+      "dpr": null,
+      "dprNote": "同显示器隔离窗口实测2；原窗口未直接脚本读回",
+      "canvasScaleDisplay": 0.83,
+      "sourceSha256": "b7ef6f317c85e915ae915c6222f753d5e275a077dba085186d0f21994a6bad26",
+      "uploadAllowed": true,
+      "privacyNote": "无令牌、内部会话URL或账号ID"
+    },
+    {
+      "file": "41-native-video-playback.png",
+      "classification": "real_native_electron_existing_profile",
+      "accepted": true,
+      "outerCapturePixels": [
+        2800,
+        1800
+      ],
+      "contentViewportCssPx": null,
+      "contentViewportNote": "原窗口未直接脚本读回；原生标题栏保留，不能冒称1440×900截图",
+      "dpr": null,
+      "dprNote": "同显示器隔离窗口实测2；原窗口未直接脚本读回",
+      "canvasScaleDisplay": 0.83,
+      "sourceSha256": "d6066026bd9491eaed4e614c0f022b8325c5cbe56f4762ecfac9263fde1b6292",
+      "uploadAllowed": true,
+      "privacyNote": "无令牌、内部会话URL或账号ID"
+    },
+    {
+      "file": "42-native-accounts.png",
+      "classification": "real_native_electron_existing_profile",
+      "accepted": true,
+      "outerCapturePixels": [
+        2800,
+        1800
+      ],
+      "contentViewportCssPx": null,
+      "contentViewportNote": "原窗口未直接脚本读回；原生标题栏保留，不能冒称1440×900截图",
+      "dpr": null,
+      "dprNote": "同显示器隔离窗口实测2；原窗口未直接脚本读回",
+      "canvasScaleDisplay": null,
+      "sourceSha256": "130e0264ddd84cbc4e3c60a0f9ba121e444dccb92b18802ba3f8004be22e8359",
+      "uploadAllowed": false,
+      "privacyNote": "账号页含昵称与会话标题，仅限本地证据，不上传"
+    }
+  ],
+  "limitedEvidence": [
+    {
+      "file": "28-accounts-1440.png",
+      "acceptedFor": "隔离账号空态外壳",
+      "notAcceptedFor": "真实登录或平台加载验收；网络被主动阻断，浏览器区域未就绪"
+    },
+    {
+      "file": "29-accounts-1280.png",
+      "acceptedFor": "隔离账号空态外壳",
+      "notAcceptedFor": "真实登录或平台加载验收；网络被主动阻断，浏览器区域未就绪"
+    },
+    {
+      "file": "20-video-preview-1280.png",
+      "acceptedFor": "隔离环境的读取失败事实",
+      "notAcceptedFor": "原项目视频失败或播放证据"
+    }
+  ],
+  "rejectedAttempts": [
+    "01-isolated-start-1440.png",
+    "03-canvas-overview-1440.png",
+    "04-canvas-sh03-1440.png",
+    "05-canvas-sh03-1440.png",
+    "06-canvas-context-1440.png",
+    "07-prompt-full-1440.png",
+    "08-image-review-1440.png",
+    "09-image-review-1440.png",
+    "10-canvas-detail-1440.png",
+    "11-prompt-full-1440.png"
+  ],
+  "rejectionReason": "调试阶段的初始空态、错误状态命名、未实际打开弹层或Playwright屏外自动滚动导致裁切；不作对应页面成功证据",
+  "browserAttempt": {
+    "surface": "Codex in-app Browser",
+    "result": "无法作为产品取证；缺Electron preload，TaskConsole读取settings时报undefined",
+    "screenshotAccepted": false,
+    "fallback": "Playwright Electron mac-test及现有原生Electron窗口"
+  },
+  "cleanup": {
+    "isolatedElectronClosed": true,
+    "temporaryIabTabClosed": true,
+    "originalWindowRestored": "ui-project / 准备基础素材",
+    "generationOrAdoptionInvoked": false
+  }
+}

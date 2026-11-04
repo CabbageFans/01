@@ -262,7 +262,8 @@ describe('产品运行时按钮到主进程请求', (): void => {
     project.plan!.understanding = 'TEST 当前剧本理解'; project.plan!.sceneDesign = 'TEST 全场空间连续性';
     project.jobs.push({ id: 'candidate-reply', taskId: 'candidate-task', kind: 'analysis', status: 'applied', inputHash: 'TEST', sourceUrl: '', sourceStoryId: project.mobileStory!.id, requestId: 'candidate-request', rulesVersion: 'TEST-runtime', ruleFiles: ['TEST/storyboard.md'], resultStatus: 'candidate', parsedResult: { plan: structuredClone(project.plan) }, rawText: 'TEST 原回复记录' });
     const html = renderToStaticMarkup(React.createElement(PetStoryRuntime, { project, disabled: false }));
-    expect(html).toContain('重新分析，生成新方案候选'); expect(html).toContain('补齐人物／道具／场景'); expect(html).toContain('确认并采用方案');
+    expect(html).toContain('确认并采用方案');
+    for (const text of ['生成记录／诊断详情', '更多操作', '重新分析，生成新方案候选', '补齐人物／道具／场景', '文字创作目标模型', '内容审查关注点']) expect(html).not.toContain(text);
     expect(html).toContain('TEST 当前剧本理解'); expect(html).toContain('TEST 全场空间连续性');
     const promptHtml = renderToStaticMarkup(React.createElement(CanvasPromptEditor, { project, shot: project.plan!.shots[0], kind: 'video', disabled: false, generationBlocked: false, dirtyChanged: (): void => undefined }));
     expect(promptHtml).toContain('修改要求'); expect(promptHtml).not.toContain('审查本项正文');
