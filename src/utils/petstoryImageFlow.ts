@@ -3,6 +3,8 @@ import { resolveTaskConversationTarget } from './taskConversationLocator';
 import { imageBelongsToTarget, pendingImageCandidates } from './petstoryImageCandidates';
 import { journeyMaterialImageApproved } from './petstoryJourney';
 
+export const IMAGE_CONVERSATION_RECOVERY_MESSAGE = '原会话未定位，请在原账号历史中打开这次图片对话后继续。';
+
 export function sameImageTarget(left: PetStoryImageTarget, right: PetStoryImageTarget): boolean {
   return left.materialId ? left.materialId === right.materialId : left.shotId === right.shotId && left.kind === right.kind;
 }
@@ -54,6 +56,7 @@ export interface PetStoryImageProgress {
   task?: Task;
   candidateAssetId?: string;
   resumable: boolean;
+  conversationMissing: boolean;
 }
 
 function completedImageMessage(project: PetStoryProject, target: PetStoryImageTarget): string {
@@ -74,10 +77,13 @@ function completedImageMessage(project: PetStoryProject, target: PetStoryImageTa
 /** 百分比未知时只给真实阶段，不用计时器推算完成或替用户采用。 */
 export function petStoryImageProgress(project: PetStoryProject, target: PetStoryImageTarget, tasks: Task[], activeOperationId?: string | null): PetStoryImageProgress {
   const operation = imageOperationForTarget(project, target);
-  if (!operation) return { busy: false, stage: 'idle', message: '', error: '', resumable: false };
+  if (!operation) return { busy: false, stage: 'idle', message: '', error: '', resumable: false, conversationMissing: false };
   const task = imageOperationTask(project, operation, tasks);
   const failedTask = task && ['fail', 'paused', 'cancelled', 'waiting_verification', 'waiting_generation_confirmation'].includes(task.status);
-  const error = operation.error || (failedTask ? task.errorInfo?.message || task.runtime?.message || '任务已暂停，请处理后继续' : '');
+  const locator = resolveTaskConversationTarget(task);
+  const conversationMissing = !!failedTask && task.mode === 'image' && !!task.runtime?.submittedAt && !task.outputs.length
+    && !locator.ok && locator.reason === 'CONVERSATION_URL_MISSING';
+  const error = conversationMissing ? IMAGE_CONVERSATION_RECOVERY_MESSAGE : operation.error || (failedTask ? task.errorInfo?.message || task.runtime?.message || '任务已暂停，请处理后继续' : '');
   const available = operation.outputAssetId && project.assets.some((asset): boolean => asset.id === operation.outputAssetId && !!asset.validation?.decoded);
   const stage = operation.stage === 'complete' && !available ? 'saving' : operation.stage;
   const resumable = ['preparing', 'generating', 'saving'].includes(stage) && activeOperationId !== undefined && activeOperationId !== operation.id;
@@ -86,7 +92,7 @@ export function petStoryImageProgress(project: PetStoryProject, target: PetStory
     saving: '正在保存图片…', complete: stage === 'complete' ? completedImageMessage(project, target) : '图片已生成，请查看', failed: '本次图片处理未完成',
   };
   return { operation, busy: !error && !resumable && ['preparing', 'generating', 'saving'].includes(stage), stage,
-    message: resumable ? '图片任务已保存，可继续本次任务' : messages[stage], error, task, candidateAssetId: available ? operation.outputAssetId : undefined, resumable };
+    message: resumable ? '图片任务已保存，可继续本次任务' : messages[stage], error, task, candidateAssetId: available ? operation.outputAssetId : undefined, resumable, conversationMissing };
 }
 
 function assetConversationTask(asset: PetStoryAsset | undefined, project: PetStoryProject, tasks: Task[]): Task | undefined {
@@ -103,7 +109,8 @@ export function imageConversationTask(project: PetStoryProject, target: PetStory
   const operation = imageOperationForTarget(project, target);
   if (operation && operation.stage !== 'complete') {
     const task = imageOperationTask(project, operation, tasks);
-    return task && resolveTaskConversationTarget(task).ok ? task : undefined;
+    const locator = resolveTaskConversationTarget(task);
+    return task && (locator.ok || locator.reason === 'CONVERSATION_URL_MISSING' && !!task.runtime?.submittedAt) ? task : undefined;
   }
   const images = project.assets.filter((asset): boolean => imageBelongsToTarget(project, asset, target));
   const material = target.materialId ? project.materials?.find((item): boolean => item.id === target.materialId) : undefined;

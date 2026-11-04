@@ -468,6 +468,36 @@ function chatEvidenceId(raw: unknown): string | undefined {
 function validOptionalChatIds(raw: Record<string, unknown>, keys: readonly string[]): boolean {
   return keys.every((key: string): boolean => raw[key] === undefined || chatEvidenceId(raw[key]) !== undefined);
 }
+
+/** 仅接纳服务器具体会话；临时路由、根页及任意非豆包地址都不能成为耐久定位。 */
+function mediaConversationUrl(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || !/^https:\/\/www\.doubao\.com\/chat\/[a-zA-Z0-9_-]{1,128}$/.test(raw)) return undefined;
+  const id = raw.slice('https://www.doubao.com/chat/'.length);
+  return /^local_/i.test(id) ? undefined : raw;
+}
+
+/** 媒体证据与原账号、运行和提交意图一同白名单校验；不凭 URL 自行判定平台已受理。 */
+export function normalizeMediaSubmissionReceipt(raw: unknown, mode: GenerationMode, runtime: unknown, accountId: unknown): TaskRunSnapshot['mediaSubmissionReceipt'] {
+  if (!isObject(raw) || !isObject(runtime) || !['image', 'video'].includes(mode)
+    || raw.schemaVersion !== 1 || raw.source !== 'published_message'
+    || !chatEvidenceId(raw.runId) || raw.runId !== runtime.runId
+    || !chatEvidenceId(raw.accountId) || raw.accountId !== accountId
+    || !isValidISODate(raw.submittedAt) || raw.submittedAt !== runtime.submittedAt
+    || !isValidISODate(raw.observedAt) || Date.parse(raw.observedAt) < Date.parse(raw.submittedAt)
+    || !validOptionalChatIds(raw, ['userMessageId', 'userTurnId'])
+    || !raw.userMessageId && !raw.userTurnId) return undefined;
+  const conversationUrl = mediaConversationUrl(raw.conversationUrl);
+  if (!conversationUrl || runtime.conversationUrl !== undefined && runtime.conversationUrl !== conversationUrl) return undefined;
+  const binding = runtime.acceptanceObservation;
+  if (binding !== undefined && (!isObject(binding) || binding.runId !== raw.runId || binding.accountId !== accountId || binding.conversationUrl !== conversationUrl)) return undefined;
+  return {
+    schemaVersion: 1, source: 'published_message', runId: raw.runId as string, accountId: raw.accountId as string,
+    submittedAt: raw.submittedAt, observedAt: raw.observedAt, conversationUrl,
+    ...(raw.userMessageId ? { userMessageId: raw.userMessageId as string } : {}),
+    ...(raw.userTurnId ? { userTurnId: raw.userTurnId as string } : {}),
+  };
+}
+
 function chatEvidenceRuntime(raw: Record<string, unknown>, runtime: Record<string, unknown>, mode: GenerationMode): boolean {
   return mode === 'chat' && isValidISODate(runtime.submittedAt) && !!chatEvidenceId(raw.runId) && raw.runId === runtime.runId;
 }
@@ -509,7 +539,7 @@ function normalizeChatAdjustmentGuard(raw: unknown): TaskRunSnapshot['chatAdjust
 }
 
 /** 归一化 TaskRunSnapshot（运行快照）；对话保护不依赖原运行状态。 */
-function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): TaskRunSnapshot | undefined {
+function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string, accountId: Task['assignedAccountId']): TaskRunSnapshot | undefined {
   if (!isObject(raw)) return undefined;
   const r = raw;
   const input = r.input;
@@ -526,6 +556,7 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): 
     lastHeartbeatAt: asISODate(r.lastHeartbeatAt, now),
     submittedAt: (() => { const v = r.submittedAt; return isValidISODate(v) ? v : undefined; })(),
     conversationUrl: asNonEmptyString(r.conversationUrl) ?? undefined,
+    mediaSubmissionReceipt: normalizeMediaSubmissionReceipt(r.mediaSubmissionReceipt, taskMode, r, accountId),
     acceptanceObservation: normalizeAcceptanceObservation(r.acceptanceObservation),
     controlReadiness: isObject(r.controlReadiness) ? {
       schemaVersion: r.controlReadiness.schemaVersion === 1 ? 1 : undefined,
@@ -736,7 +767,7 @@ function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: str
   task.batchId = asNonEmptyString(raw.batchId) ?? undefined;
 
   // runtime / errorInfo / lock
-  task.runtime = normalizeRuntime(raw.runtime, task.mode, now);
+  task.runtime = normalizeRuntime(raw.runtime, task.mode, now, task.assignedAccountId);
   task.errorInfo = normalizeErrorInfo(raw.errorInfo, now);
   task.lock = normalizeLock(raw.lock, now);
 

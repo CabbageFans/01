@@ -1,0 +1,56 @@
+{
+  "fileCount": 10,
+  "files": [
+    {
+      "file": "01_DESIGN_BRIEF.md",
+      "bytes": 9777,
+      "sha256": "c67c7d3ea95b6719b23c40b9c46e17a76167a770cc14b8bccfb8c6a2057c1825"
+    },
+    {
+      "file": "02_INTERACTION_MAP.md",
+      "bytes": 17182,
+      "sha256": "174674e1be47a0040c5bf6ed43bc0b042b486f331b344e81ecefc86d4e72b94b"
+    },
+    {
+      "file": "03_SAMPLE_CONTENT.json",
+      "bytes": 211428,
+      "sha256": "ee000c50f429168936d3668f099d80cd6cbaa00139e058c96ad570ddabfb40d2"
+    },
+    {
+      "file": "04_CURRENT_CANVAS.png",
+      "bytes": 1104262,
+      "sha256": "275fc084498b1c4c2cdcf4ed568d73ba1d0f66863cb100ef827e4ec2ace65e50"
+    },
+    {
+      "file": "05_CURRENT_IMAGE_REVIEW.png",
+      "bytes": 1497372,
+      "sha256": "09b46a6b85ea18373fd42e3c3d9da24a41061ccafcec5c096b5708980e07bd6e"
+    },
+    {
+      "file": "06_CURRENT_FEEDBACK.png",
+      "bytes": 852630,
+      "sha256": "910d41d33b2a5d301c9a698da210d99e3a1becad2d3b0b5f93bbae34ec6f8f83"
+    },
+    {
+      "file": "07_CHARACTER.png",
+      "bytes": 1022180,
+      "sha256": "c347580cfb1b2fad5989e72c171643a1cf527491bd378702b84636c38875d0e7"
+    },
+    {
+      "file": "08_KEYFRAME.png",
+      "bytes": 3671808,
+      "sha256": "2d6b7dde31559e1d2f78f7e6fabd60c0b69d500ede41bd63106bbc2cb4e58d18"
+    },
+    {
+      "file": "09_VIDEO_POSTER.png",
+      "bytes": 1124896,
+      "sha256": "1d4df0cd299cba5a30adccc8f9df9e8e44e7f948a16e27a1ec87657063d04ed4"
+    },
+    {
+      "file": "10_SAMPLE_VIDEO.mp4",
+      "bytes": 1671155,
+      "sha256": "8e9c33f458b51cf36ac2ed5b69f7ef948de41b173a4e2f5296b527106dfdc15f"
+    }
+  ],
+  "onlyUploadTheseFiles": true
+}

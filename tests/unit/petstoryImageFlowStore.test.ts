@@ -19,6 +19,7 @@ const resume = vi.fn<(id: string, operationId: string) => Promise<PetStoryImageO
 const collect = vi.fn<(id: string, jobId: string) => Promise<PetStoryResult>>();
 const start = vi.fn<(taskId: string, beforeDispatch?: (task: Task) => Promise<void>) => Promise<boolean>>();
 const bindProduction = vi.fn<(id: string, taskId: string, runId: string) => Promise<PetStoryResult>>();
+const pauseProduction = vi.fn<(id: string) => Promise<PetStoryResult>>();
 const prepareRuntime = vi.fn<() => Promise<PetStoryResult>>();
 const adoptPrompt = vi.fn<() => Promise<PetStoryResult>>();
 const saveStory = vi.fn<(id: string, revision: number, text: string) => Promise<PetStoryResult>>();
@@ -58,6 +59,13 @@ async function stoppedSubmittedImage(): Promise<{ media: Task; op: PetStoryImage
     fallbacks: {}, shots: {}, message: 'TEST 原提交结果尚未确认', steps: [{ id: stepId, kind: 'character', materialId: op.target.materialId,
       taskId: media.id, runId: media.runtime!.runId, inputHash: 'TEST', attachmentAssetIds: [], status: 'bound' }] };
   usePetStoryStore.setState({ project }); return { media, op };
+}
+type ImageReconcileDetail = { taskId: string; accountId: string; runId: string; submittedAt: string; useCurrentPage: boolean; automatic: boolean; onSettled: () => Promise<void> };
+function imageReconciles(): Event[] { return dispatch.mock.calls.map(([item]): Event => item).filter((item): boolean => item.type === 'reconcile-task-submission'); }
+function lastImageReconcile(): ImageReconcileDetail {
+  const event = imageReconciles().at(-1);
+  if (!event) throw new Error('TEST 原图片观察事件尚未分派');
+  return (event as CustomEvent<ImageReconcileDetail>).detail;
 }
 
 beforeEach((): void => {
@@ -105,12 +113,18 @@ beforeEach((): void => {
     await beforeDispatch?.(started); return true;
   });
   bindProduction.mockImplementation(async (): Promise<PetStoryResult> => ({ success: true, project }));
+  pauseProduction.mockImplementation(async (): Promise<PetStoryResult> => {
+    save(); if (project.production) project.production.state = 'paused'; return { success: true, project };
+  });
   saveStory.mockImplementation(async (_id: string, _revision: number, text: string): Promise<PetStoryResult> => {
     save(); project.mobileStory!.text = text; return { success: true, project };
   });
-  dispatch.mockReturnValue(true);
+  dispatch.mockImplementation((event: Event): boolean => {
+    if (event.type === 'inspect-image-task-recovery-page') (event as CustomEvent<{ onResult: (result: { ready: boolean }) => void }>).detail.onResult({ ready: true });
+    return true;
+  });
   vi.stubGlobal('window', Object.assign(new EventTarget(), { dispatchEvent: dispatch, electronAPI: { petstory: { beginImageOperation: begin, advanceImageOperation: advance, resumeImageOperation: resume,
-    collectChat: collect, prepareRuntime, adoptPromptCandidate: adoptPrompt, bindProductionRun: bindProduction, saveOriginalStory: saveStory,
+    collectChat: collect, prepareRuntime, adoptPromptCandidate: adoptPrompt, bindProductionRun: bindProduction, pauseProduction, saveOriginalStory: saveStory,
     bindRun: async (_id: string, jobId: string, runId: string): Promise<PetStoryResult> => { project.jobs.find((job): boolean => job.id === jobId)!.runId = runId; return { success: true, project }; },
     open: async (): Promise<PetStoryResult> => ({ success: true, project }),
   }, tasks: { list: async (): Promise<Task[]> => tasks } } }));
@@ -315,13 +329,118 @@ describe('单次图片意图的后台接力', (): void => {
     await tickPetStoryImageOperation(); expect(dispatch).not.toHaveBeenCalled();
     await usePetStoryStore.getState().recoverImageOperation(op.id);
     const explicitCurrentPage = url !== 'https://www.doubao.com/chat/TEST-image-original';
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(dispatch.mock.calls[0][0]).toMatchObject({ type: 'reconcile-task-submission', detail: { taskId: media.id, useCurrentPage: explicitCurrentPage } });
+    expect(imageReconciles()).toHaveLength(1);
+    expect(imageReconciles()[0]).toMatchObject({ type: 'reconcile-task-submission', detail: { taskId: media.id, useCurrentPage: explicitCurrentPage, automatic: false } });
+    expect(dispatch.mock.calls.some(([event]): boolean => event.type === 'inspect-image-task-recovery-page')).toBe(explicitCurrentPage);
     expect(media.status).toBe('manual_submission_observing'); expect(media.runtime!.runId).toBe(originalRun);
     expect(media.runtime!.submittedAt).toBe(now); expect(media.prompt).toBe(originalPrompt);
     expect(start).toHaveBeenCalledTimes(1); expect(begin).toHaveBeenCalledTimes(1); expect(tasks).toHaveLength(1);
     expect(dispatch.mock.invocationCallOrder[0]).toBeLessThan(advance.mock.invocationCallOrder.at(-1)!);
-    await usePetStoryStore.getState().recoverImageOperation(op.id); expect(dispatch).toHaveBeenCalledTimes(1); expect(start).toHaveBeenCalledTimes(1);
+    await usePetStoryStore.getState().recoverImageOperation(op.id); expect(imageReconciles()).toHaveLength(1); expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it('自动接力的原图片缺少会话地址时仍分派一次有账号及运行约束的只读检查', async (): Promise<void> => {
+    const { media, op } = await stoppedSubmittedImage();
+    project.production!.state = 'running';
+    advance.mockImplementation(async (): Promise<PetStoryImageOperationResult> => ({ ...response(operation(op.id)), taskId: media.id, action: 'observe' }));
+    await tickPetStoryImageOperation();
+    expect(lastImageReconcile()).toMatchObject({ taskId: media.id, accountId: project.accountId, runId: media.runtime!.runId,
+      submittedAt: now, useCurrentPage: true, automatic: true, onSettled: expect.any(Function) });
+    await tickPetStoryImageOperation(); await usePetStoryStore.getState().recoverImageOperation(op.id);
+    expect(dispatch).toHaveBeenCalledTimes(1); expect(resume).not.toHaveBeenCalled(); expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it('重启后缺URL的原图片位于空根页时先提示定位，不重置任务、不假进入观察或盲等', async (): Promise<void> => {
+    const { media, op } = await stoppedSubmittedImage();
+    await usePetStoryStore.getState().openProject('TEST/原故事副本'); const before = structuredClone(media);
+    dispatch.mockImplementationOnce((event: Event): boolean => {
+      expect(event.type).toBe('inspect-image-task-recovery-page');
+      const detail = (event as CustomEvent<{ taskId: string; runId: string; onResult: (result: { ready: boolean; message: string }) => void }>).detail;
+      expect(detail).toMatchObject({ taskId: media.id, runId: media.runtime!.runId });
+      detail.onResult({ ready: false, message: '原会话未定位，请在原账号历史中打开这次图片对话后继续。' }); return true;
+    });
+    await usePetStoryStore.getState().recoverImageOperation(op.id);
+    expect(resume).not.toHaveBeenCalled(); expect(imageReconciles()).toHaveLength(0); expect(media).toEqual(before);
+    expect(usePetStoryStore.getState().activeImageOperationId).toBeNull(); expect(usePetStoryStore.getState().error).toContain('原账号历史');
+    const count = advance.mock.calls.length; await tickPetStoryImageOperation(); expect(advance).toHaveBeenCalledTimes(count);
+    await usePetStoryStore.getState().openImageConversation(op.target);
+    expect(dispatch.mock.calls.at(-1)?.[0]).toMatchObject({ type: 'open-image-task-account', detail: { taskId: media.id, accountId: project.accountId,
+      runId: media.runtime!.runId, submittedAt: now } });
+    expect(dispatch.mock.calls.some(([event]): boolean => event.type === 'open-task-conversation')).toBe(false);
+    expect(imageConversationTask(project, op.target, tasks)?.id).toBe(media.id);
+    expect(petStoryImageProgress(project, op.target, tasks, null)).toMatchObject({ conversationMissing: true, busy: false, error: expect.stringContaining('原账号历史') });
+  });
+
+  it('用户确认重发图片后继续原操作的候选接力，原提交与正式采用图保留', async (): Promise<void> => {
+    const { media, op } = await stoppedSubmittedImage(); op.stage = 'failed'; op.error = 'TEST 原请求未定位';
+    const originalRun = structuredClone(media.runtime);
+    const resubmit = vi.fn(async (): Promise<PetStoryImageOperationResult> => {
+      save(); const replacement: Task = { ...structuredClone(media), id: 'TEST-image-replacement', status: 'queued', runtime: undefined, errorInfo: undefined };
+      tasks.push(replacement); const current = operation(op.id); current.taskId = replacement.id; current.stage = 'generating'; current.error = undefined;
+      project.production!.state = 'running'; project.production!.steps[0].taskId = replacement.id; project.production!.steps[0].runId = undefined;
+      return { ...response(current), taskId: replacement.id, action: 'start' };
+    });
+    window.electronAPI.petstory.resubmitProduction = resubmit;
+    await usePetStoryStore.getState().resubmitProduction({ taskId: media.id, runId: media.runtime!.runId, submittedAt: now,
+      authorizationId: 'TEST-explicit-image-resubmit', acceptDuplicateRisk: true });
+    expect(resubmit).toHaveBeenCalledOnce(); expect(resume).toHaveBeenCalledExactlyOnceWith(project.id, op.id, undefined);
+    expect(usePetStoryStore.getState().activeImageOperationId).toBe(op.id); expect(start).toHaveBeenCalledTimes(2);
+    expect(operation(op.id)).toMatchObject({ stage: 'generating', taskId: 'TEST-image-replacement' });
+    await finishMedia();
+    expect(operation(op.id).stage).toBe('complete'); expect(operation(op.id).outputAssetId).toBeTruthy();
+    expect(project.assets.at(-1)).toMatchObject({ taskId: 'TEST-image-replacement', imageReview: { state: 'candidate' } });
+    expect(media.runtime).toEqual(originalRun); expect(media.status).toBe('paused'); expect(project.materials![0].selectedAssetId).toBe('TEST-old-adopted');
+    expect(tasks).toHaveLength(2); expect(begin).toHaveBeenCalledOnce();
+  });
+
+  it('真实图片观察结束成功后立即接续下载候选，仍保留正式采用图且不发送第二次', async (): Promise<void> => {
+    const { media, op } = await stoppedSubmittedImage();
+    await usePetStoryStore.getState().recoverImageOperation(op.id);
+    media.status = 'done'; media.outputs = ['https://TEST.invalid/original.png'];
+    await lastImageReconcile().onSettled();
+    expect(operation(op.id).stage).toBe('complete'); expect(operation(op.id).outputAssetId).toBeTruthy();
+    expect(project.assets.at(-1)?.imageReview?.state).toBe('candidate'); expect(project.materials![0].selectedAssetId).toBe('TEST-old-adopted');
+    expect(usePetStoryStore.getState().activeImageOperationId).toBeNull(); expect(start).toHaveBeenCalledTimes(1); expect(tasks).toHaveLength(1);
+  });
+
+  it('本轮图片观察失败停止自动轮询，释放真实观察占用后一次显式继续可再检查原运行', async (): Promise<void> => {
+    const { media, op } = await stoppedSubmittedImage();
+    await usePetStoryStore.getState().recoverImageOperation(op.id);
+    const first = lastImageReconcile();
+    media.status = 'paused'; media.errorInfo = { code: 'submission_uncertain', message: 'TEST 原图片尚未核对稳定', recoverable: true, detectedAt: now };
+    await first.onSettled();
+    expect(pauseProduction).toHaveBeenCalledExactlyOnceWith(project.id); expect(usePetStoryStore.getState().activeImageOperationId).toBeNull();
+    const before = advance.mock.calls.length;
+    await tickPetStoryImageOperation(); await tickPetStoryImageOperation();
+    expect(advance).toHaveBeenCalledTimes(before); expect(imageReconciles()).toHaveLength(1);
+    await usePetStoryStore.getState().recoverImageOperation(op.id);
+    expect(imageReconciles()).toHaveLength(2); expect(media.status).toBe('manual_submission_observing');
+    expect(lastImageReconcile()).toMatchObject({ runId: first.runId, submittedAt: first.submittedAt, taskId: media.id });
+    await first.onSettled();
+    expect(media.status).toBe('manual_submission_observing'); expect(usePetStoryStore.getState().activeImageOperationId).toBe(op.id);
+    expect(pauseProduction).toHaveBeenCalledTimes(1); expect(start).toHaveBeenCalledTimes(1); expect(tasks).toHaveLength(1);
+  });
+
+  it('图片观察结束时保留用户取消，不把取消任务写回活跃或普通暂停', async (): Promise<void> => {
+    const { media, op } = await stoppedSubmittedImage();
+    await usePetStoryStore.getState().recoverImageOperation(op.id);
+    media.status = 'cancelled'; media.runtime!.stage = 'cancelled';
+    await lastImageReconcile().onSettled();
+    expect(media.status).toBe('cancelled'); expect(media.runtime!.stage).toBe('cancelled');
+    expect(usePetStoryStore.getState().activeImageOperationId).toBeNull(); expect(pauseProduction).toHaveBeenCalledOnce();
+    expect(imageReconciles()).toHaveLength(1); expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it('图片观察回调迟到遇到新run时不暂停或收取新运行，释放后仍可显式检查', async (): Promise<void> => {
+    const { media, op } = await stoppedSubmittedImage();
+    await usePetStoryStore.getState().recoverImageOperation(op.id);
+    const first = lastImageReconcile();
+    media.runtime!.runId = 'TEST-new-image-run'; project.production!.steps[0].runId = media.runtime!.runId;
+    media.status = 'paused'; usePetStoryStore.setState({ project });
+    await first.onSettled();
+    expect(pauseProduction).not.toHaveBeenCalled(); expect(media.status).toBe('paused'); expect(operation(op.id).outputAssetId).toBeUndefined();
+    await usePetStoryStore.getState().recoverImageOperation(op.id);
+    expect(imageReconciles()).toHaveLength(2); expect(lastImageReconcile().runId).toBe('TEST-new-image-run'); expect(start).toHaveBeenCalledTimes(1);
   });
 
   it.each(['run', 'account', 'project', 'step'] as const)('原图片%s关联不符时不读取当前页、不标记观察且不重发', async (mismatch: string): Promise<void> => {

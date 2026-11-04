@@ -2,7 +2,7 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PetStoryAsset, PetStoryPlan, PetStoryProject } from '@doubao-studio/contracts';
+import type { PetStoryAsset, PetStoryPlan, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { PetStoryMaterials } from '../../src/components/PetStoryMaterials';
 import { usePetStoryStore } from '../../src/store/usePetStoryStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
@@ -105,6 +105,25 @@ describe('基础素材只操作图片', (): void => {
     await waitFor((): void => expect(within(card()).getByText('TEST 新上传文件不可读取')).toBeDefined());
     expect(within(card()).queryByRole('button', { name: '继续本次任务' })).toBeNull(); expect(recover).not.toHaveBeenCalled();
     expect(within(card()).getByRole('button', { name: '上传替代图片' }).hasAttribute('disabled')).toBe(false);
+  });
+  it('缺定位旧图片在素材卡明确引导打开原账号，保留继续和用户确认重发入口', async (): Promise<void> => {
+    const task: Task = { id: 'TEST-original-image', projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'image', status: 'paused', prompt: 'TEST 原图片', result: null,
+      outputs: [], createdAt: now, updatedAt: now, runtime: { runId: 'TEST-original-run', attempt: 1, stage: 'paused', message: 'TEST 旧超时错误', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
+        input: { mode: 'image', prompt: 'TEST 原图片', attachments: [] } } };
+    project.imageOperations = [{ id: 'TEST-missing-conversation', requestId: 'TEST-original-request', taskId: task.id, target: { materialId }, mode: 'generate', stage: 'failed', error: 'TEST 旧超时错误', basisHash: 'TEST', createdAt: now }];
+    const entry = { state: 'unknown' as const, reason: '' };
+    project.production = { state: 'paused', imageOperationId: project.imageOperations[0].id, approvedAt: now, planHash: 'TEST', capability: { accountId: project.accountId, image: entry,
+      modes: { first_frame: entry, first_last_frame: entry, reference: entry }, durations: [] }, fallbacks: {}, shots: {}, message: 'TEST 待核对',
+      steps: [{ id: 'TEST-step', taskId: task.id, runId: task.runtime!.runId, kind: 'prop', materialId, inputHash: 'TEST', attachmentAssetIds: [], status: 'bound' }] };
+    const open = vi.fn(async (): Promise<void> => undefined); const recover = vi.fn(async (): Promise<void> => undefined); const resubmit = vi.fn(async (): Promise<void> => undefined);
+    useTaskStore.setState({ tasks: [task] }); usePetStoryStore.setState({ project, openImageConversation: open, recoverImageOperation: recover, resubmitProduction: resubmit });
+    render(<LiveMaterials />);
+    expect(within(card()).getByText('原会话未定位，请在原账号历史中打开这次图片对话后继续。')).toBeDefined();
+    expect(within(card()).queryByText('TEST 旧超时错误')).toBeNull();
+    fireEvent.click(within(card()).getByRole('button', { name: '打开原账号豆包' })); await waitFor((): void => expect(open).toHaveBeenCalledExactlyOnceWith({ materialId }, undefined));
+    fireEvent.click(within(card()).getByRole('button', { name: '继续本次任务' })); await waitFor((): void => expect(recover).toHaveBeenCalledExactlyOnceWith('TEST-missing-conversation'));
+    expect(within(card()).getByRole('button', { name: '确认重发一次' })).toBeDefined(); expect(resubmit).not.toHaveBeenCalled();
+    expect(within(card()).getByRole('button', { name: '生成图片' }).hasAttribute('disabled')).toBe(true);
   });
   it('切到其他位置后只保留待确认，不自动弹出结果', async (): Promise<void> => {
     let complete: (() => void) | undefined;

@@ -93,7 +93,7 @@ function legacyUnsubmittedPreparationFailure(task: Task, step: PetStoryProductio
 /** 任何提交、观察、回复或产物记录都优先于可恢复错误码，不能用准备阶段重试清掉它们。 */
 function hasSubmissionEvidence(task: Task): boolean {
   const runtime = task.runtime;
-  return !!(runtime?.submittedAt || runtime?.acceptanceObservation || runtime?.chatResponse || runtime?.chatReadback
+  return !!(runtime?.submittedAt || runtime?.acceptanceObservation || runtime?.mediaSubmissionReceipt || runtime?.chatResponse || runtime?.chatReadback
     || runtime?.chatReadbackReview || runtime?.manualObservation || task.outputs.length || task.artifacts?.length);
 }
 /** 任何活跃租约、人工会话或重发关联都阻止清理原运行。 */
@@ -468,19 +468,7 @@ export class PetStoryProductionService {
       && task.resubmissionOf?.taskId === request.taskId && task.resubmissionOf.runId === request.runId && task.resubmissionOf.submittedAt === request.submittedAt));
     if (linked?.taskId) {
       const task = this.tasks.resubmitUncertain(request);
-      if (task.id !== linked.taskId) throw new Error('重发关联已变化，请刷新原制作任务');
-      if (task.status === 'queued' && task.executionIntent === 'hold' && !task.runtime && linked.status === 'bound' && !linked.runId) {
-        capability = productionCapability(p, capability);
-        this.originalTask(p, linked);
-        this.validateRequestContext(p, capability, productionResumeTarget(production, linked));
-        await this.validateStepInputs(p, linked, task);
-        if (production.state === 'complete') throw new Error('原制作已结束，请核对关联任务');
-        production.capability = capability; production.state = 'running'; production.message = '继续本次已确认的重发请求；保留原任务';
-        const saved = await this.projects.write(p);
-        this.authorized.add(id);
-        return { success: true, project: saved, taskId: task.id, action: 'start' };
-      }
-      return { success: true, project: p, taskId: task.id, action: 'wait' };
+      return this.resumeLinkedResubmission(p, production, linked, task, capability);
     }
     if (p.revision !== revision) throw new Error('项目版本已变化，请刷新后确认本次重发');
     if (production.state !== 'paused') throw new Error('请先暂停原制作，再确认重发');
@@ -505,9 +493,41 @@ export class PetStoryProductionService {
     pending.resubmissionHistory = [...(pending.resubmissionHistory || []), history];
     pending.taskId = adopted.id; pending.runId = undefined; pending.status = 'bound'; pending.error = undefined;
     production.capability = capability; production.state = 'running'; production.message = '已确认重发一次；保留原任务，新请求完成后继续制作';
+    this.bindResubmittedImageOperation(p, pending, adopted);
     const saved = await this.projects.write(p);
     this.authorized.add(id);
     return { success: true, project: saved, taskId: adopted.id, action: 'start' };
+  }
+  /** 重复授权只接续原唯一关联任务；同步图片操作后沿原写盘和执行授权返回。 */
+  private async resumeLinkedResubmission(p: PetStoryProject, production: NonNullable<PetStoryProject['production']>, linked: PetStoryProductionStep,
+    task: Task, capability?: PetStoryCapability): Promise<PetStoryProductionResult> {
+    if (task.id !== linked.taskId) throw new Error('重发关联已变化，请刷新原制作任务');
+    if (task.status === 'queued' && task.executionIntent === 'hold' && !task.runtime && linked.status === 'bound' && !linked.runId) {
+      capability = productionCapability(p, capability);
+      this.originalTask(p, linked);
+      this.validateRequestContext(p, capability, productionResumeTarget(production, linked));
+      await this.validateStepInputs(p, linked, task);
+      if (production.state === 'complete') throw new Error('原制作已结束，请核对关联任务');
+      production.capability = capability; production.state = 'running'; production.message = '继续本次已确认的重发请求；保留原任务';
+      this.bindResubmittedImageOperation(p, linked, task);
+      const saved = await this.projects.write(p);
+      this.authorized.add(p.id);
+      return { success: true, project: saved, taskId: task.id, action: 'start' };
+    }
+    const imageChanged = this.bindResubmittedImageOperation(p, linked, task);
+    return { success: true, project: imageChanged ? await this.projects.write(p) : p, taskId: task.id, action: 'wait' };
+  }
+  /** 图片重发仍属于原操作；旧任务保存在步骤历史，当前卡片始终跟随唯一关联的新任务。 */
+  private bindResubmittedImageOperation(p: PetStoryProject, step: PetStoryProductionStep, task: Task): boolean {
+    const operation = p.imageOperations?.find((item): boolean => item.id === p.production?.imageOperationId);
+    if (!operation || task.mode !== 'image') return false;
+    const complete = step.status === 'complete' && p.production?.state === 'complete' && !!step.assetId
+      && p.assets.some((asset): boolean => asset.id === step.assetId && !!asset.validation?.decoded);
+    const stage = complete ? 'complete' : task.status === 'done' ? 'saving' : 'generating';
+    const outputAssetId = complete ? step.assetId : undefined;
+    if (operation.taskId === task.id && operation.stage === stage && !operation.error && operation.outputAssetId === outputAssetId) return false;
+    operation.taskId = task.id; operation.stage = stage; operation.error = undefined; operation.outputAssetId = outputAssetId;
+    return true;
   }
   private resetPageBindingForRetry(p: PetStoryProject, pending: PetStoryProductionStep): PetStoryCompiledPrompt | undefined {
     if (!pending.pageBindings) return undefined;
@@ -884,7 +904,15 @@ export class PetStoryProductionService {
   }
   private async importMediaArtifact(p: PetStoryProject, step: PetStoryProductionStep, task: Task, artifact: NonNullable<Task['artifacts']>[number]): Promise<PetStoryAsset | undefined> {
     const kind = step.kind === 'video' ? 'video' : 'image';
-      let job = this.tasks.downloads().find((j): boolean => j.taskId === task.id && j.accountId === p.accountId && j.mode === task.mode && j.url === artifact.url && j.status === 'done');
+      let job: DownloadJob | undefined = this.tasks.downloads().filter((j): boolean => j.taskId === task.id && j.accountId === p.accountId && j.mode === task.mode && j.url === artifact.url && j.status === 'done').reverse()[0];
+      if (job?.filePath) {
+        try { await fs.lstat(job.filePath); }
+        catch (error: unknown) {
+          // 本地下载缓存可能被移动／清理；只重下原 artifact，不把缺文件当成平台产物损坏。
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') job = undefined;
+          else throw error;
+        }
+      }
       if (!job) {
         const result = await this.tasks.download({ outputs: [{ taskId: task.id, prompt: task.prompt, outputs: [artifact.url], accountId: p.accountId, mode: task.mode }] });
         if (!result.success || result.failed) throw new Error('下载失败，继续时只重试原产物下载，不重新生成');
@@ -894,6 +922,8 @@ export class PetStoryProductionService {
       let validation;
       try { validation = await validatePetStoryMedia(job.filePath, kind); }
       catch (error: unknown) {
+        // 权限、文件竞态或磁盘错误可沿原下载重试，不能永久排除仍有效的平台产物。
+        if (error && typeof error === 'object' && typeof (error as NodeJS.ErrnoException).code === 'string') throw error;
         step.rejectedArtifactIds = [...(step.rejectedArtifactIds || []), artifact.id];
         step.error = error instanceof Error ? error.message : '产物校验失败';
         return undefined; // 损坏产物不能采用，也不发起新生成。

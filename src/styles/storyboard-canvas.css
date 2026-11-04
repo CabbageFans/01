@@ -230,7 +230,7 @@
 .petstory-plan-preview h3 { font-size:16px; font-weight:600; margin:24px 0 12px; }
 .petstory-plan-preview h4 { font-size:15px; font-weight:600; margin:0 0 12px; }
 .petstory-plan-preview h5 { font-size:14px; font-weight:600; margin:16px 0 10px; }
-.petstory-plan-preview article,.petstory-plan-prompt,.petstory-plan-dialogue { padding:16px; border:1px solid #E3E8EB; border-radius:8px; margin:12px 0; }
+.petstory-plan-preview article,.petstory-plan-dialogue { padding:16px; border:1px solid #E3E8EB; border-radius:8px; margin:12px 0; }
 .petstory-plan-preview dl { margin:0; }
 .petstory-plan-field { display:grid; grid-template-columns:140px minmax(0,1fr); gap:12px; padding:7px 0; }
 .petstory-plan-field dt { color:#697584; font-size:12px; }

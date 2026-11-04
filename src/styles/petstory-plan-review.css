@@ -7,9 +7,12 @@
 .petstory-plan-review ul { padding-left: 20px; font-size: 13px; color: #697584; }
 .petstory-plan-actions { margin: 4px 0 12px; }
 .petstory-plan-actions .ant-btn { height: 36px; }
+.petstory-plan-action-error { margin-bottom: 12px; }
+.petstory-adjustment-note { color: #697584; font-size: 13px; line-height: 1.7; margin: 16px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.petstory-plan-adjustment-status { padding: 16px; margin: 16px 0; border: 1px solid #e3e8eb; border-radius: 8px; }
+.petstory-plan-adjustment-status p { margin: 8px 0 0; color: #697584; line-height: 1.7; }
 .petstory-plan-full { margin-top: 8px; }
-.petstory-plan-full > summary, .petstory-plan-diagnostics > summary { cursor: pointer; padding: 8px 0; font-size: 13px; }
+.petstory-plan-full > summary { cursor: pointer; padding: 8px 0; font-size: 13px; }
 .petstory-plan-full > summary { color: #087f72; }
 .petstory-plan-scroll { max-height: min(560px, 65vh); overflow: auto; overscroll-behavior: contain; padding: 12px; background: #f8fafb; border: 1px solid #e3e8eb; border-radius: 8px; }
-.petstory-plan-diagnostics { border-top: 1px solid #e3e8eb; margin-top: 12px; padding-top: 4px; color: #697584; }
 @media (max-width: 1300px) { .petstory-plan-review { padding: 20px; } }

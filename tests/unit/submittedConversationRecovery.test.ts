@@ -75,8 +75,9 @@ describe('验证码前后保存原已提交会话定位', (): void => {
     const preserveAt = source.indexOf('await preserveSubmittedConversation?.().catch');
     expect(preserveAt).toBeGreaterThan(0);
     expect(source.indexOf('await assertNoHumanVerification(accountId, webview);', preserveAt)).toBeGreaterThan(preserveAt);
-    expect(source).toContain('await preserveSubmittedConversation?.(evidence, observedUrl)');
-    const recovery = source.slice(source.indexOf('if (confirmCurrentSubmission)'), source.indexOf('const originalContextIsCurrent'));
+    expect(source).toContain('await preserveSubmittedConversation?.(evidence, observedUrl, page)');
+    const recoveryStart = source.indexOf('const originalContextIsCurrent');
+    const recovery = source.slice(recoveryStart, source.indexOf('const syncStartedAt', recoveryStart));
     expect(recovery).toContain('getCreationReadbackSnapshot'); expect(recovery).toContain('verifiedSubmissionConversationUrl');
     expect(recovery).not.toMatch(/submitPrompt|injectPrompt|startNewConversation|\.click\(/);
     expect(source).toContain('resumeAfterAccountVerification(accountId, availability.checkedAt)');

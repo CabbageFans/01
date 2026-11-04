@@ -613,7 +613,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
     await expect(service.resume(p.id, capability())).rejects.toThrow('未确认可安全恢复');
     expect(list()).toEqual(before); expect(tasks).toHaveLength(1);
   });
-  it.each(legacyPreparationErrors.flatMap((error) => (['acceptance', 'reply', 'readback', 'review', 'observation', 'outputs', 'artifacts'] as const).map((evidence) => ({ error, evidence }))))('发送前错误 $error.code 遇到 $evidence 证据仍禁止重新发送', async ({ error, evidence }): Promise<void> => {
+  it.each(legacyPreparationErrors.flatMap((error) => (['acceptance', 'media-receipt', 'reply', 'readback', 'review', 'observation', 'outputs', 'artifacts'] as const).map((evidence) => ({ error, evidence }))))('发送前错误 $error.code 遇到 $evidence 证据仍禁止重新发送', async ({ error, evidence }): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
     const now = new Date().toISOString();
     core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { ...error, recoverable: true, detectedAt: now } });
@@ -624,6 +624,8 @@ describe('P4 顺序素材接力与持久化', (): void => {
       evidence: { kind: 'generation_started' }, cursor: { messageCount: 1, pollCount: 0 }, expectedArtifact: { kind: 'image', runId },
       lease: { ownerId: 'TEST', acquiredAt: now, expiresAt: now, lastHeartbeatAt: now }, outcome: 'observing',
     };
+    else if (evidence === 'media-receipt') runtime.mediaSubmissionReceipt = { schemaVersion: 1, source: 'published_message', accountId: p.accountId,
+      runId, submittedAt: now, observedAt: now, conversationUrl: 'https://www.doubao.com/chat/TEST-evidence', userMessageId: 'TEST-user-message' };
     else if (evidence === 'reply') runtime.chatResponse = { text: 'TEST 已收到回复', capturedAt: now };
     else if (evidence === 'readback') runtime.chatReadback = { runId, baselineMessageCount: 1, association: 'full_prompt', observedAt: now };
     else if (evidence === 'review') runtime.chatReadbackReview = { runId, checkedAt: now, reason: 'TEST 需要核对', candidates: [] };

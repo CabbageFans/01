@@ -67,16 +67,20 @@ afterEach((): void => {
 });
 
 describe('正常可见的六阶段与直接剧本入口', (): void => {
-  it.each(['applied', 'invalid'] as const)('完整方案候选为%s时仅合格候选可采用，坏回复仍可在豆包中调整', (status: 'applied' | 'invalid'): void => {
+  it.each(['applied', 'invalid'] as const)('完整方案候选为%s时合格候选直接填写反馈，坏回复保留原会话恢复', (status: 'applied' | 'invalid'): void => {
     p.jobs = [{ id: 'TEST-status-candidate', taskId: 'TEST-status-task', kind: 'analysis', status, resultStatus: 'candidate', requestId: 'TEST-request', inputHash: 'TEST', sourceUrl: '', parsedResult: { plan: storedPlan() } }];
     const adopt = vi.fn(async (): Promise<void> => undefined); const adjust = vi.fn(async (): Promise<void> => undefined);
-    usePetStoryStore.setState({ project: p, adoptPlanCandidate: adopt, openChatAdjustment: adjust });
+    const revise = vi.fn(async (): Promise<string | undefined> => undefined);
+    usePetStoryStore.setState({ project: p, adoptPlanCandidate: adopt, openChatAdjustment: adjust, revisePlan: revise });
     render(<PetStoryRuntime project={p} disabled={false} />);
     if (status === 'applied') {
       const adoptButton = screen.getByRole('button', { name: '确认并采用方案' });
       expect(adoptButton.hasAttribute('disabled')).toBe(false);
-      fireEvent.click(adoptButton); fireEvent.click(screen.getByRole('button', { name: '在豆包中调整' }));
-      expect(adopt).toHaveBeenCalledWith('TEST-status-candidate'); expect(adjust).toHaveBeenCalledWith({ parentJobId: 'TEST-status-candidate' });
+      fireEvent.click(screen.getByRole('button', { name: '在豆包中调整' }));
+      const dialog = screen.getByRole('dialog', { name: '调整方案' });
+      expect(within(dialog).getByRole('textbox', { name: '方案修改要求' })).toBeDefined();
+      expect(adopt).not.toHaveBeenCalled(); expect(adjust).not.toHaveBeenCalled(); expect(revise).not.toHaveBeenCalled();
+      expect(p.plan).toBeUndefined();
     } else {
       expect(screen.queryByRole('button', { name: '确认并采用方案' })).toBeNull();
       const adjustment = screen.getAllByRole('button', { name: '在豆包中调整' })[0];
@@ -315,7 +319,7 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     expect(within(candidateArticle).getAllByRole('button', { name: '确认并采用方案' })).toHaveLength(1);
     expect(within(candidateArticle).getAllByRole('button', { name: '在豆包中调整' })).toHaveLength(1);
     expect(within(candidateArticle).getByText(/个镜头 · .*人物 \/ .*道具/).closest('details')).toBeNull();
-    expect(candidateArticle.querySelector('.petstory-plan-diagnostics')?.hasAttribute('open')).toBe(false);
+    expect(candidateArticle.querySelector('.petstory-plan-diagnostics')).toBeNull();
     fireEvent.click(previewSummary); // 展开完整字段仍只是查看，不触发采用或确认。
     expect(screen.getByRole('button', { name: '确认并采用方案' }).hasAttribute('disabled')).toBe(false);
     expect(adopt).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
@@ -351,8 +355,9 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     const navigation = screen.getByRole('navigation', { name: '短剧制作阶段' }); fireEvent.click(within(navigation).getByRole('button', { name: /输入剧本/ }));
     fireEvent.change(screen.getByRole('textbox', { name: '完整剧本原文' }), { target: { value: 'TEST未保存剧本' } });
     fireEvent.click(within(navigation).getByRole('button', { name: /确认方案/ }));
-    fireEvent.click(screen.getByText('生成记录／诊断详情'));
-    fireEvent.click(within(screen.getByRole('article', { name: '方案审阅' })).getByRole('button', { name: '编辑故事与镜头' }));
+    expect(screen.queryByText('生成记录／诊断详情')).toBeNull();
+    fireEvent.click(screen.getByLabelText('项目更多操作'));
+    fireEvent.click(screen.getByRole('button', { name: '编辑故事与镜头' }));
     fireEvent.change(screen.getByRole('textbox', { name: '原片梗概' }), { target: { value: 'TEST未保存方案' } });
     await waitFor((): void => expect(pendingPetStoryDrafts(p.id)).toEqual(expect.arrayContaining(['原剧本 · 输入剧本', '故事、角色与镜头设定 · 高级编辑'])));
     expect(pendingPetStoryDrafts(`${p.id}-other`)).toEqual([]);

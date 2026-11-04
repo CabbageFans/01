@@ -26,7 +26,7 @@ describe('同轮方案审阅与明确采用', (): void => {
     expect(planDisplayText(value, `${character.id}（主角）→ ${shot.id}`)).toBe(`${character.name}（主角）→ 镜头 ${shot.order}`);
     expect(value).toEqual(before);
   });
-  it('修订成功只显示一个结果，失败父回复及来源都留在折叠诊断中', (): void => {
+  it('修订成功只显示一个结果，不展示诊断入口且保留失败父回复', (): void => {
     const root = job('TEST-parent', { status: 'invalid', error: 'TEST父回复时长缺项', parsedResult: undefined });
     const repair = job('TEST-repair', { kind: 'repair', parentJobId: root.id });
     const p = project([root, repair]); usePetStoryStore.setState({ project: p }); useTaskStore.setState({ tasks: [] });
@@ -40,7 +40,9 @@ describe('同轮方案审阅与明确采用', (): void => {
     const card = screen.getByRole('article', { name: '方案审阅' });
     expect(card.querySelectorAll('.ant-btn-primary')).toHaveLength(1);
     expect(card.querySelector<HTMLDetailsElement>('.petstory-plan-full')?.open).toBe(false);
-    expect(card.querySelector<HTMLDetailsElement>('.petstory-plan-diagnostics')?.open).toBe(false);
+    expect(card.querySelector('.petstory-plan-diagnostics')).toBeNull();
+    expect(screen.queryByText('生成记录／诊断详情')).toBeNull();
+    expect(screen.queryByText('更多操作')).toBeNull();
     expect(selectPlanReview(p).job?.id).toBe(repair.id);
     expect(p.jobs[0].error).toBe('TEST父回复时长缺项');
   });
@@ -67,6 +69,38 @@ describe('同轮方案审阅与明确采用', (): void => {
     expect(adopt).toHaveBeenCalledExactlyOnceWith('TEST-new'); expect(confirm).toHaveBeenCalledOnce();
     expect(screen.queryByRole('button', { name: '确认并采用方案' })).toBeNull();
     expect(usePetStoryStore.getState().project?.assets).toEqual(before.assets);
+  });
+  it.each([
+    '这个账号还有未完成或待核对的任务，请先处理原任务再自由调整',
+    '这项内容还没有可定位的豆包会话，请先检查原会话，再打开调整',
+  ])('历史错误不阻止未采用候选直接填写反馈：%s', async (error: string): Promise<void> => {
+    const p = project([job('TEST-adjustment')]);
+    const open = vi.fn(async (): Promise<void> => undefined);
+    const revise = vi.fn(async (): Promise<string | undefined> => undefined);
+    const adopt = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ project: p, error, busy: false, openChatAdjustment: open, revisePlan: revise, adoptPlanCandidate: adopt });
+    render(<PetStoryPlanReview project={p} disabled={false} />);
+    const card = screen.getByRole('article', { name: '方案审阅' });
+    fireEvent.click(within(card).getByRole('button', { name: '在豆包中调整' }));
+    const dialog = await screen.findByRole('dialog', { name: '调整方案' });
+    expect(within(dialog).getByRole('textbox', { name: '方案修改要求' })).toBeDefined();
+    expect(within(dialog).queryByRole('alert')).toBeNull();
+    expect(dialog.textContent).not.toContain('请先采用');
+    expect(open).not.toHaveBeenCalled(); expect(revise).not.toHaveBeenCalled(); expect(adopt).not.toHaveBeenCalled();
+    expect(usePetStoryStore.getState().project?.plan).toBeUndefined();
+  });
+  it('打开反馈弹窗不发送或占用任务，也不自动采用方案', async (): Promise<void> => {
+    const p = project([job('TEST-opening')]);
+    const open = vi.fn(async (): Promise<void> => undefined); const revise = vi.fn(async (): Promise<string | undefined> => undefined);
+    const adopt = vi.fn(async (): Promise<void> => undefined); const confirm = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ project: p, error: '', busy: false, openChatAdjustment: open, revisePlan: revise, adoptPlanCandidate: adopt, confirmStory: confirm });
+    useTaskStore.setState({ tasks: [], activeTaskId: null });
+    render(<PetStoryPlanReview project={p} disabled={false} />);
+    fireEvent.click(screen.getByRole('button', { name: '在豆包中调整' }));
+    const dialog = await screen.findByRole('dialog', { name: '调整方案' });
+    expect(within(dialog).getByRole('button', { name: '开始调整' }).hasAttribute('disabled')).toBe(true);
+    expect(usePetStoryStore.getState().busy).toBe(false); expect(useTaskStore.getState().tasks).toEqual([]);
+    expect(open).not.toHaveBeenCalled(); expect(revise).not.toHaveBeenCalled(); expect(adopt).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
   });
   it('新请求正在处理时不允许采用旧候选，过期故事回复只保留历史', async (): Promise<void> => {
     const old = job('TEST-old'); const next = job('TEST-pending', { status: 'bound', parsedResult: undefined });

@@ -2,10 +2,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Button, Checkbox, Image, Input, Modal, Space, Tag } from 'antd';
 import { PictureOutlined, UploadOutlined } from '@ant-design/icons';
 import type { PetStoryAsset, PetStoryImageTarget, PetStoryProject } from '@doubao-studio/contracts';
-import { usePetStoryStore } from '../store/usePetStoryStore';
+import { petStoryResubmissionTask, usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { imageConversationTask, petStoryImageProgress } from '../utils/petstoryImageFlow';
 import { imageBelongsToTarget, pendingImageCandidates } from '../utils/petstoryImageCandidates';
+import { resolveTaskConversationTarget } from '../utils/taskConversationLocator';
+import { PetStoryResubmissionActions } from './PetStoryTaskRecovery';
 
 export { imageBelongsToTarget } from '../utils/petstoryImageCandidates';
 interface ReviewImageProps { projectId: string; asset: PetStoryAsset; name: string; onReadable?: (value: boolean) => void }
@@ -48,16 +50,16 @@ const ImageOperationStatus: React.FC<{ progress: ImageProgress; error: string; d
 };
 interface ImageActionsProps {
   current?: PetStoryAsset; currentNeedsReview: boolean; candidateCount: number; disabled: boolean; busy: boolean;
-  generationDisabled?: boolean; show: (assetId?: string) => void; upload: () => Promise<void>; generate?: () => Promise<void>; openConversation?: () => void;
+  generationDisabled?: boolean; show: (assetId?: string) => void; upload: () => Promise<void>; generate?: () => Promise<void>; openConversation?: () => void; conversationLabel?: string;
 }
-const ImageActions: React.FC<ImageActionsProps> = ({ current, currentNeedsReview, candidateCount, disabled, busy, generationDisabled, show, upload, generate, openConversation }): React.ReactElement => <>
+const ImageActions: React.FC<ImageActionsProps> = ({ current, currentNeedsReview, candidateCount, disabled, busy, generationDisabled, show, upload, generate, openConversation, conversationLabel }): React.ReactElement => <>
   {candidateCount > 0 && <div className="petstory-candidate-banner"><span>图片待确认{candidateCount > 1 ? ` · ${candidateCount} 张` : ''}</span></div>}
   <div className="canvas-media-actions">
     {current || candidateCount ? <Button aria-label={currentNeedsReview && !candidateCount ? '查看并复核' : '查看图片'} type="primary" size="small" onClick={(): void => show()}>{currentNeedsReview && !candidateCount ? '查看并复核' : '查看图片'}</Button>
       : generate && <Button aria-label="生成图片" size="small" type="primary" loading={busy} disabled={disabled || generationDisabled || busy} onClick={(): void => { void generate(); }}>生成图片</Button>}
     <Button size="small" aria-label={current || candidateCount ? '上传替代图片' : '上传图片'} icon={<UploadOutlined />} disabled={disabled || busy} onClick={(): void => { void upload(); }}>{current || candidateCount ? '上传替代图片' : '上传图片'}</Button>
   </div>
-  {openConversation && <Button className="petstory-image-conversation" type="link" size="small" onClick={openConversation}>查看豆包对话</Button>}
+  {openConversation && <Button className="petstory-image-conversation" type="link" size="small" onClick={openConversation}>{conversationLabel || '查看豆包对话'}</Button>}
 </>;
 
 interface ImagePreviewBodyProps {
@@ -116,7 +118,7 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
   const [feedbackBaseId, setFeedbackBaseId] = useState<string>(); const [feedback, setFeedback] = useState('');
   const [feedbackError, setFeedbackError] = useState(''); const [submitting, setSubmitting] = useState(false); const [starting, setStarting] = useState(false);
   const root = useRef<HTMLDivElement>(null); const previewBody = useRef<HTMLDivElement>(null); const awaitingResult = useRef<Set<string> | null>(null);
-  const state = usePetStoryStore(); const tasks = useTaskStore((store) => store.tasks);
+  const state = usePetStoryStore(); const taskState = useTaskStore(); const tasks = taskState.tasks;
   const progress = petStoryImageProgress(project, target, tasks, state.activeImageOperationId);
   const images = project.assets.filter((asset): boolean => imageBelongsToTarget(project, asset, target));
   const current = images.find((asset): boolean => asset.id === currentAssetId);
@@ -125,9 +127,11 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
   const feedbackBase = images.find((asset): boolean => asset.id === feedbackBaseId);
   const { reviewingCurrent, needsReview, confirmingCurrent } = currentReviewState(target, current, selected, currentNeedsReview);
   const busy = progress.busy || !!generating || starting || submitting;
-  const generationBlocked = !!generationDisabled || progress.resumable;
+  const generationBlocked = !!generationDisabled || progress.resumable || progress.conversationMissing;
   const task = imageConversationTask(project, target, tasks);
   const selectedTask = selected ? imageConversationTask(project, target, tasks, selected.id) : undefined;
+  const resubmissionTask = petStoryResubmissionTask(project, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]);
+  const currentResubmission = resubmissionTask?.id === progress.task?.id ? resubmissionTask : undefined;
   const visibleError = imageError(error, externalError, progress.error);
   const show = (assetId?: string): void => {
     const nextId = assetId || candidates.at(-1)?.id || current?.id || images.at(-1)?.id;
@@ -202,8 +206,9 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
     {current ? <button type="button" className="petstory-current-image" onClick={(): void => show(current.id)} aria-label={`查看${title}已采用图片`}><ReviewImage projectId={project.id} asset={current} name={`${title} · 当前采用`} /></button>
       : <div className="petstory-image-empty"><PictureOutlined /><span>尚未采用图片</span></div>}
     {current && needsReview && <p className="canvas-error">参考内容已更新，请复核这张图片。</p>}
-    <ImageActions current={current} currentNeedsReview={needsReview} candidateCount={candidates.length} disabled={disabled} busy={busy} generationDisabled={generationBlocked} show={show} upload={upload} generate={onGenerate ? generate : undefined} openConversation={task ? (): void => openConversation() : undefined} />
+    <ImageActions current={current} currentNeedsReview={needsReview} candidateCount={candidates.length} disabled={disabled} busy={busy} generationDisabled={generationBlocked} show={show} upload={upload} generate={onGenerate ? generate : undefined} openConversation={task ? (): void => openConversation() : undefined} conversationLabel={task && !resolveTaskConversationTarget(task).ok ? '打开原账号豆包' : undefined} />
     {!open && !feedbackBase && <ImageOperationStatus progress={progress} error={visibleError} preparing={starting} disabled={disabled || busy} retry={retry} />}
+    {!feedbackBase && currentResubmission && <PetStoryResubmissionActions projectId={project.id} task={currentResubmission} disabled={disabled || busy} />}
     {open && <Modal className="petstory-image-modal" title={`${title} · 选择图片`} open width={1000} onCancel={(): void => setOpen(false)} footer={<PreviewActions reviewingCurrent={reviewingCurrent} confirmingCurrent={confirmingCurrent} hasCurrent={!!current} hasSelected={!!selected} locked={disabled || busy} readable={readable} saving={state.busy} generationDisabled={generationBlocked} generating={busy} regenerate={onGenerate ? generate : undefined} close={(): void => setOpen(false)} modify={beginFeedback} adopt={adopt} />}>
       <div ref={previewBody}>
       <ImageOperationStatus progress={progress} error={visibleError} preparing={starting} disabled={disabled || busy} retry={retry} />

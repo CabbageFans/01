@@ -8,6 +8,7 @@ function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolea
   moreDelayMs?: number;
   imageMissing?: boolean;
   selectedImageDelayMs?: number;
+  ignoreImageSelection?: boolean;
 } = {}): {
   view: { executeJavaScript: (code: string) => Promise<unknown>; getURL: () => string; loadURL: ReturnType<typeof vi.fn> };
   actions: string[];
@@ -22,7 +23,8 @@ function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolea
   class Element {
     parentElement: Element | null = null;
     visibility = 'visible';
-    constructor(readonly tagName: string, readonly innerText: string, readonly owned = true) {}
+    constructor(readonly tagName: string, readonly label: string, readonly owned = true) {}
+    get innerText(): string { return this === skill ? state === 'video' ? '视频生成' : '图像生成' : this.label; }
     get childNodes(): Array<{ nodeType: number; textContent: string }> { return [{ nodeType: 3, textContent: this.innerText }]; }
     get offsetParent(): object | null { return this.shown() ? {} : null; }
     shown(): boolean {
@@ -35,6 +37,8 @@ function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolea
     }
     getAttribute(key: string): string | null { return key === 'role' ? 'button' : null; }
     closest(): null { return null; }
+    matches(): boolean { return false; }
+    querySelector(): null { return null; }
     contains(node: Element): boolean { return this === root && node.owned; }
     querySelectorAll(selector: string): Element[] {
       synchronizeState();
@@ -49,6 +53,7 @@ function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolea
       if (this === more) menu = true;
       if (this === skill) { state = 'plain'; root = new Element('DIV', 'TEST remounted composer'); }
       if (this === video) state = 'video';
+      if (this === image && !options.ignoreImageSelection) state = 'image-skill';
       return true;
     }
   }
@@ -72,6 +77,8 @@ function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolea
     },
     querySelectorAll: (selector: string): object[] => {
       synchronizeState();
+      if (selector === '[data-testid="guidance-input-surface"],.guidance-input-surface') return [root];
+      if (selector === '#input-engine-container') return [];
       if (selector.includes('video-model') || selector.includes('data-creation-params-panel-id')) return state === 'video' || hiddenMeasurement ? [model] : [];
       return state === 'image-skill' || state === 'video' ? [sidebarImage, sidebarVideo, skill] : [sidebarImage, sidebarVideo, more, image, video].filter((n): boolean => n.shown());
     },
@@ -151,6 +158,16 @@ describe('P4 narrow composer mode entry', (): void => {
       await vi.advanceTimersByTimeAsync(10_500);
       expect(await pending).toBe(false);
       expect(test.actions).toEqual(['更多']);
+      expect(test.view.loadURL).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+  it('点击图像入口但技能未真实选中时拒绝，不把单次点击视作成功', async (): Promise<void> => {
+    vi.useFakeTimers();
+    try {
+      const test = fixture('plain', false, false, { ignoreImageSelection: true });
+      const pending = clickAITab(test.view, 'image');
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await pending).toBe(false); expect(test.actions).toEqual(['图像生成']);
       expect(test.view.loadURL).not.toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
   });

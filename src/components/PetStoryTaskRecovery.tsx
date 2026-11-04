@@ -30,11 +30,12 @@ function hasCutBindingIssue(job: PetStoryChatJob): boolean {
 function isPromptTarget(job: PetStoryChatJob): boolean {
   return job.kind !== 'review' && job.originKind !== 'review' && (!!job.materialId || !!job.shotId && !!job.promptKind);
 }
+function isBackgroundCreativeJob(job: PetStoryChatJob): boolean { return isPromptTarget(job) || !!job.planFeedback; }
 /** 只把本目标明确可修订的正文／返回契约问题投影为后台工作，不猜测归属或事实异常。 */
 export function isPetStoryAutomaticPromptFailure(job: PetStoryChatJob): boolean {
   const targetId = job.materialId || (job.shotId && job.promptKind ? `${job.shotId}:${job.promptKind}` : undefined);
-  return isPromptTarget(job) && !!job.rawText && !!job.requestId && !!job.validationDetails?.length
-    && job.validationDetails.every((issue): boolean => issue.repairable && ['prompt_content', 'content_contract'].includes(issue.code) && (!issue.targetId || issue.targetId === targetId));
+  return isBackgroundCreativeJob(job) && !!job.rawText && !!job.requestId && !!job.validationDetails?.length
+    && job.validationDetails.every((issue): boolean => issue.repairable && (!!job.planFeedback || ['prompt_content', 'content_contract'].includes(issue.code) && (!issue.targetId || issue.targetId === targetId)));
 }
 
 interface PetStoryJobDisplayStatus { title: string; instruction: string }
@@ -43,6 +44,7 @@ function invalidJobStatus(job: PetStoryChatJob, task: Task | undefined, repairPr
   if (job.resultStatus === 'stale') return { title: '历史回复待核对', instruction: job.staleReason || '当前依据已变化，这条回复仅作历史记录；请查看对应对象的当前内容和制作条件。' };
   if (isPetStoryAutomaticPromptFailure(job) || repairPreparing) {
     if (task?.status === 'waiting_verification' || task?.errorInfo?.code === 'authentication_unconfirmed') return { title: '需要登录或验证', instruction: '请先在原执行账号完成豆包登录或验证，再继续原任务。' };
+    if (job.planFeedback) return { title: '正在整理新方案', instruction: '工具正在后台检查并整理结果，完成后会显示完整的新方案。' };
     return repairPreparing ? { title: '正在后台修订', instruction: '正在后台修订并校验，校验通过后提供完整候选供确认。' }
       : { title: '提示词待后台修订', instruction: '提示词尚未通过校验，等待后台修订；通过后提供完整候选供确认。' };
   }
@@ -83,7 +85,7 @@ export function petStoryJobStatus(job: PetStoryChatJob, task?: Task, repairPrepa
   }
   if (!task) return { title: '原任务记录待载入', instruction: '先刷新任务记录，再核对原请求。此处不会新建或重发任务。' };
   if (['executing', 'generating', 'manual_submission_observing'].includes(task.status)) return job.kind === 'repair' ? { title: '正在修订', instruction: repairAction } : { title: '正在处理', instruction: '正在准备这次豆包请求，请等待页面反馈。' };
-  if (job.kind === 'repair' && isPromptTarget(job) && task.status === 'queued') return { title: '后台修订待启动', instruction: '修订任务已排队，等待后台调度后继续校验。' };
+  if (job.kind === 'repair' && isBackgroundCreativeJob(job) && task.status === 'queued') return { title: '后台修订待启动', instruction: '修订任务已排队，等待后台调度后继续校验。' };
   return { title: '原任务尚未发送', instruction: '先处理豆包登录、验证或页面阻断，再从这里继续原任务；它会复用原请求。' };
 }
 
@@ -108,7 +110,7 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
   const canReconcile = job.status === 'bound' && !!task?.runtime?.submittedAt && ['fail', 'paused', 'cancelled', 'waiting_verification'].includes(task.status);
   const conversation = resolveTaskConversationTarget(task);
   const localFormatFix = hasCutBindingIssue(job);
-  const backgroundRepair = isPromptTarget(job) || state.promptRepairJobIds.includes(job.id);
+  const backgroundRepair = isBackgroundCreativeJob(job) || state.promptRepairJobIds.includes(job.id);
   const canRepair = !backgroundRepair && !localFormatFix && !job.endedWaitingAt && job.resultStatus !== 'stale' && job.status === 'invalid' && !!job.requestId && !project.jobs.some((item): boolean => item.kind === 'repair' && item.parentJobId === job.id);
   const canAdjust = !backgroundRepair && job.status === 'invalid' && !project.jobs.some((item): boolean => item.parentJobId === job.id && item.kind === 'repair')
     && (project.chatAdjustment?.status !== 'active' || project.chatAdjustment.repairJobId === job.id);

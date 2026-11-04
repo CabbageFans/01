@@ -24,6 +24,14 @@ const task = (runtimeUrl?: string, artifacts: Task['artifacts'] = [], bindingUrl
   } as Task['runtime'],
   artifacts,
 });
+function taskWithReceipt(runtimeUrl?: string, bindingUrl?: string): ReturnType<typeof task> & Partial<Pick<Task, 'assignedAccountId' | 'mode'>> {
+  const value = { ...task(runtimeUrl, [], bindingUrl), assignedAccountId: 'account-1', mode: 'image' as const };
+  value.runtime!.submittedAt = '2026-11-04T10:00:00.000Z';
+  value.runtime!.input = { mode: 'image', prompt: 'TEST 原请求', attachments: [] };
+  value.runtime!.mediaSubmissionReceipt = { schemaVersion: 1, source: 'published_message', runId: 'run-1', accountId: 'account-1',
+    submittedAt: value.runtime!.submittedAt, observedAt: '2026-11-04T10:00:02.000Z', conversationUrl: 'https://www.doubao.com/chat/receipt-original', userMessageId: 'TEST-server-user' };
+  return value;
+}
 
 describe('任务原会话定位', () => {
   it.each([
@@ -58,6 +66,31 @@ describe('任务原会话定位', () => {
   it('优先使用 runtime 的具体会话', () => {
     expect(resolveTaskConversationTarget(task('https://www.doubao.com/chat/runtime-1')))
       .toMatchObject({ ok: true, source: 'runtime', conversationId: 'runtime-1' });
+  });
+  it.each([undefined, 'https://www.doubao.com/chat/'])('runtime具体URL缺失%s时消费当前run及submitted一致的耐久媒体收据', (url?: string): void => {
+    const value = taskWithReceipt(url);
+    expect(resolveTaskConversationTarget(value)).toEqual({ ok: true, source: 'receipt', conversationId: 'receipt-original', url: 'https://www.doubao.com/chat/receipt-original' });
+    expect(isTaskConversationMissing(value)).toBe(false);
+  });
+  it('runtime与媒体收据一致时仍优先runtime，缺runtime但acceptance一致时可用receipt', (): void => {
+    expect(resolveTaskConversationTarget(taskWithReceipt('https://www.doubao.com/chat/receipt-original'))).toMatchObject({ ok: true, source: 'runtime' });
+    expect(resolveTaskConversationTarget(taskWithReceipt(undefined, 'https://www.doubao.com/chat/receipt-original'))).toMatchObject({ ok: true, source: 'receipt' });
+  });
+  it.each(['run', 'submitted', 'account', 'runtime-url', 'acceptance-url', 'artifact-url', 'invalid-url', 'missing-id', 'local-id', 'mode', 'observed-before-submit'] as const)('媒体收据%s冲突不能降级为缺失或绑定当前页面', (condition): void => {
+    const value = taskWithReceipt(); const receipt = value.runtime!.mediaSubmissionReceipt!;
+    if (condition === 'run') receipt.runId = 'run-old';
+    if (condition === 'submitted') receipt.submittedAt = '2026-11-04T09:59:00.000Z';
+    if (condition === 'account') value.assignedAccountId = 'TEST-other-account';
+    if (condition === 'runtime-url') value.runtime!.conversationUrl = 'https://www.doubao.com/chat/other';
+    if (condition === 'acceptance-url') value.runtime!.acceptanceObservation = task(undefined, [], 'https://www.doubao.com/chat/other').runtime!.acceptanceObservation;
+    if (condition === 'artifact-url') value.artifacts = [{ id: 'TEST-artifact', kind: 'image', source: 'page', url: 'https://TEST.invalid/image.png', runId: 'run-1', conversationUrl: 'https://www.doubao.com/chat/other', discoveredAt: receipt.observedAt }];
+    if (condition === 'invalid-url') receipt.conversationUrl = 'https://www.doubao.com/chat/local_TEST-temporary';
+    if (condition === 'missing-id') receipt.userMessageId = undefined;
+    if (condition === 'local-id') receipt.userMessageId = 'local_TEST-pending-message';
+    if (condition === 'mode') value.mode = 'chat';
+    if (condition === 'observed-before-submit') receipt.observedAt = '2026-11-04T09:59:00.000Z';
+    expect(resolveTaskConversationTarget(value)).toEqual({ ok: false, reason: 'CONVERSATION_BINDING_CONFLICT' });
+    expect(isTaskConversationMissing(value)).toBe(false);
   });
   it('根页属于缺失定位，仅具体会话可直接恢复，冲突不被降级成缺失', (): void => {
     expect(isTaskConversationMissing(task('https://www.doubao.com/chat/'))).toBe(true);

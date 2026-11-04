@@ -1,0 +1,59 @@
+- complementary "主导航":
+  - img "video-camera"
+  - strong: 短剧工作室
+  - text: STORY STUDIO
+  - navigation:
+    - button "工作台总览":
+      - img "appstore"
+      - text: 工作台总览
+    - button "短剧创作":
+      - img "edit"
+      - text: 短剧创作
+    - button "任务中心":
+      - img "unordered-list"
+      - text: 任务中心
+    - button "素材与下载":
+      - img "folder-open"
+      - text: 素材与下载
+    - button "账号与浏览器":
+      - img "team"
+      - text: 账号与浏览器
+    - button "设置与诊断":
+      - img "setting"
+      - text: 设置与诊断
+  - text: 版本 2.3.8
+  - button "折叠导航":
+    - img "menu-fold"
+- banner:
+  - strong: 创作工作台
+  - text: / 短剧创作 尚未选择账号
+  - button "message 豆包 Chat":
+    - img "message"
+    - text: 豆包 Chat
+- main:
+  - region "短剧创作":
+    - heading "sample-project" [level=2]
+    - paragraph: 原执行账号缺失 · 样板项目（隔离取证）
+    - text: 已保存
+    - group: 更多
+    - navigation "短剧制作阶段":
+      - button "1输入剧本"
+      - button "2确认方案"
+      - button "3准备基础素材"
+      - button "4制作关键帧"
+      - button "5制作镜头视频"
+      - button "6查看成果"
+    - strong: 当前：确认方案
+    - paragraph: 当前采用方案已确认为制作依据，可继续准备基础素材。
+    - text: 已确认基础图 7/7 · 正文匹配关键帧 9/12 · 正文匹配视频 4/6
+    - article "方案审阅":
+      - heading "方案已采用" [level=3]
+      - text: 已采用
+      - paragraph: 6 个镜头 · 3 人物 / 3 道具 / 1 场景 · 共 35 秒
+      - paragraph: 原剧本角色为骑车小伙、黑衣男子、马尾女子；项目内置演员噜噜、噜妹为本项目可用制作角色，本次映射方案：骑车小伙→噜噜，黑衣男子→噜妹，马尾女子为新增候选配角水豚角色，沿用统一黏土毛绒3D卡通造型；全部原台词、事件顺序、结局保留不变，仅补充机位、视线、持物、站位等表演与镜头信息，不修改剧情因果。前置动作如路面雨后积水、小伙骑车前行属于剧本给定初始状态，不作为推断…
+      - button "准备基础素材"
+      - button "在豆包中调整"
+      - group: 查看完整方案
+      - group: 生成记录／诊断详情
+    - group: 更多操作
+    - group: 其他候选与内容问题 · 30 次

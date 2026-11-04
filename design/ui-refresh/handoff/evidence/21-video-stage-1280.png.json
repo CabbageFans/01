@@ -1,0 +1,22 @@
+{
+  "file": "21-video-stage-1280.png",
+  "capturedAt": "2026-11-02T12:34:34.738Z",
+  "metrics": {
+    "width": 1280,
+    "height": 800,
+    "dpr": 2,
+    "canvasTransform": "translate(-261.836px, -2430.39px) scale(0.752199)",
+    "canvasBounds": {
+      "x": 193,
+      "y": 160,
+      "width": 1074,
+      "height": 627,
+      "top": 160,
+      "right": 1267,
+      "bottom": 787,
+      "left": 193
+    }
+  },
+  "headings": [],
+  "dialogs": 0
+}

@@ -135,12 +135,32 @@ export function collectPetStoryPlanIssues(value: unknown): PetStoryValidationIss
   return issues;
 }
 
+/** 总时长不变时，修正过短／过长分镜会连带调整原本合法镜头的分配；只放行数值和对应节奏字段。 */
+function durationReallocationPaths(original: Record<string, unknown>, revisedPlan: PetStoryPlan, issues: PetStoryValidationIssue[], enabled: boolean): Set<string> {
+  const paths = new Set<string>();
+  if (!enabled || !Array.isArray(original.shots) || original.shots.length !== revisedPlan.shots.length) return paths;
+  const shots: unknown[] = original.shots;
+  const timed = shots.map((value: unknown): Record<string, unknown> | undefined => object(value));
+  if (timed.some((shot: Record<string, unknown> | undefined, index: number): boolean => !shot || shot.id !== revisedPlan.shots[index].id || shot.order !== revisedPlan.shots[index].order
+    || typeof shot.durationSeconds !== 'number' || !Number.isFinite(shot.durationSeconds) || shot.durationSeconds <= 0 || !validPetStoryDuration(revisedPlan.shots[index].durationSeconds))) return paths;
+  if (!issues.some((issue: PetStoryValidationIssue): boolean => issue.code === 'duration' && issue.repairable && timed.some((shot: Record<string, unknown> | undefined, index: number): boolean => issue.path === `$.shots[${index}].durationSeconds` && !validPetStoryDuration(shot?.durationSeconds)))) return paths;
+  const originalTotal = timed.reduce((sum: number, shot: Record<string, unknown> | undefined): number => typeof shot?.durationSeconds === 'number' ? sum + shot.durationSeconds : Number.NaN, 0);
+  const revisedTotal = revisedPlan.shots.reduce((sum: number, shot: PetStoryPlan['shots'][number]): number => sum + shot.durationSeconds, 0);
+  if (!Number.isFinite(originalTotal) || Math.abs(originalTotal - revisedTotal) > 0.000001) return paths;
+  timed.forEach((shot: Record<string, unknown> | undefined, index: number): void => {
+    paths.add(`$.shots[${index}].durationSeconds`);
+    if (shot?.durationSeconds !== revisedPlan.shots[index].durationSeconds) paths.add(`$.shots[${index}].timing`);
+  });
+  return paths;
+}
+
 /** 对比模型原文而非代码补稿；仅放行明确问题字段以及时长修订必要的节奏说明。 */
-export function planRepairPreservationIssues(originalReply: unknown, revisedPlan: PetStoryPlan, issues: PetStoryValidationIssue[]): string[] {
+export function planRepairPreservationIssues(originalReply: unknown, revisedPlan: PetStoryPlan, issues: PetStoryValidationIssue[], options: { allowTotalDurationReallocation?: boolean } = {}): string[] {
   const original = object(originalReply);
   if (!original) return [];
   const changes: string[] = [];
-  const allowed = (path: string): boolean => issues.some((issue): boolean => issue.path !== '$' && (path === issue.path || path.startsWith(`${issue.path}.`) || path.startsWith(`${issue.path}[`)));
+  const timingPaths = durationReallocationPaths(original, revisedPlan, issues, options.allowTotalDurationReallocation === true);
+  const allowed = (path: string): boolean => timingPaths.has(path) || issues.some((issue): boolean => issue.path !== '$' && (path === issue.path || path.startsWith(`${issue.path}.`) || path.startsWith(`${issue.path}[`)));
   const same = (before: unknown, after: unknown): boolean => JSON.stringify(before) === JSON.stringify(after);
   const compare = (before: unknown, after: unknown, path: string): void => {
     if (before === undefined || allowed(path) || same(before, after)) return;

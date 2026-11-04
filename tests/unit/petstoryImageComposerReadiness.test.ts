@@ -7,7 +7,7 @@ import type { PetStoryComposerSnapshot } from '../../src/utils/petstoryControls'
 
 const absent: PetStoryComposerSnapshot = { present: false, generic: false, first: false, last: false, nativeLabel: false, firstLabel: false,
   model: '', duration: 0, aspectRatio: '', durations: [], count: 0, pending: false };
-const ready: PetStoryComposerSnapshot = { ...absent, present: true, generic: true };
+const ready: PetStoryComposerSnapshot = { ...absent, present: true, generic: true, selectedSkill: 'image' };
 const nativeSlot: PetStoryComposerSnapshot = { ...absent, present: true, first: true, last: true };
 
 function viewFor(samples: PetStoryComposerSnapshot[]): WebviewHandle & { executeJavaScript: ReturnType<typeof vi.fn>; loadURL: ReturnType<typeof vi.fn>; sendInputEvent: ReturnType<typeof vi.fn> } {
@@ -63,6 +63,14 @@ describe('图片入口真实就绪回读', (): void => {
     expect(view.loadURL).not.toHaveBeenCalled(); expect(view.sendInputEvent).not.toHaveBeenCalled();
   });
 
+  it.each(['none', 'video', 'ambiguous'] as const)('普通通用上传口的技能为%s时不能当作图片模式', async (selectedSkill): Promise<void> => {
+    const view = viewFor([{ ...ready, selectedSkill }]);
+    const result = waitForPetStoryImageComposer(view, new AbortController().signal, 750);
+    const rejected = expect(result).rejects.toThrow('图片输入区尚未就绪');
+    await vi.advanceTimersByTimeAsync(750); await rejected;
+    expect(view.loadURL).not.toHaveBeenCalled(); expect(view.sendInputEvent).not.toHaveBeenCalled();
+  });
+
   it('执行序列化的真实探针只读当前控件，不点击模式、参数或引用菜单', async (): Promise<void> => {
     const click = vi.fn();
     interface ProbeNode {
@@ -79,9 +87,10 @@ describe('图片入口真实就绪回读', (): void => {
       getAttribute: (): string | null => null, closest: (): ProbeNode | null => null,
       contains: (): boolean => true, querySelectorAll: (): ProbeNode[] => [], querySelector: (): ProbeNode | null => null, click });
     const root = makeNode(); const editor = makeNode(); const input = makeNode(); input.accept = 'image/*'; input.parentElement = root;
-    const mode = makeNode('参考图'); const parameters = makeNode('9:16 · 5s'); const model = makeNode('模型 Seedream 4.0'); const reference = makeNode('图片1');
+    const mode = makeNode('参考图'); const parameters = makeNode('9:16 · 5s'); const model = makeNode('模型 Seedream 4.0'); const reference = makeNode('图片1'); const selectedSkill = makeNode('图像生成');
     editor.closest = (): ProbeNode => root;
     root.querySelectorAll = (selector: string): ProbeNode[] => selector === 'input[type="file"]' ? [input]
+      : selector === '[data-testid="skill_input_exit_button"]' ? [selectedSkill]
       : selector.includes('[data-creation-params-panel-id]') ? [parameters]
       : selector === '[data-input-engine-actionbar-control-key="video-model"]' ? [model]
       : selector.includes('button') ? [mode, parameters] : [];
@@ -98,7 +107,7 @@ describe('图片入口真实就绪回读', (): void => {
     }) as PetStoryComposerSnapshot);
     const result = waitForPetStoryImageComposer(view, new AbortController().signal, 1000);
     await vi.advanceTimersByTimeAsync(250);
-    expect(await result).toMatchObject({ present: true, generic: true, first: false, last: false, model: 'Seedream 4.0', aspectRatio: '9:16' });
+    expect(await result).toMatchObject({ present: true, generic: true, selectedSkill: 'image', first: false, last: false, model: 'Seedream 4.0', aspectRatio: '9:16' });
     expect(view.executeJavaScript).toHaveBeenCalledTimes(2);
     for (const [code] of view.executeJavaScript.mock.calls) expect(code).toMatch(/\)\(\{\}\)$/);
     expect(click).not.toHaveBeenCalled(); expect(view.loadURL).not.toHaveBeenCalled(); expect(view.sendInputEvent).not.toHaveBeenCalled();

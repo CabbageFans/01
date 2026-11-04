@@ -1,0 +1,28 @@
+{
+  "file": "31-settings-1440.png",
+  "capturedAt": "2026-11-02T12:36:07.852Z",
+  "metrics": {
+    "width": 1440,
+    "height": 900,
+    "dpr": 2,
+    "canvasTransform": "translate(-261.836px, -2430.39px) scale(0.752199)",
+    "canvasBounds": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0,
+      "top": 0,
+      "right": 0,
+      "bottom": 0,
+      "left": 0
+    }
+  },
+  "headings": [
+    "设置与诊断",
+    "使用偏好",
+    "数据与备份",
+    "运行检查",
+    "诊断详情"
+  ],
+  "dialogs": 0
+}
