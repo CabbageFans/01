@@ -22,6 +22,19 @@ function plan(): PetStoryPlan {
 }
 
 describe('完整只读方案预览', (): void => {
+  it('新方案在原预览显示相对事件窗口和时长理由，旧文字摘要不成为第二时间依据', (): void => {
+    const value = plan();
+    value.shots[1].timingPlan = { events: [{ id: 'INTERNAL-event', kind: 'dialogue', description: 'TEST发声与抬眼共享窗口', startSeconds: 0.2, endSeconds: 5.6, dialogueIndex: 0 }], estimatedRequiredSeconds: 5.6, durationReason: 'TEST完整发声需要自然换气', cutReason: 'TEST信息交付后切出' };
+    const before = structuredClone(value);
+    const { container } = render(<PetStoryPlanPreview plan={value} />);
+    const second = within(screen.getByRole('article', { name: '镜头 2 完整方案' }));
+    expect(second.getByText('0.2～5.6 秒 · 发声 · TEST发声与抬眼共享窗口')).toBeDefined();
+    expect(second.getByText('TEST完整发声需要自然换气（文本估计需要 5.6 秒）')).toBeDefined();
+    expect(second.getByText('TEST信息交付后切出')).toBeDefined();
+    expect(second.queryByText('TEST节奏安排')).toBeNull();
+    expect(container.textContent).not.toContain('INTERNAL-');
+    expect(screen.queryAllByRole('button')).toHaveLength(0); expect(value).toEqual(before);
+  });
   it('显示创作方案和引用名称，不展示制作提示词且渲染不改写方案', (): void => {
     const value = plan(); const before = structuredClone(value);
     const contentBasis: PetStoryProject['contentBasis'] = { beginning: 'TEST起始事件', middle: 'TEST发展过程', ending: 'TEST结尾结果' };

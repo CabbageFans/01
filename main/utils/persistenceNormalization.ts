@@ -717,6 +717,10 @@ function normalizeQualityVerdict(
   return { status: 'rejected', rejectionTags: rejectedTags, decidedAt };
 }
 
+export function validPetStoryChatBinding(value: unknown): value is NonNullable<Task['petstoryChat']> {
+  return isObject(value) && [value.projectId, value.jobId].every((id: unknown): boolean => typeof id === 'string' && !!id.trim() && id === id.trim() && id.length <= 200);
+}
+
 function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: string, now: string): Task {
   const task = raw as unknown as Task;
 
@@ -726,6 +730,10 @@ function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: str
   task.prompt = asString(raw.prompt, '');
   task.assignedAccountId = asNonEmptyString(raw.assignedAccountId) ?? null;
   task.mode = oneOf(raw.mode, VALID_GENERATION_MODES, 'chat');
+  const chatBindingInvalid = raw.petstoryChat !== undefined && (!validPetStoryChatBinding(raw.petstoryChat) || task.mode !== 'chat');
+  // 损坏的业务归属不能静默丢成普通任务；空归属标记仍会被正式调度门禁拒绝。
+  task.petstoryChat = raw.petstoryChat === undefined ? undefined : validPetStoryChatBinding(raw.petstoryChat)
+    ? { projectId: raw.petstoryChat.projectId, jobId: raw.petstoryChat.jobId } : { projectId: '', jobId: '' };
   // 执行意图：历史 queued 缺失字段默认 hold；只有显式 armed 才允许调度。
   task.executionIntent = raw.executionIntent === 'armed' ? 'armed' : 'hold';
   task.result = raw.result === null ? null : (typeof raw.result === 'string' ? raw.result : null);
@@ -788,6 +796,11 @@ function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: str
     }
   }
 
+  if (chatBindingInvalid) {
+    task.executionIntent = 'hold';
+    if (['queued', 'executing', 'generating'].includes(task.status)) task.status = 'paused';
+    task.errorInfo ||= { code: 'unknown', message: '短剧文字任务归属无效，请打开原项目核对；未自动发送', recoverable: false, detectedAt: now };
+  }
   return task;
 }
 

@@ -18,6 +18,22 @@ function fixture(initial: Task[] = []) {
 }
 
 describe('TaskService 核心用例', () => {
+  it('创建短剧文字任务持久保存精确项目/job归属，且不借用媒体绑定或平台输入', (): void => {
+    const { service, stored } = fixture(); const binding = { projectId: 'petstory-project', jobId: 'chat-job' };
+    expect(service.create({ prompts: ['TEST文字输入'], mode: 'chat', petstoryChat: binding }).success).toBe(true);
+    binding.jobId = 'changed-after-create';
+    expect(stored()[0]).toMatchObject({ petstoryChat: { projectId: 'petstory-project', jobId: 'chat-job' }, mode: 'chat', executionIntent: 'hold' });
+    expect(stored()[0].petstory).toBeUndefined(); expect(stored()[0].runtime).toBeUndefined();
+    expect(new TaskService({ store: { read: (): Task[] => structuredClone(stored()), replace: (): boolean => true }, defaultProjectId: (): string => 'default' }).getTasks()).toMatchObject({ success: true, data: [{ petstoryChat: { projectId: 'petstory-project', jobId: 'chat-job' } }] });
+  });
+
+  it.each(['empty-id', 'wrong-mode', 'multiple-prompts', 'media-binding'] as const)('无效短剧文字归属%s不创建普通任务', (variant: string): void => {
+    const { service, stored } = fixture();
+    const result = service.create({ prompts: variant === 'multiple-prompts' ? ['TEST1', 'TEST2'] : ['TEST'], mode: variant === 'wrong-mode' ? 'video' : 'chat',
+      petstoryChat: { projectId: 'project', jobId: variant === 'empty-id' ? '' : 'job' }, ...(variant === 'media-binding' ? { petstory: { projectId: 'project', stepId: 'step' } } : {}) });
+    expect(result.success).toBe(false); expect(stored()).toEqual([]);
+  });
+
   it('过滤空提示词并创建规范任务', () => {
     const { service, stored } = fixture();
     const result = service.create({ prompts: [' A ', ' ', 'B'], mode: 'video' });

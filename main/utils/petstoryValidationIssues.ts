@@ -1,4 +1,5 @@
 import type { PetStoryPlan, PetStoryValidationIssue } from '@doubao-studio/contracts';
+import { collectPetStoryDialogueFragmentIssues, collectPetStoryTimingIssues } from './petstoryTiming';
 
 export type { PetStoryValidationIssue } from '@doubao-studio/contracts';
 
@@ -93,6 +94,13 @@ export function collectPetStoryPlanIssues(value: unknown): PetStoryValidationIss
     validId(shot.id, `${path}.id`, '镜头 ID', targetId);
     if (seenShots.has(shot.id)) add(`${path}.id`, shot.id, '镜头集合内唯一ID', 'shots有重复 ID', 'duplicate', targetId);
     seenShots.add(shot.id);
+    const predecessors = array(shot, 'predecessorShotIds', path, false);
+    const seenPredecessors = new Set<unknown>();
+    predecessors?.forEach((predecessor: unknown, predecessorIndex: number): void => {
+      validId(predecessor, `${path}.predecessorShotIds[${predecessorIndex}]`, '前身镜头ID', targetId);
+      if (seenPredecessors.has(predecessor)) add(`${path}.predecessorShotIds[${predecessorIndex}]`, predecessor, '无重复前身ID', '镜头前身ID重复', 'duplicate', targetId);
+      seenPredecessors.add(predecessor);
+    });
     if (shot.order !== index + 1) add(`${path}.order`, shot.order, `数值${index + 1}`, `${label}顺序必须与列表一致（从 1 开始）`, 'order', targetId);
     const duration = shot.durationSeconds;
     if (!validPetStoryDuration(duration)) add(`${path}.durationSeconds`, duration, '当前项目5～10秒内的有限整秒数值（5、6、7、8、9、10），不接受字符串', `${label}时长必须是 5～10 秒内的有限数值，并使用可选整秒`, 'duration', targetId);
@@ -123,10 +131,12 @@ export function collectPetStoryPlanIssues(value: unknown): PetStoryValidationIss
       const line = object(value); const linePath = `${path}.dialogue[${lineIndex}]`;
       if (!line) { add(linePath, value, '台词对象', '台词需要 JSON 对象', 'structure', targetId); return; }
       requiredText(line, 'text', linePath, '已有台词', targetId);
+      issues.push(...collectPetStoryDialogueFragmentIssues(line, linePath, targetId));
       if (!characterIds.has(line.speakerId) || !refs?.includes(line.speakerId) && !['offscreen', 'voiceover'].includes(String(line.delivery))) add(`${linePath}.speakerId`, line.speakerId, '已出场角色，或注明OS／VO的已有角色', '画内台词说话者必须出场；OS／VO必须对应已有角色', 'reference', targetId);
       if (line.delivery !== undefined && !['onscreen', 'offscreen', 'voiceover'].includes(String(line.delivery))) add(`${linePath}.delivery`, line.delivery, 'onscreen、offscreen或voiceover', '台词发声方式无效', 'enum', targetId);
       optionalText(line, 'tone', linePath, targetId); optionalText(line, 'pace', linePath, targetId);
     });
+    issues.push(...collectPetStoryTimingIssues(shot, path, targetId));
     if (!['cut', 'continue'].includes(String(shot.transition))) add(`${path}.transition`, shot.transition, 'cut或continue', `${label}切镜关系无效`, 'enum', targetId);
     if (!['auto', 'first_frame', 'first_last_frame', 'reference'].includes(String(shot.requestedMode))) add(`${path}.requestedMode`, shot.requestedMode, 'auto、first_frame、first_last_frame或reference', `${label}模式无效`, 'enum', targetId);
     if (shot.transition === 'continue' && (index === 0 || shot.previousShotId !== object(shots[index - 1])?.id)) add(`${path}.previousShotId`, shot.previousShotId, '相邻上一镜头ID', `${label}连续引用必须指向相邻上一镜头`, 'reference', targetId);
@@ -149,18 +159,61 @@ function durationReallocationPaths(original: Record<string, unknown>, revisedPla
   if (!Number.isFinite(originalTotal) || Math.abs(originalTotal - revisedTotal) > 0.000001) return paths;
   timed.forEach((shot: Record<string, unknown> | undefined, index: number): void => {
     paths.add(`$.shots[${index}].durationSeconds`);
-    if (shot?.durationSeconds !== revisedPlan.shots[index].durationSeconds) paths.add(`$.shots[${index}].timing`);
+    if (shot?.durationSeconds !== revisedPlan.shots[index].durationSeconds) { paths.add(`$.shots[${index}].timing`); paths.add(`$.shots[${index}].timingPlan`); }
   });
   return paths;
 }
 
-/** 对比模型原文而非代码补稿；仅放行明确问题字段以及时长修订必要的节奏说明。 */
-export function planRepairPreservationIssues(originalReply: unknown, revisedPlan: PetStoryPlan, issues: PetStoryValidationIssue[], options: { allowTotalDurationReallocation?: boolean } = {}): string[] {
+/** 前身结构纠正可更换该镜头的技术ID，并精确同步仍指向它的连续镜头引用；不放开正文、顺序或数量。 */
+function predecessorRepairPaths(original: Record<string, unknown>, revisedPlan: PetStoryPlan, issues: PetStoryValidationIssue[], reservedIds: string[] = []): Set<string> {
+  const paths = new Set<string>();
+  if (!Array.isArray(original.shots) || original.shots.length !== revisedPlan.shots.length) return paths;
+  const shots: unknown[] = original.shots;
+  const ids = shots.map((value: unknown): unknown => object(value)?.id);
+  const renamed = new Map<string, string>();
+  for (const issue of issues) {
+    const match = issue.repairable && issue.code === 'structure' ? issue.path.match(/^\$\.shots\[(\d+)\]\.(?:predecessorShotIds(?:\.|\[|$)|id$)/) : undefined;
+    if (!match) continue;
+    const index = Number(match[1]); const before = object(shots[index]); const after = revisedPlan.shots[index];
+    if (typeof before?.id !== 'string' || !after || before.id === after.id || before.order !== after.order
+      || ids.includes(after.id) || reservedIds.includes(after.id) || ids.filter((id: unknown): boolean => id === before.id).length !== 1) continue;
+    renamed.set(before.id, after.id); paths.add(`$.shots[${index}].id`);
+    for (const path of renamedEventPaths(before, after, index)) paths.add(path);
+  }
+  shots.forEach((value: unknown, index: number): void => {
+    const before = object(value); const after = revisedPlan.shots[index];
+    if (typeof before?.previousShotId === 'string' && renamed.has(before.previousShotId) && renamed.get(before.previousShotId) === after.previousShotId) paths.add(`$.shots[${index}].previousShotId`);
+  });
+  return paths;
+}
+
+/** 镜头技术换名可连带重命名内部事件；只放行同序事件的唯一ID及其精确依赖映射。 */
+function renamedEventPaths(before: Record<string, unknown>, after: PetStoryPlan['shots'][number], shotIndex: number): string[] {
+  const oldEvents = object(before.timingPlan)?.events; const newEvents = after.timingPlan?.events;
+  if (!Array.isArray(oldEvents) || !newEvents || oldEvents.length !== newEvents.length) return [];
+  const oldIds = oldEvents.map((event: unknown): unknown => object(event)?.id);
+  if (oldIds.some((id: unknown): boolean => typeof id !== 'string') || new Set(oldIds).size !== oldIds.length || new Set(newEvents.map((event): string => event.id)).size !== newEvents.length) return [];
+  const mapping = new Map(oldIds.map((id: unknown, index: number): [unknown, string] => [id, newEvents[index].id]));
+  return oldEvents.flatMap((event: unknown, index: number): string[] => {
+    const previous = object(event)?.afterEventId;
+    const path = `$.shots[${shotIndex}].timingPlan.events[${index}]`;
+    return [`${path}.id`, ...(typeof previous === 'string' && mapping.get(previous) === newEvents[index].afterEventId ? [`${path}.afterEventId`] : [])];
+  });
+}
+
+/** 对比模型原文而非代码补稿；仅放行明确问题字段与其必要技术引用，以及时长修订必要的节奏说明。 */
+export function planRepairPreservationIssues(originalReply: unknown, revisedPlan: PetStoryPlan, issues: PetStoryValidationIssue[], options: { allowTotalDurationReallocation?: boolean; allowShotRestructure?: boolean; reservedShotIds?: string[] } = {}): string[] {
   const original = object(originalReply);
   if (!original) return [];
   const changes: string[] = [];
   const timingPaths = durationReallocationPaths(original, revisedPlan, issues, options.allowTotalDurationReallocation === true);
-  const allowed = (path: string): boolean => timingPaths.has(path) || issues.some((issue): boolean => issue.path !== '$' && (path === issue.path || path.startsWith(`${issue.path}.`) || path.startsWith(`${issue.path}[`)));
+  const predecessorPaths = predecessorRepairPaths(original, revisedPlan, issues, options.reservedShotIds);
+  const timingRepairs = issues.flatMap((issue: PetStoryValidationIssue): string[] => {
+    const match = issue.code === 'timing' && issue.repairable ? issue.path.match(/^(\$\.shots\[\d+\]\.timingPlan)(?:\.|\[|$)/) : undefined;
+    return match ? [match[1]] : [];
+  });
+  const allowed = (path: string): boolean => predecessorPaths.has(path) || timingPaths.has(path) || timingRepairs.some((prefix: string): boolean => path === prefix || path.startsWith(`${prefix}.`) || path.startsWith(`${prefix}[`))
+    || issues.some((issue): boolean => issue.path !== '$' && (path === issue.path || path.startsWith(`${issue.path}.`) || path.startsWith(`${issue.path}[`)));
   const same = (before: unknown, after: unknown): boolean => JSON.stringify(before) === JSON.stringify(after);
   const compare = (before: unknown, after: unknown, path: string): void => {
     if (before === undefined || allowed(path) || same(before, after)) return;
@@ -171,6 +224,10 @@ export function planRepairPreservationIssues(originalReply: unknown, revisedPlan
     }
     const entry = object(before); const revised = object(after);
     if (entry && revised) {
+      // 事件换名仅改变符号：旧对象没有的新依赖、并行标志或其他语义也必须比较，不能从旧键遍历中漏掉。
+      if (/\.timingPlan\.events\[\d+\]$/.test(path)) for (const field of Object.keys(revised)) {
+        if (!(field in entry) && revised[field] !== undefined && !allowed(`${path}.${field}`)) changes.push(`修订改变了无关内容 ${path}.${field}；技术换名不能新增事件语义或依赖`);
+      }
       for (const [field, value] of Object.entries(entry)) compare(value, revised[field], `${path}.${field}`);
       return;
     }
@@ -190,6 +247,25 @@ export function planRepairPreservationIssues(originalReply: unknown, revisedPlan
     });
   }
   if (!Array.isArray(original.shots)) return changes;
+  if (options.allowShotRestructure) {
+    const spoken = (shots: unknown[]): { speakerId: unknown; delivery: unknown; text: string }[] => {
+      const result: { speakerId: unknown; delivery: unknown; text: string }[] = [];
+      for (const value of shots) {
+        const shot = object(value);
+        if (!Array.isArray(shot?.dialogue)) continue;
+        for (const value of shot.dialogue) {
+          const line = object(value);
+          if (!line || typeof line.text !== 'string') continue;
+          const delivery = line.delivery || 'onscreen'; const last = result.at(-1);
+          if (last && last.speakerId === line.speakerId && last.delivery === delivery) last.text += line.text;
+          else result.push({ speakerId: line.speakerId, delivery, text: line.text });
+        }
+      }
+      return result;
+    };
+    if (!same(spoken(original.shots), spoken(revisedPlan.shots))) changes.push('节奏修订改变了全片逐字台词顺序、次数、说话者或发声方式；拆片必须完整拼接回原对白');
+    return changes;
+  }
   const originalShots: unknown[] = original.shots;
   compare(originalShots.length, revisedPlan.shots.length, '$.shots.length');
   originalShots.forEach((value: unknown, index: number): void => {
@@ -200,7 +276,7 @@ export function planRepairPreservationIssues(originalReply: unknown, revisedPlan
       // 与normalizeAnalysisCuts完全相同的无损清理，不将多余绑定误判为剧情漂移。
       if (field === 'previousShotId' && shot.transition === 'cut' && index > 0 && shot.order === index + 1
         && object(originalShots[index - 1])?.order === index && saved === object(originalShots[index - 1])?.id) continue;
-      if (field === 'timing' && issues.some((issue): boolean => issue.path === `$.shots[${index}].durationSeconds`)) continue;
+      if (['timing', 'timingPlan'].includes(field) && issues.some((issue): boolean => issue.path === `$.shots[${index}].durationSeconds`)) continue;
       compare(saved, revised[field], `$.shots[${index}].${field}`);
     }
   });

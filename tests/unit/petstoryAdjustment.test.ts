@@ -1,4 +1,5 @@
 /** 离线自由对话回归：真实项目文件与正式 Chat 校验，任务仅保存在内存，不访问平台。 */
+import { withOfflineTimingPlan } from '../fixtures/petstoryTimingPlan';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -41,7 +42,7 @@ async function collectPlanJob(job: PetStoryChatJob, valid: boolean, invalidDurat
   // 完整结构但演员角色与已保存配置不符：保留 parsedResult.plan 的真实 invalid 分支。
   else if (!valid) incoming.characters[0].role = 'supporting';
   const content = { requestId: job.requestId, targetIds: job.expectedIds, storyUsable: true, contentBasis: { beginning: incoming.shots[0].startState, middle: incoming.shots[2].action, ending: incoming.shots.at(-1)!.endState }, ...incoming };
-  const runtime: TaskRunSnapshot = { runId: `TEST-plan-${job.id}`, attempt: 1, stage: 'completed', message: 'TEST 离线方案原回复', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now, conversationUrl: `${url}-${job.kind}`, input: { prompt: task.prompt, mode: 'chat', attachments: [] }, chatResponse: { text: JSON.stringify(content), capturedAt: now } };
+  const runtime: TaskRunSnapshot = { runId: `TEST-plan-${job.id}`, attempt: 1, stage: 'completed', message: 'TEST 离线方案原回复', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now, conversationUrl: `${url}-${job.kind}`, input: { prompt: task.prompt, mode: 'chat', attachments: [] }, chatResponse: { text: JSON.stringify(withOfflineTimingPlan(content, project.mobileStory!.text)), capturedAt: now } };
   const completed = core.updateRuntime({ taskId: task.id, status: 'done', runtime }); if (!completed.success) throw new Error(completed.error);
   project = (await chats.bindRun(project.id, job.id, runtime.runId)).project!;
   const collected = await chats.collect(project.id, job.id); project = collected.project!; expect(collected.success).toBe(valid);
@@ -49,7 +50,7 @@ async function collectPlanJob(job: PetStoryChatJob, valid: boolean, invalidDurat
 async function receive(job: PetStoryChatJob, answer: Record<string, unknown>): Promise<PetStoryResult> {
   const task = stored.find((item): boolean => item.id === job.taskId)!; const now = new Date().toISOString();
   const runtime: TaskRunSnapshot = { runId: `TEST-repair-${job.id}`, attempt: 1, stage: 'completed', message: 'TEST 离线同目标修订结果', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
-    conversationUrl: `${url}-${job.kind}`, input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] }, chatResponse: { text: JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, ...answer }), capturedAt: now } };
+    conversationUrl: `${url}-${job.kind}`, input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] }, chatResponse: { text: JSON.stringify(withOfflineTimingPlan({ requestId: job.requestId, targetIds: job.expectedIds, ...answer }, project.mobileStory!.text)), capturedAt: now } };
   const completed = core.updateRuntime({ taskId: task.id, status: 'done', runtime }); if (!completed.success) throw new Error(completed.error);
   project = (await chats.bindRun(project.id, job.id, runtime.runId)).project!;
   const collected = await chats.collect(project.id, job.id); project = collected.project!; return collected;
@@ -466,11 +467,11 @@ describe('具体回复与目标保护', (): void => {
     const prepared = await chats.prepareRuntime(project.id, project.revision, 'analysis'); project = prepared.project!;
     const job = project.jobs.at(-1)!; const task = stored.find((item): boolean => item.id === job.taskId)!; const now = new Date().toISOString(); const incoming = plan();
     const content = { requestId: job.requestId, targetIds: job.expectedIds, storyUsable: true, contentBasis: { beginning: incoming.shots[0].startState, middle: incoming.shots[2].action, ending: incoming.shots.at(-1)!.endState }, ...incoming };
-    const runtime: TaskRunSnapshot = { runId: 'TEST-analysis-run', attempt: 1, stage: 'completed', message: 'TEST 离线方案原回复', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now, conversationUrl: url, input: { prompt: task.prompt, mode: 'chat', attachments: [] }, chatResponse: { text: JSON.stringify(content), capturedAt: now } };
+    const runtime: TaskRunSnapshot = { runId: 'TEST-analysis-run', attempt: 1, stage: 'completed', message: 'TEST 离线方案原回复', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now, conversationUrl: url, input: { prompt: task.prompt, mode: 'chat', attachments: [] }, chatResponse: { text: JSON.stringify(withOfflineTimingPlan(content, project.mobileStory!.text)), capturedAt: now } };
     const completed = core.updateRuntime({ taskId: task.id, status: 'done', runtime }); if (!completed.success) throw new Error(completed.error);
     project = (await chats.bindRun(project.id, job.id, runtime.runId)).project!; project = (await chats.collect(project.id, job.id)).project!;
     const started = await service.begin(project.id, project.revision, {}); project = started.project!; const adjustment = started.adjustment!;
-    const chosen = reply(JSON.stringify({ ...content, understanding: 'TEST 完整方案理解', sceneDesign: 'TEST 完整空间与场景安排' }), 3); await capture(adjustment, [chosen]);
+    const chosen = reply(JSON.stringify(withOfflineTimingPlan({ ...content, understanding: 'TEST 完整方案理解', sceneDesign: 'TEST 完整空间与场景安排' }, project.mobileStory!.text)), 3); await capture(adjustment, [chosen]);
     const before = await fs.readFile(path.join(directory, 'project.json'), 'utf8'); const tasksBefore = structuredClone(stored);
     const result = await service.preview(project.id, project.revision, adjustment.id, chosen.key);
     expect(result.preview?.target).toEqual({}); expect(result.preview?.body).toBeUndefined(); expect(result.preview?.previousPlan).toEqual(project.plan);

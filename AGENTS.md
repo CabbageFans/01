@@ -104,6 +104,10 @@ Dola 当前只有账号平台字段、Session/URL 边界和 CSV 账号消歧接�
 
 2026-11-01 起遵循 `docs/PRODUCT_REQUIREMENTS.md` v2.1 与 `script-driven-cast-reference-first`：新项目角色为空，从剧本提取；不注入噜噜／噜妹、物种或特定美术。人物图正式采用后决定当前形象，旧基础提示词保留历史但退出活跃读取，上传采用不依赖文字任务或旧 description。关键帧安排画面，视频安排表演、逐字对白与运镜，不重新规定外观。角色稳定 ID、speakerId、制作标签及真实图片映射一致；换图只处理实际镜头和连续依赖，历史媒体保留，无新增技术确认。旧默认、旧规范和旧测试断言不得重新覆盖此规则。
 
+### 分镜时长与节奏
+
+每镜始终为5～10秒有限整秒；先按原剧情、逐字对白和镜内事件先后／并行选择最短够用时长，不统一5秒、不突破范围。新时间安排贯通候选、采用与下游正文，见 `docs/STORYBOARD_PACING_OPTIMIZATION_REPORT.md`。
+
 ### IPC 通信
 主进程通过 `ipcMain.handle` 注册处理器，渲染进程通过 `contextBridge.exposeInMainWorld` 暴露的 `window.electronAPI` 调用，严格遵循 contextIsolation + 无 nodeIntegration 的安全模式。
 

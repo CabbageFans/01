@@ -1,4 +1,5 @@
 /** 原五镜头已保存数据派生的离线技术状态；模拟响应不作为豆包产出或业务验收。 */
+import { withOfflineTimingPlan } from '../fixtures/petstoryTimingPlan';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -76,8 +77,8 @@ describe('F01 分析只产出设计与兼容草稿', (): void => {
   });
   it('新建分析收取、保存重开保留空final；专用请求另有来源，文字操作不创建媒体', async (): Promise<void> => {
     const prepared = await chat.prepareRuntime(p.id, p.revision, 'analysis'); p = prepared.project!; const job = p.jobs.at(-1)!;
-    const plan = originalPlan(); const raw = JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, storyUsable: true,
-      contentBasis: { beginning: plan.shots[0].startState, middle: plan.shots[2].action, ending: plan.shots.at(-1)!.endState }, ...plan });
+    const plan = originalPlan(); const raw = JSON.stringify(withOfflineTimingPlan({ requestId: job.requestId, targetIds: job.expectedIds, storyUsable: true,
+      contentBasis: { beginning: plan.shots[0].startState, middle: plan.shots[2].action, ending: plan.shots.at(-1)!.endState }, ...plan }, p.mobileStory!.text));
     await recordRun(job, raw); const collected = await chat.collect(p.id, job.id); p = collected.project!;
     expect(collected.success).toBe(true); expect(p.jobs[0].rawText).toBe(raw); expect(p.jobs[0].resultStatus).toBe('candidate');
     p = (await chat.adoptPlanCandidate(p.id, p.revision, job.id)).project!;

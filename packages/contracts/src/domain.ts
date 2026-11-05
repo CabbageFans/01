@@ -339,6 +339,8 @@ export interface Task {
   mode: GenerationMode;
   /** PetStory 步骤归属，重开后也必须经过项目绑定门禁。 */
   petstory?: import('./dto/petstory').PetStoryTaskBinding;
+  /** 短剧文字任务的持久调度归属；重启未打开原项目时也不能绕过运行绑定。 */
+  petstoryChat?: { projectId: string; jobId: string };
   /** 精确保留段落的提交回读，仅业务显式启用。 */
   promptReadback?: 'exact';
   /** 视频生成配置 */

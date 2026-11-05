@@ -73,7 +73,7 @@ const PlanActions: React.FC<{ project: PetStoryProject; view: ReviewState; disab
     await usePetStoryStore.getState().confirmStory();
   };
   return <Space wrap className="petstory-plan-actions">
-    {!view.adopted && <Button type="primary" disabled={disabled} loading={state.busy} onClick={(): void => { void confirm(); }}>确认并采用方案</Button>}
+    {!view.adopted && <Button type="primary" disabled={disabled} loading={state.busy} onClick={(): void => { void confirm(); }}>{view.newCandidate ? '采用修改后的方案' : '确认并采用方案'}</Button>}
     {view.adopted && onMaterials && <Button type="primary" onClick={onMaterials}>准备基础素材</Button>}
     <Button disabled={disabled || state.busy} onClick={onAdjust}>在豆包中调整</Button>
   </Space>;
@@ -82,12 +82,15 @@ const PlanContents: React.FC<{ project: PetStoryProject; view: ReviewState; disa
   const plan = view.plan;
   if (!plan) return !view.pending && !view.problem ? <p>先在“输入剧本”中分析剧本，回复会保存在这里供你确认。</p> : null;
   const differences = view.newCandidate ? changes(project.plan, plan) : [];
+  const savedPlanLabel = project.storyApproval ? '正在使用的方案' : '已保存方案（待确认）';
+  let previewLabel = `查看${savedPlanLabel}`;
+  if (view.candidate) previewLabel = view.newCandidate ? '查看修改后的方案（待采用）' : '查看待采用方案';
   return <><p className="petstory-plan-counts">{counts(plan)}</p><p className="petstory-plan-summary">{summary(plan)}</p>
     {view.job?.parsedResult?.requiresConfirmation && <p className="petstory-plan-attention" role="status">需要你确认的变化：{view.job.parsedResult.changeReason}</p>}
-    {view.newCandidate && <><p className="petstory-plan-attention">与当前方案不同。确认前继续保留当前方案和已有图片、视频。</p>{differences.length > 0 && <ul>{differences.map((change): React.ReactNode => <li key={change}>{change}</li>)}</ul>}</>}
+    {view.newCandidate && <><p className="petstory-plan-attention">修改后的方案尚未采用。{project.storyApproval ? '采用前仍使用原方案' : '采用前保留已保存方案'}，已有图片和视频保留。</p>{differences.length > 0 && <ul>{differences.map((change): React.ReactNode => <li key={change}>{change}</li>)}</ul>}</>}
     <PlanActions project={project} view={view} disabled={disabled} onMaterials={onMaterials} onAdjust={onAdjust} />
-    <details className="petstory-plan-full"><summary>查看完整方案</summary><div className="petstory-plan-scroll"><PetStoryPlanPreview plan={plan} contentBasis={view.candidate ? view.job?.parsedResult?.contentBasis : project.contentBasis} /></div></details>
-    {view.newCandidate && project.plan && <details className="petstory-plan-full"><summary>查看当前采用方案（继续保留）</summary><div className="petstory-plan-scroll"><PetStoryPlanPreview plan={project.plan} contentBasis={project.contentBasis} /></div></details>}
+    <details className="petstory-plan-full"><summary>{previewLabel}</summary><div className="petstory-plan-scroll"><PetStoryPlanPreview plan={plan} contentBasis={view.candidate ? view.job?.parsedResult?.contentBasis : project.contentBasis} /></div></details>
+    {view.newCandidate && project.plan && <details className="petstory-plan-full"><summary>查看{savedPlanLabel}</summary><div className="petstory-plan-scroll"><PetStoryPlanPreview plan={project.plan} contentBasis={project.contentBasis} /></div></details>}
   </>;
 };
 export const PetStoryPlanReview: React.FC<{ project: PetStoryProject; disabled: boolean; onMaterials?: () => void }> = ({ project, disabled, onMaterials }): React.ReactElement => {

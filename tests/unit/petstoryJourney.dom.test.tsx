@@ -311,7 +311,7 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     await waitFor((): void => expect(screen.getByRole('button', { name: '确认并采用方案' })).toBeDefined());
     const adoptButton = screen.getByRole('button', { name: '确认并采用方案' });
     const candidateArticle = adoptButton.closest('article')!;
-    const previewSummary = within(candidateArticle).getByText('查看完整方案');
+    const previewSummary = within(candidateArticle).getByText('查看待采用方案');
     const fullPreview = previewSummary.closest('details')!;
     expect(fullPreview.open).toBe(false);
     expect(adoptButton.classList.contains('ant-btn-primary')).toBe(true);

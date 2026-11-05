@@ -215,7 +215,7 @@ describe('方案意见弹窗与后台候选', (): void => {
     expect(revise).toHaveBeenCalledOnce(); expect(oldAdjustment).not.toHaveBeenCalled(); expect(adopt).not.toHaveBeenCalled();
     fireEvent.click(within(reopened).getByRole('button', { name: '返回方案' })); await finishDialogClose(reopened);
     act((): void => { completeCandidate('TEST-feedback-1', 'TEST 返回页面后完成的新方案'); });
-    await waitFor((): void => expect(screen.getByRole('button', { name: '确认并采用方案' })).toBeDefined());
+    await waitFor((): void => expect(screen.getByRole('button', { name: '采用修改后的方案' })).toBeDefined());
     expect(screen.getAllByText('TEST 返回页面后完成的新方案').length).toBeGreaterThan(0);
     expect(currentProject().plan).toEqual(before.plan); expect(adopt).not.toHaveBeenCalled(); expect(revise).toHaveBeenCalledOnce();
   });
@@ -268,5 +268,124 @@ describe('方案意见弹窗与后台候选', (): void => {
     await within(dialog).findByText('正在按你的要求调整方案');
     expect(currentProject().jobs.at(-1)?.planFeedback?.baseJobId).toBe(repairId);
     expect(currentProject().plan).toEqual(before.plan); expect(currentProject().assets).toEqual(before.assets); expect(adopt).not.toHaveBeenCalled();
+  });
+
+  it('每次采用后再次提交相同意见都创建新一轮，重试幂等不复用已完成授权', async (): Promise<void> => {
+    updateProject((project): void => { project.jobs[0].resultStatus = 'adopted'; });
+    // 与正式服务一致：同一授权重试只返回原任务，不能靠每次新建的替身掩盖授权泄漏。
+    revise.mockImplementation(async (feedback: PlanFeedback): Promise<string> => {
+      const existing = currentProject().jobs.find((job): boolean => job.kind === 'analysis' && job.planFeedback?.requestId === feedback.requestId);
+      return existing?.id || createAdjustment(feedback);
+    });
+    const beforeAssets = structuredClone(currentProject().assets); render(<View />);
+    const authorizations = new Set<string>();
+    for (let round = 1; round <= 4; round++) {
+      const dialog = await openDialog();
+      expect((within(dialog).getByRole('textbox', { name: '方案修改要求' }) as HTMLTextAreaElement).value).toBe('');
+      await submitFeedback(dialog, 'TEST 再放慢第二镜动作');
+      await waitFor((): void => expect(revise).toHaveBeenCalledTimes(round));
+      const feedback = revise.mock.calls[round - 1][0];
+      expect(feedback.baseJobId).toBeUndefined(); expect(authorizations.has(feedback.requestId)).toBe(false);
+      authorizations.add(feedback.requestId);
+      const latest = currentProject().jobs.at(-1)!;
+      expect(latest.status).toBe('bound'); expect(currentProject().jobs).toHaveLength(round + 1);
+      act((): void => { completeCandidate(latest.id, `TEST 第${round}轮已完成方案`); });
+      await within(dialog).findByRole('button', { name: '确认并采用新方案' });
+      fireEvent.click(within(dialog).getByRole('button', { name: '确认并采用新方案' }));
+      await finishDialogClose(dialog);
+      expect(currentProject().plan?.understanding).toBe(`TEST 第${round}轮已完成方案`);
+      expect(currentProject().jobs.at(-1)?.resultStatus).toBe('adopted');
+    }
+    expect(authorizations.size).toBe(4); expect(currentProject().assets).toEqual(beforeAssets);
+  });
+
+  it('方案修订运行中也能停止等待，回到原方案后重新提交新的反馈授权', async (): Promise<void> => {
+    const before = structuredClone(currentProject()); const end = vi.fn(async (jobId: string): Promise<void> => {
+      updateProject((project): void => { project.jobs.find((job): boolean => job.id === jobId)!.endedWaitingAt = now; });
+      const taskId = currentProject().jobs.find((job): boolean => job.id === jobId)!.taskId;
+      useTaskStore.setState({ tasks: useTaskStore.getState().tasks.map((task): Task => task.id === taskId ? { ...task, status: 'paused' } : task) });
+    });
+    usePetStoryStore.setState({ endChatWaiting: end }); render(<View />); const dialog = await openDialog();
+    await submitFeedback(dialog, 'TEST 第一轮正在修订的反馈');
+    let repairId = ''; act((): void => { repairId = startRepair('TEST-feedback-1'); });
+    await within(dialog).findByText('正在检查并整理新方案');
+    fireEvent.click(within(dialog).getByRole('button', { name: '停止等待' }));
+    await waitFor((): void => expect(end).toHaveBeenCalledExactlyOnceWith(repairId));
+    await finishDialogClose(dialog);
+    expect(currentProject().plan).toEqual(before.plan); expect(currentProject().assets).toEqual(before.assets);
+    const reopened = await openDialog();
+    expect((within(reopened).getByRole('textbox', { name: '方案修改要求' }) as HTMLTextAreaElement).value).toBe('');
+    await submitFeedback(reopened, 'TEST 停止后明确的新反馈');
+    await waitFor((): void => expect(revise).toHaveBeenCalledTimes(2));
+    expect(revise.mock.calls[1][0].requestId).not.toBe(revise.mock.calls[0][0].requestId);
+    expect(currentProject().jobs.find((job): boolean => job.id === repairId)?.endedWaitingAt).toBe(now);
+    expect(currentProject().jobs.at(-1)?.status).toBe('bound');
+  });
+
+  it('弹窗中修订已停止时展示具体问题，用户明确继续才修正该回复', async (): Promise<void> => {
+    const correct = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ correctOnce: correct });
+    render(<View />); const dialog = await openDialog(); await submitFeedback(dialog, 'TEST 保留剧情修正时长');
+    let repairId = ''; act((): void => {
+      repairId = startRepair('TEST-feedback-1');
+      updateProject((project): void => {
+        const repair = project.jobs.find((job): boolean => job.id === repairId)!;
+        repair.status = 'invalid'; repair.rawText = 'TEST 已保存修订结果'; repair.error = 'TEST 第三镜事件顺序还需修正';
+        repair.validationDetails = [{ code: 'content_contract', path: '$.plan.shots[2]', actualType: 'object', expected: 'TEST 正确事件顺序', repairable: true, message: repair.error }];
+      });
+      useTaskStore.setState({ tasks: useTaskStore.getState().tasks.map((task): Task => task.id === `${repairId}-task` ? { ...task, status: 'done' } : task) });
+    });
+    expect(await within(dialog).findByText('TEST 第三镜事件顺序还需修正')).toBeDefined();
+    expect(within(dialog).queryByText('工具正在后台检查并整理结果，完成后会显示完整的新方案。')).toBeNull();
+    expect(correct).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: '继续修正方案' }));
+    await waitFor((): void => expect(correct).toHaveBeenCalledExactlyOnceWith(repairId));
+  });
+
+  it('已完成但不可自动修复的反馈可基于当前采用方案重新提出修改，保留旧结果与草稿', async (): Promise<void> => {
+    render(<View />); const dialog = await openDialog(); await submitFeedback(dialog, 'TEST 上一轮内容意见');
+    act((): void => {
+      updateProject((project): void => {
+        const failed = project.jobs.at(-1)!; failed.status = 'invalid'; failed.rawText = 'TEST 未校验的坏方案'; failed.error = 'TEST 修订改变了无关剧情';
+        failed.parsedResult = { plan: { ...structuredClone(project.plan!), understanding: 'TEST 不可信坏方案' } };
+        failed.validationDetails = [{ code: 'repair_drift', path: '$', actualType: 'object', expected: 'TEST 保留剧情', repairable: false, message: failed.error }];
+      });
+      useTaskStore.setState({ tasks: useTaskStore.getState().tasks.map((task): Task => ({ ...task, status: 'done' })) });
+    });
+    const before = structuredClone(currentProject()); const oldTasks = structuredClone(useTaskStore.getState().tasks);
+    fireEvent.click(await within(dialog).findByRole('button', { name: '重新提出修改' }));
+    expect(within(dialog).getByText('本次修改以当前已采用方案为基础。')).toBeDefined();
+    expect((within(dialog).getByRole('textbox', { name: '方案修改要求' }) as HTMLTextAreaElement).value).toBe('');
+    expect(revise).toHaveBeenCalledOnce(); expect(adopt).not.toHaveBeenCalled();
+    fireEvent.change(within(dialog).getByRole('textbox', { name: '方案修改要求' }), { target: { value: 'TEST 重新明确内容要求' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' })); await finishDialogClose(dialog);
+    fireEvent.click(screen.getByRole('button', { name: '查看调整进度' }));
+    const reopened = await screen.findByRole('dialog', { name: '调整方案' });
+    expect((within(reopened).getByRole('textbox', { name: '方案修改要求' }) as HTMLTextAreaElement).value).toBe('TEST 重新明确内容要求');
+    fireEvent.click(within(reopened).getByRole('button', { name: '开始调整' }));
+    await waitFor((): void => expect(revise).toHaveBeenCalledTimes(2));
+    expect(revise.mock.calls[1][0]).toMatchObject({ text: 'TEST 重新明确内容要求', baseJobId: undefined });
+    expect(revise.mock.calls[1][0].requestId).not.toBe(revise.mock.calls[0][0].requestId);
+    expect(currentProject().jobs.slice(0, before.jobs.length)).toEqual(before.jobs);
+    expect(currentProject().plan).toEqual(before.plan); expect(currentProject().assets).toEqual(before.assets);
+    expect(useTaskStore.getState().tasks.slice(0, oldTasks.length)).toEqual(oldTasks);
+    expect(adopt).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it.each(['bound', 'uncertain', 'occupied', 'missing-task', 'no-adopted-plan', 'preparing'] as const)('%s状态不提供重新修改入口，不能绕过未决提交或真实占用', async (condition): Promise<void> => {
+    render(<View />); const dialog = await openDialog(); await submitFeedback(dialog, 'TEST 等待原结果的反馈');
+    act((): void => {
+      updateProject((project): void => {
+        const failed = project.jobs.at(-1)!; failed.status = condition === 'bound' ? 'bound' : 'invalid'; failed.error = 'TEST 原结果需要核对';
+        failed.validationDetails = [{ code: 'repair_drift', path: '$', actualType: 'object', expected: 'TEST 保留剧情', repairable: false, message: failed.error }];
+        if (condition === 'no-adopted-plan') delete project.plan;
+      });
+      const tasks = useTaskStore.getState().tasks.map((task): Task => ({ ...task, status: condition === 'bound' ? 'generating' : condition === 'uncertain' ? 'paused' : 'done',
+        ...(condition === 'uncertain' ? { errorInfo: { code: 'submission_uncertain' as const, message: 'TEST 提交受理不明', recoverable: true, detectedAt: now } } : {}) }));
+      if (condition === 'occupied') tasks.push({ ...tasks[0], id: 'TEST-other-running-task', status: 'generating' });
+      useTaskStore.setState({ tasks: condition === 'missing-task' ? [] : tasks });
+      if (condition === 'preparing') usePetStoryStore.setState({ promptRepairJobIds: [currentProject().jobs.at(-1)!.id] });
+    });
+    expect(within(dialog).queryByRole('button', { name: '重新提出修改' })).toBeNull();
+    expect(revise).toHaveBeenCalledOnce(); expect(adopt).not.toHaveBeenCalled();
   });
 });

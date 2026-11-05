@@ -33,6 +33,31 @@ describe('AutomationEngine 租约心跳', () => {
     expect(renewLock).toHaveBeenCalledTimes(1);
   });
 
+  it('取锁IPC抛错后释放本地占位，同账号后续任务可以正常启动', async (): Promise<void> => {
+    const engine = new AutomationEngine(); acquireLock.mockRejectedValueOnce(new Error('TEST 取锁连接暂不可用'));
+    expect(await engine.reserve('TEST-failed-acquire', 'TEST-account', 'TEST-old-owner')).toEqual({ ok: false, error: 'TEST 取锁连接暂不可用' });
+    expect(engine.isReserved('TEST-failed-acquire')).toBe(false);
+    expect(await engine.reserve('TEST-next-acquire', 'TEST-account', 'TEST-next-owner')).toEqual({ ok: true });
+    await engine.release('TEST-next-acquire');
+  });
+
+  it.each(['reject', 'failure', 'success'] as const)('旧取锁%s迟到时不得删除新占位或给新占位重复启用心跳', async (outcome): Promise<void> => {
+    type LockResult = { success: boolean; error?: string };
+    let finish!: (result: LockResult) => void; let reject!: (reason: Error) => void;
+    acquireLock.mockImplementationOnce((): Promise<LockResult> => new Promise((resolve, rejectPromise): void => { finish = resolve; reject = rejectPromise; }));
+    const engine = new AutomationEngine(); const pending = engine.reserve('TEST-reused-acquire', 'TEST-account', 'TEST-old-owner');
+    await engine.release('TEST-reused-acquire');
+    expect(await engine.reserve('TEST-reused-acquire', 'TEST-account', 'TEST-new-owner')).toEqual({ ok: true });
+    const controller = engine.createController('TEST-reused-acquire', 'TEST-account');
+    if (outcome === 'reject') reject(new Error('TEST 旧IPC迟到失败'));
+    else finish({ success: outcome === 'success', error: outcome === 'failure' ? 'TEST 旧取锁失败' : undefined });
+    expect(await pending).toMatchObject({ ok: false });
+    expect(engine.ownsAccountController('TEST-reused-acquire', 'TEST-account', controller)).toBe(true);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(renewLock).toHaveBeenCalledExactlyOnceWith('TEST-reused-acquire', 'TEST-new-owner');
+    await engine.release('TEST-reused-acquire', controller);
+  });
+
   it.each([
     ['返回失败', () => renewLock.mockResolvedValueOnce({ success: false, error: 'lost' })],
     ['IPC 抛错', () => renewLock.mockRejectedValueOnce(new Error('offline'))],

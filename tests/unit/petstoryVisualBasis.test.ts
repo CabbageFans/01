@@ -15,6 +15,15 @@ function fixture(): PetStoryProject {
 }
 
 describe('正常制作入口的角色图适配与当前状态', (): void => {
+  it('显式改镜长留下的正文同步标记沿已有入口准备，不受旧reference-first合同短路', (): void => {
+    const p = fixture(); const shot = p.plan!.shots[0]; const prompt = shot.prompts.video;
+    prompt.promptTask = { visualPolicy: 'reference-first-v1', references: [], dialect: 'seedance20' };
+    expect(needsPetStoryReferenceAdaptation(p, shot.id, 'video')).toBe(false);
+    prompt.timingStale = true;
+    expect(needsPetStoryReferenceAdaptation(p, shot.id, 'video')).toBe(true);
+    prompt.timingStale = undefined;
+    expect(needsPetStoryReferenceAdaptation(p, shot.id, 'video')).toBe(false);
+  });
   it('关键帧反馈只使用实际选图和原意见，不将旧换装字段或旧正文重新发给媒体', (): void => {
     const p = fixture(); const shot = p.plan!.shots[0]; const target = { shotId: shot.id, kind: 'firstFrame' as const };
     shot.appearanceOverrides = { [shot.characterIds[0]]: 'TEST 过时黑衣马尾造型规格' };

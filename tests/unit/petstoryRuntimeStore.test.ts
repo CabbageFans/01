@@ -23,7 +23,10 @@ const prepareRuntime = vi.fn(async (_id: string, _revision: number, kind: PetSto
   const parent = project.jobs.find((job): boolean => job.id === target?.parentJobId);
   const inherited = kind === 'repair' && parent ? { shotId: parent.shotId, promptKind: parent.promptKind, materialId: parent.materialId } : {};
   project.jobs.push({ id, taskId, kind, status: 'bound', inputHash: 'TEST', sourceUrl: '', sourceStoryId: project.mobileStory!.id, requestId: `TEST-request-${index}`, expectedIds: [target?.materialId || target?.shotId || 'story'], createdAt: new Date(Date.parse(now) + index * 1000).toISOString(), ...inherited, ...target });
-  tasks.push({ id: taskId, projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'chat', status: 'queued', prompt: 'TEST 主进程运行时请求替身', runtime: { runId: `TEST-run-${index}` } } as Task);
+  tasks.push({ id: taskId, projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'chat', status: 'queued', executionIntent: 'hold',
+    prompt: 'TEST 主进程运行时请求替身', result: null, outputs: [], createdAt: now, updatedAt: now,
+    runtime: { runId: `TEST-run-${index}`, attempt: 1, stage: 'preparing_account', message: 'TEST 原运行', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
+      input: { mode: 'chat', prompt: 'TEST 主进程运行时请求替身', attachments: [] } } });
   return { success: true, project, taskId };
 });
 const collectChat = vi.fn(async (_id: string, jobId: string): Promise<PetStoryResult> => {

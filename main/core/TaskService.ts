@@ -28,7 +28,7 @@ import type {
 } from '@doubao-studio/contracts';
 import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
 import { parseCsv } from '../utils/csv';
-import { normalizeMediaSubmissionReceipt } from '../utils/persistenceNormalization';
+import { normalizeMediaSubmissionReceipt, validPetStoryChatBinding } from '../utils/persistenceNormalization';
 
 /** JSON 落盘省略 undefined 并重排白名单字段；仅比较实际数据，原回复字符串仍逐字比较。 */
 function samePersistedChatEvidence(stored: unknown, requested: unknown): boolean {
@@ -252,7 +252,7 @@ function createResubmissionTask(source: Task, input: TaskRunSnapshot['input'], t
   return {
     id: taskId, prompt: input.prompt, assignedAccountId: source.assignedAccountId, mode: input.mode,
     videoConfig: input.videoConfig ? structuredClone(input.videoConfig) : undefined, attachments: [...input.attachments], audioAttachment: input.audioAttachment,
-    petstory: binding ? structuredClone(binding) : undefined, promptReadback: input.promptReadback || source.promptReadback,
+    petstory: binding ? structuredClone(binding) : undefined, petstoryChat: source.petstoryChat ? structuredClone(source.petstoryChat) : undefined, promptReadback: input.promptReadback || source.promptReadback,
     projectId: source.projectId, batchId: source.batchId, source: source.source,
     dependsOnTaskIds: source.dependsOnTaskIds ? [...source.dependsOnTaskIds] : undefined, dependencyPolicy: source.dependencyPolicy,
     executionIntent: 'hold', status: 'queued', result: null, outputs: [], artifacts: [], runHistory: [],
@@ -374,12 +374,13 @@ export class TaskService {
     const tasks = this.readTasks();
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const mode: GenerationMode = params.mode || 'chat';
+    if (params.petstoryChat !== undefined && (!validPetStoryChatBinding(params.petstoryChat) || mode !== 'chat' || prompts.length !== 1 || params.petstory)) return { success: false, error: '短剧文字任务归属无效，未创建任务' };
     const created = prompts.map((prompt): Task => {
       const timestamp = this.now();
       return {
         id: this.id(), prompt, assignedAccountId: null, status: 'queued', mode,
         executionIntent: params.executionIntent || 'hold',
-        petstory: params.petstory, promptReadback: params.promptReadback, videoConfig: params.videoConfig, attachments: params.attachments,
+        petstory: params.petstory, petstoryChat: params.petstoryChat ? { ...params.petstoryChat } : undefined, promptReadback: params.promptReadback, videoConfig: params.videoConfig, attachments: params.attachments,
         audioAttachment: params.audioAttachment, result: null, outputs: [], artifacts: [],
         runHistory: [], source: 'manual', dependsOnTaskIds: [],
         projectId: params.projectId || this.deps.defaultProjectId(),

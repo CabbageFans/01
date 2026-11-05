@@ -1,11 +1,12 @@
 /** 隔离 Electron 取证驱动：只读打开项目、普通控件、定尺和截图；不提供生成/提交命令。 */
-const { _electron } = require('/Users/zarkding/Documents/node_modules/.pnpm/playwright@1.60.0/node_modules/playwright');
+// Playwright 使用开发环境已有安装；需要时显式指定模块路径，不绑定个人机器或依赖版本。
+const { _electron } = require(process.env.DOUBAO_CAPTURE_PLAYWRIGHT_MODULE || 'playwright');
 const fs=require('node:fs/promises'); const path=require('node:path'); const readline=require('node:readline');
-const evidence=path.resolve('design/ui-refresh/handoff/evidence');
+const evidence=__dirname; const projectRoot=path.resolve(evidence,'../../../..');
 const copy=path.join(evidence,'sample-project');
 (async()=>{
  const env={...process.env,VITE_DEV_SERVER_URL:'http://127.0.0.1:5173'}; delete env.ELECTRON_RUN_AS_NODE;
- const electron=await _electron.launch({executablePath:path.resolve('node_modules/.pnpm/electron@43.8.3/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'),args:[process.cwd(),'--profile=mac-test','--dev-viewport-size=1440x900','--local-control'],env,timeout:20000});
+ const electron=await _electron.launch({executablePath:require('electron'),args:[projectRoot,'--profile=mac-test','--dev-viewport-size=1440x900','--local-control'],env,timeout:20000});
  const page=await electron.firstWindow();
  await electron.context().route(/^https?:\/\/(?!127\.0\.0\.1|localhost)/,route=>route.abort());
  const tempProfile=await electron.evaluate(({app})=>app.getPath('userData'));
@@ -16,15 +17,15 @@ const copy=path.join(evidence,'sample-project');
  const auditStart={capturedAt:new Date().toISOString(),profile:'isolated mac-test',originalProfileUntouched:true,accountCount:0,taskCount:0,network:'external HTTP aborted; no platform requests',directoryPicker:'one-shot native dialog selection automation; project loaded via normal Open button, original IPC and validation',source:'working tree React served by existing local Vite; compiled main from current clean worktree',sampleRevision:sample.revision};
  await fs.writeFile(path.join(evidence,'capture-environment.json'),JSON.stringify(auditStart,null,2));
  const rl=readline.createInterface({input:process.stdin});
- async function stable(){await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));}
- async function state(){await stable();return {metrics:await page.evaluate(()=>({width:innerWidth,height:innerHeight,dpr:devicePixelRatio,canvasTransform:document.querySelector('.canvas-content')?.style.transform||null,canvasBounds:document.querySelector('.canvas-viewport')?.getBoundingClientRect().toJSON()||null})),headings:await page.getByRole('heading').allTextContents(),dialogs:await page.getByRole('dialog').count()};}
+ async function stable(){await page.evaluate(()=>new Promise(resolve=>globalThis.requestAnimationFrame(()=>globalThis.requestAnimationFrame(resolve))));}
+ async function state(){await stable();return {metrics:await page.evaluate(()=>({width:globalThis.innerWidth,height:globalThis.innerHeight,dpr:globalThis.devicePixelRatio,canvasTransform:globalThis.document.querySelector('.canvas-content')?.style.transform||null,canvasBounds:globalThis.document.querySelector('.canvas-viewport')?.getBoundingClientRect().toJSON()||null})),headings:await page.getByRole('heading').allTextContents(),dialogs:await page.getByRole('dialog').count()};}
  console.log(JSON.stringify({ready:true,...await state()}));
  for await(const line of rl){
   try{
    const cmd=JSON.parse(line); let result;
    if(cmd.op==='state')result=await state();
    else if(cmd.op==='open'){
-    await electron.evaluate(({dialog},directory)=>{const original=dialog.showOpenDialog;dialog.showOpenDialog=async(...args)=>{dialog.showOpenDialog=original;return {canceled:false,filePaths:[directory]};};},copy);
+    await electron.evaluate(({dialog},directory)=>{const original=dialog.showOpenDialog;dialog.showOpenDialog=async()=>{dialog.showOpenDialog=original;return {canceled:false,filePaths:[directory]};};},copy);
     await page.getByText('打开项目',{exact:true}).first().click(); await page.locator('.canvas-viewport').waitFor({state:'visible'}); result=await state();
    }else if(cmd.op==='scroll'){await page.getByText(cmd.name,{exact:true}).nth(cmd.index||0).scrollIntoViewIfNeeded(); result=await state();}
    else if(cmd.op==='click'){

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { PetStoryPlan, PetStoryProject, PetStoryPrompt } from '@doubao-studio/contracts';
 import snapshot from '../fixtures/storyboard-five-shots.json';
 import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
-import { inspectPromptEligibility, promptDesignHash, promptWritingTarget, requirePromptEligibility } from '../../main/utils/petstoryEligibility';
+import { inspectPromptEligibility, promptDesignHash, promptTimingPlanHash, promptWritingTarget, requirePromptEligibility } from '../../main/utils/petstoryEligibility';
 import { compilePrompt, promptReferences } from '../../main/utils/petstoryPromptQuality';
 import { buildPetStoryPromptExport } from '../../main/utils/petstoryExport';
 import { storyHash } from '../../main/utils/petstoryMaterials';
@@ -32,6 +32,24 @@ function first(p: PetStoryProject): PetStoryPrompt { return p.plan!.shots[0].pro
 function target(p: PetStoryProject): { shotId: string; promptKind: 'firstFrame' } { return { shotId: p.plan!.shots[0].id, promptKind: 'firstFrame' }; }
 
 describe('专用正文媒体资格与计划导出', (): void => {
+  it('新事件计划变更需要正文同步，旧无时间表视频初读不强制重新创作', (): void => {
+    const p = project(); const shot = p.plan!.shots[0]; const body = shot.prompts.video;
+    const source = p.jobs.find((job): boolean => job.id === (body.sourceJobId || body.basisJobId))!;
+    body.edited = false; body.sourceJobId = source.id;
+    const target = { shotId: shot.id, promptKind: 'video' as const, mode: body.promptTask!.mode };
+    const timingReasons = (): string[] => inspectPromptEligibility(p, body, target, 'current').reasons.filter((reason): boolean => reason.includes('事件时间安排'));
+    expect(timingReasons()).toEqual([]); shot.durationSeconds = 8;
+    shot.timingPlan = { events: [{ id: 'action', kind: 'action', description: shot.action, startSeconds: 0, endSeconds: 7.6 }],
+      estimatedRequiredSeconds: 7.6, durationReason: 'TEST原动作所需时间', cutReason: 'TEST动作完成' };
+    expect(timingReasons()).toHaveLength(1);
+    body.promptTask!.timingPlanHash = promptTimingPlanHash(shot); source.promptTask = structuredClone(body.promptTask);
+    expect(timingReasons()).toEqual([]);
+    shot.timingPlan.events[0].endSeconds = 7.3; expect(timingReasons()).toHaveLength(1);
+    body.promptTask!.timingPlanHash = promptTimingPlanHash(shot); source.promptTask = structuredClone(body.promptTask);
+    shot.durationSeconds = 9; expect(timingReasons()).toHaveLength(1);
+    delete shot.timingPlan; expect(timingReasons()).toHaveLength(1);
+  });
+
   it('无合同旧稿可读可导出，但单节点和实际编译共享阻断', (): void => {
     const p = project(); const body = first(p).final; delete first(p).promptTask;
     expect(compilePrompt(p, target(p).shotId, 'firstFrame', undefined, true).final).toBe(body);

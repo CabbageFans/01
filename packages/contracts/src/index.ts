@@ -126,3 +126,5 @@ export type { PetStoryValidationIssue, PetStoryPromptBatch, PetStoryMaterialEdit
 export type { PetStoryChatAdjustment, PetStoryConversationReply, PetStoryAdjustmentResult } from './dto/petstoryAdjustment';
 
 export type { PetStoryAdjustmentPreview, PetStoryAdjustmentPreviewResult } from './dto/petstoryAdjustment';
+
+export type { PetStoryTimingPlan, PetStoryDialogueSource } from './dto/petstory';

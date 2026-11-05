@@ -29,6 +29,10 @@ export interface PromptEligibility {
   writingReady: boolean;
 }
 function digest(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
+/** 新事件计划单独锁定；旧项目无此字段时保留已采用视频正文的复用规则。 */
+export function promptTimingPlanHash(shot: PetStoryShot): string | undefined {
+  return shot.timingPlan ? digest({ durationSeconds: shot.durationSeconds, timingPlan: shot.timingPlan }) : undefined;
+}
 function targetId(target: PromptEligibilityTarget): string | undefined { return target.materialId || (target.shotId && target.promptKind ? `${target.shotId}:${target.promptKind}` : undefined); }
 function adoptedText(prompt?: PetStoryPrompt): string | undefined { return prompt && (prompt.sourceJobId || prompt.edited) ? prompt.final : undefined; }
 
@@ -210,12 +214,15 @@ export function inspectPromptCandidate(p: PetStoryProject, job: PetStoryChatJob)
   if (!prompt || !body) return { state: 'needs_revision', reasons: ['候选缺少对应目标或完整原回复正文。'], writingReady: false };
   const snapshot = { ...p, jobs: p.jobs.map((item): PetStoryChatJob => item.id === job.id ? { ...item, status: 'applied', resultStatus: 'adopted' } : item) };
   return inspectPromptEligibility(snapshot, { ...prompt, final: body, optimized: body, edited: false, sourceJobId: job.id, candidateJobId: job.id,
-    rulesVersion: job.rulesVersion || prompt.rulesVersion, promptTask: job.promptTask, editIntent: job.editIntent, needsReview: undefined, visualBasisStale: undefined,
+    rulesVersion: job.rulesVersion || prompt.rulesVersion, promptTask: job.promptTask, editIntent: job.editIntent, needsReview: undefined, visualBasisStale: undefined, timingStale: undefined,
     supersededByAssetId: materialRequestAfterVisualAdoption(p, job) ? undefined : prompt.supersededByAssetId }, promptWritingTarget(p, job), 'candidate');
 }
-function designEligibilityIssues(p: PetStoryProject, target: PromptEligibilityTarget, task: PetStoryPromptTaskContract | undefined, source: PetStoryChatJob | undefined, purpose: PromptEligibilityPurpose, currentVideo: boolean): string[] {
+function designEligibilityIssues(p: PetStoryProject, target: PromptEligibilityTarget, task: PetStoryPromptTaskContract | undefined, source: PetStoryChatJob | undefined, purpose: PromptEligibilityPurpose, currentVideo: boolean, manualTimingCurrent: boolean): string[] {
   if (!task) return [];
   const reasons: string[] = [];
+  const shot = p.plan?.shots.find((item): boolean => item.id === target.shotId);
+  const timingHash = shot ? promptTimingPlanHash(shot) : undefined;
+  if (!manualTimingCurrent && (timingHash || task.timingPlanHash) && timingHash !== task.timingPlanHash) reasons.push('本镜事件时间安排或计划时长已变化，请通过豆包按当前方案修订正文后再制作。');
   if (!visualContractCurrent(p, target, task, purpose === 'current')) reasons.push('角色图已更新，请通过豆包按当前采用图修订本镜正文。');
   const changedVisual = task.visualPolicy === 'reference-first-v1' && task.characterVisualBasis && JSON.stringify(task.characterVisualBasis) !== JSON.stringify(characterVisualBasis(p, target.shotId || ''));
   if (!task.designHash || (!currentVideo || changedVisual) && !currentDesignContract(p, target, task, source, purpose === 'current')) reasons.push('剧本、镜头设计或已采用帧／前镜边界与正文创作时不一致，请通过豆包重新生成或修订。');
@@ -225,6 +232,7 @@ function designEligibilityIssues(p: PetStoryProject, target: PromptEligibilityTa
 export function inspectPromptEligibility(p: PetStoryProject, prompt: PetStoryPrompt, target: PromptEligibilityTarget, purpose: PromptEligibilityPurpose = 'candidate'): PromptEligibility {
   if (!prompt.final?.trim()) return { state: 'creative_plan', reasons: ['镜头已设计，正式正文待通过专用豆包 Chat 生成。'], writingReady: false };
   const reasons: string[] = [];
+  if (prompt.timingStale) reasons.push('本镜计划时长或事件安排已显式调整，保存正文仍需按当前方案同步。');
   if (prompt.supersededByAssetId) reasons.push('基础图旧正文已由当前采用图替代，只保留历史，不能继续作为创作依据。');
   const task = prompt.promptTask;
   const source = creativeSource(p, prompt);
@@ -233,7 +241,7 @@ export function inspectPromptEligibility(p: PetStoryProject, prompt: PetStoryPro
   if (!validCreativeSource(p, prompt, target, source)) reasons.push('当前正文缺少本目标已采用的专用豆包 Chat 创作来源；旧分析稿和未采用候选不能投产。');
   if (!validRuleContract(p, target, task, source)) reasons.push('正文来源未核对本次专用规则阶段和目标合同，请通过豆包重新生成或修订。');
   // 原请求及designHash保留；本次明确生成使用已保存正文和当前采用图片，不要求再次创作。
-  reasons.push(...designEligibilityIssues(p, target, task, source, purpose, currentVideo));
+  reasons.push(...designEligibilityIssues(p, target, task, source, purpose, currentVideo, currentVideo && prompt.edited && !prompt.timingStale));
   if (prompt.needsReview && (!currentVideo || hasCurrentPromptReviewError(p, prompt, target))) reasons.push(currentVideo
     ? '当前视频正文存在对应原文的审查错误，请手动修改或提交修改要求后再生成。'
     : '当前采用正文仍待复核；新候选尚未采用时下游继续读取旧正文。');

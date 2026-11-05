@@ -1,4 +1,5 @@
 /** 全部为离线测试数据，不代表真实抖音内容、免费权益或生成验收。 */
+import { withOfflineTimingPlan } from '../fixtures/petstoryTimingPlan';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -32,7 +33,7 @@ function testPlan(count = 4): PetStoryPlan {
   };
 }
 function testAnswer(plan: PetStoryPlan = testPlan()): string {
-  return JSON.stringify({ storyUsable: true, contentBasis: { beginning: '测试走进商店', middle: '测试店员找到礼物', ending: '测试道谢离开' }, ...plan });
+  return JSON.stringify(withOfflineTimingPlan({ storyUsable: true, contentBasis: { beginning: '测试走进商店', middle: '测试店员找到礼物', ending: '测试道谢离开' }, ...plan }, project?.mobileStory?.text || ''));
 }
 
 async function runtimeAnalysis(chat: PetStoryChatService, id: string = project.id): Promise<PetStoryChatJob> {
@@ -344,6 +345,38 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     expect(adopted.project?.source.status).toBe('review_required');
     expect(tasks()).toHaveLength(1);
     expect((await new PetStoryProjects().open(directory)).jobs[0].rawText).toBe(raw);
+  });
+  it('新分析明确缺时间合同进入原修订链并持久化接收版本', async (): Promise<void> => {
+    const { port, core, tasks } = taskPort(); const chat = new PetStoryChatService(projects, port);
+    const analysis = await runtimeAnalysis(chat);
+    expect(analysis.planTimingVersion).toBe('events-v1');
+    const oldShape = JSON.stringify({ ...testPlan(), storyUsable: true, contentBasis: { beginning: '测试开头', middle: '测试变化', ending: '测试结果' } });
+    await complete(core, tasks()[0], runtimeAnswer(analysis, oldShape));
+    const failed = await chat.collect(project.id, analysis.id);
+    expect(failed).toMatchObject({ success: false, needsRepair: true });
+    expect(failed.project!.jobs[0].validationDetails).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'timing', path: '$.shots[0].timingPlan', repairable: true })]));
+    const prepared = await chat.prepareRuntime(project.id, failed.project!.revision, 'repair', { parentJobId: analysis.id });
+    const repair = prepared.project!.jobs.at(-1)!; expect(repair.planTimingVersion).toBe('events-v1');
+    await complete(core, tasks()[1], runtimeAnswer(repair));
+    expect(await chat.collect(project.id, repair.id)).toMatchObject({ success: true });
+    const reopened = await new PetStoryProjects().open(directory);
+    expect(reopened.jobs[0].planTimingVersion).toBe('events-v1'); expect(reopened.jobs.at(-1)!.parsedResult!.plan!.shots.every((shot): boolean => !!shot.timingPlan)).toBe(true);
+  });
+  it('旧已发送任务没有时间版本仍按原合同收取，不改写原请求快照', async (): Promise<void> => {
+    const { port, core, tasks } = taskPort(); const chat = new PetStoryChatService(projects, port);
+    const oldShape = JSON.stringify({ ...testPlan(), storyUsable: true, contentBasis: { beginning: '测试开头', middle: '测试变化', ending: '测试结果' } });
+    const legacy = await chat.prepare(project.id, 'TEST旧已发送分析合同', 'analysis');
+    const legacyJob = legacy.project!.jobs.at(-1)!; expect(legacyJob.planTimingVersion).toBeUndefined();
+    // 旧prepare不在job补造requestText；原请求保存在正式任务及运行输入，job用inputHash绑定。
+    expect(legacyJob.requestText).toBeUndefined(); const originalTask = tasks()[0];
+    expect(originalTask.prompt).toBe('TEST旧已发送分析合同');
+    await complete(core, tasks()[0], oldShape);
+    const oldCollected = await chat.collect(project.id, legacyJob.id); expect(oldCollected.success).toBe(true);
+    const collectedJob = oldCollected.project!.jobs.find((job): boolean => job.id === legacyJob.id)!;
+    expect(collectedJob.requestText).toBe(legacyJob.requestText); expect(collectedJob.inputHash).toBe(legacyJob.inputHash);
+    expect(collectedJob.planTimingVersion).toBeUndefined(); expect(collectedJob.rawText).toBe(oldShape);
+    const collectedTask = tasks().find((task): boolean => task.id === legacyJob.taskId)!;
+    expect(collectedTask.prompt).toBe(originalTask.prompt); expect(collectedTask.runtime!.input.prompt).toBe('TEST旧已发送分析合同');
   });
   it('stores malformed JSON before parsing, reuses each parent repair and continues failed repairs', async (): Promise<void> => {
     const { port, core, tasks } = taskPort();

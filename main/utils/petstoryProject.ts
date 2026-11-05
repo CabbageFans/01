@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryPromptEditBasis, PetStoryChatJob, PetStoryPromptBatch, PetStoryImageTarget, PetStoryProductionStep } from '@doubao-studio/contracts';
 import { assetCharacterIds, defaultPromptProfile, PROMPT_RULES_VERSION } from './petstoryPromptQuality';
-import { extractDouyinLink, record, runtimePromptIssues, validatePetStoryPlan, validatePromptTask } from './petstoryValidation';
+import { collectPetStoryDialogueSourceIssues, extractDouyinLink, PetStoryContentValidationError, record, runtimePromptIssues, validatePetStoryPlan, validatePromptTask } from './petstoryValidation';
 import { invalidateMaterialDependents, materialAsset, syncMaterials, storyHash, requireMaterialInventory } from './petstoryMaterials';
 import { mediaDigest, validatePetStoryMedia } from './petstoryMedia';
 import { archiveCompletedPetStoryProduction } from './petstoryProductionLifecycle';
@@ -453,12 +453,17 @@ export class PetStoryProjects {
     if (!p.plan) throw new Error('请先取得本次 Chat 分析结果');
     if (p.production && !archiveCompletedPetStoryProduction(p)) throw new Error('原制作尚未结束或镜头方案已锁定，保留已有素材和任务');
     const checked = validatePetStoryPlan(value);
+    const sourceIssues = collectPetStoryDialogueSourceIssues(checked, p.mobileStory?.text || '');
+    if (sourceIssues.length) throw new PetStoryContentValidationError(sourceIssues);
     for (const shot of checked.shots) {
       const previous = p.plan.shots.find((s): boolean => s.id === shot.id);
+      const timingChanged = !!previous && (previous.durationSeconds !== shot.durationSeconds || !isDeepStrictEqual(previous.timingPlan, shot.timingPlan));
       for (const kind of ['firstFrame', 'lastFrame', 'video'] as const) {
         const incoming = shot.prompts[kind];
         const old = previous?.prompts[kind];
-        if (incoming && old) shot.prompts[kind] = { ...old, final: incoming.final, edited: old.edited || incoming.final !== old.final, basisJobId: incoming.final === old.final ? old.basisJobId : old.sourceJobId || old.basisJobId, sourceJobId: incoming.final === old.final ? old.sourceJobId : undefined };
+        if (incoming && old) shot.prompts[kind] = { ...old, final: incoming.final, edited: old.edited || incoming.final !== old.final, basisJobId: incoming.final === old.final ? old.basisJobId : old.sourceJobId || old.basisJobId, sourceJobId: incoming.final === old.final ? old.sourceJobId : undefined,
+          timingStale: incoming.final !== old.final ? undefined : old.timingStale,
+          ...(timingChanged && incoming.final === old.final ? { timingStale: true } : {}) };
       }
     }
     p.plan = checked;
@@ -487,6 +492,7 @@ export class PetStoryProjects {
       target.rulesVersion = source.rulesVersion || PROMPT_RULES_VERSION; target.promptTask = source.promptTask ? structuredClone(source.promptTask) : undefined;
       target.editIntent = source.editIntent ? structuredClone(source.editIntent) : undefined; target.needsReview = undefined;
     } else target.basisJobId = target.sourceJobId || target.basisJobId;
+    if (final !== target.final || source) target.timingStale = undefined;
     target.final = final; target.edited = true; target.sourceJobId = undefined; target.visualBasisStale = undefined;
     if (basis) {
       target.candidateJobId = undefined;

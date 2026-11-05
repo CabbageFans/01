@@ -44,7 +44,9 @@ function invalidJobStatus(job: PetStoryChatJob, task: Task | undefined, repairPr
   if (job.resultStatus === 'stale') return { title: '历史回复待核对', instruction: job.staleReason || '当前依据已变化，这条回复仅作历史记录；请查看对应对象的当前内容和制作条件。' };
   if (isPetStoryAutomaticPromptFailure(job) || repairPreparing) {
     if (task?.status === 'waiting_verification' || task?.errorInfo?.code === 'authentication_unconfirmed') return { title: '需要登录或验证', instruction: '请先在原执行账号完成豆包登录或验证，再继续原任务。' };
-    if (job.planFeedback) return { title: '正在整理新方案', instruction: '工具正在后台检查并整理结果，完成后会显示完整的新方案。' };
+    if (job.planFeedback) return repairPreparing
+      ? { title: '正在整理新方案', instruction: '工具正在后台检查并整理结果，完成后会显示完整的新方案。' }
+      : { title: '方案修订需要继续', instruction: job.error || job.validationDetails?.map((issue): string => issue.message).join('；') || '本轮方案尚未通过校验，请查看具体问题后继续修正。' };
     return repairPreparing ? { title: '正在后台修订', instruction: '正在后台修订并校验，校验通过后提供完整候选供确认。' }
       : { title: '提示词待后台修订', instruction: '提示词尚未通过校验，等待后台修订；通过后提供完整候选供确认。' };
   }
@@ -63,6 +65,11 @@ export function petStoryJobTargetName(project: PetStoryProject, job: PetStoryCha
   if (shot) return `镜头 ${shot.order}${job.promptKind ? ` · ${canvasPromptNames[job.promptKind]}` : ''}`;
   const kind = jobRepairAncestors(project, job).at(-1)?.kind || job.kind;
   return ({ analysis: '剧本理解与分镜方案', assets: '人物／道具／场景清单', review: '内容审查', revise: '内容修订', repair: '回复缺项修订', optimize: '镜头提示词', materialPrompt: '基础素材提示词' })[kind];
+}
+
+function queuedRepairStatus(job: PetStoryChatJob, task: Task): PetStoryJobDisplayStatus | undefined {
+  if (job.kind !== 'repair' || !isBackgroundCreativeJob(job) || task.status !== 'queued') return;
+  return { title: '后台修订待启动', instruction: job.planFeedback ? '修订任务尚未发送，可继续这次调整。' : '修订任务已排队，等待后台调度后继续校验。' };
 }
 
 export function petStoryJobStatus(job: PetStoryChatJob, task?: Task, repairPreparing: boolean = false): PetStoryJobDisplayStatus {
@@ -85,8 +92,7 @@ export function petStoryJobStatus(job: PetStoryChatJob, task?: Task, repairPrepa
   }
   if (!task) return { title: '原任务记录待载入', instruction: '先刷新任务记录，再核对原请求。此处不会新建或重发任务。' };
   if (['executing', 'generating', 'manual_submission_observing'].includes(task.status)) return job.kind === 'repair' ? { title: '正在修订', instruction: repairAction } : { title: '正在处理', instruction: '正在准备这次豆包请求，请等待页面反馈。' };
-  if (job.kind === 'repair' && isBackgroundCreativeJob(job) && task.status === 'queued') return { title: '后台修订待启动', instruction: '修订任务已排队，等待后台调度后继续校验。' };
-  return { title: '原任务尚未发送', instruction: '先处理豆包登录、验证或页面阻断，再从这里继续原任务；它会复用原请求。' };
+  return queuedRepairStatus(job, task) || { title: '原任务尚未发送', instruction: '先处理豆包登录、验证或页面阻断，再从这里继续原任务；它会复用原请求。' };
 }
 
 export function openPetStoryOriginalTask(task: Task): void {
@@ -110,8 +116,11 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
   const canReconcile = job.status === 'bound' && !!task?.runtime?.submittedAt && ['fail', 'paused', 'cancelled', 'waiting_verification'].includes(task.status);
   const conversation = resolveTaskConversationTarget(task);
   const localFormatFix = hasCutBindingIssue(job);
-  const backgroundRepair = isBackgroundCreativeJob(job) || state.promptRepairJobIds.includes(job.id);
-  const canRepair = !backgroundRepair && !localFormatFix && !job.endedWaitingAt && job.resultStatus !== 'stale' && job.status === 'invalid' && !!job.requestId && !project.jobs.some((item): boolean => item.kind === 'repair' && item.parentJobId === job.id);
+  const repairPreparing = state.promptRepairJobIds.includes(job.id);
+  const backgroundRepair = isBackgroundCreativeJob(job) || repairPreparing;
+  const canRepair = !repairPreparing && (!backgroundRepair || !!job.planFeedback && isPetStoryAutomaticPromptFailure(job)) && !localFormatFix && !job.endedWaitingAt && job.resultStatus !== 'stale' && job.status === 'invalid' && !!job.requestId && !project.jobs.some((item): boolean => item.kind === 'repair' && item.parentJobId === job.id);
+  const queuedPromptRepair = backgroundRepair && !job.planFeedback && job.kind === 'repair' && task?.status === 'queued';
+  const repairLabel = job.planFeedback ? '继续修正方案' : '继续处理具体缺项';
   const canAdjust = !backgroundRepair && job.status === 'invalid' && !project.jobs.some((item): boolean => item.parentJobId === job.id && item.kind === 'repair')
     && (project.chatAdjustment?.status !== 'active' || project.chatAdjustment.repairJobId === job.id);
   const adjust = (): void => {
@@ -122,8 +131,8 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
     {task && <Button size="small" onClick={(): void => openOriginalTask(task)}>{conversation.ok ? '打开对应豆包会话' : '打开执行账号豆包'}</Button>}
     {job.status !== 'applied' && !(backgroundRepair && job.status === 'invalid' && isPetStoryAutomaticPromptFailure(job)) && <Button size="small" type={localFormatFix ? 'primary' : 'default'} disabled={state.busy || !task?.runtime?.chatResponse?.text && job.status !== 'captured'} onClick={(): void => { void state.collect(job.id); }}>{localFormatFix ? '读取原回复并整理分镜结构' : '重新保存回复'}</Button>}
     {canReconcile && <Button size="small" disabled={state.busy} onClick={(): void => { void state.recoverChat(job.id); }}>检查原回复（不重复发送）</Button>}
-    {canStart && !(backgroundRepair && job.kind === 'repair' && task?.status === 'queued') && <Button size="small" type="primary" disabled={state.busy} onClick={(): void => { void state.startBoundChat(job.id); }}>{task?.status === 'queued' ? '继续原文字任务（尚未发送）' : '处理阻断后继续原任务（未发送）'}</Button>}
-    {canRepair && <Button size="small" disabled={state.busy} onClick={(): void => { void state.correctOnce(job.id); }}>继续处理具体缺项</Button>}
+    {canStart && !queuedPromptRepair && <Button size="small" type="primary" disabled={state.busy} onClick={(): void => { void state.startBoundChat(job.id); }}>{task?.status === 'queued' ? '继续原文字任务（尚未发送）' : '处理阻断后继续原任务（未发送）'}</Button>}
+    {canRepair && <Button size="small" disabled={state.busy} onClick={(): void => { void state.correctOnce(job.id); }}>{repairLabel}</Button>}
     {canAdjust && <Button size="small" onClick={adjust}>在豆包中调整</Button>}
     {pending && <Button size="small" disabled={state.busy} onClick={(): void => { void state.endChatWaiting(job.id); }}>结束本次等待</Button>}
     {!task && <Button size="small" disabled={state.busy} onClick={(): void => { void taskState.loadTasks(); }}>刷新任务记录</Button>}
@@ -138,10 +147,10 @@ export const PetStoryChatRecoveryActions: React.FC<{ project: PetStoryProject; j
     action = (): void => { void state.collect(job.id); };
   } else if (canReconcile) {
     label = '检查原回复（不重复发送）'; action = (): void => { void state.recoverChat(job.id); };
-  } else if (canStart && !(backgroundRepair && job.kind === 'repair' && task?.status === 'queued')) {
+  } else if (canStart && !queuedPromptRepair) {
     label = '继续原文字任务（尚未发送）'; action = (): void => { void state.startBoundChat(job.id); };
   } else if (canRepair) {
-    label = '继续处理具体缺项'; action = (): void => { void state.correctOnce(job.id); };
+    label = repairLabel; action = (): void => { void state.correctOnce(job.id); };
   } else if (!task) {
     label = '刷新任务记录'; action = (): void => { void taskState.loadTasks(); };
   }

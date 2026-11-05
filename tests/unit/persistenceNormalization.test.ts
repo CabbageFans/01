@@ -453,6 +453,21 @@ describe('normalizeAccountScheduling', () => {
 // ==================== normalizeTasks ====================
 
 describe('normalizeTasks', () => {
+  it('短剧文字归属持久保存且归一化幂等，不变成通用任务', (): void => {
+    const task = { ...makeValidTask(), mode: 'chat', petstoryChat: { projectId: 'petstory-project', jobId: 'chat-job' } };
+    const first = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW);
+    expect(first.data[0].petstoryChat).toEqual(task.petstoryChat);
+    expect(normalizeTasks(first.data, DEFAULT_PROJECT_ID, NOW).changed).toBe(false);
+  });
+
+  it.each([null, 'broken', {}, { projectId: 'project', jobId: '' }])('损坏文字归属%s保留阻断标记且暂停，不因清空字段恢复通用调度', (binding: unknown): void => {
+    const task = { ...makeValidTask(), mode: 'chat', status: 'queued', executionIntent: 'armed', petstoryChat: binding };
+    const normalized = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW).data[0];
+    expect(normalized).toMatchObject({ executionIntent: 'hold', status: 'paused', petstoryChat: { projectId: '', jobId: '' } });
+    expect(normalized.errorInfo?.message).toContain('归属无效');
+    expect(normalizeTasks([normalized], DEFAULT_PROJECT_ID, NOW).changed).toBe(false);
+  });
+
   // ---- 测试 1: 完整正常数据不产生变更 ----
   it('完整正常数据不产生变更', () => {
     const task = makeValidTask();

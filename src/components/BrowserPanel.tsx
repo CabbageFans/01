@@ -16,6 +16,7 @@ import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { isBackgroundPetStoryTask } from '../utils/petstoryBackground';
+import { readBackReleasedPetStoryTask } from '../utils/petstoryTaskReadback';
 import type { BackgroundPageSubmission, CreationModeEntryDiagnostic, VideoArtifactReadbackDiagnostic } from '../utils/doubaoBridge';
 import { readPetStoryConversationReplies } from '../utils/petstoryConversationReplies';
 import type { PetStoryConversationReply } from '@doubao-studio/contracts';
@@ -1869,7 +1870,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         runningRef.current.add(accountId);
         void useTaskStore.getState().pauseAutomation(taskId, accountId, '豆包对话正在打开，请收起后继续生成；本次尚未发送', { status: 'paused', code: 'page_unrecognized' })
           .catch((): void => { message.error('暂停状态暂未保存，请稍后重试；本次未操作豆包输入'); })
-          .finally(async (): Promise<void> => { await automationEngine.release(taskId); runningRef.current.delete(accountId); });
+          .finally(async (): Promise<void> => {
+            await automationEngine.release(taskId);
+            runningRef.current.delete(accountId);
+            await readBackReleasedPetStoryTask(taskId, task.runtime?.runId, {
+              current: (): Task | undefined => useTaskStore.getState().tasks.find((item): boolean => item.id === taskId),
+              list: (): Promise<Task[]> => window.electronAPI.tasks.list(),
+              replaceIfCurrent: (previous: Task, next: Task): void => {
+                const state = useTaskStore.getState();
+                if (state.tasks.find((item): boolean => item.id === taskId) !== previous) return;
+                useTaskStore.setState({ tasks: state.tasks.map((item): Task => item === previous ? next : item) });
+              },
+            });
+          });
         return;
       }
       console.log(`[BrowserPanel] 路由任务 ${taskId} → ${accountId}`);

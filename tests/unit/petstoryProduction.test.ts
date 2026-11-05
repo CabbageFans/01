@@ -14,6 +14,7 @@ import { TaskService } from '../../main/core/TaskService';
 import { legacyApprovedMaterialHash, syncMaterials } from '../../main/utils/petstoryMaterials';
 import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 import { normalizeTasks } from '../../main/utils/persistenceNormalization';
+import { promptTimingPlanHash } from '../../main/utils/petstoryEligibility';
 
 let root: string;
 let picture: string;
@@ -449,6 +450,38 @@ describe('P4 实际入口和请求模式', (): void => {
   it.each([4, 11, NaN, Infinity, 5.5])('duration %s never silently maps to another value', (duration): void => {
     const shot = plan().shots[0]; shot.durationSeconds = duration;
     expect((): unknown => resolvePetStoryMode(shot, capability())).toThrow('时长');
+  });
+  it.each([5, 6, 7, 8, 9, 10])('采用的%s秒时间安排经正式TaskService创建视频任务并保持运行输入与guard一致（离线）', async (duration: number): Promise<void> => {
+    const shot = p.plan!.shots[0];
+    p.plan!.shots = [shot]; shot.durationSeconds = duration;
+    shot.timingPlan = { events: [{ id: 'TEST-action', kind: 'action', description: 'TEST完整动作与必要结果', startSeconds: 0, endSeconds: duration - 0.5 }],
+      estimatedRequiredSeconds: duration - 0.5, durationReason: `TEST必要跨度${duration - 0.5}秒取${duration}整秒`, cutReason: 'TEST动作完成且结果可读后切出' };
+    shot.prompts.video.final = `TEST采用的${duration}秒离线视频正文，完成本镜动作与结果。`;
+    p = await projects.write(p);
+    await approve();
+    const expectedTimingHash = promptTimingPlanHash(p.plan!.shots[0]);
+    expect(p.plan!.shots[0].prompts.video.promptTask?.timingPlanHash).toBe(expectedTimingHash);
+
+    const next = await advanceToVideo();
+    const task = await start(next.taskId!);
+    const saved = await projects.read(p.id);
+    const step = saved.production!.steps.find((item): boolean => item.taskId === task.id)!;
+    const created = createdInputs.find((input): boolean => input.mode === 'video')!;
+    expect(tasks.filter((item): boolean => item.mode === 'video')).toHaveLength(1);
+    expect(created.videoConfig?.duration).toBe(`${duration}s`);
+    expect(task.videoConfig?.duration).toBe(`${duration}s`);
+    expect(task.runtime!.input.videoConfig?.duration).toBe(`${duration}s`);
+    expect(step.compiledPrompt!.final).toBe(saved.plan!.shots[0].prompts.video.final);
+    expect(step.compiledPrompt!.final).toContain(`TEST采用的${duration}秒`);
+    expect(created.prompts).toEqual([step.compiledPrompt!.text]);
+    expect(task.prompt).toBe(step.compiledPrompt!.text);
+    expect(task.runtime!.input.prompt).toBe(step.compiledPrompt!.text);
+    expect((await service.guard(task.id)).guard).toMatchObject({ durationSeconds: duration, compiledPrompt: step.compiledPrompt });
+    expect(task.runtime!.submittedAt).toBeUndefined();
+
+    const reopened = await new PetStoryProjects().open(projects.directory(p.id));
+    expect(reopened.plan!.shots[0]).toMatchObject({ durationSeconds: duration, timingPlan: shot.timingPlan });
+    expect(reopened.plan!.shots[0].prompts.video.promptTask?.timingPlanHash).toBe(expectedTimingHash);
   });
   it('重开旧auto批次沿用已选reference模式，不从未知入口改成首尾帧或要求检查', async (): Promise<void> => {
     await approve(); p = await projects.read(p.id);

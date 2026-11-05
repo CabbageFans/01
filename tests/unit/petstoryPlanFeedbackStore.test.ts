@@ -37,12 +37,13 @@ const startAutomation = vi.fn(async (taskId: string, beforeDispatch?: (task: Tas
   task.status = 'generating';
   return true;
 });
-const collectChat = vi.fn(async (_id: string, jobId: string): Promise<PetStoryResult> => {
+const saveCollectedCandidate = async (_id: string, jobId: string): Promise<PetStoryResult> => {
   project = structuredClone(project); project.revision++;
   const job = project.jobs.find((item): boolean => item.id === jobId)!;
   job.status = 'applied'; job.resultStatus = 'candidate'; job.parsedResult = { plan: structuredClone(snapshot.plan) as PetStoryPlan };
   return { success: true, project };
-});
+};
+const collectChat = vi.fn(saveCollectedCandidate);
 const openProject = vi.fn(async (): Promise<PetStoryResult> => ({ success: true, project }));
 
 function savedFeedback(kind: 'analysis' | 'repair' = 'analysis'): { job: PetStoryChatJob; task: Task } {
@@ -68,6 +69,7 @@ function accepted(task: Task): void {
 
 beforeEach((): void => {
   vi.clearAllMocks(); tasks = [];
+  collectChat.mockImplementation(saveCollectedCandidate);
   project = { schemaVersion: 1, id: 'TEST-plan-feedback', revision: 1, studioProjectId: 'TEST-studio', accountId: 'TEST-account', source: { kind: 'script', url: '', status: 'review_required' },
     mobileStory: { id: 'TEST-source', text: snapshot.mobileStory, importedAt: now }, plan: structuredClone(snapshot.plan) as PetStoryPlan,
     storyApproval: { hash: 'TEST-approved', at: now }, assets: [{ id: 'TEST-existing-media', kind: 'video', relativePath: 'TEST-existing.mp4' }], updatedAt: now,
@@ -164,6 +166,99 @@ describe('方案自然语言修改任务', (): void => {
       await vi.waitFor((): void => expect(project.jobs.find((job): boolean => job.id === rootId)?.resultStatus).toBe('candidate'));
       expect(collectChat).toHaveBeenCalledExactlyOnceWith(project.id, rootId); expect(adoptPlanCandidate).not.toHaveBeenCalled(); expect(confirmStory).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled();
     } finally { unsubscribe(); }
+  });
+
+  it('收取暂时失败后有限重读已完成原回复，不永久漏掉任务或重发', async (): Promise<void> => {
+    vi.useFakeTimers();
+    const rootId = await usePetStoryStore.getState().revisePlan(feedback);
+    collectChat.mockRejectedValueOnce(new Error('TEST 临时读取失败'));
+    const unsubscribe = observePetStoryTasks();
+    try {
+      const task = tasks[0]; task.status = 'done'; task.runtime!.chatResponse = { text: 'TEST 已落盘完整回复', capturedAt: now };
+      useTaskStore.setState({ tasks: [...tasks] });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(collectChat).toHaveBeenCalledTimes(2);
+      expect(project.jobs.find((job): boolean => job.id === rootId)?.resultStatus).toBe('candidate');
+      expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(startAutomation).toHaveBeenCalledTimes(1);
+    } finally { unsubscribe(); vi.useRealTimers(); }
+  });
+
+  it('收取持续失败只有限重读，保留明确原因及原任务供用户恢复', async (): Promise<void> => {
+    vi.useFakeTimers();
+    await usePetStoryStore.getState().revisePlan(feedback);
+    collectChat.mockRejectedValue(new Error('TEST 原回复读取持续失败'));
+    const unsubscribe = observePetStoryTasks();
+    try {
+      tasks[0].status = 'done'; tasks[0].runtime!.chatResponse = { text: 'TEST 原运行完整回复', capturedAt: now };
+      useTaskStore.setState({ tasks: [...tasks] }); await vi.advanceTimersByTimeAsync(20_000);
+      expect(collectChat).toHaveBeenCalledTimes(3);
+      expect(usePetStoryStore.getState().error).toBe('TEST 原回复读取持续失败');
+      expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(startAutomation).toHaveBeenCalledTimes(1);
+      collectChat.mockImplementationOnce(async (): Promise<PetStoryResult> => {
+        project = structuredClone(project); const job = project.jobs.at(-1)!;
+        job.status = 'applied'; job.resultStatus = 'candidate'; job.parsedResult = { plan: structuredClone(snapshot.plan) as PetStoryPlan };
+        return { success: true, project };
+      });
+      await usePetStoryStore.getState().collect(project.jobs.at(-1)!.id);
+      expect(project.jobs.at(-1)?.resultStatus).toBe('candidate');
+    } finally { unsubscribe(); vi.useRealTimers(); }
+  });
+
+  it('无批次方案在收取期间停止，迟到无效回复只保存，不能重新授权下一轮发送', async (): Promise<void> => {
+    const rootId = await usePetStoryStore.getState().revisePlan(feedback);
+    let release: ((result: PetStoryResult) => void) | undefined;
+    collectChat.mockImplementationOnce((): Promise<PetStoryResult> => new Promise((resolve): void => { release = resolve; }));
+    const collecting = usePetStoryStore.getState().collect(rootId!);
+    await usePetStoryStore.getState().stopPromptBatch();
+    project = structuredClone(project); project.revision++;
+    const job = project.jobs.at(-1)!; job.status = 'invalid'; job.rawText = 'TEST 停止后收到的原回复'; job.error = 'TEST 需要修订';
+    release!({ success: false, project, error: job.error, needsRepair: true }); await collecting;
+    expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(startAutomation).toHaveBeenCalledTimes(1);
+    expect(project.jobs.at(-1)).toMatchObject({ status: 'invalid', rawText: job.rawText });
+    expect(usePetStoryStore.getState().busy).toBe(false);
+  });
+
+  it('已有失败子回复重校验期间停止，不由递归修订重新取得发送权', async (): Promise<void> => {
+    const rootId = await usePetStoryStore.getState().revisePlan(feedback);
+    await prepareRuntime(project.id, project.revision, 'repair', { parentJobId: rootId, repairMode: 'automatic' });
+    const child = project.jobs.at(-1)!; child.status = 'invalid'; child.rawText = 'TEST 已有失败子回复';
+    let release: ((result: PetStoryResult) => void) | undefined;
+    collectChat.mockResolvedValueOnce({ success: false, project, needsRepair: true, repairJobId: child.id });
+    collectChat.mockImplementationOnce((): Promise<PetStoryResult> => new Promise((resolve): void => { release = resolve; }));
+    const collecting = usePetStoryStore.getState().collect(rootId!);
+    await vi.waitFor((): void => expect(collectChat).toHaveBeenCalledTimes(2));
+    await usePetStoryStore.getState().stopPromptBatch();
+    release!({ success: false, project, error: 'TEST 原子回复仍有缺项', needsRepair: true }); await collecting;
+    expect(prepareRuntime).toHaveBeenCalledTimes(2); expect(startAutomation).toHaveBeenCalledTimes(1);
+    expect(project.jobs).toHaveLength(3); expect(usePetStoryStore.getState().busy).toBe(false);
+  });
+
+  it('重读旧父回复接到已停止子修订时，保留最新真实暂停原因', async (): Promise<void> => {
+    const rootId = await usePetStoryStore.getState().revisePlan(feedback);
+    await prepareRuntime(project.id, project.revision, 'repair', { parentJobId: rootId, repairMode: 'automatic' });
+    const child = project.jobs.at(-1)!; child.status = 'invalid'; child.rawText = 'TEST 最新原回复';
+    child.error = 'TEST 自动修订没有进展，已暂停';
+    collectChat.mockResolvedValueOnce({ success: false, project, needsRepair: true, repairJobId: child.id, error: 'TEST 旧父回复的结构问题' });
+    collectChat.mockResolvedValueOnce({ success: false, project, needsRepair: false, error: child.error });
+    await usePetStoryStore.getState().collect(rootId!);
+    expect(usePetStoryStore.getState().error).toBe(child.error);
+    expect(prepareRuntime).toHaveBeenCalledTimes(2); expect(project.jobs).toHaveLength(3);
+  });
+
+  it('停止期间原回复读取失败，后续观察不能重新激活方案修订', async (): Promise<void> => {
+    vi.useFakeTimers();
+    const rootId = await usePetStoryStore.getState().revisePlan(feedback);
+    let reject: ((error: Error) => void) | undefined;
+    collectChat.mockImplementationOnce((): Promise<PetStoryResult> => new Promise((_resolve, fail): void => { reject = fail; }));
+    const unsubscribe = observePetStoryTasks();
+    try {
+      tasks[0].status = 'done'; tasks[0].runtime!.chatResponse = { text: 'TEST 原运行完整回复', capturedAt: now };
+      useTaskStore.setState({ tasks: [...tasks] });
+      await usePetStoryStore.getState().stopPromptBatch(); reject!(new Error('TEST 停止期间读取失败'));
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(collectChat).toHaveBeenCalledTimes(1); expect(prepareRuntime).toHaveBeenCalledTimes(1);
+      expect(project.jobs.find((job): boolean => job.id === rootId)?.status).toBe('bound');
+    } finally { unsubscribe(); vi.useRealTimers(); }
   });
 });
 

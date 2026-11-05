@@ -9,6 +9,7 @@ import { PetStoryChatService, type PetStoryTaskPort } from '../../main/utils/pet
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
 import { syncMaterials } from '../../main/utils/petstoryMaterials';
 import { claimConversationGuard, releaseConversationGuard, hasConversationGuard } from '../../main/utils/accountConversationGuard';
+import { withOfflineTimingPlan } from '../fixtures/petstoryTimingPlan';
 
 let directory: string; let projects: PetStoryProjects; let p: PetStoryProject; let service: PetStoryChatService; let core: TaskService; let port: PetStoryTaskPort;
 let stored: Task[];
@@ -16,12 +17,12 @@ const feedbackText = 'TEST 只调整第一镜头的机位，其他镜头与原�
 const oldPrompt = 'TEST obsolete prompt must stay off plan feedback';
 function plan(): PetStoryPlan {
   const prompt = { original: oldPrompt, optimized: oldPrompt, final: oldPrompt, edited: false, rulesVersion: 'TEST' };
-  return { sourceSummary: 'TEST 原剧本摘要', adaptedStory: 'TEST 原剧本正文与逐字台词', understanding: 'TEST 完整理解', sceneDesign: 'TEST 完整空间',
+  return withOfflineTimingPlan({ sourceSummary: 'TEST 原剧本摘要', adaptedStory: 'TEST 原剧本正文与逐字台词', understanding: 'TEST 完整理解', sceneDesign: 'TEST 完整空间',
     characters: [{ id: 'actor', name: 'TEST角色', role: 'main', purpose: 'TEST剧情职责', description: 'TEST剧本设定', continuity: 'TEST连续性', aliases: ['TEST角色'], designOrigin: 'script' }], props: [],
     scenes: [{ id: 'location', name: 'TEST地点', location: 'TEST地点', time: 'TEST时间', lighting: 'TEST光线', layout: 'TEST空间锚点', view: 'TEST视角', designOrigin: 'script' }],
     shots: [1, 2].map((order: number): PetStoryPlan['shots'][number] => ({ id: `shot_${order}`, order, characterIds: ['actor'], propIds: [], propStates: [], sceneId: 'location', scene: 'TEST地点',
       action: `TEST动作${order}`, startState: `TEST开始${order}`, endState: `TEST结束${order}`, durationSeconds: 5, transition: 'cut', requestedMode: 'reference', camera: 'TEST原机位',
-      dialogue: order === 1 ? [{ speakerId: 'actor', text: 'TEST原台词逐字保留', tone: 'TEST语气', pace: 'TEST语速' }] : [], prompts: { firstFrame: { ...prompt }, video: { ...prompt } } })) };
+      dialogue: order === 1 ? [{ speakerId: 'actor', text: 'TEST原台词逐字保留', tone: 'TEST语气', pace: 'TEST语速' }] : [], prompts: { firstFrame: { ...prompt }, video: { ...prompt } } })) }, 'TEST原台词逐字保留');
 }
 function selectedDesign(value: PetStoryPlan): object {
   return JSON.parse(JSON.stringify({ ...value, shots: value.shots.map(({ prompts: _prompts, ...shot }): object => { void _prompts; return shot; }) })) as object;
@@ -32,8 +33,9 @@ function timedThreeShotPlan(durations: [number, number, number]): PetStoryPlan {
   let elapsed = 0;
   value.shots.forEach((shot: PetStoryPlan['shots'][number], index: number): void => {
     shot.durationSeconds = durations[index]; shot.timing = `TEST ${elapsed}～${elapsed + shot.durationSeconds}秒完成本镜原动作`; elapsed += shot.durationSeconds;
+    delete shot.timingPlan;
   });
-  return value;
+  return withOfflineTimingPlan(value, 'TEST原台词逐字保留');
 }
 function target(requestId = 'TEST-click', baseJobId?: string): PetStoryRuntimeTarget {
   return { background: 'canvas', planFeedback: { text: feedbackText, requestId, ...(baseJobId ? { baseJobId } : {}) } };
@@ -80,6 +82,74 @@ beforeEach(async (): Promise<void> => {
 afterEach(async (): Promise<void> => { releaseConversationGuard(p.accountId, 'TEST-existing-adjustment'); await fs.rm(directory, { recursive: true, force: true }); });
 
 describe('完整方案的反馈任务', (): void => {
+  it.each([true, false])('通用启动遗漏job.runId后仅凭唯一已完成原运行和严格回读证据恢复收取（有新归属标记=%s），不改Task或重发', async (marked: boolean): Promise<void> => {
+    const root = await prepare(target()); await finish(root, plan());
+    const task = stored.find((item: Task): boolean => item.id === root.taskId)!; const runtime = task.runtime!;
+    const update = core.updateRuntime({ taskId: task.id, runtime: { input: { ...runtime.input, promptReadback: task.promptReadback }, chatReadback: { runId: runtime.runId, baselineMessageCount: 0, requestId: root.requestId, targetIds: root.expectedIds,
+      association: 'recorded_turn', userTurnId: 'TEST-user', assistantTurnId: 'TEST-assistant', observedAt: new Date().toISOString() } } });
+    expect(update.success).toBe(true);
+    if (!marked) delete stored.find((item: Task): boolean => item.id === root.taskId)!.petstoryChat;
+    const saved = p.jobs.find((job: PetStoryChatJob): boolean => job.id === root.id)!;
+    saved.status = 'bound'; saved.runId = undefined; saved.rawText = undefined; saved.parsedResult = undefined; saved.resultStatus = undefined;
+    p = await projects.write(p); const beforeTasks = structuredClone(stored);
+    service = new PetStoryChatService(projects, port);
+    const collected = await service.collect(p.id, root.id); p = collected.project!;
+    expect(collected.success).toBe(true);
+    expect(p.jobs.find((job: PetStoryChatJob): boolean => job.id === root.id)).toMatchObject({ runId: runtime.runId, status: 'applied', resultStatus: 'candidate' });
+    expect(stored).toEqual(beforeTasks); expect(stored).toHaveLength(1);
+  });
+
+  it.each(['project', 'job'] as const)('Task持久文字%s归属不符时bindRun与collect都拒绝，不把同输入借给另一个步骤', async (mismatch: string): Promise<void> => {
+    const root = await prepare(target()); await finish(root, plan());
+    const saved = p.jobs.find((job: PetStoryChatJob): boolean => job.id === root.id)!;
+    saved.status = 'bound'; saved.runId = undefined; saved.rawText = undefined; saved.parsedResult = undefined; saved.resultStatus = undefined; p = await projects.write(p);
+    const task = stored.find((item: Task): boolean => item.id === root.taskId)!;
+    task.petstoryChat = { projectId: mismatch === 'project' ? 'other' : p.id, jobId: mismatch === 'job' ? 'other' : root.id };
+    await expect(service.bindRun(p.id, root.id, task.runtime!.runId)).rejects.toThrow('绑定不符');
+    await expect(service.collect(p.id, root.id)).rejects.toThrow('归属不符');
+    expect((await projects.read(p.id)).revision).toBe(p.revision);
+  });
+
+  it('旧prepare入口也先生成jobId并在Task创建时持久保存文字归属', async (): Promise<void> => {
+    const result = await service.prepare(p.id, 'TEST旧入口完整请求', 'analysis');
+    const job = result.project!.jobs.at(-1)!;
+    expect(stored.find((task: Task): boolean => task.id === job.taskId)?.petstoryChat).toEqual({ projectId: p.id, jobId: job.id });
+  });
+
+  it.each(['formal-conflict', 'parent-inherited'] as const)('正式、选定与待修原回复ID完整入请求，%s按准确结构问题处理且必要技术修复可收敛', async (variant: string): Promise<void> => {
+    p.plan!.shots[1].id = 'formal_only'; p.materials = syncMaterials(p); p = await projects.write(p);
+    const base = await prepare({ background: 'canvas' }); await finish(base, plan());
+    const root = await prepare(target('TEST-reserved-all-sources', base.id)); const incoming = plan();
+    incoming.shots[1].id = variant === 'formal-conflict' ? 'formal_only' : 'fresh_in_parent'; incoming.shots[1].predecessorShotIds = ['shot_2'];
+    const failed = await finish(root, incoming, variant === 'parent-inherited');
+    expect(failed.status).toBe('invalid');
+    if (variant === 'formal-conflict') expect(failed.validationDetails).toEqual([expect.objectContaining({ code: 'structure', path: '$.shots[1].id', actual: 'formal_only', repairable: true })]);
+    p = (await service.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: root.id, repairMode: 'automatic' })).project!;
+    const repair = p.jobs.at(-1)!;
+    expect(facts(repair).reservedShotIds).toEqual(expect.arrayContaining(['shot_1', 'shot_2', 'formal_only', ...(variant === 'parent-inherited' ? ['fresh_in_parent'] : [])]));
+    if (variant === 'formal-conflict') incoming.shots[1].id = 'truly_new';
+    const completed = await finish(repair, incoming);
+    expect(completed).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+    expect(p.plan!.shots[1].id).toBe('formal_only');
+  });
+
+  it('纠正报错镜头时模型顺带重编号其他未采用合镜，按纯技术映射保留父稳定ID并直接收敛，原文完整存档', async (): Promise<void> => {
+    const root = await prepare(target()); const incoming = plan();
+    incoming.shots[0].id = 'fresh_parent'; incoming.shots[0].predecessorShotIds = ['shot_1']; incoming.shots[1].predecessorShotIds = ['shot_2'];
+    await finish(root, incoming);
+    p = (await service.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: root.id, repairMode: 'automatic' })).project!;
+    const repair = p.jobs.at(-1)!; const response = structuredClone(incoming); response.shots[0].id = 'fresh_alias'; response.shots[1].id = 'fresh_corrected';
+    const events = response.shots[0].timingPlan!.events;
+    const aliases = new Map(events.map((event, index): [string, string] => [event.id, `alias_event_${index}`]));
+    for (const event of events) { event.id = aliases.get(event.id)!; if (event.afterEventId) event.afterEventId = aliases.get(event.afterEventId); }
+    const completed = await finish(repair, response);
+    expect(completed).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+    expect(completed.parsedResult!.plan!.shots.map((shot): string => shot.id)).toEqual(['fresh_parent', 'fresh_corrected']);
+    expect(completed.parsedResult!.plan!.shots[0].timingPlan).toEqual(incoming.shots[0].timingPlan);
+    expect(completed.rawText).toContain('fresh_alias'); expect(completed.formatCorrections).toEqual(expect.arrayContaining([expect.stringContaining('fresh_alias→fresh_parent')]));
+    expect(p.plan!.shots.map((shot): string => shot.id)).toEqual(['shot_1', 'shot_2']); expect(stored).toHaveLength(2);
+  });
+
   it('未确认方案也能直接反馈，原剧本、完整选定方案、用户要求和完整返回合同均入请求', async (): Promise<void> => {
     const before = structuredClone(p); const job = await prepare(target());
     const request = stored[0].prompt; const data = facts(job);
@@ -90,6 +160,7 @@ describe('完整方案的反馈任务', (): void => {
     expect(request).toContain('contentBasis:{beginning,middle,ending}'); expect(request).toContain('不返回prompts或媒体正文'); expect(request).toContain('稳定实体ID');
     expect(p.plan).toEqual(before.plan); expect(p.assets).toEqual(before.assets); expect(p.storyApproval).toBeUndefined(); expect(p.chatAdjustment).toBeUndefined(); expect(hasConversationGuard(p.accountId)).toBe(false);
     expect(stored).toHaveLength(1); expect(stored[0]).toMatchObject({ mode: 'chat', executionIntent: 'hold', assignedAccountId: p.accountId });
+    expect(stored[0].petstoryChat).toEqual({ projectId: p.id, jobId: job.id });
     expect(stored[0].runtime?.submittedAt).toBeUndefined();
   });
 
@@ -201,6 +272,121 @@ describe('完整方案的反馈任务', (): void => {
     expect((facts(fromRepair).userPlanFeedback as { selectedPlan: object }).selectedPlan).toEqual(selectedDesign(completed.parsedResult!.plan!));
   });
 
+  it('相同自前身错误及完整回复连续三次未变化时暂停，显式继续仍可修好并再次修改方案', async (): Promise<void> => {
+    const before = structuredClone(p); const root = await prepare(target()); const bad = plan();
+    bad.shots[1].predecessorShotIds = ['shot_2'];
+    let current = await finish(root, bad);
+    for (let index = 0; index < 2; index += 1) {
+      p = (await service.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: current.id, repairMode: 'automatic' })).project!;
+      current = await finish(p.jobs.at(-1)!, bad);
+    }
+    const stopped = await service.collect(p.id, current.id); p = stopped.project!;
+    expect(stopped).toMatchObject({ success: false, needsRepair: false, error: expect.stringContaining('自动修订没有进展') });
+    const tasksBefore = structuredClone(stored);
+    await expect(service.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: current.id, repairMode: 'automatic' })).rejects.toThrow('自动修订没有进展');
+    expect(stored).toEqual(tasksBefore); expect(p.plan).toEqual(before.plan); expect(p.assets).toEqual(before.assets);
+    const firstRequest = p.jobs[0].requestText;
+    const repair = p.jobs.at(-1)!; const data = facts(repair);
+    expect(data).not.toHaveProperty('currentPlan');
+    expect(data.parentResult).not.toHaveProperty('originalRequest');
+    expect(data.parentResult).toMatchObject({ originalRequestArchive: { jobId: root.id, requestId: root.requestId, inputHash: root.inputHash }, originalReply: expect.any(String) });
+    expect(data.userPlanFeedback).toMatchObject({ selectedPlan: selectedDesign(before.plan!) });
+    expect(repair.requestText).toContain('全新镜头ID');
+    expect(repair.requestText!.length).toBeLessThan(firstRequest!.length * 3);
+    expect(p.jobs[0].requestText).toBe(firstRequest);
+    p = (await new PetStoryProjects().open(directory)); service = new PetStoryChatService(projects, port);
+    p = (await service.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: current.id, repairMode: 'explicit' })).project!;
+    const completed = await finish(p.jobs.at(-1)!, plan());
+    expect(completed).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+    const next = await prepare(target('TEST-after-stalled-repair', completed.id));
+    expect(next.planFeedback?.baseJobId).toBe(completed.id); expect(p.plan).toEqual(before.plan);
+  });
+
+  it('明确节奏反馈后的已证实过载修订允许自然拆合新ID并保留对白片段与前身，采用前不覆盖', async (): Promise<void> => {
+    const before = structuredClone(p); const input = target('TEST-explicit-pacing');
+    input.planFeedback!.text = 'TEST前半段太拖，请节奏更紧凑，必要时拆镜或合镜';
+    const root = await prepare(input); const overloaded = plan(); overloaded.shots[0].durationSeconds = 12; await finish(root, overloaded);
+    p = (await service.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: root.id, repairMode: 'automatic' })).project!;
+    const repair = p.jobs.at(-1)!; const revised = plan(); const original = revised.shots[0];
+    const sentence = original.dialogue![0].text; const characters = Array.from(sentence); const boundary = 7;
+    const fragment = (id: string, start: number, end: number, order: number): PetStoryPlan['shots'][number] => ({ ...structuredClone(original), id, order,
+      predecessorShotIds: [original.id], action: `${original.action} TEST离线拆分${order}`,
+      dialogue: [{ ...original.dialogue![0], text: characters.slice(start, end).join(''), source: { text: sentence, occurrence: 1, start, end } }],
+      timingPlan: { events: [{ id: 'speech', kind: 'dialogue', description: 'TEST原句对应片段', dialogueIndex: 0, startSeconds: 0, endSeconds: 4.6 }],
+        estimatedRequiredSeconds: 4.6, durationReason: 'TEST技术拆片时间安排', cutReason: 'TEST技术语义边界' } });
+    revised.shots = [fragment('shot_1_part_a', 0, boundary, 1), fragment('shot_1_part_b', boundary, characters.length, 2), { ...revised.shots[1], order: 3 }];
+    const completed = await finish(repair, revised);
+    expect(completed).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+    expect(completed.parsedResult?.plan?.shots.map((shot): string => shot.id)).toEqual(revised.shots.map((shot): string => shot.id));
+    expect(completed.parsedResult?.plan?.shots.flatMap((shot): string[] => shot.dialogue?.map((line): string => line.text) || []).join('')).toBe(sentence);
+    expect(completed.parsedResult?.plan?.shots[0].predecessorShotIds).toEqual(['shot_1']);
+    expect(p.plan).toEqual(before.plan); expect(p.assets).toEqual(before.assets);
+    p = (await service.adoptPlanCandidate(p.id, p.revision, completed.id)).project!;
+    expect(p.plan!.shots).toHaveLength(3); expect(p.assets).toEqual(before.assets);
+    expect((await new PetStoryProjects().open(directory)).plan!.shots[0].timingPlan).toEqual(revised.shots[0].timingPlan);
+    expect(stored).toHaveLength(2); expect(stored.every((task): boolean => task.mode === 'chat')).toBe(true);
+  });
+
+  it.each(['不要拆镜、保持节奏不变，只修人物称呼', '保持所有动作不变，只修前身映射'] as const)('结构修订不因反馈“%s”中的关键词而允许偷改动作', async (feedback: string): Promise<void> => {
+    const input = target('TEST-no-implicit-restructure'); input.planFeedback!.text = feedback;
+    const root = await prepare(input); const bad = plan(); bad.shots[0].predecessorShotIds = ['shot_1']; await finish(root, bad);
+    p = (await service.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: root.id, repairMode: 'automatic' })).project!;
+    const revised = structuredClone(bad); revised.shots[0].id = 'shot_renamed'; revised.shots[0].action += ' TEST擅改原动作';
+    const completed = await finish(p.jobs.at(-1)!, revised);
+    expect(completed.status).toBe('invalid');
+    expect(completed.validationDetails?.some((issue): boolean => issue.code === 'repair_drift' && issue.message.includes('$.shots[0].action'))).toBe(true);
+  });
+
+  it('首次分析超过10秒的明确过载可在原修订链拆镜，不用删台词或夹取数字', async (): Promise<void> => {
+    const root = await prepare({}); const overloaded = plan(); overloaded.shots[1].durationSeconds = 12;
+    const failed = await finish(root, overloaded); expect(failed.status).toBe('invalid');
+    p = (await service.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: root.id, repairMode: 'automatic' })).project!;
+    const repair = p.jobs.at(-1)!; const revised = plan(); const original = revised.shots.pop()!;
+    revised.shots.push({ ...structuredClone(original), id: 'shot_2_start', order: 2, predecessorShotIds: [original.id], action: 'TEST动作2前半段' },
+      { ...structuredClone(original), id: 'shot_2_finish', order: 3, predecessorShotIds: [original.id], action: 'TEST动作2闭合' });
+    const completed = await finish(repair, revised);
+    expect(completed).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+    expect(completed.parsedResult!.plan!.shots.map((shot): number => shot.durationSeconds)).toEqual([5, 5, 5]);
+    expect(completed.parsedResult!.plan!.shots[0].dialogue).toEqual(overloaded.shots[0].dialogue);
+    expect(p.plan!.shots).toHaveLength(2); expect(stored).toHaveLength(2);
+  });
+
+  it('明确时间结构矛盾进入现有自动修订，修好后只保存完整候选', async (): Promise<void> => {
+    const before = structuredClone(p.plan); const root = await prepare({}); const invalid = plan();
+    const line = invalid.shots[0].dialogue![0]; line.source = { text: line.text, occurrence: 1, start: 0, end: Array.from(line.text).length };
+    invalid.shots[1].timingPlan = { events: [
+      { id: 'action', kind: 'action', description: invalid.shots[1].action, startSeconds: 0, endSeconds: 4 },
+      { id: 'reaction', kind: 'reaction', description: 'TEST动作完成后的必要反应', startSeconds: 3, endSeconds: 4.8, afterEventId: 'action' }],
+      estimatedRequiredSeconds: 4.8, durationReason: 'TEST必要事件跨度', cutReason: 'TEST反应完成' };
+    const failed = await finish(root, invalid); expect(failed.status).toBe('invalid');
+    expect(failed.validationDetails?.some((issue): boolean => issue.code === 'timing')).toBe(true);
+    const recollected = await service.collect(p.id, failed.id); expect(recollected.needsRepair).toBe(true); p = recollected.project!;
+    p = (await service.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: failed.id, repairMode: 'automatic' })).project!;
+    const repair = p.jobs.at(-1)!; const corrected = structuredClone(invalid); corrected.shots[1].timingPlan!.events[1].startSeconds = 4;
+    const completed = await finish(repair, corrected);
+    expect(completed).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
+    expect(completed.parsedResult?.plan?.shots[1].timingPlan).toEqual(corrected.shots[1].timingPlan);
+    expect(p.plan).toEqual(before); expect(stored).toHaveLength(2);
+  });
+
+  it.each(['inherited', 'changed-current', 'new-current', 'changed-retired', 'new-retired', 'self', 'reuse-other-id'] as const)('已合并镜头的前身关系%s按基准身份校验，未改历史不误报', async (change: string): Promise<void> => {
+    p.plan!.shots[1].id = 'shot_merged'; p.plan!.shots[1].predecessorShotIds = ['retired_a', 'retired_b']; p = await projects.write(p);
+    const before = structuredClone(p.plan!); const input = target(`TEST-predecessor-${change}`); input.planFeedback!.text = 'TEST修正合并镜头中的持物与结束状态，保留原镜头关系';
+    const root = await prepare(input); const revised = structuredClone(before); const shot = revised.shots[1];
+    shot.endState += ' TEST状态修正';
+    if (change === 'changed-current') shot.predecessorShotIds = ['shot_1'];
+    if (change === 'new-current') { shot.id = 'shot_new'; shot.predecessorShotIds = ['shot_merged']; }
+    if (change === 'changed-retired') shot.predecessorShotIds = ['retired_b', 'retired_a'];
+    if (change === 'new-retired') shot.id = 'shot_new';
+    if (change === 'self') shot.predecessorShotIds = ['shot_merged'];
+    if (change === 'reuse-other-id') { revised.shots[0].predecessorShotIds = ['shot_merged']; shot.predecessorShotIds = ['retired_a', 'retired_b']; }
+    const completed = await finish(root, revised); const valid = ['inherited', 'new-current'].includes(change);
+    expect(completed.status).toBe(valid ? 'applied' : 'invalid'); expect(completed.rawText).toBeTruthy();
+    if (valid) expect(completed.parsedResult?.plan?.shots[1].predecessorShotIds).toEqual(shot.predecessorShotIds);
+    else expect(completed.validationDetails?.some((issue): boolean => issue.path === `$.shots[${change === 'reuse-other-id' ? 0 : 1}].predecessorShotIds`)).toBe(true);
+    expect(p.plan).toEqual(before); expect(stored).toHaveLength(1); expect(stored[0].mode).toBe('chat');
+  });
+
   it('15秒反馈的3+4+8秒原回复修为5+5+5秒时允许必要全镜时长和对应节奏调整，并可本地重收旧repair', async (): Promise<void> => {
     p.plan = timedThreeShotPlan([5, 5, 5]); p.materials = syncMaterials(p); p = await projects.write(p);
     const before = structuredClone(p); const input = target('TEST-total-15'); input.planFeedback!.text = '其他保持不变，整体视频时间控制在15秒';
@@ -232,7 +418,9 @@ describe('完整方案的反馈任务', (): void => {
     if (change === 'action') revised.shots[2].action += 'TEST改了剧情动作';
     if (change === 'order') { [revised.shots[0], revised.shots[1]] = [revised.shots[1], revised.shots[0]]; revised.shots.forEach((shot: PetStoryPlan['shots'][number], index: number): void => { shot.order = index + 1; }); }
     const collected = await finish(repair, revised);
-    expect(collected.status).toBe('invalid'); expect(collected.validationDetails?.some((issue): boolean => issue.code === 'repair_drift')).toBe(true);
+    expect(collected.status).toBe('invalid');
+    if (change === 'dialogue') expect(collected.validationDetails?.some((issue): boolean => issue.code === 'timing' && issue.path.includes('.dialogue'))).toBe(true);
+    else expect(collected.validationDetails?.some((issue): boolean => issue.code === 'repair_drift')).toBe(true);
     expect(p.plan).toEqual(before.plan); expect(p.assets).toEqual(before.assets); expect(stored).toHaveLength(2);
   });
 

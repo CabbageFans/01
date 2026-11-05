@@ -17,6 +17,7 @@ import { matchesVerificationRecoveryRun, type TaskVerificationRecoveryDetail } f
 import { needsPetStoryReferenceAdaptation } from '../utils/petstoryVisualBasis';
 import { selectPlanReview } from '../utils/petstoryPlanReview';
 import { hasPlatformAcceptance } from '../utils/acceptedObservation';
+import { registerTaskDispatchGuard } from '../automation/taskDispatchGuards';
 
 interface PetStoryState {
   activeImageOperationId: string | null;
@@ -285,10 +286,9 @@ function authorizedImageChat(project: PetStoryProject, jobId: string): boolean {
   const operation = imageOperationForChatJob(project, jobId);
   return !!operation && activeImageOperation?.projectId === project.id && activeImageOperation.operationId === operation.id;
 }
-function collectedFailureMessage(result: PetStoryResult, failedRepair: boolean, imageOperation: boolean): string {
-  if (imageOperation) return '图片准备未完成，请继续本次任务。';
-  if (failedRepair) return '豆包还未修好，你可以继续调整。具体原因已保留在生成记录中。';
-  return result.error || '内容尚未通过，请查看当前任务。';
+function collectedFailureMessage(result: PetStoryResult, imageOperation: boolean): string {
+  if (result.error) return result.error;
+  return imageOperation ? '图片准备未完成，请继续本次任务。' : '内容尚未通过，请查看当前任务。';
 }
 function imageOperationContinues(result: PetStoryImageOperationResult, operation: PetStoryImageOperation | undefined): boolean {
   return (result.success || !!result.needsRepair) && operation?.stage !== 'complete' && operation?.stage !== 'failed';
@@ -619,10 +619,9 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     const started = await useTaskStore.getState().startAutomation(job.taskId, async (task: Task): Promise<void> => {
       if (authorization !== promptWorkAuthorization) throw new Error('本轮文字准备已停止，原任务保留且未发送');
       if (!job || !task.runtime?.runId) throw new Error('本步骤运行未初始化');
-      const bound = await window.electronAPI.petstory.bindRun(project.id, job.id, task.runtime.runId);
-      accept(bound);
-      if (!bound.success) throw new Error(bound.error || '本步骤运行绑定未保存');
+      await bindPetStoryTaskRun(task);
       if (authorization !== promptWorkAuthorization) throw new Error('本轮文字准备已停止，原任务保留且未发送');
+      if (get().project?.id !== project.id || get().project?.jobs.find((item): boolean => item.id === job.id)?.runId !== task.runtime.runId) throw new Error('本步骤运行绑定未保存或项目已变化');
     });
     if (!started) throw new Error(useTaskStore.getState().error || '原任务保持已绑定；请处理原因后启动原任务，不要重复分析');
   };
@@ -888,6 +887,18 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     if (job?.status === 'applied') { await resumeAppliedPrompt(job, saved); return; }
     await nextPrompt();
   };
+  /** 已有失败子回复先只读重校验，回读期间的停止不能被递归修订重新授权。 */
+  const recheckExistingRepair = async (projectId: string, jobId: string, authorized: boolean, imageOperation: boolean): Promise<string | undefined> => {
+    const authorization = promptWorkAuthorization;
+    const checked = await window.electronAPI.petstory.collectChat(projectId, jobId);
+    if (get().project?.id !== projectId) return;
+    const stillAuthorized = authorized && authorization === promptWorkAuthorization;
+    accept(checked.needsRepair && stillAuthorized ? { ...checked, success: true } : checked);
+    if (!stillAuthorized) return;
+    liveJobs.add(jobId);
+    try { return await repairResult(checked, jobId, authorized, imageOperation); }
+    finally { liveJobs.delete(jobId); }
+  };
   const repairResult = async (result: PetStoryResult, sourceId: string, authorized: boolean, imageOperation = false): Promise<string | undefined> => {
     const authorization = promptWorkAuthorization;
     const p = result.project || get().project; const job = p?.jobs.find((item): boolean => item.id === sourceId);
@@ -900,13 +911,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     if (child.id !== job.id || result.repairJobId) {
       const existing = latestRepair(p, p.jobs.find((item): boolean => item.id === result.repairJobId) || child);
       if (existing.endedWaitingAt) return;
-      if (existing.status === 'invalid') {
-        const checked = await window.electronAPI.petstory.collectChat(p.id, existing.id);
-        if (get().project?.id !== p.id) return;
-        accept({ ...checked, success: true }); liveJobs.add(existing.id);
-        try { return await repairResult(checked, existing.id, authorized, imageOperation); }
-        finally { liveJobs.delete(existing.id); }
-      }
+      if (existing.status === 'invalid') return recheckExistingRepair(p.id, existing.id, authorized, imageOperation);
       return startPrepared({ success: true, project: p, taskId: existing.taskId }, (): boolean => authorization === promptWorkAuthorization && get().project?.id === p.id);
     }
     if (!result.needsRepair) return;
@@ -918,19 +923,23 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
   };
   const collectResult = async (jobId: string, allowRepair: boolean): Promise<void> => {
     const p = get().project; if (!p) return;
+    const authorization = promptWorkAuthorization;
     if (allowRepair) restoredPlanReadbacks.delete(jobId);
     const result = await window.electronAPI.petstory.collectChat(p.id, jobId);
     if (get().project?.id !== p.id) return;
-    const collectedJob = result.project?.jobs.find((item): boolean => item.id === jobId);
-    const failedRepair = collectedJob?.kind === 'repair' && collectedJob.status === 'invalid';
     // 修订是当前创作的一步：原错误先保存在详情，安排失败时才成为当前阻断。
-    accept(result.needsRepair && allowRepair || failedRepair ? { ...result, success: true } : result);
+    // 收取期间的停止动作立即撤回发送权，迟到回复仍保存，但不能重新授权下一轮。
+    const repairAuthorized = allowRepair && authorization === promptWorkAuthorization;
+    accept(result.needsRepair && repairAuthorized ? { ...result, success: true } : result);
     const authorizedImage = authorizedImageChat(result.project || p, jobId);
-    const repairJobId = await repairResult(result, jobId, allowRepair, authorizedImage);
-    liveJobs.delete(jobId);
-    restoredPlanReadbacks.delete(jobId);
+    const repairJobId = await repairResult(result, jobId, repairAuthorized, authorizedImage);
+    if (!pendingChatJob(get().project?.jobs.find((item): boolean => item.id === jobId))) {
+      liveJobs.delete(jobId);
+      restoredPlanReadbacks.delete(jobId);
+    }
     if (repairJobId) set({ error: '' });
-    else if (!result.success) set({ error: collectedFailureMessage(result, failedRepair && !collectedJob?.promptKind && !collectedJob?.materialId, authorizedImage) });
+    // 接回已有修订时保留最新子回复／准备失败的原因，旧父回复不能覆盖当前暂停。
+    else if (!result.success && (!result.needsRepair || !repairAuthorized || !get().error)) set({ error: collectedFailureMessage(result, authorizedImage) });
     await advanceCollectedPromptBatch(result, jobId, repairJobId);
   };
   const advanceCollectedPromptBatch = async (result: PetStoryResult, jobId: string, repairJobId?: string): Promise<void> => {
@@ -1493,8 +1502,8 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     stopPromptBatch: async (reason?: 'verification'): Promise<void> => {
       if (reason !== 'verification') { promptWorkAuthorization++; verificationPausedBatch = undefined; restoredPlanReadbacks.clear(); }
       if (promptBatchQueue) promptBatchQueue.stopRequested = true;
-      // 无批次的本镜后台修订也受停止动作约束，迟到回复不能继续下一轮。
-      if (reason !== 'verification') for (const item of get().project?.jobs || []) if (isPromptWritingJob(item)) liveJobs.delete(item.id);
+      // 单镜正文与方案反馈的独立修订也受停止约束，迟到回复不能重新取得下一轮发送权。
+      if (reason !== 'verification') for (const item of get().project?.jobs || []) if (isPromptWritingJob(item) || item.planFeedback) liveJobs.delete(item.id);
       const job = get().project?.jobs.find((item): boolean => item.id === promptBatchQueue?.jobId);
       const task = useTaskStore.getState().tasks.find((item): boolean => item.id === job?.taskId);
       if (reason !== 'verification' && job?.kind === 'repair' && !task?.runtime?.submittedAt) window.dispatchEvent(new CustomEvent('cancel-task-automation', { detail: { taskId: job.taskId, targetStatus: 'paused' } }));
@@ -1776,6 +1785,59 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
   };
 });
 
+const knownChatProjects = new Map<string, string>();
+const verifiedChatDispatchTasks = new WeakMap<Task, { key: string; revision: number }>();
+const rememberChatProjects = (project: PetStoryProject | null): void => {
+  if (project) for (const job of project.jobs) knownChatProjects.set(job.taskId, project.id);
+};
+rememberChatProjects(usePetStoryStore.getState().project);
+const stopRememberingChats = usePetStoryStore.subscribe((state, previous): void => { if (state.project !== previous.project) rememberChatProjects(state.project); });
+
+/** 输入与归属先核对；发送前仍由主进程验证请求事实与正式运行绑定。 */
+function chatDispatchRun(project: PetStoryProject, job: PetStoryChatJob, task: Task): string {
+  if (job.status !== 'bound' || job.endedWaitingAt || task.mode !== 'chat' || task.assignedAccountId !== project.accountId
+    || task.projectId !== project.studioProjectId || !project.mobileStory || job.sourceStoryId !== project.mobileStory.id
+    || !task.runtime?.runId || task.runtime.submittedAt || task.runtime.input.mode !== 'chat' || task.runtime.input.prompt !== task.prompt
+    || JSON.stringify(task.runtime.input.attachments || []) !== JSON.stringify(task.attachments || [])) throw new Error('原文字任务、项目、账号或运行输入不符，未授权页面操作');
+  return task.runtime.runId;
+}
+function boundChatSnapshot(project: PetStoryProject, job: PetStoryChatJob, taskId: string, runId: string, result: PetStoryResult): PetStoryProject {
+  const bound = result.project;
+  const saved = bound?.jobs.find((item): boolean => item.id === job.id);
+  if (!result.success || !bound || bound.id !== project.id || bound.accountId !== project.accountId || bound.studioProjectId !== project.studioProjectId
+    || !saved || saved.taskId !== taskId || saved.status !== 'bound' || saved.endedWaitingAt || saved.runId !== runId
+    || saved.inputHash !== job.inputHash || saved.requestId !== job.requestId || saved.kind !== job.kind
+    || saved.sourceStoryId !== project.mobileStory?.id) throw new Error(result.error || '本步骤运行绑定未回读，未授权页面操作');
+  return bound;
+}
+async function bindPetStoryTaskRun(task: Task): Promise<void> {
+  const project = usePetStoryStore.getState().project;
+  const job = project?.jobs.find((item): boolean => item.taskId === task.id);
+  const marker = task.petstoryChat;
+  if (marker !== undefined && (!project || !job || marker?.projectId !== project.id || marker?.jobId !== job.id)) throw new Error('请先打开该文字任务所属的原项目，并核对原步骤后继续；本次未发送');
+  if (!project || !job) {
+    if (knownChatProjects.has(task.id)) throw new Error('请先打开该文字任务所属的原项目，再继续原任务');
+    return;
+  }
+  const authorization = promptWorkAuthorization;
+  const runId = chatDispatchRun(project, job, task);
+  const key = JSON.stringify([project.id, job.id, runId]);
+  const verified = verifiedChatDispatchTasks.get(task);
+  if (verified?.key === key && verified.revision === project.revision && job.runId === runId) return;
+  const result = await window.electronAPI.petstory.bindRun(project.id, job.id, runId);
+  const bound = boundChatSnapshot(project, job, task.id, runId, result);
+  const current = usePetStoryStore.getState().project;
+  if (authorization !== promptWorkAuthorization || current?.id !== project.id) throw new Error('本轮文字准备已停止或项目已变化，原任务保留且未发送');
+  if (bound.revision >= current.revision) usePetStoryStore.setState({ project: bound });
+  const latestProject = usePetStoryStore.getState().project;
+  const latest = latestProject?.jobs.find((item): boolean => item.id === job.id);
+  if (!latestProject || latest?.runId !== runId || latest.status !== 'bound' || latest.endedWaitingAt) throw new Error('本步骤运行绑定已变化，未授权页面操作');
+  verifiedChatDispatchTasks.set(task, { key, revision: latestProject.revision });
+  liveJobs.add(job.id);
+}
+const unregisterChatDispatch = registerTaskDispatchGuard('petstory-chat', bindPetStoryTaskRun);
+if (import.meta.hot) import.meta.hot.dispose((): void => { unregisterChatDispatch(); stopRememberingChats(); });
+
 function verifiedWorkflowTask(project: PetStoryProject, detail: TaskVerificationRecoveryDetail): Task | undefined {
   const task = useTaskStore.getState().tasks.find((item): boolean => item.id === detail.taskId);
   const account = useAccountStore.getState().accounts.find((item): boolean => item.id === detail.accountId);
@@ -1812,7 +1874,11 @@ async function resumeVerifiedWorkflow(detail: TaskVerificationRecoveryDetail, pr
 }
 /** 仅收取本会话显式启动任务的结果；打开项目不会授权纠正或发送。 */
 export function observePetStoryTasks(): () => void {
-  const attempted = new Set<string>();
+  // 只重读已落盘的原回复。瞬时 IPC／文件读取失败最多补偿两次，不重发平台请求。
+  const readbackAttempts = new Map<string, number>();
+  const readbackKey = (projectId: string, job: PetStoryChatJob, task: Task | undefined): string => {
+    return JSON.stringify([projectId, job.id, job.runId, task?.runtime?.runId, task?.runtime?.chatResponse?.capturedAt]);
+  };
   const verificationRecoveries = new Map<string, { detail: TaskVerificationRecoveryDetail; projectId: string; authorization: number; productionAuthorization: number }>();
   const handledVerificationRecoveries = new Set<string>();
   const onVerificationRecovered = (event: Event): void => {
@@ -1847,10 +1913,17 @@ export function observePetStoryTasks(): () => void {
     const readback = restored && restoredPlanReadbacks.get(restored.job.id);
     const readOnlyJob = restored && restored.task.status === 'done' && readback?.projectId === project.id
       && readback.runId === restored.task.runtime?.runId && readback.authorization === promptWorkAuthorization ? restored.job : undefined;
-    const job = project.jobs.find((j): boolean => (!isChatAdjusting(project) || isAdjustmentRepair(project, j)) && !j.endedWaitingAt && !attempted.has(j.id)
-      && (j.id === readOnlyJob?.id || liveJobs.has(j.id) && j.status === 'bound' && state.tasks.some((t): boolean => t.id === j.taskId && t.status === 'done' && !!t.runtime?.chatResponse)));
+    const tasksById = new Map(state.tasks.map((task): [string, Task] => [task.id, task]));
+    const job = project.jobs.find((item): boolean => {
+      const task = tasksById.get(item.taskId);
+      return (!isChatAdjusting(project) || isAdjustmentRepair(project, item)) && !item.endedWaitingAt
+        && (readbackAttempts.get(readbackKey(project.id, item, task)) || 0) < 3
+        && (item.id === readOnlyJob?.id || liveJobs.has(item.id) && pendingChatJob(item) && task?.status === 'done'
+          && (!!task.runtime?.chatResponse?.text || item.status === 'captured' && !!item.rawText));
+    });
     if (!job) { void tickPetStoryImageOperation(); return; }
-    attempted.add(job.id);
+    const key = readbackKey(project.id, job, tasksById.get(job.taskId));
+    readbackAttempts.set(key, (readbackAttempts.get(key) || 0) + 1);
     // 重启只解析原回复；需要新的平台格式修订时，留给用户明确继续原步骤。
     void p.collect(job.id, job.id !== readOnlyJob?.id || liveJobs.has(job.id));
   };

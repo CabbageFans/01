@@ -11,8 +11,11 @@ import { PetStoryAdjustmentService, conversationReplyKey } from '../../main/util
 import { releaseConversationGuard } from '../../main/utils/accountConversationGuard';
 import { syncMaterials } from '../../main/utils/petstoryMaterials';
 import { imageTargetBasis } from '../../main/utils/petstoryImageReview';
+import { promptDesignHash } from '../../main/utils/petstoryEligibility';
+import { needsPetStoryReferenceAdaptation } from '../../src/utils/petstoryVisualBasis';
 import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 import snapshot from '../fixtures/storyboard-five-shots.json';
+import { withOfflineTimingPlan } from '../fixtures/petstoryTimingPlan';
 
 const now = '2026-10-29T00:00:00.000Z';
 const conversationUrl = 'https://www.doubao.com/chat/TEST-plan-adoption';
@@ -26,7 +29,7 @@ function existingPlan(): PetStoryPlan {
   for (const shot of plan.shots) { shot.sceneId = shot.order <= 3 ? 'road' : 'other-road'; shot.propIds = []; shot.propStates = []; }
   plan.shots[0].prompts.firstFrame.edited = true;
   plan.shots[0].prompts.video.edited = false;
-  return plan;
+  return withOfflineTimingPlan(plan, snapshot.mobileStory);
 }
 async function saveHistoricalFrames(): Promise<void> {
   for (const shot of p.plan!.shots) {
@@ -67,6 +70,59 @@ async function candidate(plan: PetStoryPlan): Promise<PetStoryChatJob> {
 async function adopt(job: PetStoryChatJob): Promise<void> { p = (await chat.adoptPlanCandidate(p.id, p.revision, job.id)).project!; }
 
 describe('明确采用方案才保留并核对受影响成果', (): void => {
+  it('旧方案显式改时长会要求同步正文，沿现有准备入口识别，手改后清除本地标记', async (): Promise<void> => {
+    for (const shot of p.plan!.shots) delete shot.timingPlan;
+    p = await projects.write(p);
+    const shotId = p.plan!.shots[0].id; const incoming = structuredClone(p.plan!); const oldBody = incoming.shots[0].prompts.video.final;
+    incoming.shots[0].durationSeconds = 8;
+    p = await projects.savePlan(p.id, p.revision, incoming);
+    expect(p.plan!.shots[0].prompts.video).toMatchObject({ final: oldBody, timingStale: true });
+    expect(needsPetStoryReferenceAdaptation(p, shotId, 'video')).toBe(true);
+    expect((await new PetStoryProjects().open(directory)).plan!.shots[0].prompts.video.timingStale).toBe(true);
+    p = await projects.saveShotPrompt(p.id, p.revision, shotId, 'video', `${oldBody}\nTEST已按当前8秒安排完成手改`);
+    expect(p.plan!.shots[0].prompts.video.timingStale).toBeUndefined();
+    expect(p.assets).toHaveLength(5); expect(tasks).toHaveLength(0);
+  });
+
+  it('高级保存和历史候选采用都重新核对全片台词切片，遗漏不能绕过原文校验', async (): Promise<void> => {
+    const sentence = '这啥呀，咋恁臭啊？'; const incoming = structuredClone(p.plan!);
+    incoming.shots[0].dialogue = [{ speakerId: 'lulu', text: sentence, tone: '', pace: '',
+      source: { text: sentence, occurrence: 1, start: 0, end: Array.from(sentence).length } }];
+    incoming.shots[0].timingPlan!.events.push({ id: 'speech', kind: 'dialogue', description: 'TEST原文发声片段', startSeconds: 0, endSeconds: 4.5, dialogueIndex: 0 });
+    const valid = await candidate(incoming); const malformed = structuredClone(valid.parsedResult!.plan!);
+    malformed.shots[0].dialogue![0].text = Array.from(sentence).slice(0, 3).join(''); malformed.shots[0].dialogue![0].source!.end = 3;
+    const before = structuredClone(p.plan); const beforeFile = await fs.readFile(path.join(directory, 'project.json'), 'utf8');
+    await expect(projects.savePlan(p.id, p.revision, malformed)).rejects.toThrow('原台词末尾片段遗漏');
+    expect(await fs.readFile(path.join(directory, 'project.json'), 'utf8')).toBe(beforeFile);
+    // 只在隔离技术夹具保存旧版留下的部分候选，模拟升级后从项目重开采用。
+    p.jobs.find((job): boolean => job.id === valid.id)!.parsedResult!.plan = malformed; p = await projects.write(p);
+    const adopted = await chat.adoptPlanCandidate(p.id, p.revision, valid.id); p = adopted.project!;
+    expect(adopted.success).toBe(false); expect(adopted.error).toContain('原台词末尾片段遗漏');
+    expect(p.plan).toEqual(before); expect(p.assets).toHaveLength(5); expect(tasks).toHaveLength(1);
+  });
+
+  it.each([5, 6, 7, 8, 9, 10])('新%d秒事件安排经过候选、采用、重开，设计hash与局部依赖同步', async (duration: number): Promise<void> => {
+    const before = structuredClone(p); const incoming = structuredClone(p.plan!);
+    const shot = incoming.shots[0]; shot.durationSeconds = duration;
+    shot.timingPlan = { events: [{ id: 'source-action', kind: 'action', description: shot.action, startSeconds: 0, endSeconds: duration - 0.4 }],
+      estimatedRequiredSeconds: duration - 0.4, durationReason: 'TEST原动作闭合所需时间向上选择整秒', cutReason: 'TEST原动作结果交付后切出' };
+    const target = { shotId: shot.id, promptKind: 'video' as const };
+    const beforeHash = promptDesignHash(p, target); const unaffectedId = p.plan!.shots[3].id;
+    const unaffectedHash = promptDesignHash(p, { shotId: unaffectedId, promptKind: 'firstFrame' });
+    const job = await candidate(incoming);
+    expect(job.parsedResult?.plan?.shots[0].timingPlan).toEqual(shot.timingPlan);
+    expect(p.plan).toEqual(before.plan); expect(p.assets).toEqual(before.assets);
+    await adopt(job); const reopened = await new PetStoryProjects().open(directory);
+    expect(reopened.plan!.shots[0].durationSeconds).toBe(duration);
+    expect(reopened.plan!.shots[0].timingPlan).toEqual(shot.timingPlan);
+    expect(promptDesignHash(reopened, target)).not.toBe(beforeHash);
+    expect(promptDesignHash(reopened, { shotId: unaffectedId, promptKind: 'firstFrame' })).toBe(unaffectedHash);
+    expect(reopened.plan!.shots[0].prompts.video.needsReview).toBe(true);
+    expect(reopened.plan!.shots[3].prompts).toEqual(before.plan!.shots[3].prompts);
+    expect(reopened.assets).toEqual(before.assets); expect(reopened.productionHistory).toEqual(before.productionHistory);
+    expect(tasks).toHaveLength(1); expect(tasks[0].mode).toBe('chat');
+  });
+
   it('候选到达不变更当前采用方案、手改、图片或批次历史', async (): Promise<void> => {
     const before = structuredClone(p); const incoming = structuredClone(p.plan!); incoming.shots[0].action += ' TEST 调整动作';
     const job = await candidate(incoming);

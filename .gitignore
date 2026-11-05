@@ -139,3 +139,6 @@ data/
 /artifacts/canvas-first-workspace/
 # 本机真实请求、原回复、账号关联和素材证据只留本地。
 /artifacts/script-driven-cast-reference/
+
+# 分镜节奏专项：真实剧本、请求回复、项目副本与截图只留本机。
+/artifacts/storyboard-pacing-20261105/

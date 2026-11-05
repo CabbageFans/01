@@ -30,6 +30,8 @@ export interface PetStoryPromptReference {
 export interface PetStoryPromptTaskContract {
   /** 当次确认设计与已采用边界；不包含上传顺序或计划文件解析结果。 */
   designHash?: string;
+  /** 新时间安排与镜长的快照；旧任务省略。 */
+  timingPlanHash?: string;
   references: PetStoryPromptReference[];
   /** 当前角色采用图的指纹；只用于阻止旧形象任务回流，不包含旧造型文字。 */
   characterVisualBasis?: Record<string, string>;
@@ -65,6 +67,8 @@ export interface PetStoryPrompt {
   needsReview?: boolean;
   /** 此正文因角色视觉替换退出活跃使用，区别于真实审查错误。 */
   visualBasisStale?: boolean;
+  /** 用户明确调整镜长后，历史正文需按当前时长重新适配；仅本地服务设置。 */
+  timingStale?: boolean;
   /** 历史基础图正文已被采用图替代；正文与来源保留，但不得再作为有效写作输入。 */
   supersededByAssetId?: string;
   /** 已采用的有界编辑计划，实际媒体仍须用户另行操作。 */
@@ -140,9 +144,37 @@ export interface PetStoryPageBinding {
   occurrenceCount?: number;
   nodeIds?: string[];
 }
+/** 文本估计的制作时间安排；有此字段时 timing 仅为兼容摘要。 */
+export interface PetStoryTimingPlan {
+  events: {
+    id: string;
+    kind: 'action' | 'dialogue' | 'reaction' | 'sound';
+    description: string;
+    startSeconds: number;
+    endSeconds: number;
+    /** 本镜 dialogue 数组的 0 起索引，每次发声恰对应一个事件。 */
+    dialogueIndex?: number;
+    /** 必须等待该事件完成；未填写允许真实可并行的事件重叠。 */
+    afterEventId?: string;
+  }[];
+  estimatedRequiredSeconds: number;
+  durationReason: string;
+  cutReason: string;
+}
+export interface PetStoryDialogueSource {
+  /** 原故事中的完整原句；不通过集合消除有意重复。 */
+  text: string;
+  /** 完整原句在原故事的第几次出现，从 1 开始。 */
+  occurrence: number;
+  /** Array.from(text) 的 0 起半开字符区间。 */
+  start: number;
+  end: number;
+}
 export interface PetStoryShot {
   id: string;
   order: number;
+  /** 拆合前镜头ID，仅记录必要前身，不复用无关旧ID。 */
+  predecessorShotIds?: string[];
   characterIds: string[];
   propIds?: string[];
   propStates?: { propId: string; holderId?: string; state: string }[];
@@ -151,7 +183,7 @@ export interface PetStoryShot {
   expression?: string;
   gaze?: string;
   interaction?: string;
-  dialogue?: { speakerId: string; text: string; tone: string; pace: string; delivery?: 'onscreen' | 'offscreen' | 'voiceover' }[];
+  dialogue?: { speakerId: string; text: string; tone: string; pace: string; delivery?: 'onscreen' | 'offscreen' | 'voiceover'; source?: PetStoryDialogueSource }[];
   camera?: string;
   sourceRefs?: string[];
   narrativePurpose?: string;
@@ -160,6 +192,7 @@ export interface PetStoryShot {
   performance?: string;
   sound?: string;
   timing?: string;
+  timingPlan?: PetStoryTimingPlan;
   continuity?: string;
   sceneReferenceAssetIds?: string[];
   scene: string;
@@ -381,7 +414,7 @@ export interface PetStoryAssetBindings {
   characters: PetStoryCharacter[];
   props: PetStoryProp[];
   scenes: PetStoryScene[];
-  shotBindings: { shotId: string; characterIds: string[]; propIds: string[]; propStates: NonNullable<PetStoryShot['propStates']>; sceneId: string; sceneView?: string; dialogue?: PetStoryShot['dialogue']; sourceRefs?: string[]; narrativePurpose?: string; framing?: string; blocking?: string; performance?: string; sound?: string; timing?: string; continuity?: string }[];
+  shotBindings: { shotId: string; characterIds: string[]; propIds: string[]; propStates: NonNullable<PetStoryShot['propStates']>; sceneId: string; sceneView?: string; dialogue?: PetStoryShot['dialogue']; sourceRefs?: string[]; narrativePurpose?: string; framing?: string; blocking?: string; performance?: string; sound?: string; timing?: string; timingPlan?: PetStoryTimingPlan; continuity?: string }[];
   understanding?: string;
   sceneDesign?: string;
 }
@@ -394,7 +427,7 @@ export interface PetStoryRuntimeTarget {
   promptFeedback?: { text: string; baseJobId?: string; baseText?: string };
   /** 本次方案调整意图；requestId 标识同一次用户提交，不代表先采用来源方案。 */
   planFeedback?: { text: string; baseJobId?: string; requestId: string };
-  /** 自动修订只消耗原轮次一次；显式新轮次由用户操作授权。 */
+  /** 自动修订沿原授权持续检查进展；显式继续由用户授权，并重新观察停滞。 */
   repairMode?: 'automatic' | 'explicit';
   shotId?: string;
   promptKind?: PetStoryPromptKind;
@@ -419,6 +452,8 @@ export interface PetStoryValidationIssue {
   message: string;
 }
 export interface PetStoryChatJob {
+  /** 新分析请求的时间返回合同；旧已发送任务缺省，继续按原合同收取。 */
+  planTimingVersion?: 'events-v1';
   background?: 'canvas';
   promptBatchId?: string;
   textContextJobIds?: string[];

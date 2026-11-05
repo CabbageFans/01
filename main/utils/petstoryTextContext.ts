@@ -21,7 +21,7 @@ export function promptTextContext(project: PetStoryProject, job: Pick<PetStoryCh
     const body = source.parsedResult.optimized;
     // 用户随后保存的不同正文优先，不能借临时上下文隐藏这类冲突。
     if (prompt.final !== body && source.inputFinal !== undefined && prompt.final !== source.inputFinal) throw new Error('前序正文已由用户修改，请基于当前正文重新生成本项');
-    prompt.final = body; prompt.sourceJobId = source.id; prompt.edited = false; prompt.needsReview = undefined; prompt.visualBasisStale = undefined;
+    prompt.final = body; prompt.sourceJobId = source.id; prompt.edited = false; prompt.needsReview = undefined; prompt.visualBasisStale = undefined; prompt.timingStale = undefined;
     prompt.promptTask = source.promptTask ? structuredClone(source.promptTask) : undefined;
     prompt.rulesVersion = source.rulesVersion || prompt.rulesVersion;
     source.resultStatus = 'adopted';

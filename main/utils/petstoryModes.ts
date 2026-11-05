@@ -1,4 +1,5 @@
 import type { PetStoryCapability, PetStoryModeResolution, PetStoryResolvedMode, PetStoryShot } from '@doubao-studio/contracts';
+import { validPetStoryDuration } from './petstoryValidationIssues';
 
 /** 文字与媒体共用同一输入计划；选择模式不代表页面已经支持它。 */
 export function plannedPetStoryMode(shot: PetStoryShot, previous?: PetStoryResolvedMode): PetStoryResolvedMode {
@@ -7,7 +8,7 @@ export function plannedPetStoryMode(shot: PetStoryShot, previous?: PetStoryResol
 }
 
 export function resolvePetStoryMode(shot: PetStoryShot, capability: PetStoryCapability, fallback?: 'first_frame' | 'reference'): PetStoryModeResolution {
-  if (!Number.isFinite(shot.durationSeconds) || shot.durationSeconds < 5 || shot.durationSeconds > 10 || !Number.isInteger(shot.durationSeconds)) throw new Error(`${shot.id}时长必须为 5～10 秒，不自动改值`);
+  if (!validPetStoryDuration(shot.durationSeconds)) throw new Error(`${shot.id}时长必须为 5～10 秒，不自动改值`);
   if (capability.durations.length && !capability.durations.includes(shot.durationSeconds)) throw new Error(`${shot.id}计划时长在当前页面选项中不可选`);
   const usable = (mode: PetStoryResolvedMode): boolean => !capability.modes[mode] || ['supported', 'unknown'].includes(capability.modes[mode].state);
   const preferred: PetStoryResolvedMode[] = [plannedPetStoryMode(shot)];

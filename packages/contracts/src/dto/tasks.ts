@@ -45,6 +45,7 @@ export interface TaskAddResult {
 
 export interface TaskAddParams {
   petstory?: Task['petstory'];
+  petstoryChat?: Task['petstoryChat'];
   promptReadback?: Task['promptReadback'];
   prompts: string[];
   mode?: GenerationMode;

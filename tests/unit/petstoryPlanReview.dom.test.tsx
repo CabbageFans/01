@@ -1,7 +1,7 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { PetStoryChatJob, PetStoryPlan, PetStoryProject } from '@doubao-studio/contracts';
+import type { PetStoryChatJob, PetStoryPlan, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { PetStoryPlanReview } from '../../src/components/PetStoryPlanReview';
 import { PetStoryRuntime } from '../../src/components/PetStoryRuntime';
 import { PetStoryCurrentTasks } from '../../src/components/PetStoryTaskRecovery';
@@ -34,6 +34,7 @@ describe('同轮方案审阅与明确采用', (): void => {
     expect(screen.getAllByRole('article', { name: '方案审阅' })).toHaveLength(1);
     expect(screen.queryByText('待处理事项')).toBeNull();
     expect(screen.getAllByRole('button', { name: '确认并采用方案' })).toHaveLength(1);
+    expect(screen.getByText('查看待采用方案')).toBeDefined();
     expect(screen.getAllByRole('button', { name: '在豆包中调整' })).toHaveLength(1);
     expect(screen.queryByText('剧本理解与动态分镜')).toBeNull();
     expect(screen.queryByText('具体缺项修订')).toBeNull();
@@ -60,14 +61,17 @@ describe('同轮方案审阅与明确采用', (): void => {
     usePetStoryStore.setState({ project: p, adoptPlanCandidate: adopt, confirmStory: confirm });
     const View: React.FC = (): React.ReactElement => { const current = usePetStoryStore((state) => state.project)!; return <PetStoryPlanReview project={current} disabled={false} />; };
     render(<View />);
-    expect(screen.getByText('有新候选')).toBeDefined(); expect(screen.getByText(/与当前方案不同/)).toBeDefined();
-    fireEvent.click(screen.getByText('查看完整方案'));
+    expect(screen.getByText('有新候选')).toBeDefined(); expect(screen.getByText(/修改后的方案尚未采用/)).toBeDefined();
+    expect(screen.getByText('查看正在使用的方案')).toBeDefined();
+    fireEvent.click(screen.getByText('查看修改后的方案（待采用）'));
     expect(within(document.querySelector('.petstory-plan-full')!).getByRole('heading', { name: '动态分镜 · 5 个镜头' })).toBeDefined();
     expect(p).toEqual(before); expect(adopt).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: '确认并采用方案' }));
+    fireEvent.click(screen.getByRole('button', { name: '采用修改后的方案' }));
     await waitFor((): void => expect(screen.getByText('方案已采用')).toBeDefined());
     expect(adopt).toHaveBeenCalledExactlyOnceWith('TEST-new'); expect(confirm).toHaveBeenCalledOnce();
-    expect(screen.queryByRole('button', { name: '确认并采用方案' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '采用修改后的方案' })).toBeNull();
+    expect(screen.queryByText('查看修改后的方案（待采用）')).toBeNull();
+    expect(screen.getByText('查看正在使用的方案')).toBeDefined();
     expect(usePetStoryStore.getState().project?.assets).toEqual(before.assets);
   });
   it.each([
@@ -131,5 +135,35 @@ describe('同轮方案审阅与明确采用', (): void => {
     fireEvent.click(primary);
     await waitFor((): void => { if (status === 'captured') expect(collect).toHaveBeenCalledExactlyOnceWith('TEST-recover'); else expect(loadTasks).toHaveBeenCalledOnce(); });
     expect(screen.queryByRole('button', { name: '确认并采用方案' })).toBeNull();
+  });
+
+  it('方案修订已停下时显示真实缺项和明确继续入口，不冒充后台仍在处理', async (): Promise<void> => {
+    const root = job('TEST-feedback-root', { status: 'invalid', planFeedback: { text: 'TEST 修改意见', requestId: 'TEST-feedback-request' } });
+    const repair = job('TEST-feedback-repair', { kind: 'repair', parentJobId: root.id, status: 'invalid', parsedResult: undefined,
+      planFeedback: root.planFeedback, rawText: 'TEST 已保存回复', error: 'TEST 第二镜动作安排超出时长',
+      validationDetails: [{ code: 'duration', path: '$.plan.shots[1]', actualType: 'object', expected: 'TEST 动作时长匹配', repairable: true, message: 'TEST 第二镜动作安排超出时长' }] });
+    const p = project([root, repair]); const correct = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ project: p, busy: false, error: '', promptRepairJobIds: [], correctOnce: correct });
+    useTaskStore.setState({ tasks: [], activeTaskId: null, accountBusy: {} });
+    render(<PetStoryPlanReview project={p} disabled={false} />);
+    expect(screen.getByText(repair.error!)).toBeDefined();
+    expect(screen.queryByText('工具正在后台检查并整理结果，完成后会显示完整的新方案。')).toBeNull();
+    const primary = screen.getByRole('article', { name: '方案审阅' }).querySelector<HTMLButtonElement>('.petstory-plan-attention > button.ant-btn-primary');
+    expect(primary?.textContent).toBe('继续修正方案'); fireEvent.click(primary!);
+    await waitFor((): void => expect(correct).toHaveBeenCalledExactlyOnceWith(repair.id));
+  });
+
+  it('未发送的方案修订排队后保留继续原任务入口，不被后台标签永久隐藏', async (): Promise<void> => {
+    const root = job('TEST-queued-root', { status: 'invalid', planFeedback: { text: 'TEST 修改意见', requestId: 'TEST-queued-request' } });
+    const repair = job('TEST-queued-repair', { kind: 'repair', parentJobId: root.id, status: 'bound', parsedResult: undefined, planFeedback: root.planFeedback });
+    const p = project([root, repair]); const start = vi.fn(async (): Promise<void> => undefined);
+    const task: Task = { id: repair.taskId, projectId: p.studioProjectId, assignedAccountId: p.accountId, mode: 'chat', status: 'queued',
+      prompt: 'TEST 未发送的修订', result: null, outputs: [], createdAt: p.updatedAt, updatedAt: p.updatedAt };
+    usePetStoryStore.setState({ project: p, busy: false, error: '', promptRepairJobIds: [], startBoundChat: start });
+    useTaskStore.setState({ tasks: [task], activeTaskId: null, accountBusy: {} });
+    render(<PetStoryPlanReview project={p} disabled={false} />);
+    const primary = screen.getByRole('article', { name: '方案审阅' }).querySelector<HTMLButtonElement>('.petstory-plan-attention > button.ant-btn-primary');
+    expect(primary?.textContent).toBe('继续原文字任务（尚未发送）'); fireEvent.click(primary!);
+    await waitFor((): void => expect(start).toHaveBeenCalledExactlyOnceWith(repair.id));
   });
 });

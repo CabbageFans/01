@@ -149,6 +149,21 @@ export default tseslint.config(
     },
   },
 
+  // 隔离取证驱动由 Node 以 CommonJS 执行；页面回调显式通过 globalThis 访问浏览器。
+  {
+    files: ['design/ui-refresh/handoff/evidence/capture-electron.cjs'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'commonjs',
+      globals: { ...globals.node },
+    },
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off', // .cjs 的正式模块机制，与主进程规则一致。
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      'no-var': 'error',
+    },
+  },
+
   // ==================== 类型声明文件（宽松） ====================
   {
     files: ['src/**/*.d.ts', 'src/vite-env.d.ts'],

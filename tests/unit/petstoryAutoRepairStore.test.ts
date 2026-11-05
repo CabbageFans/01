@@ -236,6 +236,17 @@ describe('原五镜头的自动修订与明确入口', (): void => {
     expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(collectChat).not.toHaveBeenCalled(); expect(usePetStoryStore.getState().error).toBe(job.error);
   });
 
+  it('显式改镜长后仍有旧正文时，生成视频沿原入口准备新正文并保留旧final，不提前发媒体', async (): Promise<void> => {
+    const shot = project.plan!.shots[0]; const oldBody = shot.prompts.video.final;
+    shot.durationSeconds = 8; shot.prompts.video.timingStale = true;
+    shot.prompts.video.promptTask = { visualPolicy: 'reference-first-v1', references: [], dialect: 'seedance20' };
+    const media = vi.fn(); Object.assign(window.electronAPI.petstory, { generateShotMedia: media });
+    usePetStoryStore.setState({ project }); await usePetStoryStore.getState().generateShotMedia(shot.id, 'video');
+    expect(prepareRuntime).toHaveBeenCalledExactlyOnceWith(project.id, expect.any(Number), 'optimize', { shotId: shot.id, promptKind: 'video', background: 'canvas' });
+    expect(media).not.toHaveBeenCalled(); expect(project.plan!.shots[0].prompts.video.final).toBe(oldBody);
+    expect(project.plan!.shots[0].prompts.video.timingStale).toBe(true); expect(tasks.every((task): boolean => task.mode === 'chat')).toBe(true);
+  });
+
   it('单镜修订准备期间停止，保留新hold任务但不启动下一轮', async (): Promise<void> => {
     const shot = project.plan!.shots[0]; shot.prompts.video.final = '';
     const parent = installJob('optimize', { shotId: shot.id, promptKind: 'video', background: 'canvas' }); saveRepairableFailure(parent.id);

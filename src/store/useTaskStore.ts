@@ -30,10 +30,12 @@ import { findInteractiveAccountId } from '../utils/interactiveAccount';
 import { completeAcceptedObservation, hasPlatformAcceptance, renewObservationLease, shouldResumeAcceptedObservation } from '../utils/acceptedObservation';
 import { canContinueUnsubmittedVerification, canRecoverTaskAfterVerification, hasVerificationRecoveryConflict, matchesVerificationRecoveryRun, verificationRecoveryInputMatches, type TaskVerificationRecoveryDetail, type UnsubmittedVerificationRecovery } from '../utils/verificationRecovery';
 import { resolveTaskConversationTarget } from '../utils/taskConversationLocator';
+import { runTaskDispatchGuards } from '../automation/taskDispatchGuards';
 
 let resumeAllInFlight: Promise<boolean> | null = null;
 const verificationRecoveryInFlight = new Map<string, Promise<boolean>>();
 const pendingCompletionWrites = new Map<string, { runId?: string; submittedAt?: string }>();
+const startingAutomationTasks = new Set<string>();
 
 // 账号启动复检可能仍处于 unknown；队列遇到这种软阻断时不能永久停在那里。
 // 只对已满足依赖的 queued 任务做有界退避复检，ready 后由现有调度继续。
@@ -148,6 +150,18 @@ let queueProcessing = false;
 function verificationRecoveryDispatchBlocked(state: TaskState, accountId: string): boolean {
   return state.schedulerPaused || Boolean(state.accountBusy[accountId] || state.executingTasks[accountId])
     || Boolean(findInteractiveAccountId(state.accountAutomationState));
+}
+
+/** 异步取锁与业务回读后，必须仍是同一份未发送任务；不能覆盖期间的暂停或输入变更。 */
+function sameDispatchTask(current: Task | undefined, expected: Task, status: TaskStatus): current is Task {
+  return !!current && current.status === status && current.executionIntent === 'armed' && !current.runtime?.submittedAt && !current.runtime?.chatResponse
+    && current.assignedAccountId === expected.assignedAccountId && current.projectId === expected.projectId
+    && current.prompt === expected.prompt && current.mode === expected.mode && current.audioAttachment === expected.audioAttachment
+    && JSON.stringify(current.attachments || []) === JSON.stringify(expected.attachments || [])
+    && JSON.stringify(current.videoConfig) === JSON.stringify(expected.videoConfig)
+    && JSON.stringify(current.petstory) === JSON.stringify(expected.petstory)
+    && JSON.stringify(current.petstoryChat) === JSON.stringify(expected.petstoryChat)
+    && current.runtime?.runId === expected.runtime?.runId && JSON.stringify(current.runtime?.input) === JSON.stringify(expected.runtime?.input);
 }
 
 /** 完成写入回执不明时先回读，不能让异常恢复把实际已保存的 done 降为暂停。 */
@@ -624,6 +638,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   // ---- V3 自动化方法 ----
 
   startAutomation: async (taskId: string, beforeDispatch?: (task: Task) => Promise<void>, verificationRecovery?: UnsubmittedVerificationRecovery) => {
+    // 在首次异步写入前占位，不能让队列或另一个按钮越过本次业务绑定。
+    if (startingAutomationTasks.has(taskId)) {
+      set({ error: '该任务正在启动，请等待原启动完成' });
+      return false;
+    }
+    startingAutomationTasks.add(taskId);
+    try {
     if (get().schedulerPaused) {
       set({ error: '任务调度已暂停' });
       return false;
@@ -723,6 +744,15 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       set({ error: reservation.error || '任务锁定失败' });
       return false;
     }
+    const reservedState = get();
+    const reservedSnapshot = reservedState.tasks.find((item): boolean => item.id === taskId);
+    if (reservedState.schedulerPaused || !sameDispatchTask(reservedSnapshot, task, expectedStatus)
+      || reservedState.accountBusy[accountId] || reservedState.executingTasks[accountId] || findInteractiveAccountId(reservedState.accountAutomationState)) {
+      await automationEngine.release(taskId);
+      set({ error: '取得执行锁期间任务或调度状态已变化，原任务保留且未发送' });
+      return false;
+    }
+    task = reservedSnapshot;
     // 验证等待期间的原未发送运行只续用原租约标识；异步取锁后再查一次，不能接管已提交或后来运行。
     const currentVerificationTask = get().tasks.find((item): boolean => item.id === taskId);
     if (verificationRecovery && (!currentVerificationTask || !canContinueUnsubmittedVerification(currentVerificationTask,
@@ -775,14 +805,29 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       await automationEngine.release(taskId);
       return false;
     }
-    const runningTask = get().tasks.find((item) => item.id === taskId) || startedTask;
+    let runningTask = get().tasks.find((item) => item.id === taskId) || startedTask;
 
-    // 业务运行绑定必须在向 BrowserPanel 分派前持久化；失败保持 hold，不触碰页面。
-    if (beforeDispatch) {
-      try { await beforeDispatch(runningTask); }
+    // 启动入口统一执行正式绑定，任务中心、队列和本机控制都不能绕过。
+    {
+      try {
+        await runTaskDispatchGuards(runningTask);
+        if (beforeDispatch) await beforeDispatch(runningTask);
+        const state = get();
+        const latest = state.tasks.find((item): boolean => item.id === taskId);
+        const interactive = findInteractiveAccountId(state.accountAutomationState);
+        if (state.schedulerPaused || !sameDispatchTask(latest, runningTask, 'executing') || latest.runtime?.runId !== runId
+          || state.accountBusy[accountId] || state.executingTasks[accountId] || interactive) {
+          throw new Error('运行绑定期间任务或调度状态已变化，未向页面发送');
+        }
+        runningTask = latest;
+      }
       catch (error: unknown) {
         const message = error instanceof Error ? error.message : '业务运行绑定失败';
-        await get().updateTaskRuntime(taskId, { status: 'paused', executionIntent: 'hold', runtime: { stage: 'paused', message } });
+        const latest = get().tasks.find((item): boolean => item.id === taskId);
+        // 不覆盖绑定等待期间已经暂停、完成或换成另一运行的权威状态。
+        if (latest?.runtime?.runId === runId && latest.status === 'executing' && !latest.runtime.submittedAt) {
+          await get().updateTaskRuntime(taskId, { status: 'paused', executionIntent: 'hold', runtime: { stage: 'paused', message } });
+        }
         await automationEngine.release(taskId);
         set({ error: message });
         return false;
@@ -804,6 +849,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     });
 
     return true;
+    } finally { startingAutomationTasks.delete(taskId); }
   },
 
   markDependencyBlock: async (taskId, block) => {

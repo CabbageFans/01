@@ -5,6 +5,7 @@ export function needsPetStoryReferenceAdaptation(project: PetStoryProject, shotI
   const shot = project.plan?.shots.find((item): boolean => item.id === shotId);
   const prompt = shot?.prompts[kind];
   if (!shot || !prompt?.final.trim()) return true;
+  if (prompt.timingStale) return true;
   if (prompt.promptTask?.visualPolicy === 'reference-first-v1') return false;
   return !!project.materials?.some((material): boolean => material.kind === 'character' && shot.characterIds.includes(material.entityId) && !!material.visualBasis);
 }

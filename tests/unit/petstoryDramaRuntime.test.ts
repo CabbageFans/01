@@ -16,6 +16,7 @@ import { buildPetStoryPromptExport } from '../../main/utils/petstoryExport';
 import { inspectPromptCandidate, inspectPromptEligibility, legacyPromptDesignHash, promptWritingTarget } from '../../main/utils/petstoryEligibility';
 import { validatePetStoryPlan } from '../../main/utils/petstoryValidation';
 import originalFive from '../fixtures/drama-runtime-input.json';
+import { withOfflineTimingPlan } from '../fixtures/petstoryTimingPlan';
 
 const prompt = (body: string): PetStoryPrompt => ({ original: body, optimized: body, final: body, edited: false, rulesVersion: 'TEST-old' });
 function capability(accountId = 'TEST-account'): PetStoryCapability {
@@ -24,11 +25,11 @@ function capability(accountId = 'TEST-account'): PetStoryCapability {
     modes: { first_frame: entry, first_last_frame: entry, reference: entry }, videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' } };
 }
 function technicalPlan(count = 2): PetStoryPlan {
-  return { sourceSummary: 'TEST 技术占位', adaptedStory: 'TEST 当前确认原文', understanding: 'TEST 来源对应', sceneDesign: 'TEST 空间关系', characters: [], props: [],
+  return withOfflineTimingPlan({ sourceSummary: 'TEST 技术占位', adaptedStory: 'TEST 当前确认原文', understanding: 'TEST 来源对应', sceneDesign: 'TEST 空间关系', characters: [], props: [],
     scenes: [{ id: 'location', name: 'TEST地点', location: 'TEST地点', time: '未指定', lighting: '待确认', layout: 'TEST布局', view: 'TEST视角', designOrigin: 'proposed' }],
     shots: Array.from({ length: count }, (_, index): PetStoryPlan['shots'][number] => ({ id: `shot-${index}`, order: index + 1, characterIds: [], propIds: [], propStates: [], sceneId: 'location', scene: 'TEST地点',
       startState: `TEST起点${index}`, action: `TEST过程${index}`, endState: `TEST终点${index}`, durationSeconds: 5, transition: 'cut', requestedMode: 'reference',
-      prompts: { firstFrame: prompt(`TEST首帧${index}`), video: prompt(`TEST视频${index}`) } })) };
+      prompts: { firstFrame: prompt(`TEST首帧${index}`), video: prompt(`TEST视频${index}`) } })) }, 'TEST 当前确认原文');
 }
 let directory: string; let projects: PetStoryProjects; let p: PetStoryProject; let core: TaskService; let chat: PetStoryChatService; let tasks: () => Task[];
 beforeEach(async (): Promise<void> => {
@@ -48,7 +49,7 @@ async function prepare(kind: PetStoryChatJob['kind'], target?: PetStoryRuntimeTa
 }
 async function finish(job: PetStoryChatJob, result: Record<string, unknown>, badIds = false, rawOverride?: string): Promise<PetStoryProject> {
   const task = tasks().find((t): boolean => t.id === job.taskId)!; const now = new Date().toISOString();
-  const text = rawOverride ?? JSON.stringify({ requestId: job.requestId, targetIds: badIds ? ['wrong-target'] : job.expectedIds, ...result });
+  const text = rawOverride ?? JSON.stringify({ requestId: job.requestId, targetIds: badIds ? ['wrong-target'] : job.expectedIds, ...withOfflineTimingPlan(result, p.mobileStory?.text || '') });
   const runtime: TaskRunSnapshot = { runId: `TEST-run-${job.id}`, attempt: 1, stage: 'completed', message: 'TEST离线完成', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
     input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] }, chatResponse: { text, capturedAt: now } };
   const updated = core.updateRuntime({ taskId: task.id, status: 'done', runtime }); if (!updated.success) throw new Error(updated.error);
@@ -535,6 +536,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     p.plan!.characters = [{ id: 'speaker-a', name: 'TEST甲', role: 'main', purpose: 'TEST', description: 'TEST' }, { id: 'speaker-b', name: 'TEST乙', role: 'supporting', purpose: 'TEST', description: 'TEST' }];
     p.plan!.shots[0].characterIds = ['speaker-a', 'speaker-b'];
     p.plan!.shots[0].dialogue = [{ speakerId: 'speaker-a', text: '好', tone: '', pace: '' }, { speakerId: sameSpeaker ? 'speaker-a' : 'speaker-b', text: '好', tone: '', pace: '' }];
+    delete p.plan!.shots[0].timingPlan;
     p.materials = syncMaterials(p); p = await projects.write(p);
     const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
     expect(job.requestText).toContain('按确认dialogue的发声次数保留');
@@ -628,6 +630,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
   it('已选 Seedance 方言检查原台词声音花括号，修订原回复自身携带语法且无程序补写', async (): Promise<void> => {
     p.plan!.characters = [{ id: 'speaker', name: 'TEST角色', role: 'main', purpose: 'TEST台词测试', description: 'TEST身份' }];
     p.plan!.shots[0].characterIds = ['speaker']; p.plan!.shots[0].dialogue = [{ speakerId: 'speaker', text: 'TEST逐字台词', tone: '', pace: '' }];
+    delete p.plan!.shots[0].timingPlan;
     p.materials = syncMaterials(p); p = await projects.write(p);
     const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
     const labels = job.promptTask!.references.map((ref): string => `@图片${ref.order}`).join(' ');
@@ -643,6 +646,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
   it('角色主名已合法的旧误判原回复先本地重校验，零新任务恢复同一候选并保持final', async (): Promise<void> => {
     p.plan!.characters = [{ id: 'speaker', name: '噜妹（黑衣男子）', aliases: ['黑衣男子'], role: 'main', purpose: 'TEST台词测试', description: 'TEST身份' }];
     p.plan!.shots[0].characterIds = ['speaker']; p.plan!.shots[0].dialogue = [{ speakerId: 'speaker', text: 'TEST逐字台词', tone: '', pace: '' }];
+    delete p.plan!.shots[0].timingPlan;
     p.materials = syncMaterials(p); p = await projects.write(p);
     const original = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
     const labels = original.promptTask!.references.map((reference): string => `@图片${reference.order}`).join(' ');
@@ -930,6 +934,22 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(p.jobs[0].resultStatus).toBe('adopted');
     p.plan!.shots.forEach((s, index): void => { expect(s.action).toBe(original[index].action); expect(s.startState).toBe(original[index].startState); expect(s.endState).toBe(original[index].endState); expect(s.durationSeconds).toBe(original[index].durationSeconds); expect(s.prompts).toEqual(original[index].prompts); expect(s.sourceRefs).toEqual(['TEST原文段1']); });
     expect((await new PetStoryProjects().open(directory)).plan!.sceneDesign).toBe('TEST空间锚点');
+  });
+  it('资产补齐不能借返回新时间表重排已有镜内事件，候选及采用均保留原安排', async (): Promise<void> => {
+    const shot = p.plan!.shots[0];
+    shot.timingPlan = { events: [{ id: 'action', kind: 'action', description: shot.action, startSeconds: 0, endSeconds: 4.7 }],
+      estimatedRequiredSeconds: 4.7, durationReason: 'TEST原动作完整结束', cutReason: 'TEST完成后切出' };
+    delete p.plan!.shots[1].timingPlan;
+    p = await projects.write(p); const original = structuredClone(p.plan!.shots); const job = await prepare('assets');
+    await finish(job, { characters: [], props: [], scenes: p.plan!.scenes,
+      shotBindings: original.map((s): object => ({ shotId: s.id, characterIds: [], propIds: [], propStates: [], sceneId: 'location',
+        timingPlan: { events: [{ id: 'changed', kind: 'reaction', description: 'TEST不得替换原动作安排', startSeconds: 1, endSeconds: 5 }],
+          estimatedRequiredSeconds: 5, durationReason: 'TEST资产阶段无权改时', cutReason: 'TEST资产阶段无权改切点' } })) });
+    expect(p.jobs.at(-1)?.parsedResult?.assets?.shotBindings[0].timingPlan).toEqual(original[0].timingPlan);
+    expect(p.plan!.shots).toEqual(original); await adoptAssets(job);
+    expect(p.plan!.shots[0].timingPlan).toEqual(original[0].timingPlan);
+    expect(p.plan!.shots[1].timingPlan).toBeUndefined();
+    expect((await new PetStoryProjects().open(directory)).plan!.shots).toEqual(p.plan!.shots);
   });
   it.each([{ incoming: [] as string[] }, { incoming: ['replacement'] }])('补资产拒绝模型将原出场角色误删或替换为 $incoming', async ({ incoming }: { incoming: string[] }): Promise<void> => {
     p.plan!.characters = [{ id: 'original', name: 'TEST角色', role: 'main', purpose: 'TEST用途', description: 'TEST已保存外观' }];

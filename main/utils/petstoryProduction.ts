@@ -10,6 +10,7 @@ import { approvedMaterialHash, legacyApprovedMaterialHash, materialAsset, requir
 import type { PetStoryPageBinding, PetStoryRuntimeTarget, PetStoryGenerationBlocker, PetStoryGenerationEligibilityResult, PetStoryModeResolution } from '@doubao-studio/contracts';
 import { boundaryStillCurrent, finalTaskInput, frameStillCurrent, hasSupersedingJob, runtimeContextStillCurrent } from './petstoryChat';
 import { runtimePromptIssues, validatePetStoryPlan } from './petstoryValidation';
+import { validPetStoryDuration } from './petstoryValidationIssues';
 import { resolvePetStoryMode } from './petstoryModes';
 import { productionCapability } from './petstoryCapability';
 import { extractActualEndFrame, mediaDigest, validatePetStoryMedia } from './petstoryMedia';
@@ -701,7 +702,7 @@ export class PetStoryProductionService {
       if (source) await this.assetFile(p, source.assetId, 'video');
     }
     const shot = p.plan?.shots.find((s): boolean => s.id === step.shotId);
-    if (step.kind === 'video' && (!shot || task.videoConfig?.duration !== `${shot.durationSeconds}s`)) throw new Error('视频时长不符，零提交');
+    if (step.kind === 'video' && (!shot || !validPetStoryDuration(shot.durationSeconds) || task.videoConfig?.duration !== `${shot.durationSeconds}s`)) throw new Error('视频时长不符，零提交');
   }
   private validateCompiledStep(p: PetStoryProject, step: PetStoryProductionStep, task: Task): void {
     const production = this.checked(p);

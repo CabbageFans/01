@@ -24,21 +24,26 @@ export class AutomationEngine {
     const existing = this.reservations.get(taskId);
     if (existing) return existing.ownerId === ownerId ? { ok: true } : { ok: false, error: '任务已在运行' };
 
-    this.reservations.set(taskId, { taskId, accountId, ownerId });
+    const reservation: Reservation = { taskId, accountId, ownerId };
+    this.reservations.set(taskId, reservation);
     this.accountTasks.set(accountId, taskId);
-    const result = await getElectronAPI().tasks.acquireLock(taskId, ownerId);
-    if (!result.success) {
-      this.reservations.delete(taskId);
-      if (this.accountTasks.get(accountId) === taskId) this.accountTasks.delete(accountId);
-      return { ok: false, error: result.error || '任务锁定失败' };
-    }
-    const reservation = this.reservations.get(taskId);
-    if (reservation) {
+    try {
+      const result = await getElectronAPI().tasks.acquireLock(taskId, ownerId);
+      if (!result.success) throw new Error(result.error || '任务锁定失败');
+      // 取锁等待期间可能已停止并建立新运行，旧回执不能认领新占位或重复启用其心跳。
+      if (this.reservations.get(taskId) !== reservation) return { ok: false, error: '任务执行预约已变化，未启动' };
       reservation.heartbeat = setInterval(() => {
         void this.renew(reservation);
       }, LEASE_HEARTBEAT_MS);
+      return { ok: true };
+    } catch (reason: unknown) {
+      // IPC 抛错与明确失败都释放本次本地占位；迟到失败不能删掉后来运行。
+      if (this.reservations.get(taskId) === reservation) {
+        this.reservations.delete(taskId);
+        if (this.accountTasks.get(accountId) === taskId) this.accountTasks.delete(accountId);
+      }
+      return { ok: false, error: reason instanceof Error ? reason.message : '任务锁定失败' };
     }
-    return { ok: true };
   }
 
   private async renew(reservation: Reservation): Promise<void> {

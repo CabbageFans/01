@@ -5,8 +5,10 @@ import { compileReferencedText, PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION }
 import { subtitlePolicyIssues } from './petstorySubtitlePolicy';
 import { petStoryCharacterLabelKey, petStoryCharacterLabelOwners, seedanceSpeakerLabels } from './petstoryCharacterLabels';
 import { collectPetStoryPlanIssues, PetStoryContentValidationError, validPetStoryDuration } from './petstoryValidationIssues';
+import { normalizePetStoryDialogueSource } from './petstoryTiming';
 export { collectPetStoryPlanIssues, formatPetStoryValidationIssue, PetStoryContentValidationError, planRepairPreservationIssues } from './petstoryValidationIssues';
 export type { PetStoryValidationIssue } from './petstoryValidationIssues';
+export { collectPetStoryDialogueSourceIssues } from './petstoryTiming';
 const MODES: PetStoryMode[] = ['auto', 'first_frame', 'first_last_frame', 'reference'];
 export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('需要 JSON 对象');
@@ -61,9 +63,10 @@ function characterArray(value: unknown): unknown[] {
   return value;
 }
 /** 只保留本地保存的明确复核标记，模型回复不能声明既有采用或失效事实。 */
-function savedPromptReviewFlags(p: Record<string, unknown>, model: boolean): Pick<PetStoryPrompt, 'needsReview' | 'visualBasisStale'> {
+function savedPromptReviewFlags(p: Record<string, unknown>, model: boolean): Pick<PetStoryPrompt, 'needsReview' | 'visualBasisStale' | 'timingStale'> {
   return { needsReview: !model && p.needsReview === true ? true : undefined,
-    visualBasisStale: !model && p.visualBasisStale === true ? true : undefined };
+    visualBasisStale: !model && p.visualBasisStale === true ? true : undefined,
+    timingStale: !model && p.timingStale === true ? true : undefined };
 }
 /** 分析只保存兼容草稿；正式正文必须来自专用任务。 */
 function prompt(value: unknown, field: string, model: boolean): PetStoryPrompt {
@@ -95,10 +98,11 @@ export function validatePromptTask(value: unknown): PetStoryPromptTaskContract {
       characterIds: [...ref.characterIds] as string[], materialId: optionalText(ref.materialId, '目标素材ID'), entityId: optionalText(ref.entityId, '目标实体ID'), slot: ref.slot as PetStoryPromptReference['slot'] };
   });
   if (task.designHash !== undefined && (typeof task.designHash !== 'string' || !/^[a-f0-9]{64}$/.test(task.designHash))) throw new Error('正文设计快照无效');
+  if (task.timingPlanHash !== undefined && (typeof task.timingPlanHash !== 'string' || !/^[a-f0-9]{64}$/.test(task.timingPlanHash))) throw new Error('正文时间安排快照无效');
   if (task.visualPolicy !== undefined && task.visualPolicy !== 'reference-first-v1') throw new Error('正文的视觉规则无效');
   if (task.characterVisualBasis !== undefined && (Object.prototype.toString.call(task.characterVisualBasis) !== '[object Object]'
     || Object.entries(task.characterVisualBasis as Record<string, unknown>).some(([key, value]): boolean => !/^character:[a-zA-Z0-9_-]{1,80}$/.test(key) || typeof value !== 'string' || !/^.+:[a-f0-9]{64}$/.test(value)))) throw new Error('正文的角色图片快照无效');
-  return { designHash: task.designHash as string | undefined, ...(task.characterVisualBasis ? { characterVisualBasis: structuredClone(task.characterVisualBasis) as Record<string, string> } : {}), ...(task.visualPolicy ? { visualPolicy: task.visualPolicy as 'reference-first-v1' } : {}), references, dialect: task.dialect as PetStoryPromptTaskContract['dialect'], mode: task.mode as PetStoryPromptTaskContract['mode'] };
+  return { designHash: task.designHash as string | undefined, ...(task.timingPlanHash ? { timingPlanHash: task.timingPlanHash as string } : {}), ...(task.characterVisualBasis ? { characterVisualBasis: structuredClone(task.characterVisualBasis) as Record<string, string> } : {}), ...(task.visualPolicy ? { visualPolicy: task.visualPolicy as 'reference-first-v1' } : {}), references, dialect: task.dialect as PetStoryPromptTaskContract['dialect'], mode: task.mode as PetStoryPromptTaskContract['mode'] };
 }
 
 function runtimeReferenceIssues(project: PetStoryProject, job: PetStoryChatJob, body: string): string[] {
@@ -193,11 +197,11 @@ function optionalText(value: unknown, field: string): string | undefined {
   if (typeof value !== 'string') throw new Error(`${field}必须为文本`);
   return value;
 }
-function directingFields(s: Record<string, unknown>): Pick<PetStoryShot, 'sourceRefs' | 'narrativePurpose' | 'framing' | 'blocking' | 'performance' | 'sound' | 'timing' | 'continuity'> {
+function directingFields(s: Record<string, unknown>): Pick<PetStoryShot, 'sourceRefs' | 'narrativePurpose' | 'framing' | 'blocking' | 'performance' | 'sound' | 'timing' | 'timingPlan' | 'continuity'> {
   if (s.sourceRefs !== undefined && (!Array.isArray(s.sourceRefs) || s.sourceRefs.some((v: unknown): boolean => typeof v !== 'string'))) throw new Error('镜头来源必须为文本数组');
   return { sourceRefs: s.sourceRefs as string[] | undefined,
     narrativePurpose: optionalText(s.narrativePurpose, '镜头职责'), framing: optionalText(s.framing, '构图'), blocking: optionalText(s.blocking, '空间调度'),
-    performance: optionalText(s.performance, '表演'), sound: optionalText(s.sound, '声音'), timing: optionalText(s.timing, '时长分配'), continuity: optionalText(s.continuity, '连续性') };
+    performance: optionalText(s.performance, '表演'), sound: optionalText(s.sound, '声音'), timing: optionalText(s.timing, '时长分配'), timingPlan: s.timingPlan === undefined ? undefined : structuredClone(s.timingPlan) as PetStoryShot['timingPlan'], continuity: optionalText(s.continuity, '连续性') };
 }
 function ids(value: unknown, field: string): string[] {
   if (!Array.isArray(value)) throw new Error(`${field}必须为数组`);
@@ -308,13 +312,13 @@ function validatePetStoryPlanStrict(value: unknown, model: boolean, allowHistori
         const delivery = d.delivery;
         if (delivery !== undefined && !['onscreen', 'offscreen', 'voiceover'].includes(String(delivery))) throw new Error('台词发声方式无效');
         if (!characterIds.has(speakerId) || (!refs.includes(speakerId) && (!delivery || delivery === 'onscreen'))) throw new Error('画内台词说话者必须出场；OS／VO必须对应已有角色');
-        return { speakerId, text: text(d.text, '已有台词'), tone: optionalText(d.tone, '语气') || '', pace: optionalText(d.pace, '节奏') || '', delivery: delivery as 'onscreen' | 'offscreen' | 'voiceover' | undefined };
+        return { speakerId, text: text(d.text, '已有台词'), tone: optionalText(d.tone, '语气') || '', pace: optionalText(d.pace, '节奏') || '', delivery: delivery as 'onscreen' | 'offscreen' | 'voiceover' | undefined, source: d.source === undefined ? undefined : structuredClone(normalizePetStoryDialogueSource(d)) as NonNullable<PetStoryShot['dialogue']>[number]['source'] };
       });
     }
     const lastFrame = prompts.lastFrame === undefined && s.requestedMode !== 'first_last_frame' ? undefined : prompt(prompts.lastFrame, `${shotId}.lastFrame`, model);
     if (s.requestedMode === 'first_last_frame' && !lastFrame) throw new Error(`${shotId}首尾帧模式缺少尾帧提示词`);
 
-    return { id: shotId, order: index + 1, characterIds: refs, sceneReferenceAssetIds: legacySceneReferences(s, model), scene: text(s.scene, `${shotId}.scene`),
+    return { id: shotId, order: index + 1, predecessorShotIds: s.predecessorShotIds === undefined ? undefined : ids(s.predecessorShotIds, '前身镜头ID'), characterIds: refs, sceneReferenceAssetIds: legacySceneReferences(s, model), scene: text(s.scene, `${shotId}.scene`),
       propIds, propStates, sceneId, sceneView: optionalText(s.sceneView, '视角'), dialogue,
       expression: optionalText(s.expression, '神态'), gaze: optionalText(s.gaze, '视线'), interaction: optionalText(s.interaction, '互动'), camera: optionalText(s.camera, '镜头方式'),
       ...directingFields(s),
