@@ -294,3 +294,50 @@ describe('直接对所选图片提出反馈', (): void => {
     expect(project.assets).toHaveLength(1); expect(project.adoptedImages).toEqual({});
   });
 });
+
+describe('一次只启动一个图片流程', (): void => {
+  function occupy(stage: 'pending' | 'preparing' | 'generating' | 'saving'): void {
+    project.imageOperations = [{ id: 'TEST-other-operation', requestId: 'TEST-other-request', target: { materialId: 'prop:other' },
+      mode: 'generate', stage: stage === 'pending' ? 'preparing' : stage, basisHash: 'TEST-basis', createdAt: now }];
+    usePetStoryStore.setState({ project, pendingImageTargets: stage === 'pending' ? ['material:prop:other'] : [],
+      activeImageOperationIds: stage === 'pending' ? [] : ['TEST-other-operation'] });
+  }
+
+  it.each(['pending', 'preparing', 'generating', 'saving'] as const)('%s期间其他图片的生成按钮禁用，释放后恢复', (stage): void => {
+    project.assets = []; occupy(stage);
+    const generate = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="待生成图片" disabled={false} onGenerate={generate} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    const button = screen.getByRole('button', { name: '生成图片' });
+    expect(button.hasAttribute('disabled')).toBe(true); fireEvent.click(button); expect(generate).not.toHaveBeenCalled();
+    act((): void => { usePetStoryStore.setState({ activeImageOperationIds: [], pendingImageTargets: [] }); });
+    expect(button.hasAttribute('disabled')).toBe(false);
+  });
+
+  it.each(['pending', 'preparing', 'generating', 'saving'] as const)('%s期间预览仍可读，重新生成和修改均禁用', async (stage): Promise<void> => {
+    occupy(stage); const generate = vi.fn(async (): Promise<void> => undefined); const modify = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="候选图片" disabled={false} onGenerate={generate} onModify={modify} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' })); const dialog = screen.getByRole('dialog');
+    await waitFor((): void => expect(within(dialog).getByRole('button', { name: '满意，采用图片' }).hasAttribute('disabled')).toBe(false));
+    const regenerate = within(dialog).getByRole('button', { name: '重新生成' }); const change = within(dialog).getByRole('button', { name: '不满意，修改图片' });
+    expect(regenerate.hasAttribute('disabled')).toBe(true); expect(change.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(regenerate); fireEvent.click(change); expect(generate).not.toHaveBeenCalled(); expect(modify).not.toHaveBeenCalled();
+    act((): void => { usePetStoryStore.setState({ activeImageOperationIds: [], pendingImageTargets: [] }); });
+    expect(regenerate.hasAttribute('disabled')).toBe(false); expect(change.hasAttribute('disabled')).toBe(false);
+  });
+
+  it('已填写的反馈遇到另一图片启动时锁住提交，解除后仍使用原选图和原反馈', async (): Promise<void> => {
+    const modify = vi.fn(async (): Promise<void> => undefined);
+    render(<PetStoryImageReview project={project} target={target} title="候选图片" disabled={false} onModify={modify} onUpload={async (): Promise<void> => undefined} onAdopt={async (): Promise<void> => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' })); const preview = screen.getByRole('dialog');
+    const change = within(preview).getByRole('button', { name: '不满意，修改图片' });
+    await waitFor((): void => expect(change.hasAttribute('disabled')).toBe(false)); fireEvent.click(change);
+    const dialog = screen.getByRole('dialog', { name: '修改这张图片' });
+    fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: '只调整光线' } });
+    act((): void => { usePetStoryStore.setState({ pendingImageTargets: ['material:prop:other'] }); });
+    const submit = within(dialog).getByRole('button', { name: '提交修改' });
+    expect(submit.hasAttribute('disabled')).toBe(true); fireEvent.click(submit); expect(modify).not.toHaveBeenCalled();
+    act((): void => { usePetStoryStore.setState({ pendingImageTargets: [] }); });
+    expect(submit.hasAttribute('disabled')).toBe(false); fireEvent.click(submit);
+    await waitFor((): void => expect(modify).toHaveBeenCalledExactlyOnceWith('candidate-b', '只调整光线'));
+  });
+});

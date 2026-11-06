@@ -1,9 +1,38 @@
 import { isSameDoubaoConversation } from './taskConversationLocator';
 import { classifyGenerationConfirmationText } from './generationConfirmation';
 
+/** 图卡只读诊断仅保留结构、类型与计数，不包含正文、身份或媒体地址。 */
+export interface ImageArtifactDiagnostics {
+  cardCount: number;
+  renderedImageCount: number;
+  modelFound: boolean;
+  blockCounts: { normalized: number; v2: number; legacy: number };
+  creationCount: number;
+  matchedCreationCount: number;
+  matchedCardCount: number;
+  creations: {
+    imagePresent: boolean;
+    statusType: string;
+    status?: number;
+    finishedType: string;
+    finished?: boolean;
+    matchedCardCount: number;
+    variants: {
+      field: string;
+      present: boolean;
+      urlValid: boolean;
+      widthType: string;
+      heightType: string;
+      widthPositive: boolean;
+      heightPositive: boolean;
+      matchedCardCount: number;
+    }[];
+  }[];
+}
+
 /** 普通 Chat 只读取消息区；不把侧栏、编辑器或页面脚本当成回复。 */
 export interface ChatPageSnapshot {
-  messages: { role: 'user' | 'assistant'; text: string; rawText?: string; renderedSource?: string; codeSpans?: number; fencedCode?: { language: string; text: string }[]; headingCount?: number; attachmentOnly?: boolean; hasAttachments?: boolean; turnId?: string; messageId?: string; replyId?: string; imageUrls?: string[]; imageArtifactUrls?: string[]; imageArtifactPending?: boolean; imageArtifactFailure?: string; videoReady?: boolean }[];
+  messages: { role: 'user' | 'assistant'; text: string; rawText?: string; renderedSource?: string; codeSpans?: number; fencedCode?: { language: string; text: string }[]; headingCount?: number; attachmentOnly?: boolean; hasAttachments?: boolean; turnId?: string; messageId?: string; replyId?: string; imageUrls?: string[]; imageArtifactUrls?: string[]; imageArtifactPending?: boolean; imageArtifactFailure?: string; imageArtifactDiagnostics?: ImageArtifactDiagnostics; videoReady?: boolean }[];
   editorPresent: boolean;
   editorText: string;
   generating: boolean;
@@ -81,10 +110,9 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
     return { ...(codeSpans ? { codeSpans } : {}), ...(fencedCode.length ? { fencedCode } : {}), ...(headingCount ? { headingCount } : {}) };
   };
   // 自包含：此函数随消息读取器一起序列化，不依赖宿主模块或整页全局媒体缓存。
-  const readOriginalImageCards = (node: Element, suppliedModel?: Record<string, unknown>): Pick<ChatPageSnapshot['messages'][number], 'imageArtifactUrls' | 'imageArtifactPending' | 'imageArtifactFailure'> => {
+  const readOriginalImageCards = (node: Element, suppliedModel?: Record<string, unknown>): Pick<ChatPageSnapshot['messages'][number], 'imageArtifactUrls' | 'imageArtifactPending' | 'imageArtifactFailure' | 'imageArtifactDiagnostics'> => {
     if (node.getAttribute('data-testid') !== 'receive_message') return {};
     const cards = Array.from(node.querySelectorAll('[data-testid="message_image_content"]'));
-    if (!cards.length) return {};
     type Value = Record<string, unknown>;
     const object = (value: unknown): Value | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Value : undefined;
     const modelForMessage = (): Value | undefined => {
@@ -111,17 +139,42 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
       }) : [];
     }) : [];
     const normalized = creationsIn(model?.content_blocks, true);
-    const modern = normalized.length ? normalized : creationsIn(model?.content_blocks_v2, false);
+    // v2 同时存在归一化 content_obj 与旧 creation_block；只读当前消息明确的字段。
+    const normalizedV2 = creationsIn(model?.content_blocks_v2, true);
+    const modern = normalized.length ? normalized : normalizedV2.length ? normalizedV2 : creationsIn(model?.content_blocks_v2, false);
     const creations = modern.length ? modern : creationsIn(model?.content_block, false);
     const remoteUrl = (value: unknown): value is string => {
       if (typeof value !== 'string' || !/^https:\/\//i.test(value)) return false;
       try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password; } catch { return false; }
     };
+    const matchedVariantCards = (sources: string[]): number => cards.filter((card: Element): boolean => Array.from(card.querySelectorAll('img')).some((element: HTMLImageElement): boolean => !element.closest('video')
+      && (sources.includes(element.currentSrc || element.src) || sources.includes(element.src)))).length;
+    // 诊断只读取已知字段的存在、类型及比较结果；不输出任意 provider 值或媒体地址。
+    const blockCount = (blocks: unknown): number => Array.isArray(blocks) ? blocks.length : 0;
+    const diagnostics: NonNullable<ChatPageSnapshot['messages'][number]['imageArtifactDiagnostics']> = {
+      cardCount: cards.length, renderedImageCount: cards.reduce((count: number, card: Element): number => count + card.querySelectorAll('img').length, 0), modelFound: !!model,
+      blockCounts: { normalized: blockCount(model?.content_blocks), v2: blockCount(model?.content_blocks_v2), legacy: blockCount(model?.content_block) },
+      creationCount: creations.length, matchedCreationCount: 0, matchedCardCount: 0,
+      creations: creations.slice(0, 32).map((creation: Value): NonNullable<ChatPageSnapshot['messages'][number]['imageArtifactDiagnostics']>['creations'][number] => {
+        const image = object(creation.image);
+        return { imagePresent: !!image, statusType: typeof image?.status, ...(typeof image?.status === 'number' && Number.isFinite(image.status) ? { status: image.status } : {}),
+          finishedType: typeof creation.finished, ...(typeof creation.finished === 'boolean' ? { finished: creation.finished } : {}), matchedCardCount: 0,
+          variants: ['image_thumb', 'image_ori', 'image_preview', 'image_ori_raw', 'image_preview_resize'].map((field: string): NonNullable<ChatPageSnapshot['messages'][number]['imageArtifactDiagnostics']>['creations'][number]['variants'][number] => {
+            const variant = image ? object(image[field]) : undefined; const variantUrl = variant?.url; const valid = remoteUrl(variantUrl);
+            return { field, present: !!variant, urlValid: valid, widthType: typeof variant?.width, heightType: typeof variant?.height,
+              widthPositive: typeof variant?.width === 'number' && Number.isFinite(variant.width) && variant.width > 0,
+              heightPositive: typeof variant?.height === 'number' && Number.isFinite(variant.height) && variant.height > 0,
+              matchedCardCount: valid ? matchedVariantCards([variantUrl]) : 0 };
+          }) };
+      }),
+    };
+    // 无卡时只记录真实 provider 的结构；普通 Chat 保持原快照契约。
+    if (!cards.length) return model ? { imageArtifactDiagnostics: diagnostics } : {};
     const failureFor = (card: Element): string | undefined => (card.textContent || '').normalize('NFKC').trim()
       .match(/^(?:图片生成失败|生成图片失败|图片生成异常|图片生成出错|生成失败|图片生成次数已用完|图片生成额度不足|请求未通过内容审核)/)?.[0];
     let imageArtifactFailure: string | undefined; let imageArtifactPending = false;
     const matchedCards = new Set<Element>(); const urls: string[] = [];
-    for (const creation of creations) {
+    for (const [creationIndex, creation] of creations.entries()) {
       const image = object(creation.image); if (!image) continue;
       const variants = ['image_thumb', 'image_ori', 'image_preview', 'image_ori_raw', 'image_preview_resize'].flatMap((key: string): string[] => {
         const variant = object(image[key]); return remoteUrl(variant?.url) ? [variant.url] : [];
@@ -129,6 +182,8 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
       // 原图字段必须与本消息图片卡的某个真实渲染源精确关联；不按最大尺寸猜地址。
       const owned = cards.filter((card: Element): boolean => Array.from(card.querySelectorAll('img')).some((element: HTMLImageElement): boolean => !element.closest('video')
         && (variants.includes(element.currentSrc || element.src) || variants.includes(element.src))));
+      if (owned.length) diagnostics.matchedCreationCount++;
+      if (diagnostics.creations[creationIndex]) diagnostics.creations[creationIndex].matchedCardCount = owned.length;
       if (!owned.length) { imageArtifactPending = true; continue; }
       for (const card of owned) matchedCards.add(card);
       const original = ['image_ori', 'image_ori_raw'].map((key: string): Value | undefined => object(image[key])).find((variant: Value | undefined): variant is Value => !!variant && remoteUrl(variant.url)
@@ -142,7 +197,8 @@ export function readChatPage(doc: Document): ChatPageSnapshot {
       const failure = failureFor(card); if (failure) imageArtifactFailure = failure;
       if (card.getAttribute('data-finished') === 'false' || !matchedCards.has(card) && !failure) imageArtifactPending = true;
     }
-    return { imageArtifactUrls: [...new Set(urls)], imageArtifactPending, ...(imageArtifactFailure ? { imageArtifactFailure } : {}) };
+    diagnostics.matchedCardCount = matchedCards.size;
+    return { imageArtifactDiagnostics: diagnostics, imageArtifactUrls: [...new Set(urls)], imageArtifactPending, ...(imageArtifactFailure ? { imageArtifactFailure } : {}) };
   };
   const readMessage = (node: Element): ChatPageSnapshot['messages'][number] | undefined => {
     const content = node.querySelector('[data-testid="message_text_content"]');
@@ -677,4 +733,38 @@ export function inspectCreationReadback(
     confirmationPublished = true;
   }
   return { ...inspectChatReadback({ ...snapshot, messages }, prompt, baselineMessageCount), confirmationPublished };
+}
+
+/**
+ * 已提交图片的只读恢复：定位唯一原全文或已保存的服务器消息，不能要求整段历史只有一条用户消息。
+ * 与发送前回执分开；所有后发用户消息（含空消息／新附件）均截止原回复区间，不推定续接。
+ */
+export function inspectSubmittedImageReadback(
+  snapshot: ChatPageSnapshot,
+  prompt: string,
+  context: ChatReadbackContext,
+): CreationReadbackResult {
+  const initial = inspectCreationReadback(snapshot, prompt, 'image', 0);
+  if (!trustedReadbackContext(context)) return { ...initial, promptPublished: false, confirmationPublished: false, reason: 'context_changed' };
+  const messages = creationReadbackMessages(snapshot, prompt, 'image');
+  const matches = messages.flatMap((message: ChatPageSnapshot['messages'][number], index: number): number[] => {
+    if (message.role !== 'user' || message.attachmentOnly || context.userMessageId && message.messageId !== context.userMessageId) return [];
+    return publishedPromptMatches(message, prompt) ? [index] : [];
+  });
+  if (matches.length !== 1) return { ...initial, promptPublished: false, confirmationPublished: false,
+    reason: context.userMessageId || matches.length > 1 ? 'user_ambiguous' : 'prompt_unmatched' };
+  const originalMessageIndex = matches[0]; const user = messages[originalMessageIndex];
+  // 真实服务器 ID 必须在本快照唯一；共享 union turnId 不能代替消息身份。
+  if (user.messageId && messages.filter((message: ChatPageSnapshot['messages'][number]): boolean => message.messageId === user.messageId).length !== 1) {
+    return { ...initial, promptPublished: false, confirmationPublished: false, reason: 'user_ambiguous' };
+  }
+  const followupUserMessageIndices = messages.flatMap((message: ChatPageSnapshot['messages'][number], index: number): number[] =>
+    index > originalMessageIndex && message.role === 'user' ? [index] : []);
+  const originalAssistantMessageIndices = associatedAssistantIndices(messages, originalMessageIndex, followupUserMessageIndices[0] ?? messages.length);
+  const selected = [originalMessageIndex, ...originalAssistantMessageIndices];
+  const evidence = inspectChatReadback({ ...snapshot, messages: selected.map((index: number): ChatPageSnapshot['messages'][number] => messages[index]) }, prompt, 0,
+    { ...context, userTurnId: undefined, userMessageId: user.messageId });
+  return { ...evidence, confirmationPublished: false, messageCount: snapshot.messages.length, originalMessageIndex, originalAssistantMessageIndices,
+    followupUserMessageIndices, generationContinuationMessageIndices: [],
+    candidates: evidence.candidates.map((candidate: ChatReadbackCandidate): ChatReadbackCandidate => ({ ...candidate, messageIndex: selected[candidate.messageIndex] })) };
 }

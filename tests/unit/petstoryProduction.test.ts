@@ -483,14 +483,14 @@ describe('P4 实际入口和请求模式', (): void => {
     expect(reopened.plan!.shots[0]).toMatchObject({ durationSeconds: duration, timingPlan: shot.timingPlan });
     expect(reopened.plan!.shots[0].prompts.video.promptTask?.timingPlanHash).toBe(expectedTimingHash);
   });
-  it('重开旧auto批次沿用已选reference模式，不从未知入口改成首尾帧或要求检查', async (): Promise<void> => {
+  it('新auto计划按尾帧目标选择首尾，但重开原批次仍沿用原reference执行快照', async (): Promise<void> => {
     await approve(); p = await projects.read(p.id);
     const shot = p.plan!.shots.find((item): boolean => !!item.prompts.lastFrame)!;
     shot.requestedMode = 'auto';
     Object.assign(p.production!.shots[shot.id], { requestedMode: 'auto', resolvedMode: 'reference' });
     seedOfflinePromptContracts(p, undefined, { completeVideoBody: true }); p = await projects.write(p);
     p.production!.planHash = productionPlanHash(p.plan!); p = await projects.write(p);
-    expect(resolvePetStoryMode(shot, productionCapability(p)).resolvedMode).toBe('reference');
+    expect(resolvePetStoryMode(shot, productionCapability(p)).resolvedMode).toBe('first_last_frame');
     await service.pause(p.id); const reopenedProjects = new PetStoryProjects(); await reopenedProjects.open(projects.directory(p.id)); service = makeService(reopenedProjects);
     const reopened = await service.resume(p.id);
     expect(reopened.success).toBe(true); expect(reopened.project?.production?.shots[shot.id].resolvedMode).toBe('reference');

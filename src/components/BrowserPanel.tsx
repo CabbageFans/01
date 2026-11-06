@@ -23,8 +23,11 @@ import type { PetStoryConversationReply } from '@doubao-studio/contracts';
 import type { AutomationState } from '../store/useTaskStore';
 import { classifyTaskError } from '../utils/taskRuntime';
 import { evaluateVideoCapability, isRestrictionFailure } from '../utils/videoCapability';
-import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
+import { canSelectAccount, findInteractiveAccountId, getAccountAutomationScope, isAccountExecutionBusy } from '../utils/interactiveAccount';
 import { automationEngine } from '../automation/AutomationEngine';
+import { getTaskAccountIdForScope, getTaskExecutionScope, tasksExecutionConflict } from '../utils/taskExecutionScope';
+import { MaterialImagePages } from '../utils/materialImagePages';
+import type { MaterialImagePageFailure } from '../utils/materialImagePages';
 import { runAdapterSelfCheck } from '../automation/doubaoAdapter';
 import {
   injectPrompt,
@@ -78,16 +81,18 @@ import {
   verifiedSubmissionConversationUrl,
   type SubmissionReadback,
 } from '../utils/realSendStateMachine';
-import { chatRequestIdentity, diagnoseChatReadback, diagnoseCreationReadback, inspectChatReadback, inspectCreationReadback } from '../utils/chatReadback';
+import { chatRequestIdentity, diagnoseChatReadback, diagnoseCreationReadback, inspectChatReadback, inspectCreationReadback, inspectSubmittedImageReadback } from '../utils/chatReadback';
 import type { ChatReadbackContext, ChatReadbackResult } from '../utils/chatReadback';
 import { SubmittedCreationReadbackContextError, SubmittedCreationReadbackTimeoutError, waitForSubmittedCreationReadback } from '../utils/submittedCreationReadback';
 import type { SubmittedCreationReadbackSample } from '../utils/submittedCreationReadback';
 import type { CurrentCreationConversationReadback } from '../utils/creationConversationIdentity';
 import { mediaSubmissionReceiptFor } from '../utils/mediaSubmissionReceipt';
+import type { ImageArtifactObservationProgress } from '../utils/imageArtifactReadback';
 import { createWebviewResourceScope } from '../utils/webviewLifecycle';
 import type { WebviewResourceScope } from '../utils/webviewLifecycle';
 import { getVideoQuotaUsageUnits } from '../utils/videoQuota';
 import { availabilityBlocksAutomation, probeAccountAvailability } from '../utils/accountAvailability';
+import { PageAvailabilityCoordinator, isAccountAvailabilityBlock } from '../utils/pageAvailability';
 import { HumanVerificationRequiredError, observeWithHumanVerification } from '../utils/humanVerification';
 import { isExperimentalNoWatermarkEnabled, setExperimentalNoWatermarkEnabled } from '../utils/experimentalNoWatermark';
 import { decideMaterialAuthorizationProgress } from '../utils/materialAuthorization';
@@ -242,6 +247,11 @@ function resumableRepairDraft(task: Task | undefined, prompt: string, selectedRe
   return task.prompt;
 }
 
+function accountAutomationDisplay(states: Record<string, AutomationState>, messages: Record<string, string>, accountId?: string): { state: AutomationState | undefined; text: string } {
+  const scope = getAccountAutomationScope(states, accountId || '');
+  return { state: states[scope || ''], text: messages[scope || ''] || '' };
+}
+
 const BrowserPanel: React.FC<BrowserPanelProps> = ({
   accounts,
   activeAccount,
@@ -265,7 +275,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const passiveConversationSyncRef = useRef<Map<string, number>>(new Map());
   const submissionReconcileUsageRef = useRef<Set<string>>(new Set());
   const availabilityRequestHandledRef = useRef<Record<string, number>>({});
-  const availabilityProbeSequenceRef = useRef<Record<string, number>>({});
+  const availabilityProbesRef = useRef(new PageAvailabilityCoordinator());
   /** 启动期后台巡检一次只保留一个临时 Webview，完成后立即释放。 */
   const backgroundProbeRef = useRef<Set<string>>(new Set());
   const backgroundAuditedRef = useRef<Set<string>>(new Set());
@@ -273,6 +283,39 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const advanceBackgroundWarmupRef = useRef<() => void>(() => undefined);
   /** 每个账号的 webview 监听器与定时器作用域。 */
   const resourceScopesRef = useRef<Map<string, WebviewResourceScope>>(new Map());
+  const materialPagesRef = useRef(new MaterialImagePages());
+  const [viewedTaskPageId, setViewedTaskPageId] = useState<string | null>(null);
+  const [interactiveTaskPageId, setInteractiveTaskPageId] = useState<string | null>(null);
+  const getTaskWebview = useCallback((task: Task): HTMLWebViewElement | undefined => materialPagesRef.current.uses(task)
+    ? materialPagesRef.current.get(task) : registryRef.current.get(task.assignedAccountId || ''), []);
+  const ownsTaskWebview = useCallback((taskId: string, webview: HTMLWebViewElement): boolean => {
+    const current = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+    return !!current && getTaskWebview(current) === webview;
+  }, [getTaskWebview]);
+  const taskWebviewReady = useCallback((task: Task): boolean => materialPagesRef.current.uses(task)
+    ? materialPagesRef.current.ready(task) : loadingMapRef.current.get(task.assignedAccountId || '') === false, []);
+  const ensureTaskWebview = useCallback((task: Task): HTMLWebViewElement | undefined => {
+    if (!materialPagesRef.current.uses(task)) return getTaskWebview(task);
+    const account = useAccountStore.getState().accounts.find((item): boolean => item.id === task.assignedAccountId);
+    if (!account || !poolRef.current) return undefined;
+    return materialPagesRef.current.ensure(task, account, poolRef.current, (): void => setWebviewEpoch((value: number): number => value + 1));
+  }, [getTaskWebview]);
+  const pauseFailedMaterialPage = useCallback(async (task: Task, failure: MaterialImagePageFailure): Promise<void> => {
+    const current = useTaskStore.getState().tasks.find((item: Task): boolean => item.id === task.id);
+    if (current?.runtime?.runId !== failure.runId || current.assignedAccountId !== failure.accountId
+      || current.status !== 'executing' || automationEngine.hasController(task.id)) return;
+    const scope = getTaskExecutionScope(current);
+    runningRef.current.add(scope);
+    try {
+      await useTaskStore.getState().pauseAutomation(task.id, failure.accountId, failure.message, { status: 'paused', code: failure.code });
+    } catch { message.error('页面加载失败，任务暂停状态暂未保存；本次未进入输入或发送'); }
+    finally {
+      const latest = useTaskStore.getState().tasks.find((item: Task): boolean => item.id === task.id);
+      if (!latest || latest.runtime?.runId === failure.runId) await automationEngine.release(task.id);
+      if (!automationEngine.hasController(task.id)) runningRef.current.delete(scope);
+      setTimeout((): void => { void useTaskStore.getState().processQueue(); }, 0);
+    }
+  }, []);
 
   const [activeLoading, setActiveLoading] = useState(true);
   const [loadText, setLoadText] = useState('加载豆包中...');
@@ -327,49 +370,55 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         checkedAt: new Date().toISOString(), source,
       };
     }
+    const coordinator = availabilityProbesRef.current;
+    const existing = account.health?.availability;
+    if (existing && isAccountAvailabilityBlock(existing)) coordinator.blockAccount(accountId, existing);
+    const token = coordinator.begin(accountId, webview);
+    const controlling = source === 'pre_task' || source === 'pre_submit';
+    const isAccountPage = registryRef.current.get(accountId) === webview;
+    const ownsPage = (): boolean => registryRef.current.get(accountId) === webview || materialPagesRef.current.contains(webview);
     accountState.setAvailabilityChecking(accountId, true);
-    const sequence = (availabilityProbeSequenceRef.current[accountId] || 0) + 1;
-    availabilityProbeSequenceRef.current[accountId] = sequence;
     try {
       const availability = await probeAccountAvailability(webview, account.platform || 'doubao', source);
-      // webview 被刷新/删除时丢弃旧实例的迟到结果。
-      if (
-        registryRef.current.get(accountId) !== webview ||
-        availabilityProbeSequenceRef.current[accountId] !== sequence
-      ) return useAccountStore.getState().accounts.find((item): boolean => item.id === accountId)?.health?.availability || {
-        state: 'unknown', reason: 'probe_superseded', message: '账号状态已变化，请重新检测', checkedAt: new Date().toISOString(), source,
-      };
-      const saved = await useAccountStore.getState().setAccountAvailability(accountId, availability);
-      if (!saved || availabilityProbeSequenceRef.current[accountId] !== sequence) return useAccountStore.getState().accounts.find((item): boolean => item.id === accountId)?.health?.availability || {
-        state: 'unknown', reason: 'probe_not_saved', message: '账号状态尚未保存，请重新检测', checkedAt: new Date().toISOString(), source,
-      };
-      if (availability.state === 'ready') {
+      const probe = coordinator.settle(token, availability, {
+        isCurrent: ownsPage,
+        allowAccountRecovery: isAccountPage && ['manual', 'navigation', 'startup'].includes(source),
+      });
+      if (probe.accountUpdate) {
+        const saved = await useAccountStore.getState().setAccountAvailability(accountId, probe.accountUpdate);
+        if (!saved && controlling) throw new AccountAvailabilityPauseError('本次页面检测结果未能保存，未继续输入或发送', 'page_changed');
+      }
+      const accountBlock = coordinator.currentAccountBlock(accountId);
+      if (controlling && accountBlock) throw new AccountAvailabilityPauseError(accountBlock.message, accountBlock.reason);
+      // 写盘也跨异步边界；原页面被删除／替换后不得继续控制或恢复任务。
+      const currentProbe = (): boolean => probe.current && ownsPage() && coordinator.isCurrent(token);
+      if (controlling && !currentProbe()) throw new AccountAvailabilityPauseError('本次页面或验证状态已变化，未继续输入或发送', 'page_changed');
+      if (probe.accountUpdate?.state === 'ready' && currentProbe()) {
         await useTaskStore.getState().resumeAfterAccountVerification(accountId, availability.checkedAt);
-        setTimeout(() => useTaskStore.getState().processQueue(), 0);
+        if (currentProbe()) setTimeout(() => useTaskStore.getState().processQueue(), 0);
       }
       if (source === 'manual') {
-        if (availability.state === 'ready') message.success(`${account.name}：检测通过，可执行自动化`);
+        if (availability.state === 'ready' && currentProbe()) message.success(`${account.name}：检测通过，可执行自动化`);
         else message.warning(`${account.name}：${availability.message}`);
       }
+      // 任务判定只使用自己的页面事实，不能用同账号另一页面的缓存替代。
       return availability;
     } finally {
-      if (availabilityProbeSequenceRef.current[accountId] === sequence) {
-        useAccountStore.getState().setAvailabilityChecking(accountId, false);
-      }
+      coordinator.cancel(token);
+      useAccountStore.getState().setAvailabilityChecking(accountId, coordinator.isChecking(accountId));
     }
   }, []);
 
   /** 验证只阻断所属账号；保留原 guest／会话供用户处理，不点击验证或刷新页面。 */
   const pauseForHumanVerification = useCallback(async (accountId: string): Promise<never> => {
     // 使此前已发起的 ready 探测失效，不能让它在验证出现后重新开放调度。
-    availabilityProbeSequenceRef.current[accountId] = (availabilityProbeSequenceRef.current[accountId] || 0) + 1;
+    const verification: AccountAvailability = { state: 'action_required', reason: 'human_verification',
+      message: '需要在原账号页面完成人机验证，然后重新检测', checkedAt: new Date().toISOString(), source: 'pre_submit' };
+    availabilityProbesRef.current.blockAccount(accountId, verification);
     const accountState = useAccountStore.getState();
     const current = accountState.accounts.find((item): boolean => item.id === accountId)?.health?.availability;
     if (current?.state !== 'action_required' || current.reason !== 'human_verification') {
-      await accountState.setAccountAvailability(accountId, {
-        state: 'action_required', reason: 'human_verification',
-        message: '需要在原账号页面完成人机验证，然后重新检测', checkedAt: new Date().toISOString(), source: 'pre_submit',
-      });
+      await accountState.setAccountAvailability(accountId, verification);
     }
     useAccountStore.getState().selectAccount(accountId);
     throw new AccountAvailabilityPauseError('检测到人机验证，请在原账号页面完成人工验证并重新检测；原任务已暂停，系统不会自动重新提交', 'human_verification');
@@ -464,10 +513,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     return [];
   };
 
-  const activeAutoState: AutomationState | undefined = activeAccount
-    ? accountAutoState[activeAccount.id]
-    : undefined;
-  const activeAutoMsg = activeAccount ? (accountAutoMsg[activeAccount.id] || '') : '';
+  const { state: activeAutoState, text: activeAutoMsg } = accountAutomationDisplay(accountAutoState, accountAutoMsg, activeAccount?.id);
 
   // ---- 组件卸载时清理所有 webview 资源与执行控制器 ----
   useEffect(() => {
@@ -476,7 +522,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     const loadingMap = loadingMapRef.current;
     const controllers = abortControllersRef.current;
     const runningAccounts = runningRef.current;
+    const materialPages = materialPagesRef.current;
     return () => {
+      materialPages.dispose();
       resourceScopes.forEach((scope) => scope.dispose());
       resourceScopes.clear();
       registry.forEach((webview) => webview.remove());
@@ -498,7 +546,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         message.error('任务不存在、已完成或尚未绑定账号，不能进入人工提交观察');
         return;
       }
-      const currentWebview = registryRef.current.get(task.assignedAccountId);
+      const currentWebview = getTaskWebview(task);
       const suppliedUrl = detail.conversationUrl?.trim();
       const userConfirmedCurrentUrl = detail.useCurrentPage ? currentWebview?.getURL() : undefined;
       const conversationUrl = normalizeDoubaoConversationUrl(
@@ -585,19 +633,20 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         throw new Error('缺少原账号页面或原对话地址，已保持暂停且未重新发送');
       }
 
-      if (useTaskStore.getState().tasks.some((other): boolean => other.id !== taskId && other.assignedAccountId === accountId && ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(other.status))) {
+      if (useTaskStore.getState().tasks.some((other): boolean => other.id !== taskId && tasksExecutionConflict(other, task) && ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(other.status))) {
         throw new Error('原账号还有其他活跃任务，暂不导航或补取');
       }
-      if (isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, task) && visibleRef.current
+      if (!materialPagesRef.current.uses(task) && isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, task) && visibleRef.current
         && useAccountStore.getState().selectedAccountId !== accountId) {
         throw new Error('当前正在查看其他豆包对话，请收起后继续收取本次结果');
       }
       if (!canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))) throw new Error('另一个账号正在提交，请稍后检查原结果');
       submissionReconcileRef.current.add(taskId);
       useAccountStore.getState().selectAccount(accountId);
+      ensureTaskWebview(task);
       const webview = await waitForConversationNavigator(
-        () => registryRef.current.get(accountId),
-        { timeoutMs: 20_000, isReady: () => loadingMapRef.current.get(accountId) === false,
+        () => getTaskWebview(task),
+        { timeoutMs: 20_000, isReady: () => taskWebviewReady(task),
           wait: (ms: number): Promise<void> => observationController ? sleepWithAbort(ms, observationController.signal) : new Promise((resolve): void => { setTimeout(resolve, ms); }) },
       );
       if (!webview) {
@@ -621,7 +670,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           && JSON.stringify(current.attachments || []) === JSON.stringify(task.attachments || [])
           && JSON.stringify(current.petstory) === JSON.stringify(task.petstory)
           && current.audioAttachment === task.audioAttachment && JSON.stringify(current.videoConfig) === JSON.stringify(task.videoConfig)
-          && current.assignedAccountId === accountId && registryRef.current.get(accountId) === webview
+          && current.assignedAccountId === accountId && ownsTaskWebview(taskId, webview)
           && !observationController?.signal.aborted && current.status !== 'cancelled' && current.status !== 'done'
           && (task.mode !== 'image' || current.status === task.status)
           && canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState));
@@ -650,14 +699,24 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         assertOriginalContext();
         const route = normalizeDoubaoConversationUrl(webview.getURL());
         if (concreteUrl && route && !isSameDoubaoConversation(concreteUrl, route)) throw new Error('原图片会话已变化，未绑定其他会话');
-        const evidence = inspectCreationReadback(snapshot, task.prompt, 'image', 0);
-        const diagnostic = JSON.stringify(diagnoseCreationReadback(snapshot, task.prompt, 'image'));
+        // 恢复按原全文与消息身份定位，不要求整个会话只有一条用户消息。
+        const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+        const receipt = latest?.runtime?.mediaSubmissionReceipt;
+        const evidence = concreteUrl && pinnedImageUrl ? inspectSubmittedImageReadback(snapshot, task.runtime?.input.prompt || task.prompt, {
+          taskId, runId: task.runtime?.runId || '', currentRunId: latest?.runtime?.runId || '',
+          accountId, currentAccountId: latest?.assignedAccountId || '',
+          conversationUrl: pinnedImageUrl || '', currentConversationUrl: concreteUrl || '',
+          userMessageId: receipt?.userMessageId, userTurnId: receipt?.userTurnId,
+        }) : inspectCreationReadback(snapshot, task.runtime?.input.prompt || task.prompt, 'image', 0);
+        const diagnostic = JSON.stringify({ ...diagnoseCreationReadback(snapshot, task.prompt, 'image'),
+          promptPublished: evidence.promptPublished, reason: evidence.reason,
+          originalMessageIndex: evidence.originalMessageIndex, originalAssistantMessageIndices: evidence.originalAssistantMessageIndices });
         if (diagnostic !== lastImageDiagnostic) {
           lastImageDiagnostic = diagnostic;
           void window.electronAPI.logs.append({ level: 'info', scope: 'automation', taskId, accountId,
             message: '原图片提交只读诊断 ' + diagnostic }).catch((): void => undefined);
         }
-        return { url: concreteUrl || observedUrl, evidence };
+        return { url: concreteUrl || observedUrl, evidence, historyComplete: snapshot.historyComplete };
       };
       let imageIdentityVerified = false;
       assertOriginalContext();
@@ -683,6 +742,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         if (confirmCurrentSubmission) {
           if (task.mode === 'image') {
             const located = await waitForSubmittedCreationReadback({
+              stopOnStableAmbiguity: true,
               signal: observationController?.signal, ensureCurrent: assertOriginalContext,
               wait: (ms: number): Promise<void> => observationController ? sleepWithAbort(ms, observationController.signal)
                 : new Promise((resolve): void => { setTimeout(resolve, ms); }),
@@ -772,7 +832,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
       const isManualObservation = task.status === 'manual_submission_observing';
       if (!originalContextIsCurrent()) throw new DOMException('原结果检查已暂停或运行已变化', 'AbortError');
-      useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在核对平台结果（不会重新发送）...');
+      // 只读观察保留原Task状态；不能把manual_submission_observing改成新生成运行。
+      const observationScope = getTaskExecutionScope(task);
+      useTaskStore.setState((state): Partial<ReturnType<typeof useTaskStore.getState>> => ({
+        accountAutomationState: { ...state.accountAutomationState, [observationScope]: 'generating' },
+        accountAutoMessage: { ...state.accountAutoMessage, [observationScope]: '正在核对平台结果（不会重新发送）...' },
+      }));
       try {
         await observeWithHumanVerification(async (observationSignal: AbortSignal): Promise<void> => {
         if (task.runtime?.acceptanceObservation?.outcome === 'observing') {
@@ -817,16 +882,33 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             if (route && !isSameDoubaoConversation(route, conversationUrl)) throw new Error('原图片会话已变化，未绑定其他产物');
           };
           // 耐久收据已经绑定原服务器消息；后续聊天不应再次要求整段会话只有一条用户消息。
-          if (!imageIdentityVerified && !task.runtime?.mediaSubmissionReceipt) await waitForSubmittedCreationReadback({
-            signal: observationSignal, ensureCurrent: assertImageObservation,
-            wait: (ms: number): Promise<void> => sleepWithAbort(ms, observationSignal),
-            read: (): Promise<SubmittedCreationReadbackSample> => readOriginalImageEvidence(observationSignal),
-          });
+          if (!imageIdentityVerified && !task.runtime?.mediaSubmissionReceipt) {
+            await waitForSubmittedCreationReadback({
+              stopOnStableAmbiguity: true,
+              signal: observationSignal, ensureCurrent: assertImageObservation,
+              wait: (ms: number): Promise<void> => sleepWithAbort(ms, observationSignal),
+              read: (): Promise<SubmittedCreationReadbackSample> => readOriginalImageEvidence(observationSignal),
+            });
+            assertImageObservation();
+            const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+            const receipt = lastImagePage ? mediaSubmissionReceiptFor(task, latest, accountId, lastImagePage, new Date().toISOString()) : undefined;
+            // 已有会话地址的旧任务也补存原消息身份，后续恢复直接沿该消息取图。
+            if (receipt && !await useTaskStore.getState().updateTaskRuntime(taskId, { runtime: { mediaSubmissionReceipt: receipt } })) throw new Error('原图片消息身份保存未确认，未绑定产物');
+            assertImageObservation();
+          }
           assertImageObservation();
           const receipt = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId)?.runtime?.mediaSubmissionReceipt;
+          let lastArtifactDiagnostic = '';
           const outputs = await readAcceptedImageOutputs(webview, conversationUrl, observationSignal, undefined, {
             prompt: task.runtime?.input.prompt || task.prompt, runId: task.runtime?.runId || '', userMessageId: receipt?.userMessageId, userTurnId: receipt?.userTurnId,
-          }, { ensureCurrent: assertImageObservation });
+          }, { ensureCurrent: assertImageObservation, stopOnStableAmbiguity: true,
+            onProgress: async (progress: ImageArtifactObservationProgress): Promise<void> => {
+              const diagnostic = JSON.stringify({ reason: progress.reason, outputCount: progress.outputCount, imageEvidence: progress.imageEvidence, messageChain: progress.messageChain });
+              if (diagnostic === lastArtifactDiagnostic) return;
+              lastArtifactDiagnostic = diagnostic;
+              await window.electronAPI.logs.append({ level: 'info', scope: 'automation', taskId, accountId, message: '原图片产物只读诊断 ' + diagnostic }).catch((): void => undefined);
+            },
+          });
           assertImageObservation();
           await useAccountStore.getState().recordAccountOutcome(accountId, 'success');
           assertImageObservation();
@@ -923,7 +1005,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           if (!task.runtime?.runId || !task.runtime.submittedAt || current?.assignedAccountId !== accountId
             || current.runtime?.runId !== task.runtime.runId || current.runtime.submittedAt !== task.runtime.submittedAt
             || current.runtime.input.mode !== 'video' || current.runtime.input.prompt !== task.runtime.input.prompt || current.status === 'done'
-            || registryRef.current.get(accountId) !== webview
+            || !ownsTaskWebview(taskId, webview)
             || !isSameDoubaoConversation(webview.getURL(), conversationUrl)) throw new Error('原视频运行、账号、输入或会话已变化，停止只读观察');
           if (observationSignal.aborted || requireActive && !['generating', 'manual_submission_observing'].includes(current.status)) throw new DOMException('原视频观察已暂停', 'AbortError');
         };
@@ -1040,8 +1122,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           abortControllersRef.current.delete(taskId);
         }
         submissionReconcileRef.current.delete(taskId);
-        if (ownsObservation && !useTaskStore.getState().tasks.some((other): boolean => other.id !== taskId && other.assignedAccountId === accountId
-          && ['executing', 'generating', 'manual_submission_observing'].includes(other.status))) useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
+        if (ownsObservation && !useTaskStore.getState().tasks.some((other): boolean => other.id !== taskId && tasksExecutionConflict(other, task)
+          && ['executing', 'generating', 'manual_submission_observing'].includes(other.status))) useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '', undefined, taskId);
       }
     };
     /** 后台操作先保存只读观察意图；预检提前退出时收回没有观察器的等待状态。 */
@@ -1087,7 +1169,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           if (latest?.status === 'manual_submission_observing' && latest.runtime?.runId === initialRunId
             && latest.runtime?.submittedAt === initialSubmittedAt) {
             let verificationPaused = false;
-            const accountId = latest.assignedAccountId; const webview = accountId ? registryRef.current.get(accountId) : undefined;
+            const accountId = latest.assignedAccountId; const webview = accountId ? getTaskWebview(latest) : undefined;
             if (accountId && webview) {
               try { await assertNoHumanVerification(accountId, webview); }
               catch (error: unknown) {
@@ -1135,10 +1217,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       window.removeEventListener('mark-manual-submission', handleManualSubmission);
       window.removeEventListener('reconcile-task-submission', handleSubmissionReconcileSafely);
     };
-  }, [assertNoHumanVerification, performAvailabilityCheck]);
+  }, [assertNoHumanVerification, performAvailabilityCheck, ensureTaskWebview, getTaskWebview, ownsTaskWebview, taskWebviewReady]);
 
   /** 幂等释放指定账号的 webview、监听器和定时器。 */
   const disposeAccountWebview = (accountId: string): void => {
+    materialPagesRef.current.removeAccount(accountId);
     for (const [taskId, page] of submittedImagePagesRef.current) if (page.accountId === accountId) submittedImagePagesRef.current.delete(taskId);
     resourceScopesRef.current.get(accountId)?.dispose();
     resourceScopesRef.current.delete(accountId);
@@ -1160,7 +1243,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       abortControllersRef.current.get(taskId)?.abort();
       abortControllersRef.current.delete(taskId);
     }
-    runningRef.current.delete(accountId);
+    for (const scope of runningRef.current) if (getTaskAccountIdForScope(scope) === accountId) runningRef.current.delete(scope);
   };
 
   // ---- webview 池动态管理（账号增删同步） ----
@@ -1170,6 +1253,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     if (!container) return;
 
     const accountIds = new Set(accounts.map(a => a.id));
+    const protectedTasks = { ...executingTasks };
+    // 重启恢复的只读观察没有派发槽，也必须保护账号宿主，不能因切页回收并中断原结果。
+    for (const task of tasks) {
+      if (task.assignedAccountId && ['executing', 'generating', 'manual_submission_observing', 'waiting_verification'].includes(task.status)) {
+        protectedTasks[task.assignedAccountId] = task.id;
+      }
+    }
 
     // 清理已删除账号的 webview 和定时器
     registryRef.current.forEach((webview, accountId) => {
@@ -1190,7 +1280,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       [...registryRef.current.keys()],
       loadingIds,
       activeAccount?.id || null,
-      executingTasks,
+      protectedTasks,
     );
     for (const accountId of supersededIds) {
       backgroundProbeRef.current.delete(accountId);
@@ -1202,7 +1292,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     const hydrationIds = getWebviewHydrationAccountIds(
       accounts,
       activeAccount?.id || null,
-      executingTasks,
+      protectedTasks,
     );
     for (const accountId of hydrationIds) {
       const account = accounts.find((item) => item.id === accountId);
@@ -1218,7 +1308,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     } else {
       console.log(`[BrowserPanel] webview 池同步完成 (当前 ${registryRef.current.size} 个), 无活跃账号`);
     }
-  }, [accountsKey, refreshKey, activeAccount?.id, executingTasks]);
+  }, [accountsKey, refreshKey, activeAccount?.id, executingTasks, tasks]);
 
   // ---- 创建单个 webview ----
   const createWebview = (account: Account, container: HTMLDivElement) => {
@@ -1448,7 +1538,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         account.id !== selectedId &&
         !registryRef.current.has(account.id) &&
         !backgroundAuditedRef.current.has(account.id) &&
-        !useTaskStore.getState().executingTasks[account.id],
+        !isAccountExecutionBusy(useTaskStore.getState().accountBusy, account.id),
       );
       const container = poolRef.current;
       if (!candidate || !container) return;
@@ -1487,7 +1577,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     const accountId = activeAccount?.id;
     if (!accountId) return;
     const recheck = () => {
-      if (useTaskStore.getState().accountBusy[accountId]) return;
+      if (isAccountExecutionBusy(useTaskStore.getState().accountBusy, accountId)) return;
       const webview = registryRef.current.get(accountId);
       if (webview) void performAvailabilityCheck(accountId, webview, 'navigation');
     };
@@ -1719,13 +1809,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const account = useAccountStore.getState().accounts.find((item): boolean => item.id === detail.accountId);
       if (!task || task.mode !== 'image' || task.assignedAccountId !== detail.accountId || task.runtime?.runId !== detail.runId
         || task.runtime?.submittedAt !== detail.submittedAt || !account || !supportsDoubaoConversationLocator(account.platform)) throw new Error('原图片任务或账号已变化，请重新打开原任务');
-      if (hasAccountChatAdjustment(detail.accountId) || state.tasks.some((other): boolean => other.id !== task.id && other.assignedAccountId === detail.accountId
+      if (hasAccountChatAdjustment(detail.accountId) || state.tasks.some((other): boolean => other.id !== task.id && tasksExecutionConflict(other, task)
         && ['executing', 'generating', 'manual_submission_observing', 'waiting_verification', 'waiting_generation_confirmation'].includes(other.status))) throw new Error('原账号正在处理其他对话，请等待其结束');
       if (!canSelectAccount(detail.accountId, findInteractiveAccountId(state.accountAutomationState))) throw new Error('另一个账号正在提交，请稍后打开原账号');
       return task;
     };
     const revealImageAccount = (detail: ImageRecoveryPageDetail): void => {
-      originalImageAccount(detail);
+      const task = originalImageAccount(detail);
+      if (materialPagesRef.current.uses(task)) { ensureTaskWebview(task); setViewedTaskPageId(task.id); }
       useAccountStore.getState().selectAccount(detail.accountId);
       window.dispatchEvent(new CustomEvent('reveal-workspace-browser'));
     };
@@ -1739,8 +1830,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (!detail?.onResult) return;
       try {
         revealImageAccount(detail);
-        const webview = await waitForConversationNavigator(() => registryRef.current.get(detail.accountId), {
-          timeoutMs: 6000, isReady: (): boolean => loadingMapRef.current.get(detail.accountId) === false,
+        const task = originalImageAccount(detail);
+        const webview = await waitForConversationNavigator(() => getTaskWebview(task), {
+          timeoutMs: 6000, isReady: (): boolean => taskWebviewReady(task),
         });
         if (!webview) throw new Error('原账号页面仍在加载，请等页面就绪后继续');
         const page = await getCurrentCreationConversation(webview, { timeoutMs: 3000, ensureCurrent: (): void => { originalImageAccount(detail); } });
@@ -1757,7 +1849,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       window.removeEventListener('open-image-task-account', handleOpenImageAccount);
       window.removeEventListener('inspect-image-task-recovery-page', handleImageRecoveryPage);
     };
-  }, []);
+  }, [ensureTaskWebview, getTaskWebview, taskWebviewReady]);
 
   useEffect(() => {
     const handleOpenConversation = async (event: Event) => {
@@ -1772,16 +1864,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (hasAccountChatAdjustment(accountId)) { message.info('请先采用当前回复或结束调整，再打开其他任务会话'); return; }
       if (!canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))) { message.info('另一个账号正在提交，请稍后打开原会话'); return; }
       useAccountStore.getState().selectAccount(accountId);
+      ensureTaskWebview(task);
+      if (materialPagesRef.current.uses(task)) setViewedTaskPageId(task.id);
+      else setViewedTaskPageId(null);
       const webview = await waitForConversationNavigator(
-        () => registryRef.current.get(accountId),
-        { timeoutMs: 20_000, isReady: () => loadingMapRef.current.get(accountId) === false },
+        () => getTaskWebview(task),
+        { timeoutMs: 20_000, isReady: () => taskWebviewReady(task) },
       );
       if (!webview) {
         message.warning('账号页面未能及时就绪，未跳转到其它会话');
         return;
       }
       const taskState = useTaskStore.getState();
-      const accountBusy = taskState.tasks.some((item): boolean => item.assignedAccountId === accountId
+      const accountBusy = taskState.tasks.some((item): boolean => tasksExecutionConflict(item, task)
         && ['executing', 'generating', 'manual_submission_observing'].includes(item.status));
       if (accountBusy || submissionReconcileRef.current.has(task.id)) {
         if (isSameDoubaoConversation(webview.getURL(), conversationTarget.url)) message.info('原会话正在观察中，已保留当前现场');
@@ -1791,15 +1886,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const navigation = await synchronizeConversation(webview, conversationTarget.url, (): boolean => {
         const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === task.id);
         return latest?.runtime?.runId === task.runtime?.runId && latest?.assignedAccountId === accountId
-          && registryRef.current.get(accountId) === webview && canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))
-          && !useTaskStore.getState().tasks.some((item): boolean => item.assignedAccountId === accountId && ['executing', 'generating', 'manual_submission_observing'].includes(item.status));
+          && ownsTaskWebview(task.id, webview) && canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))
+          && !useTaskStore.getState().tasks.some((item): boolean => tasksExecutionConflict(item, task) && ['executing', 'generating', 'manual_submission_observing'].includes(item.status));
       });
       if (navigation.ok) message.success('已同步并打开任务对应的原会话');
       else message.warning(conversationSyncMessage(navigation));
     };
     window.addEventListener('open-task-conversation', handleOpenConversation);
     return () => window.removeEventListener('open-task-conversation', handleOpenConversation);
-  }, []);
+  }, [ensureTaskWebview, getTaskWebview, ownsTaskWebview, taskWebviewReady]);
 
   /** 常驻 Chat 在重新显示、聚焦或空闲时同步手机端消息；交互中的页面始终跳过。 */
   useEffect(() => {
@@ -1853,26 +1948,34 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     return () => window.removeEventListener('adapter-self-check', handleAdapterSelfCheck);
   }, [activeAccount]);
 
-  // ---- V3 自动化：监听 per-account 执行状态 ----
-  useEffect(() => {
-    accounts.forEach((account) => {
-      const accountId = account.id;
-      const isBusy = accountBusy[accountId];
-      const taskId = executingTasks[accountId];
-      const webview = registryRef.current.get(accountId);
-      if (!isBusy || !taskId || !webview) return;
-      if (runningRef.current.has(accountId)) return;
-      const task = tasks.find((t) => t.id === taskId);
-      if (!task) return;
-      // 用户打开的自由聊天优先。尚未发送的后台请求保留原任务，收起后从画布继续；
-      // 已提交运行仍走只读观察，不因查看本任务会话而中止或重复发送。
-      if (visibleRef.current && !task.runtime?.submittedAt && isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, task)) {
-        runningRef.current.add(accountId);
+  // 正式图片操作及准备文字使用独立任务页面；素材和镜头仍遵守原调度范围。
+  useEffect((): void => {
+    for (const [scope, taskId] of Object.entries(executingTasks)) {
+      if (!accountBusy[scope] || runningRef.current.has(scope)) continue;
+      const task = tasks.find((item): boolean => item.id === taskId);
+      const accountId = task?.assignedAccountId;
+      if (!task || !accountId) continue;
+      let webview: HTMLWebViewElement | undefined;
+      try { webview = ensureTaskWebview(task); }
+      catch (error: unknown) {
+        runningRef.current.add(scope);
+        const reason = error instanceof Error ? error.message : '图片执行页面未能创建';
+        void useTaskStore.getState().failAutomation(taskId, accountId, reason, classifyTaskError(reason))
+          .finally(async (): Promise<void> => { runningRef.current.delete(scope); await automationEngine.release(taskId); });
+        continue;
+      }
+      const pageFailure = materialPagesRef.current.failure(task);
+      if (pageFailure) { void pauseFailedMaterialPage(task, pageFailure); continue; }
+      if (!webview || materialPagesRef.current.uses(task) && !taskWebviewReady(task)) continue;
+      // 共享宿主的后台任务仍保护自由聊天草稿；素材及首尾帧的独立图片页不操作用户页面。
+      if (!materialPagesRef.current.uses(task) && visibleRef.current && !task.runtime?.submittedAt
+        && isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, task)) {
+        runningRef.current.add(scope);
         void useTaskStore.getState().pauseAutomation(taskId, accountId, '豆包对话正在打开，请收起后继续生成；本次尚未发送', { status: 'paused', code: 'page_unrecognized' })
           .catch((): void => { message.error('暂停状态暂未保存，请稍后重试；本次未操作豆包输入'); })
           .finally(async (): Promise<void> => {
             await automationEngine.release(taskId);
-            runningRef.current.delete(accountId);
+            runningRef.current.delete(scope);
             await readBackReleasedPetStoryTask(taskId, task.runtime?.runId, {
               current: (): Task | undefined => useTaskStore.getState().tasks.find((item): boolean => item.id === taskId),
               list: (): Promise<Task[]> => window.electronAPI.tasks.list(),
@@ -1883,26 +1986,41 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               },
             });
           });
-        return;
+        continue;
       }
-      console.log(`[BrowserPanel] 路由任务 ${taskId} → ${accountId}`);
-      // 调度器取得执行锁后，必须由这里激活对应账号；不能依赖用户先手动点开。
-      useAccountStore.getState().selectAccount(accountId);
-      runningRef.current.add(accountId);
-      executeAutomation(accountId, taskId, task.prompt, task.mode || "chat", webview, task.videoConfig, task.attachments, task.audioAttachment);
+      runningRef.current.add(scope);
+      void executeAutomation(accountId, taskId, task.prompt, task.mode || 'chat', webview, task.videoConfig, task.attachments, task.audioAttachment);
+    }
+  }, [accountBusy, executingTasks, tasks, webviewEpoch, ensureTaskWebview, taskWebviewReady, pauseFailedMaterialPage]);
+
+  // 页面不借用账号池；删除账号、改变运行身份或结束任务时仅释放自己的资源。
+  useEffect((): void => {
+    materialPagesRef.current.prune(tasks, new Set(accounts.map((account: Account): string => account.id)), viewedTaskPageId);
+    const viewed = tasks.find((task: Task): boolean => task.id === viewedTaskPageId && task.assignedAccountId === activeAccount?.id);
+    const foreground = interactiveTaskPageId || (visible && viewed ? viewed.id : null);
+    materialPagesRef.current.activate(foreground);
+    const presented = tasks.find((task: Task): boolean => task.id === foreground);
+    if (presented && materialPagesRef.current.uses(presented)) {
+      setActiveLoading(!materialPagesRef.current.ready(presented));
+      if (materialPagesRef.current.ready(presented)) setLoadText('');
+    }
+    registryRef.current.forEach((webview: HTMLWebViewElement, accountId: string): void => {
+      applyWebviewActivationStyle(webview.style, !foreground && accountId === activeAccount?.id);
     });
-  }, [accountBusy, executingTasks, tasks, webviewEpoch]);
+  }, [tasks, accounts, viewedTaskPageId, interactiveTaskPageId, activeAccount?.id, visible, webviewEpoch]);
 
   // 应用重启或页面重新挂载后，只沿已持久化的原会话恢复观察；不进入注入/发送流程。
   useEffect(() => {
     tasks.forEach((task) => {
       if (task.status !== 'manual_submission_observing' ||
         task.runtime?.acceptanceObservation?.outcome !== 'observing' ||
-        !task.assignedAccountId || !registryRef.current.has(task.assignedAccountId) ||
+        !task.assignedAccountId ||
         submissionReconcileRef.current.has(task.id)) return;
+      try { ensureTaskWebview(task); } catch { return; }
+      if (!getTaskWebview(task) || !taskWebviewReady(task)) return;
       window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id } }));
     });
-  }, [tasks, webviewEpoch]);
+  }, [tasks, webviewEpoch, ensureTaskWebview, getTaskWebview, taskWebviewReady]);
 
   // ---- 自动化执行 ----
   const executeAutomation = async (
@@ -1915,16 +2033,21 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     attachments?: string[],
     audioAttachment?: string
   ) => {
-    const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask, armTasks } =
+    const { setAccountAutomationState: setExecutionState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask, armTasks } =
       useTaskStore.getState();
     const initialTask = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
     const expectedRunId = initialTask?.runtime?.runId;
+    const executionScope = initialTask ? getTaskExecutionScope(initialTask) : accountId;
+    const independentPage = !!initialTask && materialPagesRef.current.uses(initialTask);
+    const setAccountAutomationState = (id: string, state: AutomationState, text: string, stage?: NonNullable<Task['runtime']>['stage']): void => {
+      setExecutionState(id, state, text, stage, taskId);
+    };
     // 重挂载／热更新不能接管仍由旧控制器观察的运行，更不能重新创建会话。
-    if (automationEngine.hasController(taskId)) { runningRef.current.delete(accountId); return; }
+    if (automationEngine.hasController(taskId)) { runningRef.current.delete(executionScope); return; }
     if (initialTask?.runtime?.submittedAt) {
       const recoveryMessage = '原运行已记录提交；仅恢复原会话回读，不重新准备、注入或发送';
       await pauseAutomation(taskId, accountId, recoveryMessage, { status: 'paused', code: 'submission_uncertain' });
-      runningRef.current.delete(accountId);
+      runningRef.current.delete(executionScope);
       await automationEngine.release(taskId);
       const current = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
       if (current?.runtime?.runId === expectedRunId && current?.runtime?.submittedAt) window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId } }));
@@ -1958,6 +2081,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     } catch (error: any) {
       const messageText = error?.message || '任务控制器初始化失败';
       await failAutomation(taskId, accountId, messageText, classifyTaskError(messageText));
+      runningRef.current.delete(executionScope);
       await automationEngine.release(taskId);
       return;
     }
@@ -2020,7 +2144,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const settings = await window.electronAPI.settings.get();
       autoConfirmMaterialAuthorization = settings.autoConfirmMaterialAuthorization === true;
       initializationLimit = Math.max(1, Math.min(3, Number(settings.initializationConcurrency) || 1));
-      initializationLease = await initializationGate.acquire(taskId, { limit: initializationLimit, signal: controller.signal });
+      // 独立页面仍共享系统输入焦点；图片准备与发送只能短暂单通道。
+      if (independentPage) initializationLimit = 1;
+      initializationLease = await initializationGate.acquire(taskId, { limit: initializationLimit, signal: controller.signal, exclusive: independentPage });
+      useAccountStore.getState().selectAccount(accountId);
+      if (independentPage) {
+        setInteractiveTaskPageId(taskId);
+        materialPagesRef.current.activate(taskId);
+        await forceWebviewLayoutRepaint(webview);
+      }
       await updateTaskRuntime(taskId, {
         runtime: {
           executionDiagnostics: {
@@ -2032,6 +2164,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       console.log(`[Automation:${accountId}] 开始`);
 
       setAccountAutomationState(accountId, 'injecting', '正在检测账号可用性...', 'preparing_account');
+      // 新任务页的dom-ready只代表文档可读；必须先达到真实输入区就绪条件再判账号。
+      if (independentPage && !await waitForChatReady(webview, 15000)) {
+        throw new AccountAvailabilityPauseError('独立豆包对话的输入区未完成加载，已在发送前暂停', 'page_unrecognized');
+      }
       await clearKnownPromotion();
       const preTaskAvailability = await performAvailabilityCheck(accountId, webview, 'pre_task');
       if (availabilityBlocksAutomation(preTaskAvailability)) {
@@ -2075,7 +2211,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       let conversationTextAfterSubmit = '';
       setAccountAutomationState(accountId, 'injecting', '正在创建新对话...', 'new_conversation');
       await checkHumanVerification();
-      if (backgroundTask && visibleRef.current) throw new AccountAvailabilityPauseError('豆包对话正在打开，请收起后继续生成；本次尚未发送', 'page_unrecognized');
+      if (!independentPage && backgroundTask && visibleRef.current) throw new AccountAvailabilityPauseError('豆包对话正在打开，请收起后继续生成；本次尚未发送', 'page_unrecognized');
       if (selectedReplyRepair && !useTaskStore.getState().tasks.some((item): boolean => item.runtime?.chatAdjustmentGuard?.active === true && item.runtime.chatAdjustmentGuard.allowedTaskId === taskId)) throw new SubmissionSafetyPauseError('本次豆包调整已结束或移交已收回；修订未导航、未发送');
       const newConversationResult = await startNewConversation(webview, 20_000, mode === 'chat', selectedReplyRepair || backgroundTask, ownedRepairDraft);
       if (!newConversationResult.ok) {
@@ -2269,7 +2405,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       // 注入生成状态网络监听器（后台 webview 也能准确检测生成完成）
-      if (backgroundTask && visibleRef.current) throw new AccountAvailabilityPauseError('豆包对话正在打开，请收起后继续生成；本次尚未发送', 'page_unrecognized');
+      if (!independentPage && backgroundTask && visibleRef.current) throw new AccountAvailabilityPauseError('豆包对话正在打开，请收起后继续生成；本次尚未发送', 'page_unrecognized');
       await injectGenerationMonitor(webview);
       if (mode === 'video') {
         await resetVideoCaptureCache(webview);
@@ -2326,7 +2462,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       preserveSubmittedConversation = async (readback?: ChatReadbackResult, observedUrl?: string, page?: CurrentCreationConversationReadback): Promise<void> => {
         const original = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
         if (!original?.runtime?.submittedAt || original.runtime.runId !== expectedRunId
-          || !automationEngine.ownsController(taskId, controller) || registryRef.current.get(accountId) !== webview
+          || !automationEngine.ownsController(taskId, controller) || !ownsTaskWebview(taskId, webview)
           || (!['chat', 'image'].includes(mode) && !petstoryGuard && !strictPrompt)) return;
         const preserveImageReceipt = async (): Promise<boolean> => {
           const currentPage = page || await getCurrentCreationConversation(webview, {
@@ -2386,7 +2522,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             || current.runtime.runId !== expectedRunId || current.runtime.submittedAt !== submissionMarkedAt
             || current.runtime.input.prompt !== prompt || current.runtime.input.mode !== mode || current.prompt !== prompt
             || JSON.stringify(current.runtime.input.attachments || []) !== JSON.stringify(current.attachments || [])
-            || !automationEngine.ownsAccountController(taskId, accountId, controller) || registryRef.current.get(accountId) !== webview) {
+            || !automationEngine.ownsAccountController(taskId, accountId, controller) || !ownsTaskWebview(taskId, webview)) {
             throw new SubmissionSafetyPauseError('原图片运行、输入或执行权已变化，停止回读且未重新发送');
           }
         };
@@ -2666,7 +2802,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         const assertOriginalImageSubmission = (): void => {
           const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
           if (controller.signal.aborted) throw new DOMException('图片提交核对已暂停', 'AbortError');
-          if (!automationEngine.ownsAccountController(taskId, accountId, controller) || registryRef.current.get(accountId) !== webview
+          if (!automationEngine.ownsAccountController(taskId, accountId, controller) || !ownsTaskWebview(taskId, webview)
             || latest?.assignedAccountId !== accountId || latest.status !== 'executing' || !latest.runtime || latest.runtime.runId !== expectedRunId
             || latest.runtime.submittedAt !== submissionMarkedAt || JSON.stringify(latest.runtime.input) !== originalInput) {
             throw new SubmissionSafetyPauseError('原图片运行或输入已变化，停止核对且未重新发送');
@@ -2776,6 +2912,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (mode !== 'chat') conversationTextAfterSubmit = await getConversationText(webview);
       initializationLease?.release();
       initializationLease = undefined;
+      if (independentPage) setInteractiveTaskPageId((current: string | null): string | null => current === taskId ? null : current);
 
       const videoBlockerContext = { baselineMessageCount: initialMsgCount, conversationUrl };
 
@@ -2799,7 +2936,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           const current = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
           if (controller.signal.aborted || !automationEngine.ownsAccountController(taskId, accountId, controller)
             || current?.status !== 'generating' || !current.runtime || current.runtime.runId !== expectedRunId || current.assignedAccountId !== accountId
-            || current.runtime.submittedAt !== submissionMarkedAt || current.runtime.input.prompt !== prompt || registryRef.current.get(accountId) !== webview) {
+            || current.runtime.submittedAt !== submissionMarkedAt || current.runtime.input.prompt !== prompt || !ownsTaskWebview(taskId, webview)) {
             throw new DOMException('原图片运行已暂停或变化', 'AbortError');
           }
         };
@@ -3060,7 +3197,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
                 },
               }
             : availabilityPaused
-            ? { status: 'waiting_verification', code: err.code }
+            ? { status: err.code === 'login_required' ? 'waiting_verification' : 'paused', code: err.code }
             : petstoryPaused
               ? { status: 'paused', code: 'petstory_controls_unconfirmed' }
             : safetyPaused
@@ -3090,12 +3227,16 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     } finally {
       initializationLease?.release();
-      if (abortControllersRef.current.get(taskId) === controller) abortControllersRef.current.delete(taskId);
+      const ownsLocalController = abortControllersRef.current.get(taskId) === controller;
+      if (independentPage && ownsLocalController) setInteractiveTaskPageId((current: string | null): string | null => current === taskId ? null : current);
+      if (ownsLocalController) abortControllersRef.current.delete(taskId);
+      // 续租失败会先撤销engine租约；仍须释放自己的本地路由占位，迟到旧run不碰新控制器。
+      if (ownsLocalController) runningRef.current.delete(executionScope);
       if (automationEngine.ownsController(taskId, controller)) {
         notification.destroy(materialAuthorizationNotificationKey);
         pendingRestartTasksRef.current.delete(taskId);
         pendingCancellationStatusRef.current.delete(taskId);
-        runningRef.current.delete(accountId);
+        runningRef.current.delete(executionScope);
       }
       await automationEngine.release(taskId, controller);
       setTimeout(() => useTaskStore.getState().processQueue(), 0);
@@ -3105,15 +3246,20 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   // ---- 导航 ----
   const getActiveWebview = useCallback(() => {
     if (!activeAccount) return null;
-    return registryRef.current.get(activeAccount.id) || null;
-  }, [activeAccount]);
+    const pageTaskId = interactiveTaskPageId || viewedTaskPageId;
+    const task = useTaskStore.getState().tasks.find((item): boolean => item.id === pageTaskId && item.assignedAccountId === activeAccount.id);
+    return task && materialPagesRef.current.uses(task) ? getTaskWebview(task) || null : registryRef.current.get(activeAccount.id) || null;
+  }, [activeAccount, viewedTaskPageId, interactiveTaskPageId, getTaskWebview]);
 
   const handleRefresh = useCallback(() => { getActiveWebview()?.reload(); }, [getActiveWebview]);
   const handleGoBack = useCallback(() => { const w = getActiveWebview(); if (w?.canGoBack()) w.goBack(); }, [getActiveWebview]);
   const handleGoForward = useCallback(() => { const w = getActiveWebview(); if (w?.canGoForward()) w.goForward(); }, [getActiveWebview]);
   const handleGoHome = useCallback(() => {
-    if (activeAccount) getActiveWebview()?.loadURL(getAccountHome(activeAccount));
-  }, [activeAccount, getActiveWebview]);
+    if (!activeAccount) return;
+    // 返回账号页只切换所展示的页面，绝不导航仍在观察的图片任务现场。
+    if (viewedTaskPageId || interactiveTaskPageId) { setViewedTaskPageId(null); return; }
+    getActiveWebview()?.loadURL(getAccountHome(activeAccount));
+  }, [activeAccount, getActiveWebview, viewedTaskPageId, interactiveTaskPageId]);
 
   const showOverlay = activeAutoState && activeAutoState !== 'idle' && activeAutoState !== 'completed' && activeAutoState !== 'failed';
 
@@ -3172,7 +3318,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             onClick={() => void handleExtractCurrentVideo()}
             title="提取当前对话视频"
             aria-label="提取当前对话视频"
-            disabled={manualVideoExtracting || !activeAccount || !!(activeAccount && accountBusy[activeAccount.id])}
+            disabled={manualVideoExtracting || !activeAccount || !!(activeAccount && isAccountExecutionBusy(accountBusy, activeAccount.id))}
             style={{
               width: 30,
               height: 30,
@@ -3180,7 +3326,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               alignItems: 'center',
               justifyContent: 'center',
               color: experimentalNoWatermark ? '#f59e0b' : '#6855c9',
-              opacity: manualVideoExtracting || !activeAccount || !!(activeAccount && accountBusy[activeAccount.id]) ? 0.45 : 1,
+              opacity: manualVideoExtracting || !activeAccount || !!(activeAccount && isAccountExecutionBusy(accountBusy, activeAccount.id)) ? 0.45 : 1,
             }}
           >
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">

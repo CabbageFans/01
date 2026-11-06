@@ -182,7 +182,7 @@ export const PetStoryResubmissionActions: React.FC<{ projectId: string; task: Ta
   const confirmResubmission = async (): Promise<void> => {
     if (!resubmitTarget || disabled || usePetStoryStore.getState().busy) return;
     const current = usePetStoryStore.getState().project; const currentTasks = useTaskStore.getState();
-    const candidate = current?.id === resubmitTarget.projectId ? petStoryResubmissionTask(current, currentTasks.tasks, [...Object.values(currentTasks.executingTasks), ...(currentTasks.activeTaskId ? [currentTasks.activeTaskId] : [])]) : undefined;
+    const candidate = current?.id === resubmitTarget.projectId ? petStoryResubmissionTask(current, currentTasks.tasks, [...Object.values(currentTasks.executingTasks), ...(currentTasks.activeTaskId ? [currentTasks.activeTaskId] : [])], resubmitTarget.taskId) : undefined;
     if (!candidate || candidate.id !== resubmitTarget.taskId || candidate.runtime?.runId !== resubmitTarget.runId || candidate.runtime.submittedAt !== resubmitTarget.submittedAt) {
       setResubmitTarget(null); message.warning('原任务状态已变化，请重新检查制作结果后确认'); return;
     }

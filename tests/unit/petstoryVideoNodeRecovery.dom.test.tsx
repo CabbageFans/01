@@ -1,6 +1,7 @@
 /** 仅离线验证节点恢复接线；不向平台提交确认或视频请求。 */
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { message } from 'antd';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Account, PetStoryPlan, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { CanvasMediaNode } from '../../src/components/PetStoryCanvasMedia';
@@ -41,7 +42,13 @@ beforeEach((): void => {
   useTaskStore.setState({ ...initial.tasks, tasks: [task], executingTasks: {}, activeTaskId: null, accountAutomationState: {} });
   useAccountStore.setState({ ...initial.accounts, accounts: [account], selectAccount: vi.fn(), requestAvailabilityCheck: vi.fn((): void => saveFreshAvailability(true)) });
 });
-afterEach((): void => { usePetStoryStore.setState(initial.pet); useTaskStore.setState(initial.tasks); useAccountStore.setState(initial.accounts); vi.restoreAllMocks(); });
+afterEach(async (): Promise<void> => {
+  // 先解除 store 订阅；AntD 静态提示有独立 React 根，须在 DOM 环境销毁前完成异步清理。
+  cleanup();
+  await act(async (): Promise<void> => { message.destroy(); });
+  usePetStoryStore.setState(initial.pet); useTaskStore.setState(initial.tasks); useAccountStore.setState(initial.accounts);
+  vi.restoreAllMocks();
+});
 const Node: React.FC = (): React.ReactElement => {
   const current = usePetStoryStore((state) => state.project);
   return current?.plan ? <CanvasMediaNode project={current} shot={current.plan.shots[0]} kind="video" disabled /> : <></>;

@@ -5,6 +5,7 @@ import type { PetStoryCompiledPrompt, PetStoryPageBinding, PetStoryProject, PetS
 import { compileMaterialPrompt, compilePrompt, PROMPT_RULES_VERSION } from './petstoryPromptQuality';
 import { inspectPromptEligibility, type PromptEligibility } from './petstoryEligibility';
 import { hasCurrentPromptReviewError, reviewMatchesPrompt } from './petstoryReview';
+import { plannedPetStoryMode } from './petstoryModes';
 
 export interface PromptExportEntry {
   id: string;
@@ -107,7 +108,8 @@ function materialEntry(p: PetStoryProject, m: PetStoryMaterial): PromptExportEnt
 function shotEntry(p: PetStoryProject, shot: PetStoryShot, kind: PetStoryPromptKind): PromptExportEntry[] {
   const prompt = shot.prompts[kind];
   if (!prompt) return [];
-  const mode: PetStoryResolvedMode | undefined = p.production?.shots[shot.id]?.resolvedMode || (shot.requestedMode === 'auto' ? undefined : shot.requestedMode);
+  const mode: PetStoryResolvedMode = p.production?.steps.some((step): boolean => step.shotId === shot.id && step.kind === 'video')
+    ? p.production.shots[shot.id]?.resolvedMode || plannedPetStoryMode(shot) : plannedPetStoryMode(shot);
   const checked = preview((): PetStoryCompiledPrompt => compilePrompt(p, shot.id, kind, kind === 'video' ? mode : undefined, true));
   const eligibility = inspectPromptEligibility(p, prompt, { shotId: shot.id, promptKind: kind, mode, currentReferences: checked.compiled?.references }, 'current');
   if (!checked.compiled && eligibility.state !== 'creative_plan') eligibility.state = 'needs_revision';

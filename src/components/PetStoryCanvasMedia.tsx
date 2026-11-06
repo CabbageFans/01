@@ -23,7 +23,7 @@ import { revealBrowser } from '../utils/workspace';
 const petStoryModeNames = { auto: '自动选择', first_frame: '首帧', first_last_frame: '首尾帧', reference: '多参考' };
 
 function productionSteps(project: PetStoryProject): PetStoryProductionStep[] {
-  return [...(project.productionHistory || []).flatMap((production) => production.steps), ...(project.production?.steps || [])];
+  return [...(project.productionHistory || []).flatMap((production) => production.steps), ...(project.production?.steps || []), ...Object.values(project.imageProductions || {}).flatMap((production): PetStoryProductionStep[] => production.steps)];
 }
 export const CanvasSubmissionDetails: React.FC<{ project: PetStoryProject; shot: PetStoryShot; kind: PetStoryPromptKind; dirty: boolean }> = ({ project, shot, kind, dirty }): React.ReactElement => {
   const tasks = useTaskStore((store) => store.tasks); const [preview, setPreview] = useState<PetStoryCompiledPrompt>(); const [error, setError] = useState('');
@@ -157,9 +157,12 @@ export const CanvasVideoSettings: React.FC<{ project: PetStoryProject; shot: Pet
 };
 
 const CanvasVideoResolution: React.FC<{ project: PetStoryProject; shot: PetStoryShot; eligibility?: PetStoryGenerationEligibility }> = ({ project, shot, eligibility }): React.ReactElement => {
+  const tasks = useTaskStore((store) => store.tasks);
   const authorized = project.production?.referenceContinuations?.[shot.id] ? project.production.shots[shot.id] : undefined;
-  const mode = authorized?.resolvedMode || eligibility?.resolvedMode; const reason = authorized?.reason || eligibility?.modeReason;
-  return <div className="canvas-mode"><span>请求 <b>{petStoryModeNames[shot.requestedMode]}</b></span><span>执行模式 <b>{mode ? petStoryModeNames[mode] : '执行时读取'}</b></span>{reason && <p>{reason}</p>}</div>;
+  const mode = shot.requestedMode === 'auto' ? shot.autoModePlan?.mode : shot.requestedMode;
+  const reason = shot.requestedMode === 'auto' && shot.autoModePlan ? shot.autoModePlan.reason : authorized?.reason || eligibility?.modeReason;
+  // 当前剧情计划与原任务执行事实分别展示，不把历史图片任务或只读预检当成视频已改模式。
+  return <div className="canvas-mode"><span>请求 <b>{petStoryModeNames[shot.requestedMode]}</b></span><span>计划模式 <b>{mode ? petStoryModeNames[mode] : '执行时读取'}</b></span><span>执行模式 <b>{canvasActualMode(project, shot, tasks)}</b></span>{reason && <p>{reason}</p>}</div>;
 };
 
 interface CanvasMediaFacts { asset?: PetStoryAsset; step?: PetStoryProductionStep; pendingTask?: Task; waiting: boolean; video: boolean; buttonText: string }
@@ -217,7 +220,7 @@ const CanvasVideoRecovery: React.FC<{ recovery: PetStoryVideoReadOnlyRecovery; b
 
 function mediaNodeFacts(project: PetStoryProject, shot: PetStoryShot, kind: PetStoryPromptKind, tasks: Task[]): CanvasMediaFacts {
   const asset = selectedPetStoryMedia(project, shot, kind);
-  const step = [...(project.production?.steps || [])].reverse().find((item): boolean => item.shotId === shot.id && item.kind === kind);
+  const step = productionSteps(project).reverse().find((item): boolean => item.shotId === shot.id && item.kind === kind);
   const pendingTask = tasks.find((item): boolean => item.id === step?.taskId);
   const waiting = !!step && step.status !== 'complete'; const video = kind === 'video';
   const buttonText = asset ? `重新生成${video ? '视频' : '图片'}` : video ? '生成视频' : '生成图片';

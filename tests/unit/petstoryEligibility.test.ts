@@ -95,6 +95,7 @@ describe('专用正文媒体资格与计划导出', (): void => {
   });
   it('auto文字与媒体使用同一输入计划，不以缺少入口检查为由要求重新适配', (): void => {
     const p = project(); const shot = p.plan!.shots[0]; shot.requestedMode = 'auto'; delete shot.prompts.video.promptTask;
+    shot.autoModePlan = { mode: 'reference', reason: 'TEST本镜由多个人物参考共同驱动，没有固定首尾构图要求' };
     seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: 'video' }, { completeVideoBody: true });
     const t = promptWritingTarget(p, { shotId: shot.id, promptKind: 'video' });
     expect(t).toMatchObject({ model: 'seedance-2.0', mode: 'reference' });

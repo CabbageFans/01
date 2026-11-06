@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { PetStoryChatJob, PetStoryImageOperation, PetStoryPlan, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { hasBackgroundImageExecution, hasBackgroundPetStoryExecution, hasForegroundAccountInteraction, isBackgroundCanvasPromptTask, isBackgroundImageOperationTask, isBackgroundPetStoryTask } from '../../src/utils/petstoryBackground';
 import snapshot from '../fixtures/storyboard-five-shots.json';
+import { getTaskExecutionScope } from '../../src/utils/taskExecutionScope';
 
 const now = '2026-10-30T07:00:00.000Z';
 let project: PetStoryProject;
@@ -46,6 +47,13 @@ describe('图片后台执行的目标归属', (): void => {
 });
 
 describe('注入或提交期间的前台账号识别', (): void => {
+  it('独立素材执行槽仍识别为当前项目后台任务，不自动展开自由聊天页面', (): void => {
+    const current = task('TEST-current-image-task');
+    current.petstory = { projectId: project.id, stepId: 'TEST-step', imageOperationId: operation.id, materialId: operation.target.materialId! };
+    const scope = getTaskExecutionScope(current);
+    expect(hasForegroundAccountInteraction(project, [current], { [scope]: 'injecting' }, { [scope]: current.id })).toBe(false);
+    expect(hasBackgroundPetStoryExecution(project, [current], operation.id)).toBe(true);
+  });
   it.each(['injecting', 'submitting'])('调度映射尚未重建时，从执行任务回读识别后台图片（%s）', (state: string): void => {
     const tasks = [task('TEST-current-image-task')];
     expect(hasForegroundAccountInteraction(project, tasks, { [project.accountId]: state }, {})).toBe(false);

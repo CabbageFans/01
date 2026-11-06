@@ -1,12 +1,36 @@
-import type { PetStoryAsset, PetStoryChatJob, PetStoryImageOperation, PetStoryImageTarget, PetStoryProject, Task } from '@doubao-studio/contracts';
+import type { PetStoryAsset, PetStoryChatJob, PetStoryImageOperation, PetStoryImageTarget, PetStoryProduction, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { resolveTaskConversationTarget } from './taskConversationLocator';
 import { imageBelongsToTarget, pendingImageCandidates } from './petstoryImageCandidates';
 import { journeyMaterialImageApproved } from './petstoryJourney';
+import { isImageExecutionTask } from './taskExecutionScope';
 
 export const IMAGE_CONVERSATION_RECOVERY_MESSAGE = '原会话未定位，请在原账号历史中打开这次图片对话后继续。';
 
 export function sameImageTarget(left: PetStoryImageTarget, right: PetStoryImageTarget): boolean {
   return left.materialId ? left.materialId === right.materialId : left.shotId === right.shotId && left.kind === right.kind;
+}
+
+export function imageTargetKey(target: PetStoryImageTarget): string {
+  return target.materialId ? `material:${target.materialId}` : `shot:${target.shotId}:${target.kind}`;
+}
+/** 单图片流程资格覆盖点击、文字准备、生成及保存；暂停历史不占用新的执行资格。 */
+export function isPetStoryImageFlowBusy(project: PetStoryProject | null | undefined, tasks: readonly Task[], activeImageOperationIds: readonly string[], pendingImageTargets: readonly string[], continuingOperationId?: string): boolean {
+  if (pendingImageTargets.length) return true;
+  const running = tasks.some((task: Task): boolean => {
+    if (!isImageExecutionTask(task) || !['executing', 'generating', 'manual_submission_observing'].includes(task.status)) return false;
+    const operationId = task.petstory?.imageOperationId || task.petstoryChat?.imageOperationId
+      || project?.imageOperations?.find((operation: PetStoryImageOperation): boolean => imageOperationTask(project, operation, tasks)?.id === task.id)?.id;
+    return !continuingOperationId || operationId !== continuingOperationId;
+  });
+  if (running) return true;
+  return !!project?.imageOperations?.some((operation: PetStoryImageOperation): boolean => {
+    return operation.id !== continuingOperationId && activeImageOperationIds.includes(operation.id) && !['complete', 'failed'].includes(operation.stage);
+  });
+}
+
+/** 新操作各自持有制作状态；旧项目仍可读取原来的单制作记录。 */
+export function imageOperationProduction(project: PetStoryProject, operationId: string): PetStoryProduction | undefined {
+  return project.imageProductions?.[operationId] || (project.production?.imageOperationId === operationId ? project.production : undefined);
 }
 
 /** 仅投影现有操作；读取卡片或重开项目不会创建请求。 */
@@ -41,7 +65,7 @@ export function imageOperationForChatJob(project: PetStoryProject, jobId: string
   }
 }
 
-export function imageOperationTask(project: PetStoryProject, operation: PetStoryImageOperation, tasks: Task[]): Task | undefined {
+export function imageOperationTask(project: PetStoryProject, operation: PetStoryImageOperation, tasks: readonly Task[]): Task | undefined {
   const job = operationChatJob(project, operation);
   const taskId = operation.stage === 'preparing' ? job?.taskId || operation.taskId : operation.taskId || job?.taskId;
   return tasks.find((task): boolean => task.id === taskId && task.projectId === project.studioProjectId && task.assignedAccountId === project.accountId);
@@ -74,8 +98,14 @@ function completedImageMessage(project: PetStoryProject, target: PetStoryImageTa
   return approved && validTime ? '图片已采用' : material ? '图片需要复核' : '图片采用记录或文件校验不完整';
 }
 
+function imageGenerationMessage(operation: PetStoryImageOperation, task: Task | undefined, preparing: boolean): string {
+  if (task?.status === 'queued') return '图片任务已排队，等待开始…';
+  if (preparing) return '正在准备图片…';
+  return operation.mode === 'modify' ? '正在按你的要求修改图片…' : '正在生成图片…';
+}
+
 /** 百分比未知时只给真实阶段，不用计时器推算完成或替用户采用。 */
-export function petStoryImageProgress(project: PetStoryProject, target: PetStoryImageTarget, tasks: Task[], activeOperationId?: string | null): PetStoryImageProgress {
+export function petStoryImageProgress(project: PetStoryProject, target: PetStoryImageTarget, tasks: Task[], activeOperationId?: string | null | readonly string[]): PetStoryImageProgress {
   const operation = imageOperationForTarget(project, target);
   if (!operation) return { busy: false, stage: 'idle', message: '', error: '', resumable: false, conversationMissing: false };
   const task = imageOperationTask(project, operation, tasks);
@@ -86,9 +116,10 @@ export function petStoryImageProgress(project: PetStoryProject, target: PetStory
   const error = conversationMissing ? IMAGE_CONVERSATION_RECOVERY_MESSAGE : operation.error || (failedTask ? task.errorInfo?.message || task.runtime?.message || '任务已暂停，请处理后继续' : '');
   const available = operation.outputAssetId && project.assets.some((asset): boolean => asset.id === operation.outputAssetId && !!asset.validation?.decoded);
   const stage = operation.stage === 'complete' && !available ? 'saving' : operation.stage;
-  const resumable = ['preparing', 'generating', 'saving'].includes(stage) && activeOperationId !== undefined && activeOperationId !== operation.id;
+  const authorized = Array.isArray(activeOperationId) ? activeOperationId.includes(operation.id) : activeOperationId === operation.id;
+  const resumable = ['preparing', 'generating', 'saving'].includes(stage) && activeOperationId !== undefined && !authorized;
   const messages: Record<PetStoryImageOperation['stage'], string> = {
-    preparing: '正在准备图片…', generating: operation.mode === 'modify' ? '正在按你的要求修改图片…' : '正在生成图片…',
+    preparing: imageGenerationMessage(operation, task, true), generating: imageGenerationMessage(operation, task, false),
     saving: '正在保存图片…', complete: stage === 'complete' ? completedImageMessage(project, target) : '图片已生成，请查看', failed: '本次图片处理未完成',
   };
   return { operation, busy: !error && !resumable && ['preparing', 'generating', 'saving'].includes(stage), stage,

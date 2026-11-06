@@ -7,6 +7,7 @@ interface Waiter {
   taskId: string;
   enqueuedAt: number;
   signal?: AbortSignal;
+  exclusive: boolean;
   resolve: (lease: InitializationLease) => void;
   reject: (error: Error) => void;
 }
@@ -18,15 +19,17 @@ export class InitializationGate {
   private active = new Set<string>();
   private waiters: Waiter[] = [];
   private limit = 1;
+  private exclusiveTaskId: string | null = null;
 
-  async acquire(taskId: string, options: { limit?: number; signal?: AbortSignal } = {}): Promise<InitializationLease> {
+  async acquire(taskId: string, options: { limit?: number; signal?: AbortSignal; exclusive?: boolean } = {}): Promise<InitializationLease> {
     this.limit = Math.max(1, Math.min(3, Math.floor(options.limit || 1)));
     if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     return new Promise<InitializationLease>((resolve, reject) => {
-      const waiter: Waiter = { taskId, enqueuedAt: Date.now(), signal: options.signal, resolve, reject };
+      const waiter: Waiter = { taskId, enqueuedAt: Date.now(), signal: options.signal, exclusive: options.exclusive === true, resolve, reject };
       const onAbort = () => {
         this.waiters = this.waiters.filter((item) => item !== waiter);
         reject(new DOMException('Aborted', 'AbortError'));
+        this.drain();
       };
       options.signal?.addEventListener('abort', onAbort, { once: true });
       const originalResolve = waiter.resolve;
@@ -41,9 +44,13 @@ export class InitializationGate {
 
   private drain(): void {
     while (this.active.size < this.limit && this.waiters.length > 0) {
-      const waiter = this.waiters.shift()!;
+      // 独立图片持有真实输入焦点时，其他请求不能通过提高并发设置抢占。
+      if (this.exclusiveTaskId || this.waiters[0].exclusive && this.active.size > 0) return;
+      const waiter = this.waiters.shift();
+      if (!waiter) return;
       if (waiter.signal?.aborted) continue;
       this.active.add(waiter.taskId);
+      if (waiter.exclusive) this.exclusiveTaskId = waiter.taskId;
       let released = false;
       waiter.resolve({
         waitedMs: Date.now() - waiter.enqueuedAt,
@@ -51,6 +58,7 @@ export class InitializationGate {
           if (released) return;
           released = true;
           this.active.delete(waiter.taskId);
+          if (this.exclusiveTaskId === waiter.taskId) this.exclusiveTaskId = null;
           this.drain();
         },
       });

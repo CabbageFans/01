@@ -40,7 +40,9 @@ const ShotPreview: React.FC<{ plan: PetStoryPlan; shot: PetStoryShot }> = ({ pla
       <PreviewField label="镜头运动" value={shot.camera} /><PreviewField label="声音安排" value={shot.sound} />
       <PreviewField label="动作与发声节奏" value={petStoryTimingText(shot)} /><PreviewField label="镜头时长" value={`${shot.durationSeconds} 秒`} />
       {shot.timingPlan && <><PreviewField label="时长依据" value={`${shot.timingPlan.durationReason}（文本估计需要 ${shot.timingPlan.estimatedRequiredSeconds} 秒）`} /><PreviewField label="切出位置" value={shot.timingPlan.cutReason} /></>}
-      <PreviewField label="视频模式" value={modes[shot.requestedMode]} /><PreviewField label="镜头衔接" value={shot.transition === 'continue' ? '延续上一镜' : '正常切镜'} />
+      <PreviewField label="视频模式" value={shot.requestedMode === 'auto' && shot.autoModePlan ? `自动选择 · ${modes[shot.autoModePlan.mode]}` : modes[shot.requestedMode]} />
+      {shot.requestedMode === 'auto' && shot.autoModePlan && <PreviewField label="模式依据" value={shot.autoModePlan.reason} />}
+      <PreviewField label="镜头衔接" value={shot.transition === 'continue' ? '延续上一镜' : '正常切镜'} />
       <PreviewField label="衔接镜头" value={previous ? `镜头 ${previous.order} · ${previous.scene}` : shot.previousShotId ? '未对应到前一镜头，请核对' : '没有指定前一镜头'} />
       <PreviewField label="连续性要求" value={shot.continuity} /><PreviewField label="已有场景参考图片" value={`${shot.sceneReferenceAssetIds?.length || 0} 张`} />
       <PreviewField label="本场人物造型" value={Object.entries(shot.appearanceOverrides || {}).map(([id, value]): string => `${entityName(plan.characters, id, '未对应人物')}：${value || '未填写'}`).join('\n')} />

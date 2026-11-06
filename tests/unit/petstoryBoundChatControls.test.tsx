@@ -44,6 +44,29 @@ describe('原绑定文字任务明确未发送的继续入口', (): void => {
     job.runId = undefined; task.status = 'fail'; task.errorInfo!.code = 'page_changed';
     expect(allowed()).toBe(true); expect(historyHtml()).toContain(label); expect(job.runId).toBeUndefined();
   });
+  it.each(['dispatch_not_ready', 'legacy_unbound'] as const)('派发前%s的正式未发送状态允许继续原任务', (kind): void => {
+    task.status = 'paused'; task.executionIntent = 'hold'; task.runtime!.stage = 'paused';
+    if (kind === 'legacy_unbound') { job.runId = undefined; task.errorInfo = undefined; }
+    else task.errorInfo!.code = 'dispatch_not_ready';
+    expect(allowed()).toBe(true); expect(historyHtml()).toContain(label);
+  });
+  it.each(['bound', 'armed', 'stage', 'unknown', 'empty_code', 'submitted', 'readback', 'review', 'observation', 'receipt', 'artifact', 'audio', 'video', 'binding'] as const)('旧派发暂停缺错误码时%s不符合持久化事实仍拒绝', (reason): void => {
+    job.runId = undefined; task.status = 'paused'; task.executionIntent = 'hold'; task.runtime!.stage = 'paused'; task.errorInfo = undefined;
+    if (reason === 'bound') job.runId = task.runtime!.runId;
+    if (reason === 'armed') task.executionIntent = 'armed';
+    if (reason === 'stage') task.runtime!.stage = 'submitting';
+    if (reason === 'unknown' || reason === 'empty_code') task.errorInfo = { code: reason === 'unknown' ? 'unknown' : '', message: 'TEST同文案无授权作用', recoverable: true, detectedAt: now };
+    if (reason === 'submitted') task.runtime!.submittedAt = now;
+    if (reason === 'readback') task.runtime!.chatReadback = { runId: task.runtime!.runId, baselineMessageCount: 0, association: 'full_prompt', observedAt: now };
+    if (reason === 'review') task.runtime!.chatReadbackReview = { runId: task.runtime!.runId, checkedAt: now, reason: 'TEST', candidates: [] };
+    if (reason === 'observation') task.runtime!.manualObservation = { startedAt: now, expiresAt: now, source: 'stored_conversation', outcome: 'observing' };
+    if (reason === 'receipt') task.runtime!.mediaSubmissionReceipt = { schemaVersion: 1, runId: task.runtime!.runId, accountId: project.accountId, submittedAt: now, conversationUrl: 'https://www.doubao.com/chat/TEST-receipt', observedAt: now, source: 'published_message' };
+    if (reason === 'artifact') task.artifacts = [{ id: 'TEST-artifact', kind: 'image', url: 'https://TEST.invalid/image.png', source: 'page', runId: task.runtime!.runId, discoveredAt: now }];
+    if (reason === 'audio') task.runtime!.input.audioAttachment = 'TEST-different-audio';
+    if (reason === 'video') task.runtime!.input.videoConfig = { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' };
+    if (reason === 'binding') task.runtime!.input.petstory = { projectId: 'TEST-other-project', stepId: 'TEST-other-step' };
+    expect(allowed()).toBe(false); expect(historyHtml()).not.toContain(label);
+  });
   it.each(['request', 'legacy', 'submitted', 'ended', 'lock', 'runtime_input'] as const)('缺job.runId时%s证据不满足仍拒绝恢复', (change: string): void => {
     job.runId = undefined; task.status = 'fail'; task.errorInfo!.code = 'page_changed';
     if (change === 'request') job.requestText += 'TEST不匹配正文';

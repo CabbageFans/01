@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Button, Checkbox, Image, Input, Modal, Space, Tag } from 'antd';
-import { PictureOutlined, UploadOutlined } from '@ant-design/icons';
+import { PictureOutlined, StopOutlined, UploadOutlined } from '@ant-design/icons';
 import type { PetStoryAsset, PetStoryImageTarget, PetStoryProject } from '@doubao-studio/contracts';
 import { petStoryResubmissionTask, usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
-import { imageConversationTask, petStoryImageProgress } from '../utils/petstoryImageFlow';
+import { imageConversationTask, imageTargetKey, isPetStoryImageFlowBusy, petStoryImageProgress } from '../utils/petstoryImageFlow';
 import { imageBelongsToTarget, pendingImageCandidates } from '../utils/petstoryImageCandidates';
 import { resolveTaskConversationTarget } from '../utils/taskConversationLocator';
 import { PetStoryResubmissionActions } from './PetStoryTaskRecovery';
@@ -40,13 +40,15 @@ function adoptionNote(reviewingCurrent: boolean, replacing: boolean, needsReview
 }
 type ImageProgress = ReturnType<typeof petStoryImageProgress>;
 function imageError(local: string, external: string | undefined, operation: string): string { return local || external || operation || ''; }
-const ImageOperationStatus: React.FC<{ progress: ImageProgress; error: string; disabled: boolean; preparing?: boolean; retry?: () => Promise<void> }> = ({ progress, error, disabled, preparing, retry }): React.ReactElement | null => {
-  if (error) return <div className="petstory-image-feedback-error" role="alert"><span>{error}</span>{retry && <Button size="small" disabled={disabled} onClick={(): void => { void retry(); }}>{progress.operation ? progress.task?.outputs.length ? '重新下载图片' : '继续本次任务' : '重试剩余原图'}</Button>}</div>;
-  if (progress.resumable && !preparing) return <div className="petstory-image-progress" role="status"><span>{progress.message}</span>{retry && <Button size="small" disabled={disabled} onClick={(): void => { void retry(); }}>继续本次任务</Button>}</div>;
-  if (!progress.operation && !preparing) return null;
+const StopImageButton: React.FC<{ stop: () => Promise<void>; stopping: boolean }> = ({ stop, stopping }): React.ReactElement => <Button size="small" danger icon={<StopOutlined />} loading={stopping} disabled={stopping} title="停止本工具的处理与等待，保留豆包对话和已有图片" onClick={(): void => { void stop(); }}>停止</Button>;
+const ImageOperationStatus: React.FC<{ progress: ImageProgress; error: string; disabled: boolean; preparing?: boolean; retry?: () => Promise<void>; stop?: () => Promise<void>; stopping: boolean }> = ({ progress, error, disabled, preparing, retry, stop, stopping }): React.ReactElement | null => {
+  const stopAction = stop && <StopImageButton stop={stop} stopping={stopping} />;
+  if (error) return <div className="petstory-image-feedback-error" role="alert"><span>{error}</span>{retry && <Button size="small" disabled={disabled} onClick={(): void => { void retry(); }}>{progress.operation ? progress.task?.outputs.length ? '重新下载图片' : '继续本次任务' : '重试剩余原图'}</Button>}{stopAction}</div>;
+  if (progress.resumable && !preparing) return <div className="petstory-image-progress" role="status"><span>{progress.message}</span>{retry && <Button size="small" disabled={disabled} onClick={(): void => { void retry(); }}>继续本次任务</Button>}{stopAction}</div>;
+  if (!progress.operation && !preparing && !stop) return null;
   const complete = !!progress.candidateAssetId && !progress.busy && !preparing;
-  const message = preparing ? '正在准备图片…' : progress.message;
-  return <div className="petstory-image-progress" role="status"><div className={`petstory-image-progress-track ${complete ? 'is-complete' : 'is-pending'}`} role="progressbar" aria-label="图片任务进度" aria-valuetext={message} aria-valuenow={complete ? 100 : undefined} aria-valuemin={0} aria-valuemax={100}><span /></div><span>{message}</span></div>;
+  const message = stopping ? '正在停止图片任务…' : preparing ? '正在准备图片…' : progress.message;
+  return <div className="petstory-image-progress" role="status"><div className={`petstory-image-progress-track ${complete ? 'is-complete' : 'is-pending'}`} role="progressbar" aria-label="图片任务进度" aria-valuetext={message} aria-valuenow={complete ? 100 : undefined} aria-valuemin={0} aria-valuemax={100}><span /></div><span>{message}</span>{stopAction}</div>;
 };
 interface ImageActionsProps {
   current?: PetStoryAsset; currentNeedsReview: boolean; candidateCount: number; disabled: boolean; busy: boolean;
@@ -84,21 +86,21 @@ const ImagePreviewBody: React.FC<ImagePreviewBodyProps> = ({ project, title, ima
 </aside></div>;
 interface PreviewActionsProps {
   reviewingCurrent: boolean; confirmingCurrent: boolean; hasCurrent: boolean; hasSelected: boolean; locked: boolean; readable: boolean; saving: boolean;
-  generationDisabled: boolean; generating: boolean; regenerate?: () => Promise<void>;
+  generationDisabled: boolean; modificationDisabled: boolean; generating: boolean; regenerate?: () => Promise<void>;
   close: () => void; modify: () => void; adopt: () => Promise<void>;
 }
-const PreviewActions: React.FC<PreviewActionsProps> = ({ reviewingCurrent, confirmingCurrent, hasCurrent, hasSelected, locked, readable, saving, generationDisabled, generating, regenerate, close, modify, adopt }): React.ReactElement => <>
+const PreviewActions: React.FC<PreviewActionsProps> = ({ reviewingCurrent, confirmingCurrent, hasCurrent, hasSelected, locked, readable, saving, generationDisabled, modificationDisabled, generating, regenerate, close, modify, adopt }): React.ReactElement => <>
   <span className="petstory-adoption-note">{adoptionNote(reviewingCurrent, hasCurrent, confirmingCurrent)}</span>
   <Button onClick={close}>{reviewingCurrent ? '返回' : '暂不采用'}</Button>
   {regenerate && <Button title="重新上传参考图和当前生图提示词，生成一组新图片" disabled={locked || generationDisabled} loading={generating} onClick={(): void => { void regenerate(); }}>重新生成</Button>}
-  {hasSelected && <Button disabled={locked || !readable} onClick={modify}>不满意，修改图片</Button>}
+  {hasSelected && <Button disabled={locked || modificationDisabled || !readable} onClick={modify}>不满意，修改图片</Button>}
   {(!reviewingCurrent || confirmingCurrent) && <Button type="primary" disabled={locked || !hasSelected || !readable} loading={saving} onClick={(): void => { void adopt(); }}>{confirmingCurrent ? '确认继续使用' : '满意，采用图片'}</Button>}
 </>;
 interface ImageFeedbackDialogProps {
   projectId: string; title: string; base: PetStoryAsset; feedback: string; error: string; submitting: boolean; disabled: boolean;
-  cancel: () => void; submit: () => Promise<void>; change: (feedback: string) => void;
+  cancel: () => void; submit: () => Promise<void>; change: (feedback: string) => void; stop?: () => Promise<void>; stopping: boolean;
 }
-const ImageFeedbackDialog: React.FC<ImageFeedbackDialogProps> = ({ projectId, title, base, feedback, error, submitting, disabled, cancel, submit, change }): React.ReactElement => <Modal className="petstory-image-feedback-modal" title="修改这张图片" open closable={false} width={640} onCancel={(): void => { if (!submitting) cancel(); }} footer={<><Button aria-label="取消" disabled={submitting} onClick={cancel}>取消</Button><Button type="primary" loading={submitting} disabled={disabled || !feedback.trim() || submitting} onClick={(): void => { void submit(); }}>提交修改</Button></>}>
+const ImageFeedbackDialog: React.FC<ImageFeedbackDialogProps> = ({ projectId, title, base, feedback, error, submitting, disabled, cancel, submit, change, stop, stopping }): React.ReactElement => <Modal className="petstory-image-feedback-modal" title="修改这张图片" open closable={false} width={640} onCancel={(): void => { if (!submitting) cancel(); }} footer={<>{stop && <StopImageButton stop={stop} stopping={stopping} />}<Button aria-label="取消" disabled={submitting} onClick={cancel}>取消</Button><Button type="primary" loading={submitting} disabled={disabled || !feedback.trim() || submitting} onClick={(): void => { void submit(); }}>提交修改</Button></>}>
   <div className="petstory-feedback-image"><ReviewImage projectId={projectId} asset={base} name={`${title} · 本次修改基图`} /></div><p>{title}</p>
   <label className="petstory-feedback-label" htmlFor={`image-feedback-${base.id}`}>告诉 AI 你希望怎么修改。</label>
   <Input.TextArea id={`image-feedback-${base.id}`} aria-label="图片修改意见" value={feedback} disabled={submitting} autoSize={{ minRows: 4, maxRows: 8 }} placeholder="例如：表情更自然一些，衣服和背景保持不变。" onChange={(event): void => change(event.target.value)} />
@@ -117,22 +119,40 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
   const [readable, setReadable] = useState(false); const [error, setError] = useState(''); const [recoveryFailed, setRecoveryFailed] = useState(false);
   const [feedbackBaseId, setFeedbackBaseId] = useState<string>(); const [feedback, setFeedback] = useState('');
   const [feedbackError, setFeedbackError] = useState(''); const [submitting, setSubmitting] = useState(false); const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false); const [stopError, setStopError] = useState(''); const actionVersion = useRef({ value: 0 }).current;
   const root = useRef<HTMLDivElement>(null); const previewBody = useRef<HTMLDivElement>(null); const awaitingResult = useRef<Set<string> | null>(null);
   const state = usePetStoryStore(); const taskState = useTaskStore(); const tasks = taskState.tasks;
-  const progress = petStoryImageProgress(project, target, tasks, state.activeImageOperationId);
+  const progress = petStoryImageProgress(project, target, tasks, state.activeImageOperationIds.length ? state.activeImageOperationIds : state.activeImageOperationId);
+  const targetKey = imageTargetKey(target);
   const images = project.assets.filter((asset): boolean => imageBelongsToTarget(project, asset, target));
   const current = images.find((asset): boolean => asset.id === currentAssetId);
   const candidates = pendingImageCandidates(project, target, currentAssetId);
   const selected = images.find((asset): boolean => asset.id === selectedId);
   const feedbackBase = images.find((asset): boolean => asset.id === feedbackBaseId);
   const { reviewingCurrent, needsReview, confirmingCurrent } = currentReviewState(target, current, selected, currentNeedsReview);
-  const busy = progress.busy || !!generating || starting || submitting;
-  const generationBlocked = !!generationDisabled || progress.resumable || progress.conversationMissing;
+  const processing = progress.busy || state.pendingImageTargets.includes(targetKey) || starting || submitting || stopping;
+  const busy = processing || !!generating;
+  const canStop = processing || !!stopError || !!progress.task && ['executing', 'generating', 'manual_submission_observing'].includes(progress.task.status);
+  // 所有图片入口共用流程占用状态；预览、上传和采用继续按各自已有条件处理。
+  const flowBusy = isPetStoryImageFlowBusy(project, tasks, state.activeImageOperationIds, state.pendingImageTargets);
+  const recoveryBlocked = isPetStoryImageFlowBusy(project, tasks, state.activeImageOperationIds, state.pendingImageTargets, progress.operation?.id);
+  const generationBlocked = !!generationDisabled || flowBusy || progress.resumable || progress.conversationMissing;
   const task = imageConversationTask(project, target, tasks);
   const selectedTask = selected ? imageConversationTask(project, target, tasks, selected.id) : undefined;
-  const resubmissionTask = petStoryResubmissionTask(project, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]);
+  const resubmissionTask = petStoryResubmissionTask(project, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])], progress.task?.id);
   const currentResubmission = resubmissionTask?.id === progress.task?.id ? resubmissionTask : undefined;
-  const visibleError = imageError(error, externalError, progress.error);
+  const visibleError = imageError(stopError || error, externalError || state.imageTargetErrors[targetKey], progress.error);
+  // 新上传／其他运行的具体图片不继承旧生成任务错误；卡片仍保留原任务的继续入口。
+  const previewOperationVisible = canStop || busy || !selected || !progress.operation || !!selected.taskId
+    && selected.taskId === (progress.operation.taskId || progress.task?.id) && (!selected.runId || selected.runId === progress.task?.runtime?.runId);
+  const previewError = imageError(stopError || error, externalError || state.imageTargetErrors[targetKey], previewOperationVisible ? progress.error : '');
+  // 组件复用于其他项目／目标或卸载后，原异步动作不得写回当前预览。
+  useEffect((): (() => void) => {
+    actionVersion.value++; awaitingResult.current = null;
+    setStarting(false); setSubmitting(false); setStopping(false); setStopError(''); setError(''); setFeedbackError(''); setFeedbackBaseId(undefined); setOpen(false);
+    return (): void => { actionVersion.value++; awaitingResult.current = null; };
+  }, [project.id, targetKey, actionVersion]);
+  const isCurrentAction = (version: number): boolean => version === actionVersion.value && usePetStoryStore.getState().project?.id === project.id;
   const show = (assetId?: string): void => {
     const nextId = assetId || candidates.at(-1)?.id || current?.id || images.at(-1)?.id;
     if (nextId !== selectedId) setReadable(false);
@@ -153,10 +173,20 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
   useEffect((): void => { if (previewAssetId) { setSelectedId(previewAssetId); setReadable(false); setOpen(true); } }, [previewAssetId]);
   const generate = async (): Promise<void> => {
     if (!onGenerate || busy || disabled || generationBlocked) return;
-    setError(''); setRecoveryFailed(false); setStarting(true); awaitingResult.current = new Set(images.map((asset): string => asset.id));
-    try { await onGenerate(); const latest = usePetStoryStore.getState(); if (latest.error) { awaitingResult.current = null; setError(latest.error); } }
-    catch (failure: unknown) { awaitingResult.current = null; setError(failure instanceof Error ? failure.message : '图片任务未启动，请重试'); }
-    finally { setStarting(false); }
+    const version = ++actionVersion.value;
+    setError(''); setStopError(''); setRecoveryFailed(false); setStarting(true); awaitingResult.current = new Set(images.map((asset): string => asset.id));
+    try { await onGenerate(); if (!isCurrentAction(version)) return; const ownError = usePetStoryStore.getState().imageTargetErrors[targetKey]; if (ownError) { awaitingResult.current = null; setError(ownError); } }
+    catch (failure: unknown) { if (isCurrentAction(version)) { awaitingResult.current = null; setError(failure instanceof Error ? failure.message : '图片任务未启动，请重试'); } }
+    finally { if (isCurrentAction(version)) setStarting(false); }
+  };
+  /** 停止不受生成期间的输入禁用影响；迟到的启动／修改回调不能覆盖停止后的界面。 */
+  const stop = async (): Promise<void> => {
+    if (stopping || usePetStoryStore.getState().project?.id !== project.id) return;
+    const version = ++actionVersion.value; awaitingResult.current = null;
+    setStopping(true); setStarting(false); setSubmitting(false); setError(''); setFeedbackError(''); setStopError('');
+    try { await usePetStoryStore.getState().stopImageOperation(target); if (isCurrentAction(version)) { setFeedbackBaseId(undefined); setOpen(false); } }
+    catch (failure: unknown) { if (isCurrentAction(version)) setStopError(failure instanceof Error ? failure.message : '停止尚未确认，请再次停止本次任务'); }
+    finally { if (isCurrentAction(version)) setStopping(false); }
   };
   const upload = async (): Promise<void> => {
     if (disabled || busy) return;
@@ -176,30 +206,34 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
     const latest = usePetStoryStore.getState(); if (latest.error) setError(latest.error); else setOpen(false);
   };
   const beginFeedback = (): void => {
-    if (!selected || !readable || disabled || busy) return;
+    if (!selected || !readable || disabled || busy || flowBusy) return;
     setFeedbackBaseId(selected.id); setFeedback(''); setFeedbackError(''); setOpen(false);
   };
   const submitFeedback = async (): Promise<void> => {
-    if (!feedbackBase || !feedback.trim() || submitting || disabled || progress.busy) return;
-    setSubmitting(true); setFeedbackError('');
+    if (!feedbackBase || !feedback.trim() || submitting || disabled || progress.busy || flowBusy) return;
+    const version = ++actionVersion.value;
+    setSubmitting(true); setFeedbackError(''); setStopError('');
     awaitingResult.current = new Set(images.map((asset): string => asset.id));
     try {
       if (onModify) await onModify(feedbackBase.id, feedback);
       else await state.modifyImage(target, feedbackBase.id, feedback);
+      if (!isCurrentAction(version)) return;
       const latest = usePetStoryStore.getState();
-      if (latest.error) { setFeedbackError(latest.error); return; }
+      const ownError = latest.imageTargetErrors[targetKey];
+      if (ownError) { setFeedbackError(ownError); return; }
       setFeedbackBaseId(undefined); setOpen(false);
-    } catch (failure: unknown) { setFeedbackError(failure instanceof Error ? failure.message : '修改任务未启动，请重试'); }
-    finally { setSubmitting(false); }
+    } catch (failure: unknown) { if (isCurrentAction(version)) setFeedbackError(failure instanceof Error ? failure.message : '修改任务未启动，请重试'); }
+    finally { if (isCurrentAction(version)) setSubmitting(false); }
   };
   const openConversation = (assetId?: string): void => { void state.openImageConversation(target, assetId); };
   const operationId = progress.operation?.id;
   const operationIssueVisible = !externalError && (recoveryFailed || !error || error === progress.error) && (progress.resumable || !!progress.error);
   const recover = async (): Promise<void> => {
-    if (!operationId) return;
-    setError(''); setRecoveryFailed(false);
-    try { await state.recoverImageOperation(operationId); const latest = usePetStoryStore.getState(); if (latest.error) { setError(latest.error); setRecoveryFailed(true); } }
-    catch (failure: unknown) { setError(failure instanceof Error ? failure.message : '原图片任务未能继续，请重试'); setRecoveryFailed(true); }
+    if (!operationId || recoveryBlocked) return;
+    const version = ++actionVersion.value;
+    setError(''); setStopError(''); setRecoveryFailed(false);
+    try { await state.recoverImageOperation(operationId); if (!isCurrentAction(version)) return; const ownError = usePetStoryStore.getState().imageTargetErrors[targetKey]; if (ownError) { setError(ownError); setRecoveryFailed(true); } }
+    catch (failure: unknown) { if (isCurrentAction(version)) { setError(failure instanceof Error ? failure.message : '原图片任务未能继续，请重试'); setRecoveryFailed(true); } }
   };
   const retry = operationId && operationIssueVisible ? recover : externalError ? onRetry : undefined;
   return <div ref={root} className="petstory-image-review" data-image-target={title}>
@@ -207,15 +241,15 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
       : <div className="petstory-image-empty"><PictureOutlined /><span>尚未采用图片</span></div>}
     {current && needsReview && <p className="canvas-error">参考内容已更新，请复核这张图片。</p>}
     <ImageActions current={current} currentNeedsReview={needsReview} candidateCount={candidates.length} disabled={disabled} busy={busy} generationDisabled={generationBlocked} show={show} upload={upload} generate={onGenerate ? generate : undefined} openConversation={task ? (): void => openConversation() : undefined} conversationLabel={task && !resolveTaskConversationTarget(task).ok ? '打开原账号豆包' : undefined} />
-    {!open && !feedbackBase && <ImageOperationStatus progress={progress} error={visibleError} preparing={starting} disabled={disabled || busy} retry={retry} />}
-    {!feedbackBase && currentResubmission && <PetStoryResubmissionActions projectId={project.id} task={currentResubmission} disabled={disabled || busy} />}
-    {open && <Modal className="petstory-image-modal" title={`${title} · 选择图片`} open width={1000} onCancel={(): void => setOpen(false)} footer={<PreviewActions reviewingCurrent={reviewingCurrent} confirmingCurrent={confirmingCurrent} hasCurrent={!!current} hasSelected={!!selected} locked={disabled || busy} readable={readable} saving={state.busy} generationDisabled={generationBlocked} generating={busy} regenerate={onGenerate ? generate : undefined} close={(): void => setOpen(false)} modify={beginFeedback} adopt={adopt} />}>
+    {!open && !feedbackBase && <ImageOperationStatus progress={progress} error={visibleError} preparing={starting} disabled={disabled || busy || recoveryBlocked} retry={retry} stop={canStop ? stop : undefined} stopping={stopping} />}
+    {!feedbackBase && currentResubmission && <PetStoryResubmissionActions projectId={project.id} task={currentResubmission} disabled={disabled || busy || recoveryBlocked} />}
+    {open && <Modal className="petstory-image-modal" title={`${title} · 选择图片`} open width={1000} onCancel={(): void => setOpen(false)} footer={<PreviewActions reviewingCurrent={reviewingCurrent} confirmingCurrent={confirmingCurrent} hasCurrent={!!current} hasSelected={!!selected} locked={disabled || busy} readable={readable} saving={state.busy} generationDisabled={generationBlocked} modificationDisabled={flowBusy} generating={busy} regenerate={onGenerate ? generate : undefined} close={(): void => setOpen(false)} modify={beginFeedback} adopt={adopt} />}>
       <div ref={previewBody}>
-      <ImageOperationStatus progress={progress} error={visibleError} preparing={starting} disabled={disabled || busy} retry={retry} />
+      {(previewOperationVisible || previewError) && <ImageOperationStatus progress={progress} error={previewError} preparing={starting} disabled={disabled || busy || recoveryBlocked} retry={previewOperationVisible ? retry : undefined} stop={canStop ? stop : undefined} stopping={stopping} />}
       <ImagePreviewBody project={project} title={title} images={images} candidates={candidates} current={current} selected={selected} reviewingCurrent={reviewingCurrent} confirmingCurrent={confirmingCurrent} identity={identity} locked={disabled || busy} readable={readable} batchSelectedId={batchSelectedId} onBatchSelection={onBatchSelection} hasConversation={!!selectedTask} onReadable={setReadable} select={(assetId: string): void => { if (selectedId !== assetId) setReadable(false); setSelectedId(assetId); setError(''); }} upload={upload} openConversation={(): void => openConversation(selected?.id)} />
       </div>
     </Modal>}
-    {feedbackBase && <ImageFeedbackDialog projectId={project.id} title={title} base={feedbackBase} feedback={feedback} error={feedbackError} submitting={submitting} disabled={disabled || progress.busy} cancel={(): void => { setFeedbackBaseId(undefined); setOpen(true); }} submit={submitFeedback} change={setFeedback} />}
+    {feedbackBase && <ImageFeedbackDialog projectId={project.id} title={title} base={feedbackBase} feedback={feedback} error={stopError || feedbackError} submitting={submitting} disabled={disabled || progress.busy || flowBusy || stopping || !!stopError} cancel={(): void => { setFeedbackBaseId(undefined); setOpen(true); }} submit={submitFeedback} change={setFeedback} stop={canStop ? stop : undefined} stopping={stopping} />}
 
   </div>;
 };

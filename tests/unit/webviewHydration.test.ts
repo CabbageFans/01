@@ -32,6 +32,12 @@ describe('webview 按需挂载策略', () => {
     })).toEqual([]);
   });
 
+  it('独立图片执行范围映射回原账号，不创建虚构账号宿主或回收任务账号', (): void => {
+    const scoped = { 'image:account-b:TEST-project:character%3Ab': 'TEST-task-b' };
+    expect(getWebviewHydrationAccountIds(accounts, 'account-a', scoped)).toEqual(['account-a', 'account-b']);
+    expect(getSupersededLoadingAccountIds(['account-a', 'account-b'], new Set(['account-b']), 'account-a', scoped)).toEqual([]);
+  });
+
   it('后台账号移出可视区，避免 Electron guest surface 串画面', () => {
     const style = { opacity: '', pointerEvents: '', transform: '', zIndex: '', visibility: '' };
     applyWebviewActivationStyle(style, false);

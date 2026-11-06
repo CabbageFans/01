@@ -5,7 +5,9 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import type { Task } from '@doubao-studio/contracts';
+import { getTaskExecutionScope } from '../../src/utils/taskExecutionScope';
 import original from '../fixtures/storyboard-five-shots.json';
+import { MaterialImagePages } from '../../src/utils/materialImagePages';
 
 function executeEntry(bindings: Record<string, unknown>): (...args: unknown[]) => Promise<void> {
   const file = ts.createSourceFile('BrowserPanel.tsx', fs.readFileSync(path.resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
@@ -16,7 +18,7 @@ function executeEntry(bindings: Record<string, unknown>): (...args: unknown[]) =
   };
   visit(file); if (!expression) throw new Error('OFFLINE: actual BrowserPanel execution entry not found');
   const script = ts.transpileModule('(' + expression + ')', { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
-  return vm.runInNewContext(script, bindings) as (...args: unknown[]) => Promise<void>;
+  return vm.runInNewContext(script, { getTaskExecutionScope, materialPagesRef: { current: new MaterialImagePages() }, ...bindings }) as (...args: unknown[]) => Promise<void>;
 }
 
 function task(): Task {

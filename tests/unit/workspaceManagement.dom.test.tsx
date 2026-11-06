@@ -1,7 +1,7 @@
 /** 离线管理界面回归；账号、下载和平台接口均为替身，不读取生产数据。 */
 import React from 'react';
 import { message } from 'antd';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AccountList } from '../../src/components/AccountList';
 import { DownloadQueueModal } from '../../src/components/DownloadQueueModal';
@@ -22,13 +22,19 @@ beforeEach((): void => {
   useTaskStore.setState({ ...originals.tasks, tasks: [], accountAutomationState: {}, accountBusy: {} });
   useProjectStore.setState({ ...originals.projects, activeProjectId: 'TEST-project' });
 });
-afterEach((): void => { message.destroy(); useAccountStore.setState(originals.accounts); useTaskStore.setState(originals.tasks); useProjectStore.setState(originals.projects); vi.restoreAllMocks(); });
+afterEach(async (): Promise<void> => {
+  // 先解除组件订阅，再等待 AntD 独立提示根清理，避免环境销毁后仍提交 React 更新。
+  cleanup();
+  await act(async (): Promise<void> => { message.destroy(); });
+  useAccountStore.setState(originals.accounts); useTaskStore.setState(originals.tasks); useProjectStore.setState(originals.projects);
+  vi.restoreAllMocks();
+});
 
 describe('管理界面的真实操作边界', (): void => {
   it('账号键盘切换同样遵守提交租约；释放后可切换，更多动作不抢占选中', async (): Promise<void> => {
     const select = vi.fn(); useAccountStore.setState({ selectAccount: select });
     useTaskStore.setState({ accountAutomationState: { 'TEST-first': 'submitting' } }); render(<AccountList />);
-    fireEvent.keyDown(screen.getByRole('button', { name: '选择账号TEST-second' }), { key: 'Enter' }); expect(select).not.toHaveBeenCalled();
+    await act(async (): Promise<void> => { fireEvent.keyDown(screen.getByRole('button', { name: '选择账号TEST-second' }), { key: 'Enter' }); }); expect(select).not.toHaveBeenCalled();
     await act(async (): Promise<void> => { useTaskStore.setState({ accountAutomationState: {} }); });
     fireEvent.keyDown(screen.getByRole('button', { name: '选择账号TEST-second' }), { key: ' ' }); expect(select).toHaveBeenCalledWith('TEST-second');
     select.mockClear(); fireEvent.click(screen.getByRole('button', { name: 'TEST-second更多操作' })); expect(select).not.toHaveBeenCalled();

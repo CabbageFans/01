@@ -47,6 +47,25 @@ describe('原运行媒体提交收据的发布消息证明', (): void => {
     expect(mediaSubmissionReceiptFor(original, structuredClone(original), accountId, sample, observedAt)).toBeUndefined();
   });
 
+  it('原全文唯一时，历史聊天和后发空用户消息不否定已经发布的图片收据', (): void => {
+    const original = task(); const sample = page();
+    sample.snapshot.messages.unshift({ role: 'user', text: 'TEST 历史聊天', messageId: 'TEST-history-user' },
+      { role: 'assistant', text: 'TEST 历史回复', messageId: 'TEST-history-reply' });
+    sample.snapshot.messages.push({ role: 'user', text: '', attachmentOnly: true, messageId: 'TEST-later-upload' });
+    sample.messageIds = sample.snapshot.messages.flatMap((message): string[] => message.messageId ? [message.messageId] : []);
+    expect(mediaSubmissionReceiptFor(original, structuredClone(original), accountId, sample, observedAt)).toMatchObject({ userMessageId: 'TEST-server-user', runId: 'TEST-run' });
+  });
+
+  it('已有原图片收据在重复同文后仍选择原服务器消息，且不允许错误收据回退到全文', (): void => {
+    const original = task(); const sample = page();
+    const receipt = mediaSubmissionReceiptFor(original, structuredClone(original), accountId, sample, observedAt)!;
+    original.runtime!.mediaSubmissionReceipt = receipt;
+    sample.snapshot.messages.push({ ...sample.snapshot.messages[0], messageId: 'TEST-second-server-user' }); sample.messageIds!.push('TEST-second-server-user');
+    expect(mediaSubmissionReceiptFor(original, structuredClone(original), accountId, sample, observedAt)).toMatchObject({ userMessageId: 'TEST-server-user' });
+    original.runtime!.mediaSubmissionReceipt = { ...receipt, userMessageId: 'TEST-missing' };
+    expect(mediaSubmissionReceiptFor(original, structuredClone(original), accountId, sample, observedAt)).toBeUndefined();
+  });
+
   it.each(['root', 'foreign-origin', 'temporary-route', 'different-conversation', 'snapshot-conversation'] as const)('%s不是当前已发布请求的具体服务器会话', (condition): void => {
     const original = task(); const sample = page();
     if (condition === 'root') sample.conversationUrl = 'https://www.doubao.com/chat/';

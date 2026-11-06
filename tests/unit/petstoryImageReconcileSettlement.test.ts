@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PetStoryPlan, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { isBackgroundPetStoryTask } from '../../src/utils/petstoryBackground';
 import { requiresSubmissionReconciliation, verifiedSubmissionConversationUrl } from '../../src/utils/realSendStateMachine';
-import { diagnoseCreationReadback, inspectCreationReadback, type ChatPageSnapshot } from '../../src/utils/chatReadback';
+import { diagnoseCreationReadback, inspectCreationReadback, inspectSubmittedImageReadback, type ChatPageSnapshot } from '../../src/utils/chatReadback';
 import { waitForSubmittedCreationReadback, type SubmittedCreationReadbackOptions, type SubmittedCreationReadbackSample } from '../../src/utils/submittedCreationReadback';
 import { canSelectAccount, findInteractiveAccountId } from '../../src/utils/interactiveAccount';
 import { syncTaskConversation, type ConversationSyncPageSnapshot, type ConversationSyncResult } from '../../src/utils/conversationSync';
@@ -15,6 +15,8 @@ import { isSameDoubaoConversation, normalizeDoubaoConversationUrl, resolveTaskCo
 import { mediaSubmissionReceiptFor } from '../../src/utils/mediaSubmissionReceipt';
 import type { CurrentCreationConversationReadback } from '../../src/utils/creationConversationIdentity';
 import { inspectImageArtifactReadback, type ImageArtifactReadbackContext, type ImageArtifactObservationOptions } from '../../src/utils/imageArtifactReadback';
+import { getTaskExecutionScope, tasksExecutionConflict } from '../../src/utils/taskExecutionScope';
+import { MaterialImagePages } from '../../src/utils/materialImagePages';
 import original from '../fixtures/storyboard-five-shots.json';
 
 type RuntimePatch = { status?: Task['status']; runtime?: Partial<NonNullable<Task['runtime']>>; errorInfo?: Task['errorInfo'] };
@@ -57,16 +59,20 @@ function fixture(): {
   const promises = { current: new Map<string, Promise<void>>() };
   const view = { getURL: vi.fn((): string => 'https://www.doubao.com/chat/TEST-current'), loadURL: vi.fn(), reload: vi.fn(), sendInputEvent: vi.fn() };
   const selectAccount = vi.fn();
+  type TaskProjection = { accountAutomationState: Record<string, string>; accountAutoMessage: Record<string, string> };
+  const projection: TaskProjection = { accountAutomationState: {}, accountAutoMessage: {} };
   const bindings: Record<string, unknown> = {
-    useTaskStore: { getState: (): object => ({ tasks: [current], accountAutomationState: {}, updateTaskRuntime: writes, completeAutomation: complete, setAccountAutomationState: vi.fn(),
+    useTaskStore: { getState: (): object => ({ tasks: [current], ...projection, updateTaskRuntime: writes, completeAutomation: complete, setAccountAutomationState: vi.fn(),
       pauseAutomation: async (id: string, _accountId: string, text: string, options: { status: Task['status']; code: string }): Promise<boolean> => writes(id, {
         status: options.status, errorInfo: { code: options.code, message: text, recoverable: true, detectedAt: now }, runtime: { stage: 'waiting_verification', message: text },
       }),
-    }) }, usePetStoryStore: { getState: (): object => ({ project }) },
+    }), setState: (update: Partial<TaskProjection> | ((state: TaskProjection) => Partial<TaskProjection>)): void => {
+      Object.assign(projection, typeof update === 'function' ? update(projection) : update);
+    } }, usePetStoryStore: { getState: (): object => ({ project }) },
     useAccountStore: { getState: (): object => ({ accounts: [{ id: 'TEST-account', platform: 'doubao' }], selectAccount, recordAccountOutcome: vi.fn(async (): Promise<void> => undefined) }) },
     isBackgroundPetStoryTask, visibleRef: { current: false }, requiresSubmissionReconciliation, hasAccountChatAdjustment: (): boolean => false,
     resolveTaskConversationTarget, supportsDoubaoConversationLocator, normalizeDoubaoConversationUrl, isSameDoubaoConversation,
-    inspectCreationReadback, diagnoseCreationReadback, verifiedSubmissionConversationUrl, mediaSubmissionReceiptFor,
+    inspectCreationReadback, inspectSubmittedImageReadback, diagnoseCreationReadback, verifiedSubmissionConversationUrl, mediaSubmissionReceiptFor,
     waitForSubmittedCreationReadback: vi.fn((options: SubmittedCreationReadbackOptions): Promise<SubmittedCreationReadbackSample> => {
       let elapsed = 0;
       return waitForSubmittedCreationReadback({ ...options, timeoutMs: 2000, now: (): number => elapsed,
@@ -95,6 +101,9 @@ function fixture(): {
     automationEngine: { hasController: (): boolean => false }, canSelectAccount, findInteractiveAccountId,
     sleepWithAbort: actualFunction<(ms: number, signal: AbortSignal) => Promise<void>>('sleepWithAbort', { window: { setTimeout, clearTimeout } }),
     registryRef: { current: new Map([['TEST-account', view]]) }, loadingMapRef: { current: new Map([['TEST-account', false]]) },
+    tasksExecutionConflict, getTaskExecutionScope,
+    materialPagesRef: { current: new MaterialImagePages() }, poolRef: { current: null }, setViewedTaskPageId: vi.fn(),
+    useCallback: <T>(callback: T): T => callback,
     waitForConversationNavigator: vi.fn(async (): Promise<typeof view> => view),
     getChatPageSnapshot: vi.fn(async (): Promise<object> => ({ messages: [], editorPresent: true, editorText: current.prompt, generating: false })),
     getCreationReadbackSnapshot: vi.fn(async (): Promise<ChatPageSnapshot> => ({ messages: [], editorPresent: true, editorText: '', generating: true })),
@@ -110,6 +119,11 @@ function fixture(): {
     conversationSyncMessage: (result: ConversationSyncResult): string => result.ok ? 'TEST 已同步' : `TEST 原会话未同步：${result.reason}`,
     assertNoHumanVerification: vi.fn(async (): Promise<void> => undefined), AccountAvailabilityPauseError: OfflineAccountPause,
   };
+  // 运行真实路由/归属闭包；当前任务、账号和注册实例改变时仍须拒绝迟到结果。
+  bindings.getTaskWebview = actualFunction('getTaskWebview', bindings);
+  bindings.ownsTaskWebview = actualFunction('ownsTaskWebview', bindings);
+  bindings.taskWebviewReady = actualFunction('taskWebviewReady', bindings);
+  bindings.ensureTaskWebview = actualFunction('ensureTaskWebview', bindings);
   const handler = (override?: ReconcileHandler): ReconcileHandler => {
     const handleSubmissionReconcile = override || actualFunction<ReconcileHandler>('handleSubmissionReconcile', bindings);
     const runSubmissionReconcileSafely = actualFunction<ReconcileHandler>('runSubmissionReconcileSafely', { ...bindings, handleSubmissionReconcile });
@@ -182,6 +196,7 @@ describe('图片只读恢复预检退出后的真实状态收束', (): void => {
       runId: before?.runId, accountId: 'TEST-account', submittedAt: before?.submittedAt, conversationUrl: page.conversationUrl, userMessageId: 'TEST-original-user' });
     expect(test.current().runtime?.conversationUrl).toBe(page.conversationUrl);
     expect(test.current().runtime?.input).toEqual(before?.input);
+    expect(test.writes.mock.calls.some((call): boolean => call[1].status === 'generating')).toBe(false);
     const receiptWrite = test.writes.mock.calls.findIndex((call): boolean => !!call[1].runtime?.mediaSubmissionReceipt);
     expect(receiptWrite).toBeGreaterThanOrEqual(0);
     expect(test.writes.mock.invocationCallOrder[receiptWrite]).toBeLessThan(test.complete.mock.invocationCallOrder[0]);
@@ -218,6 +233,55 @@ describe('图片只读恢复预检退出后的真实状态收束', (): void => {
       expect.objectContaining({ prompt: originalRuntime.input.prompt, runId: receipt.runId, userMessageId: receipt.userMessageId }),
       expect.objectContaining({ ensureCurrent: expect.any(Function) }));
     expect(test.current().runtime?.mediaSubmissionReceipt).toEqual(receipt);
+    expect(test.view.reload).not.toHaveBeenCalled(); expect(test.view.loadURL).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('旧图片任务缺收据且已有后续消息时，一次扫描定位唯一原全文并保存消息身份（已有URL=%s）', async (knownUrl: boolean): Promise<void> => {
+    const test = fixture(); const before = structuredClone(test.current().runtime!);
+    const page = providerImage(test.current().prompt, 'TEST-current');
+    page.snapshot.generating = false;
+    page.snapshot.editorText = 'TEST 用户后续草稿';
+    page.snapshot.messages.push({ role: 'user', text: '', messageId: 'TEST-later-user' },
+      { role: 'assistant', text: '', messageId: 'TEST-later-assistant', replyId: 'TEST-later-user' });
+    page.messageIds!.push('TEST-later-user', 'TEST-later-assistant');
+    if (knownUrl) test.replace({ ...test.current(), runtime: { ...test.current().runtime!, conversationUrl: test.view.getURL() } });
+    test.bindings.getCurrentCreationConversation = vi.fn(async (): Promise<CurrentCreationConversationReadback> => page);
+    await test.handler()(test.event);
+    expect(test.current().status).toBe('done'); expect(test.complete).toHaveBeenCalledOnce();
+    expect(test.bindings.getCurrentCreationConversation).toHaveBeenCalledOnce();
+    expect(test.current().runtime?.mediaSubmissionReceipt).toMatchObject({ runId: before.runId, submittedAt: before.submittedAt,
+      userMessageId: 'TEST-original-user', conversationUrl: page.conversationUrl });
+    expect(test.current().runtime?.input).toEqual(before.input);
+    expect(test.bindings.readAcceptedImageOutputs).toHaveBeenCalledWith(test.view, page.conversationUrl, expect.any(AbortSignal), undefined,
+      expect.objectContaining({ userMessageId: 'TEST-original-user' }), expect.objectContaining({ ensureCurrent: expect.any(Function) }));
+    expect(test.bindings.synchronizeConversation).not.toHaveBeenCalled();
+    expect(test.view.reload).not.toHaveBeenCalled(); expect(test.view.loadURL).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled();
+    expect(test.errors).not.toHaveBeenCalled();
+  });
+
+  it('原要求先返回文字方案，已有生成图片指令及三候选沿原任务恢复，不再发送', async (): Promise<void> => {
+    const test = fixture(); const before = structuredClone(test.current().runtime!);
+    const page = providerImage(test.current().prompt, 'TEST-current');
+    const outputs = [1, 2, 3].map((index: number): string => `https://media.example/TEST-original-${index}.png`);
+    page.snapshot.generating = false;
+    page.snapshot.messages[1].text = 'TEST 原图片方案';
+    page.snapshot.messages.push({ role: 'user', text: '生成图片', messageId: 'TEST-image-command' },
+      { role: 'assistant', text: 'TEST 已生成三张图片', messageId: 'TEST-image-result', replyId: 'TEST-image-command', imageArtifactUrls: outputs, imageArtifactPending: false });
+    page.messageIds!.push('TEST-image-command', 'TEST-image-result');
+    test.bindings.getCurrentCreationConversation = vi.fn(async (): Promise<CurrentCreationConversationReadback> => page);
+    test.bindings.readAcceptedImageOutputs = vi.fn(async (_view: unknown, _url: string, _signal: AbortSignal, _timeout: number | undefined,
+      context: ImageArtifactReadbackContext, options: ImageArtifactObservationOptions): Promise<string[]> => {
+      options.ensureCurrent();
+      const evidence = inspectImageArtifactReadback(page.snapshot, context);
+      if (evidence.reason !== 'ready') throw new Error('TEST 原生成指令的三张图未定位');
+      return evidence.outputs;
+    });
+    await test.handler()(test.event);
+    expect(test.current().status).toBe('done'); expect(test.current().outputs).toEqual(outputs);
+    expect(test.current().runtime?.mediaSubmissionReceipt?.userMessageId).toBe('TEST-original-user');
+    expect(test.current().runtime?.runId).toBe(before.runId); expect(test.current().runtime?.submittedAt).toBe(before.submittedAt);
+    expect(test.current().runtime?.input).toEqual(before.input);
+    expect(test.bindings.getCurrentCreationConversation).toHaveBeenCalledOnce();
     expect(test.view.reload).not.toHaveBeenCalled(); expect(test.view.loadURL).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled();
   });
 
@@ -308,12 +372,13 @@ describe('图片只读恢复预检退出后的真实状态收束', (): void => {
     expect(test.current().status).toBe('cancelled'); expect(test.complete).not.toHaveBeenCalled(); expect(test.current().outputs).toEqual([]);
   });
 
-  it('读取原全文期间换run或换会话时不保存定位、不绑定产物', async (): Promise<void> => {
-    for (const change of ['run', 'conversation'] as const) {
+  it('读取原全文期间换run、会话或页面实例时不保存定位、不绑定产物', async (): Promise<void> => {
+    for (const change of ['run', 'conversation', 'webview'] as const) {
       const test = fixture();
       test.bindings.getCreationReadbackSnapshot = vi.fn(async (): Promise<ChatPageSnapshot> => {
         if (change === 'run') test.replace({ ...test.current(), runtime: { ...test.current().runtime!, runId: 'TEST-new-run' } });
-        else test.view.getURL.mockReturnValue('https://www.doubao.com/chat/TEST-another');
+        else if (change === 'conversation') test.view.getURL.mockReturnValue('https://www.doubao.com/chat/TEST-another');
+        else (test.bindings.registryRef as { current: Map<string, typeof test.view> }).current.set('TEST-account', { ...test.view });
         return publishedImage(test.current().prompt);
       });
       await test.handler()(test.event);

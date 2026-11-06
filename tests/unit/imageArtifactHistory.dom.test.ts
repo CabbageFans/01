@@ -1,6 +1,6 @@
 /** 真实序列化只读回读，使用合成 provider 消息与图片卡验证归属及虚拟卸载。 */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getCreationReadbackSnapshot, readAcceptedImageOutputs, type WebviewHandle } from '../../src/utils/doubaoBridge';
+import { getCreationReadbackSnapshot, getCurrentCreationConversation, readAcceptedImageOutputs, type WebviewHandle } from '../../src/utils/doubaoBridge';
 import { readChatPage } from '../../src/utils/chatReadback';
 import { inspectImageArtifactReadback } from '../../src/utils/imageArtifactReadback';
 
@@ -94,6 +94,103 @@ describe('原图片卡证据的DOM读取和消息ID历史缓存', (): void => {
     expect(snapshot.messages[2]).toMatchObject({ messageId: 'TEST-original-user', turnId: 'TEST-shared-turn' });
     expect(snapshot.messages[3]).toMatchObject({ imageUrls: [originalImage], imageArtifactUrls: [originalImage], imageArtifactPending: false });
     expect(inspectImageArtifactReadback(snapshot, { prompt, runId: 'TEST-run', userMessageId: 'TEST-original-user' }).outputs).toEqual([originalImage]);
+  });
+
+  it('真实序列化历史中原助手询问生图、用户回复“要”后，按明确消息父链一次取齐三张既有原图', async (): Promise<void> => {
+    vi.useFakeTimers(); const test = fixture();
+    test.models[3].image = undefined; test.models[3].text = '你现在是要我直接调用生图生成这张图吗？'; test.models[4].text = '要'; test.mount();
+    for (const image of test.nodeFor('TEST-next-user').querySelectorAll('img')) image.remove();
+    const originals = [1, 2, 3].map((index: number): string => `https://test.invalid/confirmed-${index}.png`);
+    const thumbs = [1, 2, 3].map((index: number): string => `https://test.invalid/confirmed-thumb-${index}.png`);
+    test.messageFor('TEST-next-reply').content_blocks = [{ is_finish: true, content_obj: { creations: originals.map((source: string, index: number): object => ({ image: {
+      status: 2, image_thumb: { url: thumbs[index], width: 2848, height: 1600 }, image_ori: { url: source, width: 2848, height: 1600 },
+    } })) } }];
+    test.nodeFor('TEST-next-reply').querySelector('[data-testid="message_image_content"]')!.replaceChildren(...thumbs.map((source: string): HTMLImageElement => picture(source, 384, 216)));
+    const snapshot = await getCreationReadbackSnapshot(test.view, { conversationUrl: url });
+    expect(snapshot.historyComplete).toBe(true); expect(snapshot.messages[3].imageArtifactUrls).toBeUndefined();
+    expect(snapshot.messages[4]).toMatchObject({ role: 'user', text: '要', messageId: 'TEST-next-user' }); expect(snapshot.messages[4].hasAttachments).not.toBe(true);
+    expect(snapshot.messages[5]).toMatchObject({ replyId: 'TEST-next-user', imageArtifactPending: false, imageArtifactUrls: originals });
+    const recovering = readAcceptedImageOutputs(test.view, url, undefined, 5000, { prompt, runId: 'TEST-run', userMessageId: 'TEST-original-user' }, { ensureCurrent: (): void => undefined });
+    await vi.advanceTimersByTimeAsync(2000); expect(await recovering).toEqual(originals);
+    expect(test.view.loadURL).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled();
+  });
+
+  it.each(['real-user-attachment', 'unknown-reply-chain'] as const)('真实序列化的肯定回复遇到%s仍不串接图片', async (variant): Promise<void> => {
+    const test = fixture(); test.models[3].image = undefined; test.models[3].text = '需要我帮你生成图片吗？'; test.models[4].text = '要';
+    if (variant === 'unknown-reply-chain') test.models[5].replyId = 'TEST-unknown-parent';
+    test.mount();
+    if (variant === 'unknown-reply-chain') for (const image of test.nodeFor('TEST-next-user').querySelectorAll('img')) image.remove();
+    const snapshot = await getCreationReadbackSnapshot(test.view, { conversationUrl: url });
+    if (variant === 'real-user-attachment') expect(snapshot.messages[4].hasAttachments).toBe(true);
+    expect(inspectImageArtifactReadback(snapshot, { prompt, runId: 'TEST-run', userMessageId: 'TEST-original-user' }).outputs).toEqual([]);
+    expect(test.view.loadURL).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled();
+  });
+
+  it('图卡诊断只保留已知结构及比较结果，不泄露provider正文、身份、凭据或媒体地址', async (): Promise<void> => {
+    const test = fixture(); const model = test.messageFor('TEST-original-reply');
+    model.cookie = 'TEST-private-cookie'; model.token = 'TEST-private-token'; model.unknown_payload = 'TEST-private-payload';
+    const visible = readChatPage(document); const history = await getCreationReadbackSnapshot(test.view, { conversationUrl: url });
+    for (const snapshot of [visible, history]) {
+      const diagnostic = snapshot.messages.find((message): boolean => message.imageArtifactUrls?.includes(originalImage) === true)?.imageArtifactDiagnostics;
+      expect(diagnostic).toMatchObject({ cardCount: 1, renderedImageCount: 2, modelFound: true,
+        blockCounts: { normalized: 2, v2: 0, legacy: 0 }, creationCount: 1, matchedCreationCount: 1, matchedCardCount: 1,
+        creations: [{ imagePresent: true, status: 2, statusType: 'number', finished: true, finishedType: 'boolean', matchedCardCount: 1 }] });
+      expect(diagnostic?.creations[0].variants.find((variant): boolean => variant.field === 'image_ori'))
+        .toMatchObject({ present: true, urlValid: true, widthType: 'number', heightType: 'number', widthPositive: true, heightPositive: true, matchedCardCount: 1 });
+      const serialized = JSON.stringify(diagnostic);
+      for (const secret of [prompt, url, originalImage, 'https:', 'TEST-original', 'TEST-private-cookie', 'TEST-private-token', 'TEST-private-payload']) expect(serialized).not.toContain(secret);
+    }
+  });
+
+  it('缺失卡片选择器时保留结构诊断，不把provider原图字段升级为产物', async (): Promise<void> => {
+    const test = fixture(); test.nodeFor('TEST-original-reply').querySelector('[data-testid="message_image_content"]')!.remove();
+    const snapshot = await getCreationReadbackSnapshot(test.view, { conversationUrl: url });
+    expect(snapshot.messages[3]).toMatchObject({ imageArtifactDiagnostics: { cardCount: 0, modelFound: true, creationCount: 1, matchedCreationCount: 0, matchedCardCount: 0 } });
+    expect(snapshot.messages[3].imageArtifactUrls).toBeUndefined();
+    expect(inspectImageArtifactReadback(snapshot, { prompt, runId: 'TEST-run' }).outputs).toEqual([]);
+  });
+
+  it('完整身份快照不含图片证据时，后续真实图片快照仍一次取齐原轮次三候选', async (): Promise<void> => {
+    const test = fixture(); const node = test.nodeFor('TEST-original-reply');
+    const originals = [1, 2, 3].map((ordinal: number): string => `https://test.invalid/candidate-${ordinal}.png`);
+    const thumbs = [1, 2, 3].map((ordinal: number): string => `https://test.invalid/candidate-thumb-${ordinal}.png`);
+    test.messageFor('TEST-original-reply').content_blocks = [{ is_finish: true, content_obj: { creations: originals.map((source: string, index: number): object => ({ image: {
+      status: 2, image_thumb: { url: thumbs[index], width: 2848, height: 1600 }, image_ori: { url: source, width: 2848, height: 1600 },
+    } })) } }];
+    const card = node.querySelector('[data-testid="message_image_content"]')!;
+    card.replaceChildren(...thumbs.map((source: string): HTMLImageElement => picture(source, 384, 216)));
+    const identity = await getCurrentCreationConversation(test.view);
+    expect(identity.source).toBe('published_message');
+    expect(identity.snapshot.messages[3].imageArtifactUrls).toBeUndefined();
+    const snapshot = await getCreationReadbackSnapshot(test.view, { conversationUrl: url });
+    expect(inspectImageArtifactReadback(snapshot, { prompt, runId: 'TEST-run', userMessageId: 'TEST-original-user' }))
+      .toMatchObject({ reason: 'ready', outputs: originals });
+    expect(test.view.loadURL).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled();
+  });
+
+  it('后续空用户消息及其图片保持独立轮次，不能因共享union或指回旧助手而串入原图', async (): Promise<void> => {
+    const test = fixture(); test.models[4].text = ''; test.models[5].replyId = 'TEST-original-reply'; test.mount();
+    const snapshot = await getCreationReadbackSnapshot(test.view, { conversationUrl: url });
+    expect(snapshot.messages[4]).toMatchObject({ role: 'user', text: '' });
+    expect(inspectImageArtifactReadback(snapshot, { prompt, runId: 'TEST-run', userMessageId: 'TEST-original-user' }))
+      .toMatchObject({ reason: 'ready', outputs: [originalImage] });
+    test.models[3].image = undefined; test.mount();
+    const missing = await getCreationReadbackSnapshot(test.view, { conversationUrl: url });
+    expect(inspectImageArtifactReadback(missing, { prompt, runId: 'TEST-run', userMessageId: 'TEST-original-user' }))
+      .toMatchObject({ reason: 'image_pending', outputs: [] });
+  });
+
+  it.each(['normalized', 'legacy'] as const)('content_blocks_v2的%s图片模型与常规模型读取同一原图，不误等生成完成', async (format): Promise<void> => {
+    const test = fixture(); const model = test.messageFor('TEST-original-reply');
+    const blocks = model.content_blocks as { content_obj: object; is_finish?: boolean }[];
+    model.content_blocks_v2 = format === 'normalized' ? blocks : blocks.map((block): object => ({ is_finish: block.is_finish, content: { creation_block: block.content_obj } }));
+    delete model.content_blocks;
+    const visible = readChatPage(document);
+    const history = await getCreationReadbackSnapshot(test.view, { conversationUrl: url });
+    for (const snapshot of [visible, history]) {
+      expect(snapshot.messages.find((message): boolean => message.role === 'assistant' && !!message.imageUrls?.includes(originalImage)))
+        .toMatchObject({ imageArtifactUrls: [originalImage], imageArtifactPending: false });
+    }
   });
 
   it('已证明的原图片卡虚拟卸载后，按同消息ID缓存回收，挂载晚图不能顶替', async (): Promise<void> => {

@@ -128,3 +128,4 @@ export type { PetStoryChatAdjustment, PetStoryConversationReply, PetStoryAdjustm
 export type { PetStoryAdjustmentPreview, PetStoryAdjustmentPreviewResult } from './dto/petstoryAdjustment';
 
 export type { PetStoryTimingPlan, PetStoryDialogueSource } from './dto/petstory';
+export type { PetStoryAutoModePlan } from './dto/petstory';

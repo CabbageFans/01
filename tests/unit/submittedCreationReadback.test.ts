@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CreationReadbackResult } from '../../src/utils/chatReadback';
 import {
+  SubmittedCreationReadbackAmbiguityError,
   SubmittedCreationReadbackContextError,
   SubmittedCreationReadbackTimeoutError,
   waitForSubmittedCreationReadback,
@@ -92,6 +93,52 @@ describe('原次创作提交的有界只读确认', (): void => {
     expect(clock).toBe(60_000);
     expect(JSON.stringify(progress)).not.toContain('private reply');
     expect(JSON.stringify(progress)).not.toContain(originalUrl);
+  });
+
+  it('恢复完整历史中稳定重复的歧义只复读一次，不白等60秒且不输出正文', async (): Promise<void> => {
+    vi.useFakeTimers();
+    const read = vi.fn(async (): Promise<SubmittedCreationReadbackSample> => ({
+      ...sample(originalUrl, { messageCount: 4, reason: 'user_ambiguous', replyRawText: 'TEST private reply',
+        candidates: [{ messageIndex: 3, messageId: 'TEST-assistant', rawText: 'TEST private candidate' }] }), historyComplete: true,
+    }));
+    const pending = waitForSubmittedCreationReadback({ read, ensureCurrent, stopOnStableAmbiguity: true,
+      wait: async (milliseconds: number): Promise<void> => new Promise((resolve: () => void): void => { setTimeout(resolve, milliseconds); }) });
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'SubmittedCreationReadbackAmbiguityError', reason: 'user_ambiguous',
+      message: expect.not.stringContaining('private') });
+    await vi.advanceTimersByTimeAsync(499); expect(read).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1); await rejected;
+    expect(read).toHaveBeenCalledTimes(2); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('完整历史仍在变化或只是可见片段时继续等待，随后唯一原请求可恢复', async (): Promise<void> => {
+    const complete = (count: number, ready = false): SubmittedCreationReadbackSample => ({
+      ...sample(originalUrl, { messageCount: count, promptPublished: ready, reason: ready ? undefined : 'user_ambiguous' }), historyComplete: true,
+    });
+    const samples = [complete(4), complete(6), { ...complete(6), historyComplete: false }, complete(6), complete(6, true)];
+    const read = vi.fn(async (): Promise<SubmittedCreationReadbackSample> => samples.shift()!);
+    const result = await waitForSubmittedCreationReadback({ read, ensureCurrent, stopOnStableAmbiguity: true, wait: immediateWait });
+    expect(result.evidence.promptPublished).toBe(true); expect(result.historyComplete).toBe(true); expect(read).toHaveBeenCalledTimes(5);
+  });
+
+  it('首次发送不启用恢复选项，完整历史的暂时歧义仍等到原请求就绪', async (): Promise<void> => {
+    const ambiguous = { ...sample(originalUrl, { messageCount: 4, reason: 'user_ambiguous' }), historyComplete: true };
+    const samples = [ambiguous, ambiguous, sample(originalUrl, { promptPublished: true })];
+    const read = vi.fn(async (): Promise<SubmittedCreationReadbackSample> => samples.shift()!);
+    await waitForSubmittedCreationReadback({ read, ensureCurrent, wait: immediateWait });
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it('快速歧义复读期间原运行变化后先保留停止原因，不发布歧义结果', async (): Promise<void> => {
+    let current = true;
+    const read = vi.fn(async (): Promise<SubmittedCreationReadbackSample> => ({
+      ...sample(originalUrl, { reason: 'user_ambiguous' }), historyComplete: true,
+    }));
+    await expect(waitForSubmittedCreationReadback({ read, stopOnStableAmbiguity: true,
+      ensureCurrent: (): void => { if (!current) throw new Error('TEST original run stopped'); },
+      wait: async (): Promise<void> => { current = false; },
+    })).rejects.toThrow('TEST original run stopped');
+    expect(read).toHaveBeenCalledOnce();
+    expect(new SubmittedCreationReadbackAmbiguityError('user_ambiguous').message).toContain('未重新发送');
   });
 
   it('DOM读取挂起也受宿主截止约束，超时后迟到结果不触发进度或再次读取', async (): Promise<void> => {

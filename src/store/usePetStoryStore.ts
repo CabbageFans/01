@@ -7,8 +7,8 @@ import { useProjectStore } from './useProjectStore';
 import { repairPrompt } from '../utils/petstoryPrompts';
 import { resolveTaskConversationTarget } from '../utils/taskConversationLocator';
 import { canStartBoundChat } from '../utils/petstoryCandidate';
-import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
-import { IMAGE_CONVERSATION_RECOVERY_MESSAGE, imageConversationTask, imageOperationForChatJob } from '../utils/petstoryImageFlow';
+import { canSelectAccount, findInteractiveAccountId, isAccountExecutionBusy } from '../utils/interactiveAccount';
+import { IMAGE_CONVERSATION_RECOVERY_MESSAGE, imageConversationTask, imageOperationForChatJob, imageOperationForTarget, imageOperationProduction, imageTargetKey, isPetStoryImageFlowBusy } from '../utils/petstoryImageFlow';
 import { journeyShotAsset } from '../utils/petstoryJourney';
 import { isBackgroundProductionVideoTask } from '../utils/petstoryBackground';
 import { automationEngine } from '../automation/AutomationEngine';
@@ -18,11 +18,17 @@ import { needsPetStoryReferenceAdaptation } from '../utils/petstoryVisualBasis';
 import { selectPlanReview } from '../utils/petstoryPlanReview';
 import { hasPlatformAcceptance } from '../utils/acceptedObservation';
 import { registerTaskDispatchGuard } from '../automation/taskDispatchGuards';
+import { getTaskExecutionScope } from '../utils/taskExecutionScope';
+import { imageBelongsToTarget } from '../utils/petstoryImageCandidates';
 
 interface PetStoryState {
   activeImageOperationId: string | null;
+  activeImageOperationIds: string[];
+  pendingImageTargets: string[];
+  imageTargetErrors: Record<string, string>;
   generateMaterialImage: (materialId: string) => Promise<void>;
   modifyImage: (target: PetStoryImageTarget, baseAssetId: string, feedback: string) => Promise<void>;
+  stopImageOperation: (target: PetStoryImageTarget) => Promise<void>;
   recoverImageOperation: (operationId: string) => Promise<void>;
   advanceImageOperation: () => Promise<void>;
   openImageConversation: (target: PetStoryImageTarget, assetId?: string) => Promise<void>;
@@ -106,6 +112,38 @@ interface PetStoryState {
   retryUnsubmitted: (jobId: string) => Promise<void>;
   collect: (jobId: string, allowRepair?: boolean) => Promise<void>;
   draftFinal: (shotId: string) => Promise<void>;
+}
+
+/** 项目读取会规范化可选字段；比较时忽略值为 undefined 的对象字段及属性顺序。 */
+function sameAutoModeReadback(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (Array.isArray(left) || Array.isArray(right)) return Array.isArray(left) && Array.isArray(right)
+    && left.length === right.length && left.every((value: unknown, index: number): boolean => sameAutoModeReadback(value, right[index]));
+  const a = left as Record<string, unknown>; const b = right as Record<string, unknown>;
+  const keys = Object.keys(a).filter((key: string): boolean => a[key] !== undefined);
+  return keys.length === Object.keys(b).filter((key: string): boolean => b[key] !== undefined).length
+    && keys.every((key: string): boolean => Object.hasOwn(b, key) && sameAutoModeReadback(a[key], b[key]));
+}
+
+/** 同版本只接纳主进程补齐的自动判断与空尾帧，其他正文和本地项目事实全部保留。 */
+function normalizedAutoModeReadback(current: PetStoryPlan, incoming: PetStoryPlan): PetStoryPlan | undefined {
+  if (current.shots.length !== incoming.shots.length || sameAutoModeReadback(current, incoming)) return undefined;
+  const merged = structuredClone(current);
+  for (let index = 0; index < current.shots.length; index++) {
+    const previous = current.shots[index]; const next = incoming.shots[index]; const shot = merged.shots[index];
+    if (previous.id !== next.id) return undefined;
+    if (!sameAutoModeReadback(previous.autoModePlan, next.autoModePlan)) {
+      if (previous.requestedMode !== 'auto' || !next.autoModePlan || previous.autoModePlan && previous.autoModePlan.source !== 'legacy') return undefined;
+      shot.autoModePlan = structuredClone(next.autoModePlan);
+    }
+    if (!previous.prompts.lastFrame && next.prompts.lastFrame) {
+      const empty = { original: '', optimized: '', final: '', edited: false, rulesVersion: previous.prompts.firstFrame.rulesVersion };
+      if (shot.requestedMode !== 'auto' || shot.autoModePlan?.mode !== 'first_last_frame' || !sameAutoModeReadback(next.prompts.lastFrame, empty)) return undefined;
+      shot.prompts.lastFrame = structuredClone(next.prompts.lastFrame);
+    }
+  }
+  return sameAutoModeReadback(merged, incoming) ? merged : undefined;
 }
 function isChatAdjusting(p: PetStoryProject | null): boolean { return p?.chatAdjustment?.status === 'active'; }
 /** 自由交流只向用户明确选定的修订任务移交输入权，其余任务继续等待。 */
@@ -276,15 +314,21 @@ type ProductionObservationAttempt = ProductionConfirmationRecheck & { authorizat
 const productionObservationAttempts = new Map<string, ProductionObservationAttempt>();
 let productionObservationAuthorization = 0;
 type ImageOperationContext = { projectId: string; operationId: string };
+type ImageTargetRequest = { projectId: string; key: string; stopped: boolean };
+type PreparedImageTaskIdentity = { taskId: string; runId: string | undefined; submittedAt: string | undefined };
 type ImageObservationAttempt = { context: ImageOperationContext; taskId: string; accountId: string; runId: string; submittedAt: string };
-let activeImageOperation: ImageOperationContext | null = null;
+const activeImageOperations = new Map<string, ImageOperationContext>();
+function ownsImageOperation(context: ImageOperationContext): boolean {
+  return activeImageOperations.get(context.operationId) === context;
+}
 let imageOperationTickRunning = false;
 const dispatchedImageTasks = new Set<string>();
 const imageObservationAttempts = new Map<string, ImageObservationAttempt>();
 const attemptedImageRuns = new Set<string>();
+const pendingImageCollections = new Set<string>();
 function authorizedImageChat(project: PetStoryProject, jobId: string): boolean {
   const operation = imageOperationForChatJob(project, jobId);
-  return !!operation && activeImageOperation?.projectId === project.id && activeImageOperation.operationId === operation.id;
+  return !!operation && activeImageOperations.get(operation.id)?.projectId === project.id;
 }
 function collectedFailureMessage(result: PetStoryResult, imageOperation: boolean): string {
   if (result.error) return result.error;
@@ -296,7 +340,7 @@ function imageOperationContinues(result: PetStoryImageOperationResult, operation
 /** 只有本会话的生成或显式恢复可推进；重开卡片仅显示保存的真实状态。 */
 export async function tickPetStoryImageOperation(): Promise<void> {
   const state = usePetStoryStore.getState();
-  if (!activeImageOperation || activeImageOperation.projectId !== state.project?.id || state.busy || isChatAdjusting(state.project) || imageOperationTickRunning) return;
+  if (![...activeImageOperations.values()].some((context): boolean => context.projectId === state.project?.id) || state.busy || isChatAdjusting(state.project) || imageOperationTickRunning) return;
   imageOperationTickRunning = true;
   try { await state.advanceImageOperation(); }
   finally { imageOperationTickRunning = false; }
@@ -316,9 +360,11 @@ function productionStillRunning(id: string): boolean {
   return activeProductionId === id && current?.id === id && current.production?.state === 'running';
 }
 /** 明确受理或仍在观察的任务只能继续读取；新发送必须单独取得本次用户授权。 */
-export function petStoryResubmissionTask(project: PetStoryProject, tasks: Task[], activeTaskIds: string[] = []): Task | undefined {
-  if (project.production?.state !== 'paused') return undefined;
-  const step = project.production.steps.find((item): boolean => item.status !== 'complete');
+export function petStoryResubmissionTask(project: PetStoryProject, tasks: Task[], activeTaskIds: string[] = [], taskId?: string): Task | undefined {
+  const productions = [project.production, ...Object.values(project.imageProductions || {})];
+  const production = productions.find((item): boolean => item?.state === 'paused' && (!taskId || item.steps.some((step): boolean => step.taskId === taskId)));
+  if (!production) return undefined;
+  const step = production.steps.find((item): boolean => item.status !== 'complete');
   const task = tasks.find((item): boolean => item.id === step?.taskId);
   const runtime = task?.runtime;
   if (!task || !runtime?.runId || !runtime.submittedAt || !['paused', 'fail', 'cancelled', 'waiting_verification', 'waiting_generation_confirmation'].includes(task.status)
@@ -544,6 +590,60 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     }
     if (!result.success) set({ error: result.error || '操作未完成' });
   };
+  const imageErrorVersions = new Map<string, number>();
+  // 点击到主进程返回 operationId 之前同样需要可撤回的归属；停止后迟到 IPC 只能保存原记录。
+  const imageTargetRequests = new Map<string, ImageTargetRequest>();
+  const imageRequestKey = (projectId: string, key: string): string => JSON.stringify([projectId, key]);
+  const ownsImageRequest = (request: ImageTargetRequest): boolean => !request.stopped
+    && imageTargetRequests.get(imageRequestKey(request.projectId, request.key)) === request && get().project?.id === request.projectId;
+  const imageErrorsWith = (key: string, error: string): Record<string, string> => {
+    imageErrorVersions.set(key, (imageErrorVersions.get(key) || 0) + 1);
+    return { ...get().imageTargetErrors, [key]: error };
+  };
+  const imageRequestIdentity = (project: PetStoryProject, target: PetStoryImageTarget): string => {
+    const operation = imageOperationForTarget(project, target);
+    const production = operation ? imageOperationProduction(project, operation.id) : undefined;
+    return JSON.stringify([operation?.id, operation?.requestId, operation?.taskId, operation?.stage, operation?.outputAssetId,
+      operation?.basisHash, operation?.error, production?.state, production?.steps.map((step: PetStoryProductionStep): unknown[] => [step.id, step.taskId, step.runId])]);
+  };
+  /** 上传／采用共用原项目、请求及错误版本守卫，只收束本次目标已经解决的旧错误。 */
+  const settleImageTargets = async (project: PetStoryProject, targets: PetStoryImageTarget[], work: () => Promise<PetStoryResult>,
+    completed: (current: PetStoryProject, target: PetStoryImageTarget) => boolean, action: '上传' | '采用'): Promise<void> => {
+    const scope = { id: project.id, accountId: project.accountId, studioProjectId: project.studioProjectId };
+    const snapshots = targets.map((target: PetStoryImageTarget): { target: PetStoryImageTarget; key: string; error: string | undefined; version: number; request: string } => {
+      const key = imageTargetKey(target);
+      return { target, key, error: get().imageTargetErrors[key], version: imageErrorVersions.get(key) || 0, request: imageRequestIdentity(project, target) };
+    });
+    const matchesScope = (current: PetStoryProject | null | undefined): current is PetStoryProject => !!current && current.id === scope.id
+      && current.accountId === scope.accountId && current.studioProjectId === scope.studioProjectId;
+    const result = await work();
+    // 通用 accept 支持打开项目；图片回读必须先守住原项目，不能切回旧项目或接纳外来响应。
+    if (!matchesScope(get().project)) return;
+    if (result.project && !matchesScope(result.project)) { set({ error: `图片${action}回读与原项目或账号不符，已保留当前项目和候选图片` }); return; }
+    accept(result);
+    const current = get().project;
+    if (!result.success || !matchesScope(result.project) || !matchesScope(current)) return;
+    const errors = { ...get().imageTargetErrors };
+    let changed = false;
+    for (const snapshot of snapshots) {
+      if (!snapshot.error || errors[snapshot.key] !== snapshot.error || (imageErrorVersions.get(snapshot.key) || 0) !== snapshot.version
+        || get().pendingImageTargets.includes(snapshot.key) || imageRequestIdentity(current, snapshot.target) !== snapshot.request || !completed(current, snapshot.target)) continue;
+      delete errors[snapshot.key]; changed = true;
+    }
+    if (changed) set({ imageTargetErrors: errors });
+  };
+  const adoptImageTargets = async (project: PetStoryProject, selections: { target: PetStoryImageTarget; assetId: string }[], adopt: () => Promise<PetStoryResult>): Promise<void> => {
+    await settleImageTargets(project, selections.map((selection): PetStoryImageTarget => selection.target), adopt, (current: PetStoryProject, target: PetStoryImageTarget): boolean => {
+      const adoptedId = target.materialId ? current.materials?.find((material): boolean => material.id === target.materialId)?.selectedAssetId
+        : target.kind === 'firstFrame' ? current.adoptedImages?.[target.shotId || '']?.firstFrameId : current.adoptedImages?.[target.shotId || '']?.plannedEndImageId;
+      return selections.some((selection): boolean => imageTargetKey(selection.target) === imageTargetKey(target) && selection.assetId === adoptedId);
+    }, '采用');
+  };
+  const uploadImageTarget = async (project: PetStoryProject, target: PetStoryImageTarget, upload: () => Promise<PetStoryResult>): Promise<void> => {
+    const previousIds = new Set(project.assets.map((asset: PetStoryAsset): string => asset.id));
+    await settleImageTargets(project, [target], upload, (current: PetStoryProject): boolean => current.assets.some((asset: PetStoryAsset): boolean =>
+      !previousIds.has(asset.id) && asset.validation?.decoded === true && asset.imageReview?.state === 'candidate' && imageBelongsToTarget(current, asset, target)), '上传');
+  };
   let currentWork: Promise<void> | null = null;
   const run = async (work: () => Promise<void>, background: boolean = false): Promise<void> => {
     if (get().busy || background && currentWork) return;
@@ -574,6 +674,185 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       release?.();
       if (!background) set({ busy: false });
     }
+  };
+  /** 项目读写仍串行，唯一图片流程资格由入口同步占位并沿原授权持有到保存结束。 */
+  const runImageWork = async (work: () => Promise<void>): Promise<void> => {
+    const previous = currentWork;
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve): void => { release = resolve; });
+    currentWork = pending;
+    try { if (previous) await previous; await work(); }
+    finally { if (currentWork === pending) currentWork = null; release?.(); }
+  };
+  const publishImageAuthorizations = (): void => {
+    const ids = [...activeImageOperations.values()].filter((context): boolean => context.projectId === get().project?.id).map((context): string => context.operationId);
+    set({ activeImageOperationIds: ids, activeImageOperationId: ids.at(-1) || null });
+  };
+  const authorizeImageOperation = (projectId: string, operationId: string): ImageOperationContext => {
+    const context = { projectId, operationId };
+    activeImageOperations.set(operationId, context); publishImageAuthorizations(); return context;
+  };
+  const ownsCurrentImageOperation = (context: ImageOperationContext): boolean => ownsImageOperation(context) && get().project?.id === context.projectId;
+  const imageContextForJob = (project: PetStoryProject, jobId: string): ImageOperationContext | undefined =>
+    activeImageOperations.get(imageOperationForChatJob(project, jobId)?.id || '');
+  const revokeImageOperation = (context: ImageOperationContext): void => {
+    if (!ownsImageOperation(context)) return;
+    activeImageOperations.delete(context.operationId);
+    const project = get().project;
+    if (project?.id === context.projectId) for (const job of project.jobs) {
+      if (imageOperationForChatJob(project, job.id)?.id === context.operationId) liveJobs.delete(job.id);
+    }
+    publishImageAuthorizations();
+  };
+  const resetImageDispatch = (project: PetStoryProject, operationId: string): void => {
+    const operation = project.imageOperations?.find((item): boolean => item.id === operationId);
+    if (operation?.taskId) dispatchedImageTasks.delete(operation.taskId);
+    for (const job of project.jobs) if (imageOperationForChatJob(project, job.id)?.id === operationId) dispatchedImageTasks.delete(job.taskId);
+    for (const key of attemptedImageRuns) {
+      const [projectId, id] = JSON.parse(key) as string[];
+      if (projectId === project.id && id === operationId) attemptedImageRuns.delete(key);
+    }
+  };
+  const pauseImageOperation = async (context: ImageOperationContext): Promise<PetStoryResult> => {
+    const api = window.electronAPI.petstory;
+    if (typeof api.pauseImageOperation === 'function') return api.pauseImageOperation(context.projectId, context.operationId);
+    // 仅为旧宿主／旧项目兼容；绝不暂停另一张图片或视频的制作。
+    if (get().project?.production?.imageOperationId === context.operationId) return api.pauseProduction(context.projectId);
+    return { success: false, error: '本次图片暂停接口尚未就绪，请重新打开项目后继续' };
+  };
+  const setImageError = (context: ImageOperationContext, error: string): void => {
+    const project = get().project;
+    if (project?.id !== context.projectId) return;
+    const target = project.imageOperations?.find((operation): boolean => operation.id === context.operationId)?.target;
+    set({ error, ...(target ? { imageTargetErrors: imageErrorsWith(imageTargetKey(target), error) } : {}) });
+  };
+  const imageFlowBusy = (continuingOperationId?: string): boolean => isPetStoryImageFlowBusy(get().project, useTaskStore.getState().tasks,
+    get().activeImageOperationIds, get().pendingImageTargets, continuingOperationId);
+  const assertImageFlowAvailable = (continuingOperationId?: string): void => {
+    if (imageFlowBusy(continuingOperationId)) throw new Error('已有图片流程正在处理，请等待本次图片完成后再操作');
+  };
+  const runImageTarget = async (target: PetStoryImageTarget, work: (request: ImageTargetRequest) => Promise<void>, continuingOperationId?: string): Promise<void> => {
+    const projectId = get().project?.id; const key = imageTargetKey(target);
+    if (get().pendingImageTargets.includes(key)) return;
+    if (imageFlowBusy(continuingOperationId)) {
+      set({ imageTargetErrors: imageErrorsWith(key, '已有图片流程正在处理，请等待本次图片完成后再操作') }); return;
+    }
+    if (!projectId) return;
+    const request: ImageTargetRequest = { projectId, key, stopped: false };
+    const requestKey = imageRequestKey(projectId, key); imageTargetRequests.set(requestKey, request);
+    set({ pendingImageTargets: [...get().pendingImageTargets, key], imageTargetErrors: imageErrorsWith(key, '') });
+    try {
+      await runImageWork(async (): Promise<void> => {
+        if (!ownsImageRequest(request)) return;
+        set({ error: '' }); await work(request);
+      });
+    } catch (error: unknown) {
+      if (ownsImageRequest(request) || request.stopped && get().project?.id === projectId && !imageTargetRequests.has(requestKey)) {
+        const message = error instanceof Error ? error.message : '本次图片处理失败，请继续原任务';
+        set({ error: message, imageTargetErrors: imageErrorsWith(key, message) });
+      }
+    } finally {
+      if (imageTargetRequests.get(requestKey) === request) {
+        if (get().project?.id === projectId) set({ pendingImageTargets: get().pendingImageTargets.filter((item): boolean => item !== key) });
+      }
+    }
+  };
+  const imageTasksForOperation = (project: PetStoryProject, operationId: string): Task[] => {
+    const operation = project.imageOperations?.find((item): boolean => item.id === operationId);
+    const ids = new Set<string>([...(operation?.taskId ? [operation.taskId] : []),
+      ...(imageOperationProduction(project, operationId)?.steps.flatMap((step): string[] => step.taskId ? [step.taskId] : []) || []),
+      ...project.jobs.filter((job): boolean => imageOperationForChatJob(project, job.id)?.id === operationId).map((job): string => job.taskId)]);
+    return useTaskStore.getState().tasks.filter((task): boolean => task.projectId === project.studioProjectId && task.assignedAccountId === project.accountId
+      && (ids.has(task.id) || task.petstory?.projectId === project.id && task.petstory.imageOperationId === operationId
+        || task.petstoryChat?.projectId === project.id && task.petstoryChat.imageOperationId === operationId));
+  };
+  /** 同步撤销宿主与只读观察；不点击平台停止、不删除生成意图或既有候选。 */
+  const interruptImageTasks = (tasks: readonly Task[]): void => {
+    for (const task of tasks) {
+      imageObservationAttempts.delete(task.id);
+      if (task.status === 'done') continue;
+      automationEngine.abort(task.id);
+      window.dispatchEvent(new CustomEvent('cancel-task-automation', { detail: { taskId: task.id, targetStatus: 'paused' } }));
+    }
+  };
+  const persistStoppedImageTasks = async (tasks: readonly Task[]): Promise<void> => {
+    for (const original of tasks) {
+      const state = useTaskStore.getState(); const task = state.tasks.find((item): boolean => item.id === original.id);
+      if (!task || task.status === 'done' || task.assignedAccountId !== original.assignedAccountId
+        || task.runtime?.runId !== original.runtime?.runId || task.runtime?.submittedAt !== original.runtime?.submittedAt) continue;
+      const message = '本次图片已停止，原任务和已有结果已保留；继续时只处理原任务，不会自动重发';
+      const saved = task.status === 'paused' && task.executionIntent === 'hold' || await state.updateTaskRuntime(task.id, { status: 'paused', executionIntent: 'hold', result: message,
+        errorInfo: { code: 'cancelled', message, recoverable: true, detectedAt: new Date().toISOString() },
+        ...(task.runtime ? { runtime: { stage: 'paused', message, lastHeartbeatAt: new Date().toISOString() } } : {}) });
+      const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === task.id);
+      if (latest?.status === 'done') continue;
+      if (!saved || latest?.status !== 'paused' || latest.executionIntent !== 'hold') throw new Error(useTaskStore.getState().error || '已撤销图片自动操作，但原任务暂停尚未保存，请稍后继续');
+      // 没有控制器的取锁／排队窗口同样释放；已有控制器沿 BrowserPanel finally 清理。
+      if (!automationEngine.hasController(task.id)) await automationEngine.release(task.id);
+      const scope = getTaskExecutionScope(latest);
+      useTaskStore.setState((current): Partial<typeof current> => {
+        if (current.executingTasks[scope] && current.executingTasks[scope] !== task.id) return {};
+        const executingTasks = { ...current.executingTasks }; const accountBusy = { ...current.accountBusy };
+        delete executingTasks[scope]; delete accountBusy[scope];
+        return { executingTasks, accountBusy, accountAutomationState: { ...current.accountAutomationState, [scope]: 'idle' },
+          accountAutoMessage: { ...current.accountAutoMessage, [scope]: message },
+          ...(current.activeTaskId === task.id ? { activeTaskId: null, automationState: 'idle' } : {}) };
+      });
+    }
+  };
+  const preparedImageTaskIdentity = (taskId: string, recordedRunId?: string): PreparedImageTaskIdentity => {
+    const task = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+    const runId = recordedRunId;
+    return { taskId, runId, submittedAt: task?.runtime?.runId === runId ? task?.runtime?.submittedAt : undefined };
+  };
+  /** 身份在等待 IPC／列表前固定；未知新 hold 也不能借迟到回读认领后来已开始的运行。 */
+  const stopPreparedImageTask = async (project: PetStoryProject, expected: PreparedImageTaskIdentity): Promise<void> => {
+    const task = useTaskStore.getState().tasks.find((item): boolean => item.id === expected.taskId && item.projectId === project.studioProjectId && item.assignedAccountId === project.accountId
+      && item.runtime?.runId === expected.runId && item.runtime?.submittedAt === expected.submittedAt);
+    if (task) {
+      const original = structuredClone(task);
+      interruptImageTasks([original]); await persistStoppedImageTasks([original]);
+    }
+  };
+  /** 主进程可能已保存 hold 任务才返回；停止后的迟到回执只暂停同一操作，绝不重新授权。 */
+  const stopSavedImageOperation = async (context: ImageOperationContext, project: PetStoryProject): Promise<void> => {
+    const originalTasks = new Map<string, Task>();
+    const stoppedTasks = (snapshot: PetStoryProject): Task[] => imageTasksForOperation(snapshot, context.operationId).filter((task): boolean => {
+      const authorization = activeImageOperations.get(context.operationId);
+      if (authorization && authorization !== context) return false;
+      const original = originalTasks.get(task.id);
+      if (original && (original.assignedAccountId !== task.assignedAccountId || original.prompt !== task.prompt
+        || original.runtime?.runId && original.runtime.runId !== task.runtime?.runId
+        || original.runtime?.submittedAt && original.runtime.submittedAt !== task.runtime?.submittedAt)) return false;
+      // 未初始化的 hold 可能在停止前已进入取锁窗口；首个原运行到达后钉住，后来的运行不能被旧停止覆盖。
+      if (!original?.runtime?.runId) originalTasks.set(task.id, structuredClone(task));
+      return true;
+    });
+    interruptImageTasks(stoppedTasks(project));
+    const stopping = pauseImageOperation(context).then((result): { result: PetStoryResult; error?: undefined } => ({ result }),
+      (error: unknown): { result?: undefined; error: unknown } => ({ error }));
+    await refreshTasks();
+    const tasks = stoppedTasks(project); interruptImageTasks(tasks);
+    await persistStoppedImageTasks(tasks);
+    const outcome = await stopping;
+    if (!outcome.result) throw outcome.error;
+    const result = outcome.result;
+    const paused = result.project?.imageOperations?.find((item): boolean => item.id === context.operationId);
+    const production = result.project && imageOperationProduction(result.project, context.operationId);
+    if (!result.project || !paused || !['failed', 'complete'].includes(paused.stage)
+      || production && !['paused', 'complete'].includes(production.state)) throw new Error(result.error || '图片自动操作已撤销，但暂停记录尚未保存，请稍后继续');
+    if (get().project?.id === context.projectId) accept({ ...result, success: true });
+    await refreshTasks();
+    const lateTasks = stoppedTasks(result.project); interruptImageTasks(lateTasks);
+    await persistStoppedImageTasks(lateTasks);
+    const deadline = Date.now() + 6000;
+    while (stoppedTasks(result.project).some((task): boolean => automationEngine.hasController(task.id))) {
+      if (Date.now() >= deadline) throw new Error('已停止图片后续操作，原页面仍在清理，请稍后继续原任务');
+      await new Promise<void>((resolve): void => { setTimeout(resolve, 50); });
+    }
+    // Controller finally 可能先保留 manual_submission_observing；退出后再回读收束，不能让它复活自动观察。
+    await refreshTasks();
+    await persistStoppedImageTasks(stoppedTasks(result.project));
   };
   /** 换项目先收回原视频宿主；提交证据与平台后台生成保留，回原项目后只读接续。 */
   const pauseVideosBeforeProjectChange = async (): Promise<void> => {
@@ -606,45 +885,52 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     });
     if (!stopped) throw new Error('原视频暂停状态尚未回读确认，已保留原项目，未切换');
   };
-  const startBound = async (jobId: string): Promise<void> => {
+  const startBound = async (jobId: string, canContinue: () => boolean = (): boolean => true): Promise<void> => {
     const authorization = promptWorkAuthorization;
     const project = get().project;
     const job = project?.jobs.find((j): boolean => j.id === jobId);
     if (project?.chatAdjustment?.status === 'active' && !isAdjustmentRepair(project, job)) throw new Error('请先采用豆包回复或结束当前调整');
     if (!project || !job || job.endedWaitingAt || job.status !== 'bound') throw new Error('请选择原步骤');
+    const imageOperation = imageOperationForChatJob(project, job.id);
+    const imageContext = imageOperation ? activeImageOperations.get(imageOperation.id) : undefined;
+    const imageAuthorized = (): boolean => canContinue() && (!imageOperation || !!imageContext && ownsImageOperation(imageContext));
+    if (!imageAuthorized()) throw new Error('本次图片准备已暂停，请从原图片继续本次任务');
     if (!project.mobileStory || job.sourceStoryId !== project.mobileStory.id) throw new Error('旧版链接直读任务已停用，请保存手机豆包故事后生成制作方案');
     if (!useProjectStore.getState().projects.some((p): boolean => p.id === project.studioProjectId && !p.archived)) throw new Error('原Studio项目不存在');
     restoredPlanReadbacks.delete(job.id);
     liveJobs.add(job.id);
     const started = await useTaskStore.getState().startAutomation(job.taskId, async (task: Task): Promise<void> => {
-      if (authorization !== promptWorkAuthorization) throw new Error('本轮文字准备已停止，原任务保留且未发送');
+      if (authorization !== promptWorkAuthorization || !imageAuthorized()) throw new Error('本轮文字准备已停止，原任务保留且未发送');
       if (!job || !task.runtime?.runId) throw new Error('本步骤运行未初始化');
       await bindPetStoryTaskRun(task);
-      if (authorization !== promptWorkAuthorization) throw new Error('本轮文字准备已停止，原任务保留且未发送');
+      if (authorization !== promptWorkAuthorization || !imageAuthorized()) throw new Error('本轮文字准备已停止，原任务保留且未发送');
       if (get().project?.id !== project.id || get().project?.jobs.find((item): boolean => item.id === job.id)?.runId !== task.runtime.runId) throw new Error('本步骤运行绑定未保存或项目已变化');
     });
     if (!started) throw new Error(useTaskStore.getState().error || '原任务保持已绑定；请处理原因后启动原任务，不要重复分析');
   };
-  const continueBoundChat = async (jobId: string): Promise<void> => {
+  const continueBoundChat = async (jobId: string, canContinue: () => boolean = (): boolean => true): Promise<void> => {
     const authorization = promptWorkAuthorization;
     const p = get().project; const job = p?.jobs.find((item): boolean => item.id === jobId);
     if (!p || !job) throw new Error('请先打开原项目并选择原文字任务');
     await refreshTasks();
-    if (authorization !== promptWorkAuthorization) return;
+    if (authorization !== promptWorkAuthorization || !canContinue()) return;
     const taskState = useTaskStore.getState(); const task = taskState.tasks.find((item): boolean => item.id === job.taskId);
-    if (!canStartBoundChat(p, job, task, taskState.tasks, taskState.activeTaskId === job.taskId || !!taskState.accountBusy[p.accountId])) throw new Error('原任务未明确停止在未发送状态，或运行归属／账号占用不符；请只读核对，不重新发送');
+    if (!canStartBoundChat(p, job, task, taskState.tasks, taskState.activeTaskId === job.taskId || isAccountExecutionBusy(taskState.accountBusy, p.accountId))) throw new Error('原任务未明确停止在未发送状态，或运行归属／账号占用不符；请只读核对，不重新发送');
+    const originalIdentity = preparedImageTaskIdentity(job.taskId, task?.runtime?.runId);
     if (task?.status !== 'queued') {
       const result = await window.electronAPI.petstory.retryUnsubmitted(p.id, job.id); accept(result);
       if (!result.success) return;
       await refreshTasks();
     }
-    if (authorization === promptWorkAuthorization) await startBound(job.id);
+    if (!canContinue()) { await stopPreparedImageTask(p, originalIdentity); return; }
+    if (authorization === promptWorkAuthorization && canContinue()) await startBound(job.id, canContinue);
   };
   const startPrepared = async (result: PetStoryResult, canContinue: () => boolean = (): boolean => true): Promise<string | undefined> => {
     accept(result);
     if (!result.success || !result.taskId || !result.project) return;
     const job = result.project.jobs.find((item): boolean => item.taskId === result.taskId);
     if (!job) throw new Error('已创建原任务但项目绑定未回读，不继续发送');
+    const originalIdentity = preparedImageTaskIdentity(job.taskId, job.runId);
     const batch = promptBatchQueue;
     if (batch?.projectId === result.project.id && (!job.promptBatchId || job.promptBatchId === batch.id)) {
       // 启动前保存原任务关联；启动失败和重开都只能恢复这一任务。
@@ -652,7 +938,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       await persistBatch(batch.stopRequested ? 'paused' : 'running', job.id);
     }
     await refreshTasks();
-    if (!canContinue()) return job.id;
+    if (!canContinue()) { await stopPreparedImageTask(result.project, originalIdentity); return job.id; }
     if (batch && (batch.stopRequested || promptBatchQueue !== batch)) return job.id;
     const task = useTaskStore.getState().tasks.find((item): boolean => item.id === job.taskId);
     // 幂等准备可能接回已提交修订。仅连接原运行，绝不重新启动或替换 run。
@@ -660,9 +946,11 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (!job.endedWaitingAt && job.status === 'bound') liveJobs.add(job.id);
       return job.id;
     }
-    await startBound(job.id); return job.id;
+    await startBound(job.id, canContinue); return job.id;
   };
-  const prepare = async (prompt: string, kind: PetStoryChatJob['kind'], parentJobId?: string, shotId?: string, promptKind?: PetStoryPromptKind, materialId?: string): Promise<string | undefined> => {
+  const prepare = async (prompt: string, kind: PetStoryChatJob['kind'], parentJobId?: string, shotId?: string, promptKind?: PetStoryPromptKind, materialId?: string,
+    canContinue: () => boolean = (): boolean => true): Promise<string | undefined> => {
+    if (!canContinue()) return;
     const authorization = promptWorkAuthorization;
     const project = get().project;
     if (!project) throw new Error('请先打开或创建项目');
@@ -672,9 +960,11 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     if (!account || account.platform === 'dola') throw new Error('项目原豆包账号缺失，不能自动更换账号');
     const result = await window.electronAPI.petstory.prepareChat(project.id, prompt, kind, parentJobId, shotId, promptKind, materialId);
     if (get().project?.id !== project.id) return;
-    return startPrepared(result, (): boolean => authorization === promptWorkAuthorization && get().project?.id === project.id);
+    return startPrepared(result, (): boolean => authorization === promptWorkAuthorization && get().project?.id === project.id && canContinue());
   };
-  const prepareRuntime = async (kind: PetStoryChatJob['kind'], target?: PetStoryRuntimeTarget): Promise<string | undefined> => {
+  const prepareRuntime = async (kind: PetStoryChatJob['kind'], target?: PetStoryRuntimeTarget,
+    canContinue: () => boolean = (): boolean => true): Promise<string | undefined> => {
+    if (!canContinue()) return;
     const project = get().project;
     const authorization = promptWorkAuthorization;
     if (!project) throw new Error('请先打开或创建项目');
@@ -687,7 +977,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     const requestTarget = capability ? { ...target, capability } : target;
     const result = await window.electronAPI.petstory.prepareRuntime(project.id, project.revision, kind, requestTarget);
     if (get().project?.id !== project.id) return;
-    return startPrepared(result, (): boolean => authorization === promptWorkAuthorization && get().project?.id === project.id);
+    return startPrepared(result, (): boolean => authorization === promptWorkAuthorization && get().project?.id === project.id && canContinue());
   };
   const persistBatch = async (status: PetStoryPromptBatch['status'], jobId?: string): Promise<void> => {
     const batch = promptBatchQueue; const p = get().project;
@@ -707,22 +997,23 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       set({ promptBatch: { ...get().promptBatch, status: 'paused' } });
     }
   };
-  const recoverBatchJob = async (job: PetStoryChatJob): Promise<void> => {
+  const recoverBatchJob = async (job: PetStoryChatJob, canContinue: () => boolean = (): boolean => true): Promise<void> => {
     const authorization = promptWorkAuthorization;
     await refreshTasks();
-    if (authorization !== promptWorkAuthorization) return;
+    if (authorization !== promptWorkAuthorization || !canContinue()) return;
     const task = useTaskStore.getState().tasks.find((item): boolean => item.id === job.taskId);
     const project = get().project;
     if (!task || !project || task.mode !== 'chat' || task.projectId !== project.studioProjectId || task.assignedAccountId !== project.accountId || job.sourceStoryId !== project.mobileStory?.id) throw new Error('原文字任务、项目或账号归属不符，未重新创建');
     liveJobs.add(job.id);
-    if (job.status === 'captured' || task.runtime?.chatResponse?.text) { await collectResult(job.id, true); return; }
-    if (!task.runtime?.submittedAt) { await continueBoundChat(job.id); return; }
+    if (job.status === 'captured' || task.runtime?.chatResponse?.text) { await collectResult(job.id, true, canContinue); return; }
+    if (!task.runtime?.submittedAt) { await continueBoundChat(job.id, canContinue); return; }
     if (task.runtime.runId !== job.runId || task.runtime.input.mode !== 'chat' || task.runtime.input.prompt !== task.prompt || JSON.stringify(task.runtime.input.attachments || []) !== JSON.stringify(task.attachments || [])) throw new Error('原文字运行或提交输入不一致，未重新发送');
     if (['fail', 'paused', 'cancelled', 'waiting_verification'].includes(task.status)) {
       const locator = resolveTaskConversationTarget(task);
       if (!locator.ok && locator.reason !== 'CONVERSATION_URL_MISSING') throw new Error('原会话归属不明，请查看豆包对话');
       const observed = await useTaskStore.getState().updateTaskRuntime(task.id, { status: 'manual_submission_observing', runtime: { stage: 'manual_submission_observing', message: '只读取得原提示词结果，不重复发送' } });
       if (!observed) throw new Error('原任务恢复未保存，请稍后继续');
+      if (!canContinue()) { await persistStoppedImageTasks([task]); return; }
       window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id, useCurrentPage: !locator.ok } }));
     }
   };
@@ -888,21 +1179,26 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     await nextPrompt();
   };
   /** 已有失败子回复先只读重校验，回读期间的停止不能被递归修订重新授权。 */
-  const recheckExistingRepair = async (projectId: string, jobId: string, authorized: boolean, imageOperation: boolean): Promise<string | undefined> => {
+  const recheckExistingRepair = async (projectId: string, jobId: string, authorized: boolean, imageOperation: boolean,
+    canContinue: () => boolean = (): boolean => true): Promise<string | undefined> => {
     const authorization = promptWorkAuthorization;
     const checked = await window.electronAPI.petstory.collectChat(projectId, jobId);
     if (get().project?.id !== projectId) return;
-    const stillAuthorized = authorized && authorization === promptWorkAuthorization;
+    const stillAuthorized = authorized && authorization === promptWorkAuthorization && canContinue();
     accept(checked.needsRepair && stillAuthorized ? { ...checked, success: true } : checked);
     if (!stillAuthorized) return;
     liveJobs.add(jobId);
-    try { return await repairResult(checked, jobId, authorized, imageOperation); }
+    try { return await repairResult(checked, jobId, authorized, imageOperation, canContinue); }
     finally { liveJobs.delete(jobId); }
   };
-  const repairResult = async (result: PetStoryResult, sourceId: string, authorized: boolean, imageOperation = false): Promise<string | undefined> => {
+  const repairResult = async (result: PetStoryResult, sourceId: string, authorized: boolean, imageOperation = false,
+    canContinue: () => boolean = (): boolean => true): Promise<string | undefined> => {
     const authorization = promptWorkAuthorization;
     const p = result.project || get().project; const job = p?.jobs.find((item): boolean => item.id === sourceId);
     if (!p || !job || !canAutomaticallyRepair(job, authorized, imageOperation, get().autoRepair)) return;
+    if (imageOperation && !authorizedImageChat(p, sourceId)) return;
+    const imageContext = imageContextForJob(p, sourceId);
+    const imageAuthorized = (): boolean => canContinue() && (!imageOperation || !!imageContext && ownsImageOperation(imageContext));
     if (promptBatchQueue?.stopRequested) return;
     if (!imageOperation && isPromptWritingJob(job) && !promptBatchQueue && !liveJobs.has(job.id)) return;
     if (p.promptBatch?.status === 'paused' && p.promptBatch.jobId === sourceId && !promptBatchQueue && !liveJobs.has(job.id)) return;
@@ -911,32 +1207,37 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     if (child.id !== job.id || result.repairJobId) {
       const existing = latestRepair(p, p.jobs.find((item): boolean => item.id === result.repairJobId) || child);
       if (existing.endedWaitingAt) return;
-      if (existing.status === 'invalid') return recheckExistingRepair(p.id, existing.id, authorized, imageOperation);
-      return startPrepared({ success: true, project: p, taskId: existing.taskId }, (): boolean => authorization === promptWorkAuthorization && get().project?.id === p.id);
+      if (existing.status === 'invalid') return recheckExistingRepair(p.id, existing.id, authorized, imageOperation, canContinue);
+      return startPrepared({ success: true, project: p, taskId: existing.taskId }, (): boolean => authorization === promptWorkAuthorization && get().project?.id === p.id && imageAuthorized());
     }
     if (!result.needsRepair) return;
     set({ promptRepairJobIds: [...get().promptRepairJobIds, job.id] });
     try {
-      if (job.requestId) return await prepareRuntime('repair', { parentJobId: job.id, repairMode: 'automatic' });
-      return await prepare(repairPrompt(p, job), 'repair', job.id);
+      if (job.requestId) return await prepareRuntime('repair', { parentJobId: job.id, repairMode: 'automatic' }, imageAuthorized);
+      return await prepare(repairPrompt(p, job), 'repair', job.id, undefined, undefined, undefined, imageAuthorized);
     } finally { set({ promptRepairJobIds: get().promptRepairJobIds.filter((id): boolean => id !== job.id) }); }
   };
-  const collectResult = async (jobId: string, allowRepair: boolean): Promise<void> => {
+  const collectResult = async (jobId: string, allowRepair: boolean, canContinue: () => boolean = (): boolean => true): Promise<void> => {
     const p = get().project; if (!p) return;
     const authorization = promptWorkAuthorization;
+    const imageOperation = imageOperationForChatJob(p, jobId);
+    const imageContext = imageOperation && activeImageOperations.get(imageOperation.id);
     if (allowRepair) restoredPlanReadbacks.delete(jobId);
     const result = await window.electronAPI.petstory.collectChat(p.id, jobId);
     if (get().project?.id !== p.id) return;
+    if (!canContinue()) { accept({ ...result, success: true }); liveJobs.delete(jobId); return; }
     // 修订是当前创作的一步：原错误先保存在详情，安排失败时才成为当前阻断。
     // 收取期间的停止动作立即撤回发送权，迟到回复仍保存，但不能重新授权下一轮。
-    const repairAuthorized = allowRepair && authorization === promptWorkAuthorization;
+    const repairAuthorized = allowRepair && authorization === promptWorkAuthorization
+      && (!imageOperation || !!imageContext && ownsImageOperation(imageContext));
     accept(result.needsRepair && repairAuthorized ? { ...result, success: true } : result);
-    const authorizedImage = authorizedImageChat(result.project || p, jobId);
-    const repairJobId = await repairResult(result, jobId, repairAuthorized, authorizedImage);
+    const authorizedImage = !!imageOperation;
+    const repairJobId = await repairResult(result, jobId, repairAuthorized, authorizedImage, canContinue);
     if (!pendingChatJob(get().project?.jobs.find((item): boolean => item.id === jobId))) {
       liveJobs.delete(jobId);
       restoredPlanReadbacks.delete(jobId);
     }
+    if (!canContinue()) return;
     if (repairJobId) set({ error: '' });
     // 接回已有修订时保留最新子回复／准备失败的原因，旧父回复不能覆盖当前暂停。
     else if (!result.success && (!result.needsRepair || !repairAuthorized || !get().error)) set({ error: collectedFailureMessage(result, authorizedImage) });
@@ -988,24 +1289,25 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
   };
   const validateImageObservationTask = (project: PetStoryProject, operationId: string, task: Task): void => {
     const operation = project.imageOperations?.find((item): boolean => item.id === operationId);
-    const step = project.production?.steps.find((item): boolean => item.taskId === task.id);
+    const production = imageOperationProduction(project, operationId);
+    const step = production?.steps.find((item): boolean => item.taskId === task.id);
     if (!task.runtime?.submittedAt) throw new Error('原图片缺少提交记录，未读取当前页面');
     if (operation?.taskId !== task.id || task.mode !== 'image' || task.runtime.input.mode !== 'image' || task.runtime.input.prompt !== task.prompt
       || JSON.stringify(task.runtime.input.attachments || []) !== JSON.stringify(task.attachments || [])
       || task.projectId !== project.studioProjectId || task.assignedAccountId !== project.accountId
-      || project.production?.imageOperationId !== operationId || !step?.runId || step.runId !== task.runtime.runId
+      || production?.imageOperationId !== operationId || !step?.runId || step.runId !== task.runtime.runId
       || task.petstory?.projectId !== project.id || task.petstory.stepId !== step.id) throw new Error('图片原任务与项目、账号或运行不一致，未读取当前页面');
   };
   const imageObservationTask = (context: ImageOperationContext, taskId: string): Task | undefined => {
     const project = get().project;
-    if (activeImageOperation !== context || project?.id !== context.projectId) return;
+    if (!ownsImageOperation(context) || project?.id !== context.projectId) return;
     const task = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
     if (!task?.runtime?.submittedAt) return;
     validateImageObservationTask(project, context.operationId, task);
     return task;
   };
   const ownsImageObservation = (attempt: ImageObservationAttempt, task: Task | undefined): boolean =>
-    activeImageOperation === attempt.context && get().project?.id === attempt.context.projectId
+    ownsImageOperation(attempt.context) && get().project?.id === attempt.context.projectId
       && imageObservationAttempts.get(attempt.taskId) === attempt && task?.assignedAccountId === attempt.accountId
       && task.runtime?.runId === attempt.runId && task.runtime.submittedAt === attempt.submittedAt;
   /** 只在真实观察器清理后交还制作；失败结束本轮授权，不由定时器反复开启原检查。 */
@@ -1025,17 +1327,17 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       }
       const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === attempt.taskId);
       if (!ownsImageObservation(attempt, latest)) return;
-      activeImageOperation = null; set({ activeImageOperationId: null, error: reason });
-      const paused = await window.electronAPI.petstory.pauseProduction(attempt.context.projectId);
+      revokeImageOperation(attempt.context); setImageError(attempt.context, reason);
+      const paused = await pauseImageOperation(attempt.context);
       if (get().project?.id === attempt.context.projectId) accept(paused);
     } catch (error: unknown) {
       const task = useTaskStore.getState().tasks.find((item): boolean => item.id === attempt.taskId);
       if (ownsImageObservation(attempt, task)) {
-        activeImageOperation = null; set({ activeImageOperationId: null, error: error instanceof Error ? error.message : '原图片检查状态尚未保存，请稍后继续' });
+        revokeImageOperation(attempt.context); setImageError(attempt.context, error instanceof Error ? error.message : '原图片检查状态尚未保存，请稍后继续');
       }
     } finally {
       if (imageObservationAttempts.get(attempt.taskId) === attempt) imageObservationAttempts.delete(attempt.taskId);
-      if (collect && activeImageOperation === attempt.context) await tickPetStoryImageOperation();
+      if (collect && ownsImageOperation(attempt.context)) await tickPetStoryImageOperation();
     }
   };
   /** 自动接力与显式继续共用同一原运行的只读观察，缺 URL 时也只核对当前原账号页面。 */
@@ -1061,19 +1363,25 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     if (!observed) { await settleImageObservation(attempt); return; }
     if (!ownsImageObservation(attempt, useTaskStore.getState().tasks.find((item): boolean => item.id === taskId))) {
       if (imageObservationAttempts.get(taskId) === attempt) imageObservationAttempts.delete(taskId);
+      if (!ownsImageOperation(context)) {
+        await refreshTasks();
+        const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId && item.runtime?.runId === attempt.runId
+          && item.runtime.submittedAt === attempt.submittedAt && item.assignedAccountId === attempt.accountId);
+        if (latest) await persistStoppedImageTasks([latest]);
+      }
       return;
     }
     window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId, accountId: attempt.accountId, runId: attempt.runId,
       submittedAt: attempt.submittedAt, useCurrentPage: !locator.ok, automatic: !explicit, onSettled: (): Promise<void> => settleImageObservation(attempt) } }));
   };
-  const driveImageChat = async (project: PetStoryProject, jobId: string, context: NonNullable<typeof activeImageOperation>): Promise<void> => {
+  const driveImageChat = async (project: PetStoryProject, jobId: string, context: ImageOperationContext): Promise<void> => {
       const original = project.jobs.find((job): boolean => job.id === jobId);
       const job = original ? latestRepair(project, original) : undefined;
       if (!job || job.endedWaitingAt || !pendingChatJob(job)) return;
       if (dispatchedImageTasks.has(job.taskId)) { liveJobs.add(job.id); return; }
       dispatchedImageTasks.add(job.taskId);
       await refreshTasks();
-      if (activeImageOperation !== context || get().project?.id !== context.projectId) return;
+      if (!ownsImageOperation(context) || get().project?.id !== context.projectId) return;
       const task = useTaskStore.getState().tasks.find((item): boolean => item.id === job.taskId);
       if (job.status === 'captured' || task?.runtime?.chatResponse?.text) { await collectResult(job.id, true); return; }
       if (task?.runtime?.submittedAt && ['paused', 'fail', 'cancelled', 'waiting_verification'].includes(task.status)) {
@@ -1082,18 +1390,19 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
         if (!locator.ok && locator.reason !== 'CONVERSATION_URL_MISSING') throw new Error('原会话存在多个候选或绑定冲突，请先查看豆包对话');
         liveJobs.add(job.id);
         const resumed = await useTaskStore.getState().updateTaskRuntime(task.id, { status: 'manual_submission_observing', runtime: { stage: 'manual_submission_observing', message: '继续读取本次图片准备结果，不重复发送' } });
-        if (resumed) window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id, useCurrentPage: !locator.ok } }));
+        if (resumed && ownsImageOperation(context) && get().project?.id === context.projectId) window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id, useCurrentPage: !locator.ok } }));
         return;
       }
-      await startPrepared({ success: true, project, taskId: job.taskId }); return;
+      await startPrepared({ success: true, project, taskId: job.taskId }, (): boolean => ownsImageOperation(context) && get().project?.id === context.projectId); return;
   };
-  const driveImageOperation = async (result: PetStoryImageOperationResult, context: NonNullable<typeof activeImageOperation>): Promise<void> => {
-    if (activeImageOperation !== context || get().project?.id !== context.projectId) return;
+  const driveImageOperation = async (result: PetStoryImageOperationResult, context: ImageOperationContext): Promise<void> => {
+    if (!ownsCurrentImageOperation(context)) return;
     accept(result.needsRepair ? { ...result, success: true } : result);
     const project = get().project;
     const operation = project?.imageOperations?.find((item): boolean => item.id === context.operationId);
     if (!project || !imageOperationContinues(result, operation)) {
-      activeImageOperation = null; set({ activeImageOperationId: null }); return;
+      if (operation?.stage === 'failed' || !result.success) setImageError(context, operation?.error || result.error || '本次图片处理未完成，请继续本次任务');
+      revokeImageOperation(context); return;
     }
     if (result.needsRepair && result.chatJobId) {
       await repairResult(result, result.repairSourceJobId || result.chatJobId, true, true); return;
@@ -1104,31 +1413,33 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (dispatchedImageTasks.has(result.taskId)) return;
       dispatchedImageTasks.add(result.taskId);
       await refreshTasks();
-      if (activeImageOperation !== context || get().project?.id !== context.projectId) return;
+      if (!ownsCurrentImageOperation(context)) return;
       const started = await useTaskStore.getState().startAutomation(result.taskId, async (task: Task): Promise<void> => {
-        if (activeImageOperation !== context || get().project?.id !== context.projectId || !task.runtime) throw new Error('本次图片任务已停止');
+        if (!ownsImageOperation(context) || get().project?.id !== context.projectId || !task.runtime) throw new Error('本次图片任务已停止');
         const bound = await window.electronAPI.petstory.bindProductionRun(context.projectId, task.id, task.runtime.runId);
         if (get().project?.id === context.projectId) accept(bound);
+        if (!ownsImageOperation(context)) throw new Error('本次图片任务已停止，原任务保留且未发送');
         if (!bound.success) throw new Error(bound.error || '图片任务运行绑定未保存');
       });
       if (!started) {
+        if (!ownsImageOperation(context)) return;
         const message = useTaskStore.getState().error || '图片任务未启动，请处理后继续';
-        const paused = await window.electronAPI.petstory.pauseProduction(context.projectId);
+        const paused = await pauseImageOperation(context);
         if (get().project?.id === context.projectId) {
           accept(paused);
           // 保存失败状态并保留同一任务，重试不会再次创建图片请求。
           accept(await window.electronAPI.petstory.advanceImageOperation(context.projectId, context.operationId));
-          set({ error: message });
+          setImageError(context, message);
         }
-        activeImageOperation = null; set({ activeImageOperationId: null });
+        revokeImageOperation(context);
       }
     } else if (result.action === 'observe') await observeImageTask(context, result.taskId);
   };
   /** 显式继续可核对仍停在当前页的原图片请求；绝不把缺少会话地址当作重发授权。 */
-  const recoverSubmittedImage = async (context: NonNullable<typeof activeImageOperation>): Promise<void> => {
+  const recoverSubmittedImage = async (context: ImageOperationContext): Promise<void> => {
     await refreshTasks();
     const project = get().project;
-    if (!project || project.id !== context.projectId || activeImageOperation !== context) return;
+    if (!project || project.id !== context.projectId || !ownsImageOperation(context)) return;
     const operation = project.imageOperations?.find((item): boolean => item.id === context.operationId);
     const task = useTaskStore.getState().tasks.find((item): boolean => item.id === operation?.taskId);
     if (!task?.runtime?.submittedAt || !['paused', 'fail', 'cancelled', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(task.status)) return;
@@ -1158,24 +1469,28 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === task.id);
     if (latest?.assignedAccountId !== task.assignedAccountId || latest.runtime?.runId !== runId || latest.runtime.submittedAt !== submittedAt) throw new Error('原图片运行已变化，请重新检查当前任务');
   };
-  const beginImageOperation = async (target: PetStoryImageTarget, baseAssetId?: string, feedback?: string): Promise<void> => {
+  const beginImageOperation = async (target: PetStoryImageTarget, baseAssetId?: string, feedback?: string, request?: ImageTargetRequest): Promise<void> => {
     const project = get().project;
     if (!project) throw new Error('请先打开原项目');
     if (baseAssetId && !feedback?.trim()) return;
+    const existing = imageOperationForTarget(project, target);
+    if (existing && activeImageOperations.get(existing.id)?.projectId === project.id && !['complete', 'failed'].includes(existing.stage)) return;
     const result = await window.electronAPI.petstory.beginImageOperation(project.id, project.revision,
       { target, requestId: crypto.randomUUID(), ...(baseAssetId ? { baseAssetId, feedback } : {}) }, get().capability || undefined);
+    if (request && !ownsImageRequest(request)) {
+      if (result.operationId && result.project) await stopSavedImageOperation({ projectId: project.id, operationId: result.operationId }, result.project);
+      return;
+    }
+    if (get().project?.id !== project.id) return;
     accept(result);
-    if (!result.success || !result.operationId) return;
-    activeProductionId = null;
-    dispatchedImageTasks.clear(); attemptedImageRuns.clear();
-    const context = { projectId: project.id, operationId: result.operationId };
-    activeImageOperation = context;
-    set({ productionCounts: null, activeImageOperationId: context.operationId });
+    if (!result.success || !result.operationId) throw new Error(result.error || '图片操作尚未保存，请继续原任务');
+    const context = authorizeImageOperation(project.id, result.operationId);
+    set({ productionCounts: null });
     try { await driveImageOperation(result, context); }
-    catch (error: unknown) { if (activeImageOperation === context) { activeImageOperation = null; set({ activeImageOperationId: null }); } throw error; }
+    catch (error: unknown) { if (ownsImageOperation(context)) revokeImageOperation(context); throw error; }
   };
   /** 视频点击沿原文字链准备合格候选；尚未确认正文时不创建媒体任务。 */
-  const prepareShotPrompt = async (shotId: string, kind: PetStoryPromptKind): Promise<boolean> => {
+  const prepareShotPrompt = async (shotId: string, kind: PetStoryPromptKind, canContinue: () => boolean = (): boolean => true): Promise<boolean> => {
     const project = get().project; const shot = project?.plan?.shots.find((item): boolean => item.id === shotId);
     if (!project) throw new Error('请先打开原项目');
     if (project.production && project.production.state !== 'complete') return true;
@@ -1185,62 +1500,111 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     const original = [...project.jobs].reverse().find((job): boolean => job.shotId === shotId && job.promptKind === kind && isPromptWritingJob(job));
     const job = original ? latestRepair(project, original) : undefined;
     if (job?.endedWaitingAt || unresolvedEndedPromptKeys(project).has(promptTargetKey({ shotId, kind }))) throw new Error('本镜原文字任务已结束等待，请先核对原结果；未重复发送');
-    if (pendingChatJob(job)) { await recoverBatchJob(job); return false; }
+    if (pendingChatJob(job)) { await recoverBatchJob(job, canContinue); return false; }
     if (job?.status === 'invalid' && job.resultStatus !== 'stale') {
       if (!hasRepairablePromptReply(job)) throw new Error(job.error || '本镜提示词的原回复尚需核对归属或当前依据，未重复发送');
-      liveJobs.add(job.id); await collectResult(job.id, true); return false;
+      liveJobs.add(job.id); await collectResult(job.id, true, canContinue); return false;
     }
     if (job?.status === 'applied' && job.resultStatus === 'candidate' && job.parsedResult?.optimized?.trim()) return false;
-    await prepareRuntime('optimize', { shotId, promptKind: kind, background: 'canvas' });
+    await prepareRuntime('optimize', { shotId, promptKind: kind, background: 'canvas' }, canContinue);
     return false;
   };
   return {
-    activeImageOperationId: null,
+    activeImageOperationId: null, activeImageOperationIds: [], pendingImageTargets: [], imageTargetErrors: {},
     generateMaterialImage: async (materialId: string): Promise<void> => {
-      await run((): Promise<void> => beginImageOperation({ materialId }));
+      await runImageTarget({ materialId }, (request: ImageTargetRequest): Promise<void> => beginImageOperation({ materialId }, undefined, undefined, request));
       await tickPetStoryImageOperation();
     },
     modifyImage: async (target: PetStoryImageTarget, baseAssetId: string, feedback: string): Promise<void> => {
       if (!feedback.trim()) return;
-      await run((): Promise<void> => beginImageOperation(target, baseAssetId, feedback));
+      await runImageTarget(target, (request: ImageTargetRequest): Promise<void> => beginImageOperation(target, baseAssetId, feedback, request));
       await tickPetStoryImageOperation();
     },
+    stopImageOperation: async (target: PetStoryImageTarget): Promise<void> => {
+      const project = get().project;
+      if (!project) return;
+      const key = imageTargetKey(target); const requestKey = imageRequestKey(project.id, key);
+      const request = imageTargetRequests.get(requestKey);
+      if (request) { request.stopped = true; imageTargetRequests.delete(requestKey); }
+      const operation = imageOperationForTarget(project, target);
+      const context = operation ? activeImageOperations.get(operation.id) : undefined;
+      if (context) revokeImageOperation(context);
+      set({ pendingImageTargets: get().pendingImageTargets.filter((item): boolean => item !== key),
+        imageTargetErrors: imageErrorsWith(key, '本次图片已停止，可继续原任务；原请求和已有图片已保留') });
+      if (!operation || operation.stage === 'complete') {
+        const job = request ? [...project.jobs].reverse().find((item): boolean => promptJobKey(item) === key && pendingChatJob(item)) : undefined;
+        const original = job ? latestRepair(project, job) : undefined;
+        const task = original && useTaskStore.getState().tasks.find((item): boolean => item.id === original.taskId && item.projectId === project.studioProjectId && item.assignedAccountId === project.accountId);
+        if (original) liveJobs.delete(original.id);
+        if (task) { interruptImageTasks([task]); await persistStoppedImageTasks([task]); }
+        return;
+      }
+      // 不进入 currentWork 队列：先撤回所有发送权、打断宿主，再保存这次原操作的暂停事实。
+      const stoppingContext = context || { projectId: project.id, operationId: operation.id };
+      interruptImageTasks(imageTasksForOperation(project, operation.id));
+      set({ pendingImageTargets: [...get().pendingImageTargets, key] });
+      try { await stopSavedImageOperation(stoppingContext, project); }
+      catch (error: unknown) {
+        if (get().project?.id === project.id && !imageTargetRequests.has(requestKey)) {
+          const message = error instanceof Error ? error.message : '图片后续操作已停止，但暂停记录尚未保存，请稍后继续';
+          set({ error: message, imageTargetErrors: imageErrorsWith(key, message) });
+        }
+        throw error;
+      } finally {
+        if (get().project?.id === project.id && !imageTargetRequests.has(requestKey)) set({ pendingImageTargets: get().pendingImageTargets.filter((item): boolean => item !== key) });
+      }
+    },
     recoverImageOperation: async (operationId: string): Promise<void> => {
-      await run(async (): Promise<void> => {
+      const target = get().project?.imageOperations?.find((operation): boolean => operation.id === operationId)?.target;
+      if (!target) return;
+      await runImageTarget(target, async (request: ImageTargetRequest): Promise<void> => {
         const project = get().project;
         if (!project) throw new Error('请先打开原项目');
         if ([...imageObservationAttempts.values()].some((attempt): boolean => attempt.context.projectId === project.id && attempt.context.operationId === operationId)) return;
         await refreshTasks();
+        if (!ownsImageRequest(request)) return;
         const operation = project.imageOperations?.find((item): boolean => item.id === operationId);
         const originalTask = useTaskStore.getState().tasks.find((item): boolean => item.id === operation?.taskId);
         if (originalTask?.mode === 'image' && originalTask.runtime?.submittedAt) {
           try { validateImageObservationTask(project, operationId, originalTask); await inspectImageRecoveryPage(originalTask); }
           catch (error: unknown) {
-            if (activeImageOperation?.projectId === project.id && activeImageOperation.operationId === operationId) {
-              activeImageOperation = null; set({ activeImageOperationId: null });
-            }
+            const previous = activeImageOperations.get(operationId);
+            if (previous?.projectId === project.id) revokeImageOperation(previous);
             throw error;
           }
         }
         if (get().project?.id !== project.id) throw new Error('当前项目已变化，请重新打开原图片任务');
+        if (!ownsImageRequest(request)) return;
         const result = await window.electronAPI.petstory.resumeImageOperation(project.id, operationId, get().capability || undefined);
+        if (!ownsImageRequest(request)) {
+          if (result.project) await stopSavedImageOperation({ projectId: project.id, operationId }, result.project);
+          return;
+        }
+        if (get().project?.id !== project.id) return;
         accept(result);
-        if (!result.success) return;
-        activeProductionId = null; dispatchedImageTasks.clear(); attemptedImageRuns.clear();
-        const context = { projectId: project.id, operationId };
-        activeImageOperation = context;
-        set({ activeImageOperationId: operationId });
+        if (!result.success) throw new Error(result.error || '本次图片任务尚未恢复，请继续原任务');
+        resetImageDispatch(project, operationId);
+        const context = authorizeImageOperation(project.id, operationId);
         try { await recoverSubmittedImage(context); await driveImageOperation(result, context); }
-        catch (error: unknown) { if (activeImageOperation === context) { activeImageOperation = null; set({ activeImageOperationId: null }); } throw error; }
-      });
+        catch (error: unknown) { if (ownsImageOperation(context)) revokeImageOperation(context); throw error; }
+      }, operationId);
       await tickPetStoryImageOperation();
     },
-    advanceImageOperation: async (): Promise<void> => run(async (): Promise<void> => {
-      const context = activeImageOperation;
-      if (!context || get().project?.id !== context.projectId) return;
-      try { await driveImageOperation(await window.electronAPI.petstory.advanceImageOperation(context.projectId, context.operationId), context); }
-      catch (error: unknown) { if (activeImageOperation === context) { activeImageOperation = null; set({ activeImageOperationId: null }); } throw error; }
-    }, true),
+    advanceImageOperation: async (): Promise<void> => {
+      if (currentWork || get().busy) return;
+      await runImageWork(async (): Promise<void> => {
+        for (const context of [...activeImageOperations.values()]) {
+          if (get().project?.id !== context.projectId || !ownsImageOperation(context)) continue;
+          try { await driveImageOperation(await window.electronAPI.petstory.advanceImageOperation(context.projectId, context.operationId), context); }
+          catch (error: unknown) {
+            if (ownsImageOperation(context)) {
+              revokeImageOperation(context);
+              setImageError(context, error instanceof Error ? error.message : '图片处理已暂停，请继续本次任务');
+            }
+          }
+        }
+      });
+    },
     openImageConversation: async (target: PetStoryImageTarget, assetId?: string): Promise<void> => {
       const project = get().project;
       if (!project) return;
@@ -1251,7 +1615,8 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (!canSelectAccount(project.accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))) { set({ error: '其他账号正在提交，请稍后查看这次豆包对话' }); return; }
       const occupied = useTaskStore.getState().tasks.some((item): boolean => item.id !== task.id && item.assignedAccountId === project.accountId
         && ['executing', 'generating', 'manual_submission_observing', 'waiting_verification', 'waiting_generation_confirmation'].includes(item.status));
-      if (occupied || project.chatAdjustment?.status === 'active') { set({ error: '这个账号正在处理另一段对话，请稍后查看图片来源' }); return; }
+      const independentImage = !!task.petstory?.imageOperationId || !!task.petstoryChat?.imageOperationId;
+      if (occupied && !independentImage || project.chatAdjustment?.status === 'active') { set({ error: '这个账号正在处理另一段对话，请稍后查看图片来源' }); return; }
       if (locator.ok) {
         window.dispatchEvent(new CustomEvent('reveal-workspace-browser'));
         window.dispatchEvent(new CustomEvent('open-task-conversation', { detail: { task } }));
@@ -1288,7 +1653,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       activeProductionId = null;
       let p = get().project; if (!p) throw new Error('请先打开项目');
       if (p.production?.state === 'running') { const paused = await window.electronAPI.petstory.pauseProduction(p.id); accept(paused); if (!paused.success) throw new Error(paused.error || '当前制作未暂停'); const refreshed = get().project; if (!refreshed) throw new Error('项目已关闭'); p = refreshed; }
-      if (useTaskStore.getState().accountBusy[p.accountId] || !canSelectAccount(p.accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))) throw new Error('这个账号仍在执行任务，请等待原任务结束再调整');
+      if (isAccountExecutionBusy(useTaskStore.getState().accountBusy, p.accountId) || !canSelectAccount(p.accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))) throw new Error('这个账号仍在执行任务，请等待原任务结束再调整');
       const result = await window.electronAPI.petstory.beginAdjustment(p.id, p.revision, target); accept(result);
       if (!result.success) return;
       set({ chatReadbackError: '' });
@@ -1341,10 +1706,12 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (p && a?.status === 'active') { const result = await window.electronAPI.petstory.endAdjustment(p.id, p.revision, a.id); accept(result); if (result.success) { if (a.repairJobId) liveJobs.delete(a.repairJobId); set({ chatReadbackError: '' }); await refreshTasks(); } }
     }),
     uploadShotImage: async (shotId: string, kind: 'firstFrame' | 'lastFrame'): Promise<void> => run(async (): Promise<void> => {
-      const p = get().project; if (p) accept(await window.electronAPI.petstory.addShotImage(p.id, p.revision, shotId, kind)); set({ productionCounts: null });
+      const p = get().project; if (p) await uploadImageTarget(p, { shotId, kind }, (): Promise<PetStoryResult> => window.electronAPI.petstory.addShotImage(p.id, p.revision, shotId, kind)); set({ productionCounts: null });
     }),
     adoptShotImage: async (shotId: string, kind: 'firstFrame' | 'lastFrame', assetId: string): Promise<void> => run(async (): Promise<void> => {
-      const p = get().project; if (p) accept(await window.electronAPI.petstory.adoptImage(p.id, p.revision, { shotId, kind }, assetId)); set({ productionCounts: null });
+      const p = get().project;
+      if (p) await adoptImageTargets(p, [{ target: { shotId, kind }, assetId }], (): Promise<PetStoryResult> => window.electronAPI.petstory.adoptImage(p.id, p.revision, { shotId, kind }, assetId));
+      set({ productionCounts: null });
     }),
     savePromptModel: async (model?: PetStoryProject['promptModel']): Promise<void> => run(async (): Promise<void> => {
       await pauseBatch();
@@ -1360,6 +1727,8 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     recoverChat: async (jobId: string): Promise<void> => run(async (): Promise<void> => {
       const p = get().project; const job = p?.jobs.find((item): boolean => item.id === jobId);
       if (!p || !job) throw new Error('请选择原任务');
+      const operation = imageOperationForChatJob(p, jobId);
+      if (operation) assertImageFlowAvailable(operation.id);
       await refreshTasks();
       const task = useTaskStore.getState().tasks.find((item): boolean => item.id === job.taskId);
       if (!task?.runtime?.submittedAt || task.runtime.runId !== job.runId) throw new Error('没有已提交原运行，不能以恢复入口重新发送');
@@ -1394,11 +1763,17 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       const result = await (scope ? window.electronAPI.petstory.promptStageTargets(project.id, project.revision, scope) : window.electronAPI.petstory.promptStageTargets(project.id, project.revision));
       const current = get().project;
       if (current?.id !== project.id || !result.success || !result.project || result.project.id !== current.id || result.project.revision < current.revision) return result;
-      // 同版本资格查询不替换plan引用，避免页面effect因新对象重复查询。
+      // 同版本只同步当前方案的纯规划补齐；已有正文、历史和未保存草稿不被读取结果覆盖。
       if (result.project.revision > current.revision) accept(result);
-      else if (!promptBatchQueue && result.project.promptBatch) {
-        const batch = result.project.promptBatch;
-        set({ promptBatch: { total: batch.total, completed: batch.completed, status: batch.status === 'complete' ? 'complete' : 'paused' } });
+      else {
+        if (current.plan && result.project.plan && !pendingPetStoryDrafts(current.id).length) {
+          const plan = normalizedAutoModeReadback(current.plan, result.project.plan);
+          if (plan) set({ project: { ...current, plan } });
+        }
+        if (!promptBatchQueue && result.project.promptBatch) {
+          const batch = result.project.promptBatch;
+          set({ promptBatch: { total: batch.total, completed: batch.completed, status: batch.status === 'complete' ? 'complete' : 'paused' } });
+        }
       }
       return result;
     },
@@ -1483,7 +1858,8 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       const p = get().project;
       if (!p?.plan) throw new Error('请先打开已有制作方案');
       if (promptBatchQueue) throw new Error('当前文字批次尚未结束，请先收取原任务');
-      const targets = p.plan.shots.flatMap((s): { shotId: string; kind: PetStoryPromptKind }[] => (['firstFrame', 'lastFrame', 'video'] as const).filter((kind): boolean => !!s.prompts[kind]).map((kind) => ({ shotId: s.id, kind })));
+      const targets = p.plan.shots.flatMap((s): { shotId: string; kind: PetStoryPromptKind }[] => (['firstFrame', 'lastFrame', 'video'] as const).filter((kind): boolean => !!s.prompts[kind]
+        && (kind !== 'lastFrame' || s.requestedMode !== 'auto' || !s.autoModePlan || s.autoModePlan.mode === 'first_last_frame')).map((kind) => ({ shotId: s.id, kind })));
       await beginBatch(targets);
     }),
     regenerateAllMaterialPrompts: async (): Promise<void> => run(async (): Promise<void> => {
@@ -1520,9 +1896,9 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     generateShotMedia: async (shotId: string, kind: PetStoryPromptKind): Promise<void> => {
       if (kind === 'firstFrame' || kind === 'lastFrame') {
         // 与基础图及图片修改共用真实进度、后台宿主和原任务恢复，不另建执行器。
-        await run(async (): Promise<void> => {
-          if (!await prepareShotPrompt(shotId, kind)) return;
-          await beginImageOperation({ shotId, kind });
+        await runImageTarget({ shotId, kind }, async (request: ImageTargetRequest): Promise<void> => {
+          if (!await prepareShotPrompt(shotId, kind, (): boolean => ownsImageRequest(request)) || !ownsImageRequest(request)) return;
+          await beginImageOperation({ shotId, kind }, undefined, undefined, request);
         });
         await tickPetStoryImageOperation();
         return;
@@ -1582,9 +1958,16 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     project: null, projectName: '', capability: null, productionCounts: null, productionResolutions: {}, fallbacks: {},
     confirmStory: async (): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.confirmStory(p.id, p.revision)); }),
     saveMaterialPrompt: async (materialId: string, final: string): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.saveMaterialPrompt(p.id, p.revision, materialId, final)); }),
-    addMaterialImage: async (materialId: string): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.addMaterialImage(p.id, p.revision, materialId)); set({ productionCounts: null }); }),
+    addMaterialImage: async (materialId: string): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project; if (p) await uploadImageTarget(p, { materialId }, (): Promise<PetStoryResult> => window.electronAPI.petstory.addMaterialImage(p.id, p.revision, materialId)); set({ productionCounts: null });
+    }),
     selectMaterialImage: async (materialId: string, assetId: string): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.selectMaterialImage(p.id, p.revision, materialId, assetId)); set({ productionCounts: null }); }),
-    approveMaterials: async (selections: { materialId: string; assetId: string }[]): Promise<void> => run(async (): Promise<void> => { const p = get().project; if (p) accept(await window.electronAPI.petstory.approveMaterials(p.id, p.revision, selections)); set({ productionCounts: null }); }),
+    approveMaterials: async (selections: { materialId: string; assetId: string }[]): Promise<void> => run(async (): Promise<void> => {
+      const p = get().project;
+      if (p) await adoptImageTargets(p, selections.map((selection): { target: PetStoryImageTarget; assetId: string } => ({ target: { materialId: selection.materialId }, assetId: selection.assetId })),
+        (): Promise<PetStoryResult> => window.electronAPI.petstory.approveMaterials(p.id, p.revision, selections));
+      set({ productionCounts: null });
+    }),
     generateMaterials: async (materialIds: string[]): Promise<void> => {
       await run(async (): Promise<void> => {
         const p = get().project; const capability = get().capability;
@@ -1650,8 +2033,9 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       await run(async (): Promise<void> => {
         const p = get().project; const taskState = useTaskStore.getState();
         if (!p) throw new Error('请先打开原项目');
-        const task = petStoryResubmissionTask(p, taskState.tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]);
+        const task = petStoryResubmissionTask(p, taskState.tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])], request.taskId);
         if (!task || task.id !== request.taskId || task.runtime?.runId !== request.runId || task.runtime.submittedAt !== request.submittedAt || request.acceptDuplicateRisk !== true) throw new Error('原任务状态已变化，请重新检查制作结果后确认');
+        if (task.mode === 'image') assertImageFlowAvailable(task.petstory?.imageOperationId);
         const block = petStoryResubmissionAccountBlock(useAccountStore.getState().accounts.find((account): boolean => account.id === task.assignedAccountId));
         if (block) throw new Error(block);
         const result = await window.electronAPI.petstory.resubmitProduction(p.id, p.revision, request, get().capability || undefined);
@@ -1659,16 +2043,17 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
         accept(result);
         if (result.success) {
           await refreshTasks();
-          const operationId = result.project?.production?.imageOperationId;
+          const updated = result.project;
+          const operationId = updated?.imageOperations?.find((operation): boolean => operation.taskId === request.taskId
+            || !!imageOperationProduction(updated, operation.id)?.steps.some((step): boolean => !!step.resubmissionHistory?.some((history): boolean => history.taskId === request.taskId && history.runId === request.runId)))?.id || updated?.production?.imageOperationId;
           if (operationId) {
             // 重发只创建既有授权关联任务；沿图片接力收取候选，不能遗漏原操作的收尾状态。
             const resumed = await window.electronAPI.petstory.resumeImageOperation(p.id, operationId, get().capability || undefined);
             if (get().project?.id !== p.id) return;
             accept(resumed);
             if (!resumed.success) return;
-            activeProductionId = null; dispatchedImageTasks.clear(); attemptedImageRuns.clear();
-            activeImageOperation = { projectId: p.id, operationId };
-            set({ activeImageOperationId: operationId }); imageAuthorized = true;
+            resetImageDispatch(result.project || p, operationId);
+            authorizeImageOperation(p.id, operationId); imageAuthorized = true;
           } else { activeProductionId = p.id; observingProductionTasks.clear(); authorized = true; }
         }
       });
@@ -1682,7 +2067,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (isChatAdjusting(get().project)) throw new Error('请先采用当前豆包回复或结束调整，再切换短剧项目');
       await pauseBatch();
       await pauseVideosBeforeProjectChange();
-      activeProductionId = null; activeImageOperation = null; set({ activeImageOperationId: null }); promptBatchQueue = null;
+      activeProductionId = null; activeImageOperations.clear(); imageTargetRequests.clear(); set({ activeImageOperationId: null, activeImageOperationIds: [], pendingImageTargets: [], imageTargetErrors: {} }); promptBatchQueue = null;
       set({ capability: null, productionCounts: null, fallbacks: {}, promptRepairJobIds: [] });
       const accountId = selection ? selection.accountId : useAccountStore.getState().selectedAccountId;
       if (!accountId) throw new Error('请先选择已登录的豆包账号');
@@ -1695,7 +2080,7 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       if (isChatAdjusting(get().project)) throw new Error('请先采用当前豆包回复或结束调整，再切换短剧项目');
       await pauseBatch();
       await pauseVideosBeforeProjectChange();
-      activeProductionId = null; activeImageOperation = null; set({ activeImageOperationId: null }); promptBatchQueue = null;
+      activeProductionId = null; activeImageOperations.clear(); imageTargetRequests.clear(); set({ activeImageOperationId: null, activeImageOperationIds: [], pendingImageTargets: [], imageTargetErrors: {} }); promptBatchQueue = null;
       liveJobs.clear();
       restoredPlanReadbacks.clear();
       set({ capability: null, productionCounts: null, fallbacks: {}, promptRepairJobIds: [] });
@@ -1766,7 +2151,11 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
         else await prepare(repairPrompt(p, job), 'repair', job.id);
       }
     }),
-    startBoundChat: async (jobId: string): Promise<void> => run((): Promise<void> => continueBoundChat(jobId)),
+    startBoundChat: async (jobId: string): Promise<void> => run(async (): Promise<void> => {
+      const project = get().project; const operation = project && imageOperationForChatJob(project, jobId);
+      if (operation) assertImageFlowAvailable(operation.id);
+      await continueBoundChat(jobId);
+    }),
     retryUnsubmitted: async (jobId: string): Promise<void> => run(async (): Promise<void> => {
       const p = get().project;
       if (!p) throw new Error('请先打开原项目');
@@ -1775,7 +2164,23 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
       await refreshTasks();
       if (result.success) await startBound(jobId);
     }),
-    collect: async (jobId: string, allowRepair = true): Promise<void> => run((): Promise<void> => collectResult(jobId, allowRepair)),
+    collect: async (jobId: string, allowRepair = true): Promise<void> => {
+      const project = get().project;
+      if (project && authorizedImageChat(project, jobId)) {
+        if (pendingImageCollections.has(jobId)) return;
+        pendingImageCollections.add(jobId);
+        try { await runImageWork((): Promise<void> => collectResult(jobId, allowRepair)); }
+        catch (error: unknown) {
+          const current = get().project;
+          const operation = current?.id === project.id ? imageOperationForChatJob(current, jobId) : undefined;
+          const context = operation && activeImageOperations.get(operation.id);
+          if (context) { revokeImageOperation(context); setImageError(context, error instanceof Error ? error.message : '图片准备未完成，请继续本次任务'); }
+        }
+        finally { pendingImageCollections.delete(jobId); }
+        return;
+      }
+      await run((): Promise<void> => collectResult(jobId, allowRepair));
+    },
     draftFinal: async (shotId: string): Promise<void> => run(async (): Promise<void> => {
       const p = get().project;
       if (!p) return;
@@ -1851,6 +2256,10 @@ async function resumeVerifiedWorkflow(detail: TaskVerificationRecoveryDetail, pr
   const state = usePetStoryStore.getState(); const project = state.project;
   if (!project || project.id !== projectId || authorization !== promptWorkAuthorization || state.busy || isChatAdjusting(project)) return;
   const task = verifiedWorkflowTask(project, detail); if (!task) return;
+  const job = project.jobs.find((item): boolean => item.taskId === task.id && item.runId === detail.runId && item.status === 'bound' && !item.endedWaitingAt);
+  const operation = project.imageOperations?.find((item): boolean => item.taskId === task.id && item.stage !== 'complete')
+    || (job ? imageOperationForChatJob(project, job.id) : undefined);
+  if (operation) { await state.recoverImageOperation(operation.id); return; }
   const step = project.production?.steps.find((item): boolean => item.status !== 'complete');
   if (step?.taskId === task.id && step.runId === detail.runId) {
     if (productionAuthorization !== productionObservationAuthorization) return;
@@ -1859,10 +2268,6 @@ async function resumeVerifiedWorkflow(detail: TaskVerificationRecoveryDetail, pr
     if (usePetStoryStore.getState().project?.id === projectId) observingProductionTasks.add(task.id);
     return;
   }
-  const job = project.jobs.find((item): boolean => item.taskId === task.id && item.runId === detail.runId && item.status === 'bound' && !item.endedWaitingAt);
-  const operation = project.imageOperations?.find((item): boolean => item.taskId === task.id && item.stage !== 'complete')
-    || (job ? imageOperationForChatJob(project, job.id) : undefined);
-  if (operation) { await state.recoverImageOperation(operation.id); return; }
   const suspended = verificationPausedBatch;
   if (job && suspended?.projectId === projectId && suspended.jobId === job.id && suspended.taskId === task.id
     && suspended.runId === detail.runId && suspended.authorization === authorization) {
@@ -1916,7 +2321,7 @@ export function observePetStoryTasks(): () => void {
     const tasksById = new Map(state.tasks.map((task): [string, Task] => [task.id, task]));
     const job = project.jobs.find((item): boolean => {
       const task = tasksById.get(item.taskId);
-      return (!isChatAdjusting(project) || isAdjustmentRepair(project, item)) && !item.endedWaitingAt
+      return (!isChatAdjusting(project) || isAdjustmentRepair(project, item)) && !item.endedWaitingAt && !pendingImageCollections.has(item.id)
         && (readbackAttempts.get(readbackKey(project.id, item, task)) || 0) < 3
         && (item.id === readOnlyJob?.id || liveJobs.has(item.id) && pendingChatJob(item) && task?.status === 'done'
           && (!!task.runtime?.chatResponse?.text || item.status === 'captured' && !!item.rawText));

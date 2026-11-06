@@ -720,7 +720,7 @@ describe('媒体直接开始与真实制作条件', (): void => {
 
   it('点击生成后实际操作失败仍显示原因，不被删除的预提示逻辑吞掉', async (): Promise<void> => {
     readyMediaJourney(1, 1); const shot = p.plan!.shots[0];
-    const generate = vi.fn(async (): Promise<void> => { usePetStoryStore.setState({ error: 'TEST 本次图片任务无法提交' }); });
+    const generate = vi.fn(async (): Promise<void> => { usePetStoryStore.setState({ error: 'TEST 本次图片任务无法提交', imageTargetErrors: { [`shot:${shot.id}:firstFrame`]: 'TEST 本次图片任务无法提交' } }); });
     usePetStoryStore.setState({ generateShotMedia: generate });
     render(<CanvasMediaNode project={p} shot={shot} kind="firstFrame" disabled={false} />);
     const button = screen.getByRole('button', { name: '生成图片' });

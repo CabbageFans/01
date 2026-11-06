@@ -27,6 +27,7 @@ import type {
   QualityRejectionTag,
 } from '@doubao-studio/contracts';
 import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
+import { isImageExecutionTask, IMAGE_EXECUTION_CONCURRENCY, tasksExecutionConflict } from '../utils/taskExecutionScope';
 import { parseCsv } from '../utils/csv';
 import { normalizeMediaSubmissionReceipt, validPetStoryChatBinding } from '../utils/persistenceNormalization';
 
@@ -927,11 +928,16 @@ export class TaskService {
     const nowMs = this.nowMs();
     const accountConflict = task.assignedAccountId && tasks.some((item) =>
       item.id !== task.id &&
-      item.assignedAccountId === task.assignedAccountId &&
+      tasksExecutionConflict(item, task) &&
       item.lock &&
       Date.parse(item.lock.expiresAt) > nowMs,
     );
     if (accountConflict) return { success: false, error: '该账号已经被其他任务锁定' };
+    if (isImageExecutionTask(task) && tasks.filter((item: Task): boolean => item.id !== task.id && isImageExecutionTask(item)
+      && (['executing', 'generating', 'manual_submission_observing'].includes(item.status)
+        || !!item.lock && Date.parse(item.lock.expiresAt) > nowMs)).length >= IMAGE_EXECUTION_CONCURRENCY) {
+      return { success: false, error: '已有图片任务正在处理，请等待完成或暂停后再开始' };
+    }
 
     const decision = acquireTaskLease(task.lock, params.ownerId, nowMs);
     if (!decision.success) return decision;

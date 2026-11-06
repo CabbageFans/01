@@ -53,7 +53,7 @@ async function sameFileBytes(first: string, second: string): Promise<boolean> {
 
 /** 端口不含 create/start/download：关联操作本身没有生成或补发能力。 */
 export class PetStoryExistingMediaService {
-  constructor(private readonly projects: PetStoryProjects, private readonly tasks: ExistingMediaPort) {}
+  constructor(private readonly projects: Pick<PetStoryProjects, 'read' | 'write' | 'directory' | 'referenceFile'>, private readonly tasks: ExistingMediaPort) {}
   private download(task: Task, artifactId: string, p: PetStoryProject): DownloadJob | undefined {
     const artifact = validArtifacts(task).find((a): boolean => a.id === artifactId);
     return artifact ? this.tasks.downloads().find((d): boolean => d.taskId === task.id && d.accountId === p.accountId && d.mode === task.mode && d.url === artifact.url && d.status === 'done' && !!d.filePath) : undefined;

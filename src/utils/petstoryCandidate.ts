@@ -18,21 +18,26 @@ function isBoundOrRecoverableRun(job: PetStoryChatJob, task: Task): boolean {
 }
 function isUnsubmittedBoundRun(job: PetStoryChatJob, task: Task): boolean {
   const runtime = task.runtime;
-  if (runtime?.submittedAt || runtime?.acceptanceObservation || runtime?.chatResponse || task.outputs?.length) return false;
+  if (runtime?.submittedAt || runtime?.acceptanceObservation || runtime?.chatResponse || runtime?.chatReadback || runtime?.chatReadbackReview
+    || runtime?.manualObservation || runtime?.mediaSubmissionReceipt || task.outputs?.length || task.artifacts?.length) return false;
   if (!runtime) return task.status === 'queued' && !job.runId;
   if (!isBoundOrRecoverableRun(job, task)) return false;
-  return runtime.input.mode === 'chat' && runtime.input.prompt === task.prompt && JSON.stringify(runtime.input.attachments) === JSON.stringify(task.attachments || []);
+  return runtime.input.mode === 'chat' && runtime.input.prompt === task.prompt && JSON.stringify(runtime.input.attachments) === JSON.stringify(task.attachments || [])
+    && runtime.input.audioAttachment === task.audioAttachment && JSON.stringify(runtime.input.videoConfig) === JSON.stringify(task.videoConfig)
+    && JSON.stringify(runtime.input.petstory) === JSON.stringify(task.petstory);
 }
-function isBoundChatStartState(task: Task): boolean {
+function isBoundChatStartState(job: PetStoryChatJob, task: Task): boolean {
   if (hasTaskExecutionLease(task)) return false;
   if (task.status === 'queued') return true;
+  const unboundDispatchPause = !task.errorInfo && !job.runId && task.status === 'paused' && task.executionIntent === 'hold'
+    && task.runtime?.stage === 'paused' && !task.lock;
   return ['fail', 'paused', 'cancelled', 'waiting_verification'].includes(task.status)
-    && ['video_prompt_not_ready', 'video_assets_not_ready', 'chat_assets_not_ready', 'page_unrecognized', 'page_loading', 'page_changed', 'authentication_unconfirmed', 'cancelled'].includes(task.errorInfo?.code || '');
+    && (unboundDispatchPause || ['video_prompt_not_ready', 'video_assets_not_ready', 'chat_assets_not_ready', 'page_unrecognized', 'page_loading', 'page_changed', 'authentication_unconfirmed', 'cancelled', 'dispatch_not_ready'].includes(task.errorInfo?.code || ''));
 }
 /** 两处来源入口共用：只允许原任务明确未发送后继续；真正重入队和绑定新 run 仍由正式服务核对。 */
 export function canStartBoundChat(project: PetStoryProject | null | undefined, job: PetStoryChatJob, task: Task | undefined, tasks: Task[], occupied = false): boolean {
   if (!project?.mobileStory || !task || occupied) return false;
-  if (!isOriginalBoundChat(project, job, task) || !isUnsubmittedBoundRun(job, task) || !isBoundChatStartState(task)) return false;
+  if (!isOriginalBoundChat(project, job, task) || !isUnsubmittedBoundRun(job, task) || !isBoundChatStartState(job, task)) return false;
   return !tasks.some((other): boolean => other.id !== task.id && other.assignedAccountId === project.accountId
     && (hasTaskExecutionLease(other) || ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(other.status)));
 }

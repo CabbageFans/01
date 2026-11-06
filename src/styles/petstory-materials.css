@@ -26,6 +26,7 @@
 .petstory-material-card .canvas-media-actions .ant-btn { height: 32px; padding-inline: 10px; }
 .petstory-image-conversation.ant-btn { padding-inline: 0; height: auto; margin-top: 8px; }
 .petstory-image-progress { display: grid; gap: 7px; margin: 14px 0; font-size: 12px; color: #566575; }
+.petstory-image-progress > .ant-btn { justify-self: start; }
 .petstory-image-progress-track { height: 5px; border-radius: 4px; background: #E8EFED; overflow: hidden; }
 .petstory-image-progress-track > span { display: block; height: 100%; background: #087F72; border-radius: inherit; }
 .petstory-image-progress-track.is-pending > span { width: 35%; animation: petstory-image-wait 1.5s ease-in-out infinite alternate; }

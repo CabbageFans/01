@@ -257,7 +257,7 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     expect(result.project!.plan).toBeUndefined();
     expect(tasks()).toHaveLength(1);
   });
-  it.each(['video_prompt_not_ready', 'video_assets_not_ready', 'chat_assets_not_ready', 'page_unrecognized', 'page_changed', 'cancelled'] as const)('retries the same never-submitted %s failure as hold and binds a new run without creating another task', async (code): Promise<void> => {
+  it.each(['video_prompt_not_ready', 'video_assets_not_ready', 'chat_assets_not_ready', 'page_unrecognized', 'page_changed', 'cancelled', 'dispatch_not_ready'] as const)('retries the same never-submitted %s failure as hold and binds a new run without creating another task', async (code): Promise<void> => {
     const { port, core, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
     const prepared = await chat.prepare(project.id, 'TEST analysis', 'analysis');
@@ -276,6 +276,50 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     expect((await chat.bindRun(project.id, job.id, 'TEST-new-run')).project!.jobs[0].runId).toBe('TEST-new-run');
     expect(tasks()[0].runtime?.submittedAt).toBeUndefined();
     expect(tasks()).toHaveLength(1);
+  });
+  it('旧派发前停止无错误码但paused/hold且job从未绑定时，继续同任务并保留旧运行历史', async (): Promise<void> => {
+    const { port, core, tasks } = taskPort(); const chat = new PetStoryChatService(projects, port);
+    const prepared = await chat.prepareRuntime(project.id, project.revision, 'analysis'); const job = prepared.project!.jobs[0]; const task = tasks()[0];
+    core.updateRuntime({ taskId: task.id, status: 'paused', executionIntent: 'hold', errorInfo: null,
+      runtime: { runId: 'TEST-unbound-dispatch', attempt: 1, stage: 'paused', message: '任意文案不作为恢复依据', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
+        input: { prompt: task.prompt, mode: 'chat', attachments: [] } } });
+    const resumed = await chat.retryUnsubmitted(project.id, job.id);
+    expect(resumed.success).toBe(true); expect(tasks()).toHaveLength(1);
+    expect(tasks()[0]).toMatchObject({ id: task.id, status: 'queued', executionIntent: 'hold', runHistory: [{ runId: 'TEST-unbound-dispatch' }] });
+    expect(resumed.project!.jobs[0].runId).toBeUndefined();
+  });
+  it.each(['bound', 'armed', 'stage', 'status', 'unknown', 'empty_code', 'submitted', 'response', 'readback', 'review', 'observation', 'receipt', 'artifact', 'output', 'input', 'mode', 'audio', 'video', 'binding', 'account', 'source', 'lease'] as const)('旧无错误码派发恢复拒绝%s证据，不清运行、不新增任务', async (reason): Promise<void> => {
+    const { port, core, tasks } = taskPort(); const chat = new PetStoryChatService(projects, port);
+    const prepared = await chat.prepareRuntime(project.id, project.revision, 'analysis'); const job = prepared.project!.jobs[0]; const task = tasks()[0];
+    const runtime: TaskRunSnapshot = { runId: 'TEST-unbound-dispatch', attempt: 1, stage: 'paused', message: '请先打开该文字任务所属的原项目，并核对原步骤后继续；本次未发送', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
+      input: { prompt: task.prompt, mode: 'chat', attachments: [] } };
+    core.updateRuntime({ taskId: task.id, status: 'paused', executionIntent: 'hold', errorInfo: null, runtime });
+    if (reason === 'bound') await chat.bindRun(project.id, job.id, runtime.runId);
+    // 仅离线测试变更快照；包含观察等证据时不能靠缺错误码或同文案突破门禁。
+    const snapshot = tasks()[0];
+    if (reason === 'armed') snapshot.executionIntent = 'armed';
+    if (reason === 'stage') snapshot.runtime!.stage = 'injecting_prompt';
+    if (reason === 'status') snapshot.status = 'fail';
+    if (reason === 'unknown' || reason === 'empty_code') snapshot.errorInfo = { code: reason === 'unknown' ? 'unknown' : '', message: runtime.message, recoverable: true, detectedAt: now };
+    if (reason === 'submitted') snapshot.runtime!.submittedAt = now;
+    if (reason === 'response') snapshot.runtime!.chatResponse = { text: 'TEST已有回复', capturedAt: now };
+    if (reason === 'readback') snapshot.runtime!.chatReadback = { runId: runtime.runId, baselineMessageCount: 0, association: 'full_prompt', observedAt: now };
+    if (reason === 'review') snapshot.runtime!.chatReadbackReview = { runId: runtime.runId, checkedAt: now, reason: 'TEST已有回读', candidates: [] };
+    if (reason === 'observation') snapshot.runtime!.manualObservation = { startedAt: now, expiresAt: now, source: 'stored_conversation', outcome: 'observing' };
+    if (reason === 'receipt') snapshot.runtime!.mediaSubmissionReceipt = { schemaVersion: 1, runId: runtime.runId, accountId: project.accountId, submittedAt: now, conversationUrl: 'https://www.doubao.com/chat/TEST-receipt', observedAt: now, source: 'published_message' };
+    if (reason === 'artifact') snapshot.artifacts = [{ id: 'TEST-artifact', kind: 'image', url: 'https://TEST.invalid/image.png', source: 'page', runId: runtime.runId, discoveredAt: now }];
+    if (reason === 'output') snapshot.outputs = ['https://TEST.invalid/image.png'];
+    if (reason === 'input') snapshot.runtime!.input.prompt += 'TEST mismatch';
+    if (reason === 'mode') snapshot.runtime!.input.mode = 'image';
+    if (reason === 'audio') snapshot.runtime!.input.audioAttachment = 'TEST-different-audio';
+    if (reason === 'video') snapshot.runtime!.input.videoConfig = { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' };
+    if (reason === 'binding') snapshot.runtime!.input.petstory = { projectId: 'TEST-other-project', stepId: 'TEST-other-step' };
+    if (reason === 'account') snapshot.assignedAccountId = 'TEST-other';
+    if (reason === 'lease') snapshot.lock = { ownerId: 'TEST-owner', acquiredAt: now, expiresAt: now };
+    if (reason === 'source') { const changed = await projects.read(project.id); changed.mobileStory!.id = '11111111-1111-4111-8111-111111111111'; await projects.write(changed); }
+    const guarded = new PetStoryChatService(projects, { ...port, list: (): Task[] => [snapshot] });
+    await expect(guarded.retryUnsubmitted(project.id, job.id)).rejects.toThrow();
+    expect(tasks()).toHaveLength(1); expect(tasks()[0].runtime?.runId).toBe(runtime.runId); expect(tasks()[0].status).toBe('paused');
   });
   it.each(['submitted', 'uncertain', 'wrong-run', 'page-changed-submitted'] as const)('refuses attachment retry for %s evidence', async (reason): Promise<void> => {
     const { port, core, tasks } = taskPort();
@@ -350,14 +394,16 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     const { port, core, tasks } = taskPort(); const chat = new PetStoryChatService(projects, port);
     const analysis = await runtimeAnalysis(chat);
     expect(analysis.planTimingVersion).toBe('events-v1');
-    const oldShape = JSON.stringify({ ...testPlan(), storyUsable: true, contentBasis: { beginning: '测试开头', middle: '测试变化', ending: '测试结果' } });
+    const missingTiming = testPlan();
+    for (const shot of missingTiming.shots) if (shot.requestedMode === 'auto') shot.autoModePlan = { mode: 'first_frame', reason: 'TEST本项模式判断完整，只故意缺少时间合同' };
+    const oldShape = JSON.stringify({ ...missingTiming, storyUsable: true, contentBasis: { beginning: '测试开头', middle: '测试变化', ending: '测试结果' } });
     await complete(core, tasks()[0], runtimeAnswer(analysis, oldShape));
     const failed = await chat.collect(project.id, analysis.id);
     expect(failed).toMatchObject({ success: false, needsRepair: true });
     expect(failed.project!.jobs[0].validationDetails).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'timing', path: '$.shots[0].timingPlan', repairable: true })]));
     const prepared = await chat.prepareRuntime(project.id, failed.project!.revision, 'repair', { parentJobId: analysis.id });
     const repair = prepared.project!.jobs.at(-1)!; expect(repair.planTimingVersion).toBe('events-v1');
-    await complete(core, tasks()[1], runtimeAnswer(repair));
+    await complete(core, tasks()[1], runtimeAnswer(repair, testAnswer(missingTiming)));
     expect(await chat.collect(project.id, repair.id)).toMatchObject({ success: true });
     const reopened = await new PetStoryProjects().open(directory);
     expect(reopened.jobs[0].planTimingVersion).toBe('events-v1'); expect(reopened.jobs.at(-1)!.parsedResult!.plan!.shots.every((shot): boolean => !!shot.timingPlan)).toBe(true);

@@ -111,6 +111,7 @@ function fixture(strictImage: boolean = true): Harness {
     submissionMarkedAt: current.runtime?.submittedAt, initialMsgCount: 0, videoConfig: undefined, strictPrompt: strictImage, petstoryGuard: strictImage,
     webview: view, controller, registryRef: { current: registry }, submittedImagePagesRef: { current: new Map() }, useTaskStore: { getState: (): object => ({ tasks: [current], updateTaskRuntime: writes }) },
     automationEngine: { ownsAccountController: (): boolean => owns, ownsController: (): boolean => owns },
+    ownsTaskWebview: (taskId: string, page: unknown): boolean => taskId === current.id && registry.get(current.assignedAccountId || '') === page,
     pause: async (milliseconds: number): Promise<void> => { vi.setSystemTime(Date.now() + milliseconds); },
     checkHumanVerification: vi.fn(async (): Promise<void> => undefined),
     getChatPageSnapshot: chatRead, getCreationReadbackSnapshot: creationRead, getCurrentCreationConversation: providerRead, inspectCreationReadback, diagnoseCreationReadback,

@@ -35,6 +35,13 @@ beforeEach(async (): Promise<void> => {
 afterEach(async (): Promise<void> => fs.rm(directory, { recursive: true, force: true }));
 
 describe('完整P4完成后的明确文字操作', (): void => {
+  it('独立图片仍在制作时保护方案输入，全部结束后解除方案锁', (): void => {
+    const imageRun: PetStoryProduction = { ...production(), phase: 'materials', state: 'running', steps: [] };
+    const project = { ...p, production: undefined, imageProductions: { 'TEST-image-operation': imageRun } };
+    expect(isCanvasPlanLocked(project)).toBe(true);
+    project.imageProductions['TEST-image-operation'] = { ...imageRun, state: 'complete' };
+    expect(isCanvasPlanLocked(project)).toBe(false);
+  });
   it('打开与读盘保留原完成批次且不创建任务，画布允许新的明确文字操作', async (): Promise<void> => {
     const before = structuredClone(p); const reopened = await new PetStoryProjects().open(directory);
     expect(reopened).toEqual(before); expect(reopened.productionHistory).toBeUndefined(); expect(isCanvasPlanLocked(reopened)).toBe(false); expect(stored).toEqual([]);

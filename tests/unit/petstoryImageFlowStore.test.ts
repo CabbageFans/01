@@ -144,6 +144,73 @@ afterEach(async (): Promise<void> => {
 });
 
 describe('单次图片意图的后台接力', (): void => {
+  it('点击立即占用唯一图片资格，其他素材与修改不排队，候选保存后允许下一项', async (): Promise<void> => {
+    const firstTarget = { materialId: project.materials![0].id }; const secondTarget = { materialId: 'prop:TEST-independent' };
+    const gate = deferred<void>(); const implementation = begin.getMockImplementation()!;
+    begin.mockImplementation(async (id: string, revision: number, request: PetStoryImageOperationRequest): Promise<PetStoryImageOperationResult> => {
+      await gate.promise; return implementation(id, revision, request);
+    });
+    const first = usePetStoryStore.getState().modifyImage(firstTarget, 'TEST-old-adopted', '调整表情');
+    await usePetStoryStore.getState().modifyImage(secondTarget, 'TEST-other-original', '调整角度');
+    await usePetStoryStore.getState().generateMaterialImage(secondTarget.materialId);
+    expect(usePetStoryStore.getState().pendingImageTargets).toHaveLength(1);
+    gate.resolve(); await first; await tickPetStoryImageOperation();
+    expect(begin).toHaveBeenCalledTimes(1); expect(start).toHaveBeenCalledTimes(1);
+    expect(usePetStoryStore.getState().activeImageOperationIds).toHaveLength(1);
+    expect(usePetStoryStore.getState().imageTargetErrors['material:prop:TEST-independent']).toContain('已有图片流程');
+    tasks.find((item): boolean => item.id === project.imageOperations![0].taskId)!.status = 'done';
+    await tickPetStoryImageOperation();
+    expect(project.imageOperations![0].stage).toBe('complete'); expect(usePetStoryStore.getState().activeImageOperationIds).toEqual([]);
+    await usePetStoryStore.getState().modifyImage(secondTarget, 'TEST-other-original', '调整角度');
+    expect(begin).toHaveBeenCalledTimes(2); expect(start).toHaveBeenCalledTimes(2);
+  });
+
+  it('失败释放授权及真实执行后，历史generating阶段不会永久阻止下一张', async (): Promise<void> => {
+    await usePetStoryStore.getState().modifyImage({ materialId: project.materials![0].id }, 'TEST-old-adopted', '调整表情');
+    const first = project.imageOperations![0]; const implementation = advance.getMockImplementation()!;
+    tasks.find((item): boolean => item.id === first.taskId)!.status = 'fail';
+    advance.mockImplementation(async (id: string, operationId: string): Promise<PetStoryImageOperationResult> => {
+      if (operationId === first.id) throw new Error('TEST 当前图片失败');
+      return implementation(id, operationId);
+    });
+    await tickPetStoryImageOperation();
+    expect(usePetStoryStore.getState().activeImageOperationIds).toEqual([]); expect(operation(first.id).stage).toBe('generating');
+    await usePetStoryStore.getState().modifyImage({ materialId: 'prop:TEST-independent' }, 'TEST-other-original', '调整角度');
+    expect(begin).toHaveBeenCalledTimes(2); expect(usePetStoryStore.getState().activeImageOperationIds).toEqual([project.imageOperations![1].id]);
+  });
+
+  it('图片准备自动修订沿同一授权接续，其他图片仍不可启动', async (): Promise<void> => {
+    await usePetStoryStore.getState().generateMaterialImage(project.materials![0].id);
+    const first = project.imageOperations![0]; const parent = project.jobs.find((job): boolean => job.id === first.chatJobId)!;
+    const repair: PetStoryChatJob = { ...structuredClone(parent), id: 'TEST-single-repair', taskId: 'TEST-single-repair-task', kind: 'repair', parentJobId: parent.id, runId: undefined };
+    project.jobs.push(repair); tasks.push(task(repair.taskId, 'chat'));
+    collect.mockImplementationOnce(async (): Promise<PetStoryResult> => {
+      save(); project.jobs.find((job): boolean => job.id === parent.id)!.status = 'invalid';
+      return { success: false, project, needsRepair: true, repairSourceJobId: parent.id, repairJobId: repair.id };
+    });
+    await usePetStoryStore.getState().collect(parent.id, true);
+    await usePetStoryStore.getState().modifyImage({ materialId: 'prop:TEST-independent' }, 'TEST-other-original', '调整角度');
+    expect(begin).toHaveBeenCalledOnce(); expect(usePetStoryStore.getState().activeImageOperationIds).toEqual([first.id]);
+    expect(start.mock.calls.map(([id]): string => id)).toEqual([parent.taskId, repair.taskId]);
+  });
+
+  it('旧排队准备的授权失败后，即使启动下一张也不能借新授权发送迟到旧任务', async (): Promise<void> => {
+    let queuedDispatch: ((task: Task) => Promise<void>) | undefined;
+    start.mockImplementationOnce(async (taskId: string, beforeDispatch?: (task: Task) => Promise<void>): Promise<boolean> => { queuedDispatch = beforeDispatch; return !!taskId; });
+    await usePetStoryStore.getState().generateMaterialImage(project.materials![0].id);
+    const first = project.imageOperations![0]; const implementation = advance.getMockImplementation()!;
+    advance.mockImplementation(async (id: string, operationId: string): Promise<PetStoryImageOperationResult> => {
+      if (operationId === first.id) { operation(first.id).stage = 'failed'; return { ...response(operation(first.id)), error: 'TEST 当前已停止' }; }
+      return implementation(id, operationId);
+    });
+    await tickPetStoryImageOperation();
+    await usePetStoryStore.getState().modifyImage({ materialId: 'prop:TEST-independent' }, 'TEST-other-original', '调整角度');
+    const prepared = tasks.find((item): boolean => item.id === project.jobs.find((job): boolean => job.id === first.chatJobId)?.taskId)!;
+    prepared.runtime = { runId: 'TEST-late-queued-run', attempt: 1, stage: 'preparing_account', message: '', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { mode: 'chat', prompt: prepared.prompt, attachments: [] } };
+    if (!queuedDispatch) throw new Error('TEST 缺少原排队任务派发回调');
+    await expect(queuedDispatch(prepared)).rejects.toThrow('本轮文字准备已停止');
+    expect(usePetStoryStore.getState().activeImageOperationIds).toEqual([project.imageOperations![1].id]);
+  });
   it.each(['firstFrame', 'lastFrame'] as const)('画布%s生成复用图片操作和进度，不进入旧制作调度或打开浏览器', async (kind): Promise<void> => {
     const shot = project.plan!.shots.find((item): boolean => !!item.prompts[kind])!;
     const target = { shotId: shot.id, kind };

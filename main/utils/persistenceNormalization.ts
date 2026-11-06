@@ -718,7 +718,10 @@ function normalizeQualityVerdict(
 }
 
 export function validPetStoryChatBinding(value: unknown): value is NonNullable<Task['petstoryChat']> {
-  return isObject(value) && [value.projectId, value.jobId].every((id: unknown): boolean => typeof id === 'string' && !!id.trim() && id === id.trim() && id.length <= 200);
+  if (!isObject(value)) return false;
+  const validId = (id: unknown): boolean => typeof id === 'string' && !!id.trim() && id === id.trim() && id.length <= 200;
+  return [value.projectId, value.jobId].every(validId) && (value.imageOperationId === undefined && value.materialId === undefined
+    || [value.imageOperationId, value.materialId].every(validId));
 }
 
 function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: string, now: string): Task {
@@ -733,7 +736,8 @@ function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: str
   const chatBindingInvalid = raw.petstoryChat !== undefined && (!validPetStoryChatBinding(raw.petstoryChat) || task.mode !== 'chat');
   // 损坏的业务归属不能静默丢成普通任务；空归属标记仍会被正式调度门禁拒绝。
   task.petstoryChat = raw.petstoryChat === undefined ? undefined : validPetStoryChatBinding(raw.petstoryChat)
-    ? { projectId: raw.petstoryChat.projectId, jobId: raw.petstoryChat.jobId } : { projectId: '', jobId: '' };
+    ? { projectId: raw.petstoryChat.projectId, jobId: raw.petstoryChat.jobId,
+      ...(raw.petstoryChat.imageOperationId ? { imageOperationId: raw.petstoryChat.imageOperationId, materialId: raw.petstoryChat.materialId } : {}) } : { projectId: '', jobId: '' };
   // 执行意图：历史 queued 缺失字段默认 hold；只有显式 armed 才允许调度。
   task.executionIntent = raw.executionIntent === 'armed' ? 'armed' : 'hold';
   task.result = raw.result === null ? null : (typeof raw.result === 'string' ? raw.result : null);
