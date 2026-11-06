@@ -58,7 +58,8 @@ describe('所有通用启动入口的运行绑定门禁', (): void => {
     });
     unregister = registerTaskDispatchGuard('TEST-business', guard);
     expect(await useTaskStore.getState().startAutomation(id)).toBe(false);
-    expect(guard).toHaveBeenCalledOnce(); expect(tasks[0]).toMatchObject({ status: 'paused', executionIntent: 'hold' });
+    expect(guard).toHaveBeenCalledOnce(); expect(tasks[0]).toMatchObject({ status: 'paused', executionIntent: 'hold',
+      errorInfo: { code: 'dispatch_not_ready', recoverable: true, message: 'TEST 绑定写入失败' } });
     expect(tasks[0].runtime?.submittedAt).toBeUndefined(); expect(automationEngine.isReserved(id)).toBe(false);
     expect(useTaskStore.getState().executingTasks).toEqual({});
   });
@@ -74,6 +75,15 @@ describe('所有通用启动入口的运行绑定门禁', (): void => {
     expect(useTaskStore.getState().executingTasks).toEqual({});
     pending.resolve(); expect(await first).toBe(true);
     expect(guard).toHaveBeenCalledOnce(); expect(useTaskStore.getState().executingTasks['TEST-account-a']).toBe(id);
+  });
+  it('正式guard通过后beforeDispatch失败仍保存派发前原因，始终未发布页面执行状态', async (): Promise<void> => {
+    const id = add('TEST-account-a'); const bound = vi.fn(async (): Promise<void> => undefined);
+    unregister = registerTaskDispatchGuard('TEST-business', bound);
+    expect(await useTaskStore.getState().startAutomation(id, async (): Promise<void> => { throw new Error('TEST正式绑定后回读尚未完成'); })).toBe(false);
+    expect(bound).toHaveBeenCalledOnce();
+    expect(tasks[0]).toMatchObject({ status: 'paused', executionIntent: 'hold', errorInfo: { code: 'dispatch_not_ready', recoverable: true } });
+    expect(tasks[0].runtime?.submittedAt).toBeUndefined(); expect(useTaskStore.getState().executingTasks).toEqual({});
+    expect(automationEngine.isReserved(id)).toBe(false);
   });
 
   it('绑定等待期间暂停原运行，迟到guard不能把权威paused覆盖为executing', async (): Promise<void> => {

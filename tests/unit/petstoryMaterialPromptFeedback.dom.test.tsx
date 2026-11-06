@@ -59,10 +59,31 @@ describe('基础素材只操作图片', (): void => {
     usePetStoryStore.setState({ project, generateMaterialImage: generate }); render(<LiveMaterials />);
     const button = within(card()).getByRole('button', { name: '生成图片' }); fireEvent.click(button); fireEvent.click(button);
     expect(generate).toHaveBeenCalledOnce(); expect(button.hasAttribute('disabled')).toBe(true);
-    await act(async (): Promise<void> => { usePetStoryStore.setState({ error: 'TEST 本次图片准备失败' }); finish?.(); });
+    await act(async (): Promise<void> => { usePetStoryStore.setState({ error: 'TEST 本次图片准备失败', imageTargetErrors: { [`material:${project.materials![0].id}`]: 'TEST 本次图片准备失败' } }); finish?.(); });
     await waitFor((): void => expect(within(card()).getByText('TEST 本次图片准备失败')).toBeDefined());
     const other = document.getElementById(`material-character:${actor.id}`); if (!other) throw new Error('TEST 缺少人物卡');
     expect(within(other).queryByText('TEST 本次图片准备失败')).toBeNull(); expect(button.hasAttribute('disabled')).toBe(false);
+  });
+  it('一张图片准备未返回时锁住其他素材，释放后才允许下一项', async (): Promise<void> => {
+    const finishes: (() => void)[] = [];
+    const generate = vi.fn<(materialId: string) => Promise<void>>((id): Promise<void> => {
+      usePetStoryStore.setState({ pendingImageTargets: [`material:${id}`] });
+      return new Promise<void>((resolve): void => { finishes.push(resolve); })
+        .finally((): void => { usePetStoryStore.setState({ pendingImageTargets: [] }); });
+    });
+    const actor = project.plan!.characters[0];
+    project.materials!.push({ id: `character:${actor.id}`, entityId: actor.id, kind: 'character', name: actor.name, designHash: 'TEST', prompt: { original: '', optimized: '', final: '', edited: false, rulesVersion: 'TEST' } });
+    usePetStoryStore.setState({ project, generateMaterialImage: generate }); render(<LiveMaterials />);
+    const first = within(card()).getByRole('button', { name: '生成图片' });
+    const other = document.getElementById(`material-character:${actor.id}`); if (!other) throw new Error('TEST 缺少人物卡');
+    const second = within(other).getByRole('button', { name: '生成图片' });
+    fireEvent.click(first); expect(first.hasAttribute('disabled')).toBe(true); expect(second.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(second); expect(generate).toHaveBeenCalledExactlyOnceWith(project.materials![0].id);
+    await act(async (): Promise<void> => { finishes[0](); });
+    expect(second.hasAttribute('disabled')).toBe(false); fireEvent.click(second);
+    expect(generate.mock.calls.map(([id]): string => id)).toEqual([project.materials![0].id, `character:${actor.id}`]);
+    expect(first.hasAttribute('disabled')).toBe(true); expect(usePetStoryStore.getState().busy).toBe(false);
+    await act(async (): Promise<void> => { finishes[1](); });
   });
   it('当前账号自由调整时禁用图片发送，不擅自结束调整', (): void => {
     project.chatAdjustment = { id: 'TEST-adjustment', target: {}, sourceJobId: 'TEST-source', conversationUrl: 'https://www.doubao.com/chat/TEST', basisHash: 'TEST', startedAt: now, status: 'active', replies: [] };
@@ -91,7 +112,7 @@ describe('基础素材只操作图片', (): void => {
     expect(within(card()).queryByRole('progressbar')).toBeNull();
     expect(within(card()).getByRole('button', { name: '生成图片' }).hasAttribute('disabled')).toBe(true);
     expect(recover).not.toHaveBeenCalled(); expect(generate).not.toHaveBeenCalled();
-    recover.mockImplementationOnce(async (): Promise<void> => { usePetStoryStore.setState({ error: 'TEST 原会话暂未就绪' }); });
+    recover.mockImplementationOnce(async (): Promise<void> => { usePetStoryStore.setState({ error: 'TEST 原会话暂未就绪', imageTargetErrors: { [`material:${materialId}`]: 'TEST 原会话暂未就绪' } }); });
     fireEvent.click(within(card()).getByRole('button', { name: '继续本次任务' }));
     await waitFor((): void => expect(recover).toHaveBeenCalledExactlyOnceWith('TEST-saved-operation')); expect(generate).not.toHaveBeenCalled();
     expect(within(card()).getByText('TEST 原会话暂未就绪')).toBeDefined();

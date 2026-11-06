@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { DownloadJob, PetStoryChatJob, PetStoryImageOperationResult, PetStoryImageTarget, PetStoryPlan, PetStoryProject, Task, TaskAddParams } from '@doubao-studio/contracts';
+import type { DownloadJob, PetStoryChatJob, PetStoryImageOperationResult, PetStoryImageTarget, PetStoryPlan, PetStoryProduction, PetStoryProject, Task, TaskAddParams } from '@doubao-studio/contracts';
 import { TaskService } from '../../main/core/TaskService';
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
 import { PetStoryChatService } from '../../main/utils/petstoryChat';
@@ -20,6 +20,10 @@ let root: string; let red: string; let blue: string; let projects: PetStoryProje
 let stored: Task[]; let downloads: DownloadJob[]; let core: TaskService; let chats: PetStoryChatService;
 let production: PetStoryProductionService; let operations: PetStoryImageOperationService; let failedDownload: boolean;
 function list(): Task[] { return structuredClone(stored); }
+function imageRun(project: PetStoryProject = p): PetStoryProduction | undefined {
+  const operationId = project.imageOperations?.at(-1)?.id;
+  return operationId ? project.imageProductions?.[operationId] || project.production : project.production;
+}
 function create(params: TaskAddParams, accountId: string): Task {
   const created = core.create(params); if (!created.success) throw new Error(created.error);
   const assigned = core.assign({ taskId: created.data[0].id, accountId }); if (!assigned.success) throw new Error(assigned.error);
@@ -109,6 +113,167 @@ beforeEach(async (): Promise<void> => {
 });
 
 describe('一键图片操作的真实服务链（离线）', (): void => {
+  it('不同基础素材可各自准备文字与生成，后开始的图片先完成也不会覆盖原操作', async (): Promise<void> => {
+    const [firstMaterial, secondMaterial] = p.materials!;
+    const first = await begin(undefined, undefined, { materialId: firstMaterial.id });
+    const firstJob = p.jobs.find((job): boolean => job.id === first.chatJobId)!;
+    const firstTask = list().find((task): boolean => task.id === firstJob.taskId)!;
+    const now = new Date().toISOString(); const runId = `TEST-parallel-chat-${firstTask.id}`;
+    core.updateRuntime({ taskId: firstTask.id, status: 'generating', runtime: { runId, attempt: 1, stage: 'generating', message: 'TEST等待第一张文字', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
+      input: { mode: 'chat', prompt: firstTask.prompt, attachments: firstTask.attachments || [] } } });
+    const second = await begin(undefined, undefined, { materialId: secondMaterial.id });
+    expect(second.success, second.error).toBe(true); expect(second.operationId).not.toBe(first.operationId);
+    const secondJob = p.jobs.find((job): boolean => job.id === second.chatJobId)!;
+    expect(list().map((task): unknown => task.petstoryChat)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ imageOperationId: first.operationId, materialId: firstMaterial.id }),
+      expect.objectContaining({ imageOperationId: second.operationId, materialId: secondMaterial.id }),
+    ]));
+    await finishChat(secondJob, secondMaterial.prompt.original);
+    expect((await operations.advance(p.id, second.operationId!)).success).toBe(true);
+    const secondOutput = await finishOperation(second.operationId!);
+    expect(p.imageOperations!.find((operation): boolean => operation.id === first.operationId)?.stage).toBe('preparing');
+    await finishChat(firstJob, firstMaterial.prompt.original);
+    expect((await operations.advance(p.id, first.operationId!)).success).toBe(true);
+    const firstOutput = await finishOperation(first.operationId!);
+    expect(p.assets.find((asset): boolean => asset.id === firstOutput)?.materialId).toBe(firstMaterial.id);
+    expect(p.assets.find((asset): boolean => asset.id === secondOutput)?.materialId).toBe(secondMaterial.id);
+    expect(p.production).toBeUndefined(); expect(Object.values(p.imageProductions!).map((run): string => run.state)).toEqual(['complete', 'complete']);
+  });
+  it('同一目标防重，不同目标的创建在短项目事务中串行且都保留', async (): Promise<void> => {
+    const targets = p.materials!.slice(0, 2).map((material): PetStoryImageTarget => ({ materialId: material.id }));
+    const results = await Promise.all(targets.map((target, index): Promise<PetStoryImageOperationResult> => projects.serial(p.id, async (): Promise<PetStoryImageOperationResult> => {
+      const latest = await projects.read(p.id);
+      return operations.begin(latest.id, latest.revision, { requestId: `TEST-concurrent-${index}`, target });
+    })));
+    expect(results.every((result): boolean => result.success)).toBe(true);
+    await read(); expect(p.imageOperations).toHaveLength(2); expect(list()).toHaveLength(2);
+    const duplicate = await begin(undefined, undefined, targets[0], 'TEST-duplicate-target');
+    expect(duplicate).toMatchObject({ success: false, operationId: results[0].operationId }); expect(list()).toHaveLength(2);
+  });
+  it.each(['unsubmitted', 'submission_uncertain', 'captured', 'repair'] as const)('准备文字%s时暂停后再次生成仍返回原操作，不遮蔽恢复且其他素材可开始', async (checkpoint): Promise<void> => {
+    const [a, b] = p.materials!;
+    const first = await begin(undefined, undefined, { materialId: a.id });
+    let job = p.jobs.find((item): boolean => item.id === first.chatJobId)!;
+    if (checkpoint === 'repair') {
+      await finishChat(job, '', JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, optimized: '' }));
+      const repair = await chats.prepareRuntime(p.id, p.revision, 'repair', { parentJobId: job.id });
+      expect(repair.success, repair.error).toBe(true); p = repair.project!;
+      job = p.jobs.find((item): boolean => item.taskId === repair.taskId)!;
+    } else if (checkpoint !== 'unsubmitted') {
+      const task = list().find((item): boolean => item.id === job.taskId)!;
+      const now = new Date().toISOString(); const runId = `TEST-run-${job.id}`;
+      const response = JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, optimized: a.prompt.original });
+      core.updateRuntime({ taskId: task.id, status: checkpoint === 'captured' ? 'done' : 'paused', runtime: { runId, attempt: 1, stage: checkpoint === 'captured' ? 'completed' : 'paused', message: 'TEST准备恢复检查点', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
+        input: { mode: 'chat', prompt: task.prompt, attachments: task.attachments || [] }, ...(checkpoint === 'captured' ? { chatResponse: { text: response, capturedAt: now } } : {}) } });
+      p = (await chats.bindRun(p.id, job.id, runId)).project!;
+      if (checkpoint === 'captured') {
+        const saved = p.jobs.find((item): boolean => item.id === job.id)!;
+        saved.status = 'captured'; saved.rawText = response; p = await projects.write(p);
+      }
+    }
+    p = (await operations.pause(p.id, first.operationId!)).project!;
+    const originalTaskCount = list().length;
+    const blocked = await begin(undefined, undefined, { materialId: a.id }, 'TEST-preparation-new-request');
+    expect(blocked).toMatchObject({ success: false, operationId: first.operationId });
+    expect(p.imageOperations).toHaveLength(1); expect(list()).toHaveLength(originalTaskCount);
+    const second = await begin(undefined, undefined, { materialId: b.id }); expect(second.success, second.error).toBe(true);
+    const resumed = await operations.resume(p.id, first.operationId!);
+    expect(resumed.success, resumed.error).toBe(true); expect(resumed.chatJobId).toBe(job.id); p = resumed.project!;
+    if (checkpoint === 'captured') {
+      const collected = await chats.collect(p.id, job.id); expect(collected.success, collected.error).toBe(true); p = collected.project!;
+    } else await finishChat(job, a.prompt.original);
+    const ready = await operations.advance(p.id, first.operationId!); expect(ready.success, ready.error).toBe(true); p = ready.project!;
+    await finishOperation(first.operationId!);
+    expect(p.imageOperations!.find((item): boolean => item.id === first.operationId)?.stage).toBe('complete');
+    expect(p.imageOperations!.find((item): boolean => item.id === second.operationId)?.stage).toBe('preparing');
+  });
+  it('修改A暂停和恢复只影响A，B完成后可继续基于B新候选修改，A基图与任务不变', async (): Promise<void> => {
+    const [a, b] = p.materials!;
+    p = await projects.addMaterialImage(p.id, p.revision, a.id, red); const aBase = p.assets.at(-1)!.id;
+    p = await projects.addMaterialImage(p.id, p.revision, b.id, blue); const bBase = p.assets.at(-1)!.id;
+    const first = await begin(aBase, '让表情自然一点。', { materialId: a.id }); const firstTask = await imageTask(first.operationId!);
+    const second = await begin(bBase, '让光线柔和一点。', { materialId: b.id });
+    const paused = await operations.pause(p.id, first.operationId!); p = paused.project!;
+    expect(p.imageProductions![first.operationId!].state).toBe('paused'); expect(p.imageProductions![second.operationId!].state).toBe('running');
+    const output = await finishOperation(second.operationId!);
+    const third = await begin(output, '把笑容再收敛一点。', { materialId: b.id });
+    const thirdTask = await imageTask(third.operationId!);
+    expect(thirdTask.attachments).toEqual([await projects.referenceFile(p.id, output)]);
+    await finishImage(thirdTask); await operations.advance(p.id, third.operationId!); await operations.advance(p.id, third.operationId!);
+    const resumed = await operations.resume(p.id, first.operationId!); expect(resumed.success, resumed.error).toBe(true);
+    expect((await imageTask(first.operationId!)).id).toBe(firstTask.id);
+    await finishImage(firstTask); await operations.advance(p.id, first.operationId!); p = (await operations.advance(p.id, first.operationId!)).project!;
+    expect(p.imageOperations!.find((operation): boolean => operation.id === first.operationId)).toMatchObject({ baseAssetId: aBase, taskId: firstTask.id, stage: 'complete' });
+    expect(list()).toHaveLength(3);
+  });
+  it('停止已提交图片后可上传、预览和采用同目标，原任务和运行证据不变且不会自动重发', async (): Promise<void> => {
+    const materialId = p.materials![0].id;
+    p = await projects.addMaterialImage(p.id, p.revision, materialId, red); const base = p.assets.at(-1)!.id;
+    p = await projects.adoptImage(p.id, p.revision, { materialId }, base);
+    const begun = await begin(base, '让光线柔和一些。'); const task = await imageTask(begun.operationId!);
+    const startedAt = new Date().toISOString(); const runId = 'TEST-stopped-submitted-image-run';
+    expect(core.updateRuntime({ taskId: task.id, status: 'generating', runtime: { runId, attempt: 1, stage: 'generating', message: 'TEST已有平台生成',
+      startedAt, stageStartedAt: startedAt, lastHeartbeatAt: startedAt, submittedAt: startedAt,
+      input: { mode: task.mode, prompt: task.prompt, attachments: task.attachments || [], videoConfig: task.videoConfig, petstory: task.petstory } } }).success).toBe(true);
+    await production.bindRun(p.id, task.id, runId);
+    expect(core.updateRuntime({ taskId: task.id, status: 'paused', executionIntent: 'hold', runtime: { stage: 'paused', message: 'TEST用户停止' } }).success).toBe(true);
+    p = (await operations.pause(p.id, begun.operationId!)).project!;
+    const stopped = structuredClone(p); const originalTasks = list();
+    expect(imageRun(p)?.state).toBe('paused'); expect(imageRun(p)?.steps[0]).toMatchObject({ status: 'bound', taskId: task.id, runId });
+    p = await projects.addMaterialImage(p.id, p.revision, materialId, blue); const candidate = p.assets.at(-1)!;
+    expect(candidate.imageReview?.state).toBe('candidate'); expect(p.materials![0].selectedAssetId).toBe(base);
+    p = await projects.selectMaterialImage(p.id, p.revision, materialId, candidate.id);
+    expect(p.materials![0].selectedAssetId).toBe(base);
+    p = await projects.adoptImage(p.id, p.revision, { materialId }, candidate.id);
+    expect(p.materials![0].selectedAssetId).toBe(candidate.id);
+    expect(p.imageOperations).toEqual(stopped.imageOperations); expect(p.imageProductions).toEqual(stopped.imageProductions);
+    expect(p.productionHistory).toEqual(stopped.productionHistory); expect(list()).toEqual(originalTasks); expect(downloads).toEqual([]);
+    expect(await begin(candidate.id, '另一个意见')).toMatchObject({ success: false, operationId: begun.operationId });
+    expect(list()).toEqual(originalTasks); expect(p.imageOperations).toHaveLength(1);
+  });
+  it('A生成期间可上传采用无关B，B换图不会使A制作计划失效', async (): Promise<void> => {
+    const [a, b] = p.materials!;
+    p = await projects.addMaterialImage(p.id, p.revision, a.id, red); const aBase = p.assets.at(-1)!.id;
+    const first = await begin(aBase, '衣服保持不变，表情自然一点。', { materialId: a.id });
+    p = await projects.addMaterialImage(p.id, p.revision, b.id, blue); const bBase = p.assets.at(-1)!.id;
+    p = await projects.adoptImage(p.id, p.revision, { materialId: b.id }, bBase);
+    expect(p.materials!.find((material): boolean => material.id === b.id)?.selectedAssetId).toBe(bBase);
+    const output = await finishOperation(first.operationId!);
+    expect(p.assets.find((asset): boolean => asset.id === output)?.materialId).toBe(a.id);
+    expect(p.imageOperations![0].stage).toBe('complete');
+  });
+  it('A提交受理不明只保护A原运行，B仍可独立生成并完成', async (): Promise<void> => {
+    const [a, b] = p.materials!;
+    p = await projects.addMaterialImage(p.id, p.revision, a.id, red); const aBase = p.assets.at(-1)!.id;
+    p = await projects.addMaterialImage(p.id, p.revision, b.id, blue); const bBase = p.assets.at(-1)!.id;
+    const first = await begin(aBase, '保持服装，眼神更自然。', { materialId: a.id }); const original = await imageTask(first.operationId!);
+    const now = new Date().toISOString(); const runId = `TEST-uncertain-isolated-${original.id}`;
+    core.updateRuntime({ taskId: original.id, status: 'executing', runtime: { runId, attempt: 1, stage: 'submitting', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
+      input: { prompt: original.prompt, mode: original.mode, attachments: original.attachments || [], videoConfig: original.videoConfig, petstory: original.petstory } } });
+    await production.bindRun(p.id, original.id, runId);
+    core.updateRuntime({ taskId: original.id, status: 'paused', runtime: { submittedAt: now }, errorInfo: { code: 'submission_uncertain', message: 'TEST原提交待检查', recoverable: true, detectedAt: now } });
+    p = (await operations.pause(p.id, first.operationId!)).project!;
+    const blocked = await begin(aBase, '换一条新修改意见。', { materialId: a.id });
+    expect(blocked).toMatchObject({ success: false, operationId: first.operationId });
+    const second = await begin(bBase, '让光线更自然。', { materialId: b.id }); expect(second.success, second.error).toBe(true);
+    await finishOperation(second.operationId!);
+    expect(list().find((task): boolean => task.id === original.id)?.runtime).toMatchObject({ runId, submittedAt: now });
+    expect(p.imageOperations!.find((operation): boolean => operation.id === first.operationId)).toMatchObject({ taskId: original.id, stage: 'failed', baseAssetId: aBase });
+    expect(list()).toHaveLength(2);
+  });
+  it('旧单图片计划在开始另一素材时迁入独立槽，原任务仍可通过守卫和完成', async (): Promise<void> => {
+    const [a, b] = p.materials!;
+    p = await projects.addMaterialImage(p.id, p.revision, a.id, red); const aBase = p.assets.at(-1)!.id;
+    p = await projects.addMaterialImage(p.id, p.revision, b.id, blue); const bBase = p.assets.at(-1)!.id;
+    const first = await begin(aBase, '让表情自然一点。', { materialId: a.id }); const firstTask = await imageTask(first.operationId!);
+    p.production = p.imageProductions![first.operationId!]; delete p.imageProductions; p = await projects.write(p);
+    const second = await begin(bBase, '让光线柔和一点。', { materialId: b.id }); expect(second.success, second.error).toBe(true);
+    expect(p.production).toBeUndefined(); expect(p.imageProductions![first.operationId!].steps[0].taskId).toBe(firstTask.id);
+    await finishOperation(second.operationId!); await finishImage(firstTask);
+    await operations.advance(p.id, first.operationId!); p = (await operations.advance(p.id, first.operationId!)).project!;
+    expect(p.imageOperations!.find((operation): boolean => operation.id === first.operationId)?.stage).toBe('complete');
+    expect(list()).toHaveLength(2);
+  });
   it('无提示词一次授权自动准备、正式保存并继续生图，只产候选且不启动其他素材或视频', async (): Promise<void> => {
     const initial = structuredClone(p.materials!); const originalShots = structuredClone(p.plan!.shots); const material = p.materials![0]; const body = material.prompt.original;
     const begun = await begin(); expect(begun.chatJobId).toBeTruthy(); expect(list()).toHaveLength(1); expect(list()[0].mode).toBe('chat');
@@ -218,7 +383,7 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     expect(list()).toHaveLength(1); expect(list()[0].mode).toBe('image');
     expect(list()[0].attachments).toEqual([await projects.referenceFile(p.id, base)]);
     expect(p.assets.find((asset): boolean => asset.id === output)?.imageReview?.target).toEqual(target); expect(p.adoptedImages).toBeUndefined();
-    expect(p.production?.shots[shot.id].firstFrameId).toBeUndefined();
+    expect(imageRun(p)?.shots[shot.id].firstFrameId).toBeUndefined();
     p = await projects.adoptImage(p.id, p.revision, target, output); expect(p.adoptedImages?.[shot.id].firstFrameId).toBe(output);
     expect(list()).toHaveLength(1);
   });
@@ -229,13 +394,14 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     const directory = projects.directory(p.id); let linkedPlanWrites = 0; let linkedTaskWrites = 0;
     projects = new PetStoryProjects(async (from, to): Promise<void> => {
       const next = JSON.parse(await fs.readFile(from, 'utf8')) as PetStoryProject;
-      if (next.production) {
-        const operation = next.imageOperations?.find((item): boolean => item.id === next.production?.imageOperationId);
+      const run = imageRun(next);
+      if (run) {
+        const operation = next.imageOperations?.find((item): boolean => item.id === run?.imageOperationId);
         expect(operation).toMatchObject({ mode: 'generate', target });
         expect(operation?.chatJobId).toBeUndefined();
-        expect(next.production.target).toEqual({ shotId: target.shotId, kind });
-        if (!next.production.steps.length) linkedPlanWrites++;
-        for (const step of next.production.steps) {
+        expect(run.target).toEqual({ shotId: target.shotId, kind });
+        if (!run.steps.length) linkedPlanWrites++;
+        for (const step of run.steps) {
           expect(step).toMatchObject({ shotId: target.shotId, kind });
           if (step.taskId) {
             expect(list().find((task): boolean => task.id === step.taskId)?.petstory).toMatchObject({ projectId: next.id, stepId: step.id });
@@ -251,13 +417,13 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     expect(begun.success, begun.error).toBe(true); expect(begun.chatJobId).toBeUndefined();
     expect(p.imageOperations).toHaveLength(1); expect(list()).toEqual([]);
     expect(p.imageOperations![0]).toMatchObject({ id: begun.operationId, mode: 'generate', stage: 'generating', target });
-    expect(p.production?.imageOperationId).toBe(begun.operationId); expect(linkedPlanWrites).toBeGreaterThan(0);
+    expect(imageRun(p)?.imageOperationId).toBe(begun.operationId); expect(linkedPlanWrites).toBeGreaterThan(0);
     const repeated = await begin(undefined, undefined, target, requestId);
     expect(repeated.operationId).toBe(begun.operationId); expect(list()).toEqual([]);
     const task = await imageTask(begun.operationId!);
     expect(task).toMatchObject({ mode: 'image', executionIntent: 'hold', assignedAccountId: p.accountId });
     expect(list()).toHaveLength(1); expect(linkedTaskWrites).toBeGreaterThan(0);
-    const step = p.production!.steps[0]; const source = p.plan!.shots.find((shot): boolean => shot.id === target.shotId)!.prompts[kind]!;
+    const step = imageRun(p)!.steps[0]; const source = p.plan!.shots.find((shot): boolean => shot.id === target.shotId)!.prompts[kind]!;
     expect(task.prompt).toBe(step.compiledPrompt?.text); expect(step.compiledPrompt?.final).toBe(source.final);
     expect((await imageTask(begun.operationId!)).id).toBe(task.id); expect(list()).toHaveLength(1);
     const output = await finishOperation(begun.operationId!);
@@ -308,12 +474,12 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     expect(regenerated.operationId).not.toBe(previous.operationId);
     expect(p.imageOperations!.at(-1)).toMatchObject({ mode: 'generate', target, stage: 'generating' });
     expect(p.imageOperations!.at(-1)?.baseAssetId).toBeUndefined(); expect(p.imageOperations!.at(-1)?.feedback).toBeUndefined();
-    expect(p.production?.steps).toEqual([]);
+    expect(imageRun(p)?.steps).toEqual([]);
     const next = await imageTask(regenerated.operationId!);
     expect(next.id).not.toBe(previousTask.id); expect(next.runtime).toBeUndefined();
     expect(next).toMatchObject({ mode: 'image', executionIntent: 'hold', assignedAccountId: p.accountId, prompt: expected.text, attachments });
-    expect(p.production!.steps[0].compiledPrompt?.final).toBe(final);
-    expect(p.production!.steps[0].attachmentAssetIds).toEqual(assetIds);
+    expect(imageRun(p)!.steps[0].compiledPrompt?.final).toBe(final);
+    expect(imageRun(p)!.steps[0].attachmentAssetIds).toEqual(assetIds);
     const output = await finishOperation(regenerated.operationId!);
     expect(output).not.toBe(previousOutput); expect(list().map((task): string => task.mode)).toEqual(['image', 'image']);
     expect(list()[0]).toEqual(previousTask); expect(p.imageOperations![0]).toEqual(previousOperation);
@@ -327,12 +493,12 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     const target = await prepareShotGeneration(kind); const originalPlan = structuredClone(p.plan); const originalJobs = structuredClone(p.jobs);
     const wrong = productionCapability(p); wrong.accountId = 'TEST-other-account';
     const failed = await operations.begin(p.id, p.revision, { requestId: `TEST-uncreated-${kind}`, target }, wrong); p = failed.project!;
-    expect(failed.success).toBe(false); expect(failed.error).toContain('账号不符'); expect(p.production).toBeUndefined(); expect(list()).toEqual([]);
+    expect(failed.success).toBe(false); expect(failed.error).toContain('账号不符'); expect(imageRun(p)).toBeUndefined(); expect(list()).toEqual([]);
     expect(p.imageOperations).toHaveLength(1); expect(p.imageOperations![0]).toMatchObject({ id: failed.operationId, mode: 'generate', stage: 'failed', target });
     const directory = projects.directory(p.id); projects = new PetStoryProjects(); p = await projects.open(directory); services();
     expect((await operations.advance(p.id, failed.operationId!)).action).toBeUndefined(); expect(list()).toEqual([]);
     const resumed = await operations.resume(p.id, failed.operationId!); expect(resumed.success, resumed.error).toBe(true); p = resumed.project!;
-    expect(p.production?.imageOperationId).toBe(failed.operationId); expect(p.imageOperations).toHaveLength(1); expect(list()).toEqual([]);
+    expect(imageRun(p)?.imageOperationId).toBe(failed.operationId); expect(p.imageOperations).toHaveLength(1); expect(list()).toEqual([]);
     await finishOperation(failed.operationId!);
     expect(list().map((task): string => task.mode)).toEqual(['image']); expect(p.jobs).toEqual(originalJobs); expect(p.plan).toEqual(originalPlan);
     expect(p.imageOperations![0].error).toBeUndefined(); expect(p.assets.at(-1)?.imageReview?.state).toBe('candidate');
@@ -349,14 +515,14 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     }
     const tasksBefore = list();
     await expect(operations.resume(p.id, failed.operationId!)).rejects.toThrow(reason === 'orphan' ? '已有记录或创建结果不明' : '事实已变化');
-    await read(); expect(p.production).toBeUndefined(); expect(p.imageOperations).toHaveLength(1); expect(p.imageOperations![0].stage).toBe('failed');
+    await read(); expect(imageRun(p)).toBeUndefined(); expect(p.imageOperations).toHaveLength(1); expect(p.imageOperations![0].stage).toBe('failed');
     expect(list()).toEqual(tasksBefore); expect(p.jobs).toEqual(originalJobs);
   });
   it('画布尾帧缺少用户已采用的首帧时停止，上传候选也不会被偷偷采用或触发补生成', async (): Promise<void> => {
     const target = await prepareShotGeneration('lastFrame', false);
     p = await projects.addShotImage(p.id, p.revision, target.shotId!, 'firstFrame', red);
     const original = structuredClone(p); const failed = await begin(undefined, undefined, target);
-    expect(failed.success).toBe(false); expect(failed.error).toContain('首帧'); expect(p.production).toBeUndefined();
+    expect(failed.success).toBe(false); expect(failed.error).toContain('首帧'); expect(imageRun(p)).toBeUndefined();
     expect(list()).toEqual([]); expect(p.jobs).toEqual(original.jobs); expect(p.plan).toEqual(original.plan);
     expect(p.assets).toEqual(original.assets); expect(p.adoptedImages).toEqual(original.adoptedImages);
     expect(p.assets.at(-1)?.imageReview?.state).toBe('candidate');
@@ -368,15 +534,15 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     const directory = projects.directory(p.id); let failTaskLink = true;
     projects = new PetStoryProjects(async (from, to): Promise<void> => {
       const next = JSON.parse(await fs.readFile(from, 'utf8')) as PetStoryProject;
-      if (failTaskLink && next.production?.steps.some((step): boolean => !!step.taskId)) {
+      if (failTaskLink && imageRun(next)?.steps.some((step): boolean => !!step.taskId)) {
         failTaskLink = false; throw new Error('TEST画布图片关联写盘失败');
       }
       await fs.rename(from, to);
     });
     p = await projects.open(directory); services(); const begun = await begin(undefined, undefined, target);
     const failed = await operations.advance(p.id, begun.operationId!); expect(failed.success).toBe(false); p = failed.project!;
-    expect(failed.error).toContain('关联写盘失败'); expect(p.production?.imageOperationId).toBe(begun.operationId);
-    expect(p.production?.steps[0]).toMatchObject({ status: 'preparing' }); expect(p.production?.steps[0].taskId).toBeUndefined();
+    expect(failed.error).toContain('关联写盘失败'); expect(imageRun(p)?.imageOperationId).toBe(begun.operationId);
+    expect(imageRun(p)?.steps[0]).toMatchObject({ status: 'preparing' }); expect(imageRun(p)?.steps[0].taskId).toBeUndefined();
     expect(p.imageOperations![0]).toMatchObject({ stage: 'failed', id: begun.operationId });
     expect(list()).toHaveLength(1); expect(list()[0]).toMatchObject({ mode: 'image', status: 'queued', executionIntent: 'hold' });
     const originalTask = list()[0];
@@ -390,8 +556,14 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
   it('确定未提交的修改失败后可明确提交新意见，保留旧任务与意见且只执行新请求', async (): Promise<void> => {
     p = await projects.addMaterialImage(p.id, p.revision, p.materials![0].id, red); const base = p.assets.at(-1)!.id;
     const first = await begin(base, '表情自然一点。'); const task = await imageTask(first.operationId!);
+    const startedAt = new Date().toISOString(); const originalRunId = 'TEST-failed-unsubmitted-image-run';
+    expect(core.updateRuntime({ taskId: task.id, status: 'executing', runtime: { runId: originalRunId, attempt: 1, stage: 'injecting_prompt', message: 'TEST尚未提交',
+      startedAt, stageStartedAt: startedAt, lastHeartbeatAt: startedAt,
+      input: { mode: task.mode, prompt: task.prompt, attachments: task.attachments || [], videoConfig: task.videoConfig, petstory: task.petstory } } }).success).toBe(true);
+    await production.bindRun(p.id, task.id, originalRunId);
     expect(core.updateStatus({ taskId: task.id, status: 'fail' }).success).toBe(true);
     const failed = await operations.advance(p.id, first.operationId!); expect(failed.success).toBe(false); p = failed.project!;
+    const failedTask = list().find((item): boolean => item.id === task.id)!;
     const second = await begin(base, '改成轻微微笑，保持原来的衣服。'); expect(second.success, second.error).toBe(true); p = second.project!;
     expect(p.productionHistory?.at(-1)?.imageOperationId).toBe(first.operationId); expect(p.imageOperations!.find((item): boolean => item.id === first.operationId)?.feedback).toBe('表情自然一点。');
     const next = await imageTask(second.operationId!); expect(next.id).not.toBe(task.id); expect(list()).toHaveLength(2);
@@ -399,12 +571,23 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     await finishImage(next); await operations.advance(p.id, second.operationId!); p = (await operations.advance(p.id, second.operationId!)).project!;
     expect(p.imageOperations!.at(-1)?.stage).toBe('complete'); expect(list().find((item): boolean => item.id === task.id)?.runtime?.submittedAt).toBeUndefined();
     await expect(operations.resume(p.id, first.operationId!)).rejects.toThrow('已有记录或创建结果不明'); expect(list()).toHaveLength(2);
+    const beforeAdoption = structuredClone(p); const originalTasks = list();
+    const output = p.imageOperations!.find((item): boolean => item.id === second.operationId)!.outputAssetId!;
+    expect(output).toBeTruthy();
+    p = await projects.adoptImage(p.id, p.revision, { materialId: p.materials![0].id }, output);
+    expect(p.materials![0].selectedAssetId).toBe(output); expect(p.assets.find((asset): boolean => asset.id === output)?.imageReview?.state).toBe('adopted');
+    expect(list()).toEqual(originalTasks); expect(list().find((item): boolean => item.id === task.id)).toEqual(failedTask);
+    expect(list().find((item): boolean => item.id === task.id)?.runtime?.runId).toBe(originalRunId);
+    expect(p.imageOperations!.find((item): boolean => item.id === first.operationId)).toEqual(beforeAdoption.imageOperations!.find((item): boolean => item.id === first.operationId));
+    expect(p.imageOperations!.find((item): boolean => item.id === first.operationId)?.feedback).toBe('表情自然一点。');
+    expect(p.imageProductions?.[first.operationId!]).toEqual(beforeAdoption.imageProductions?.[first.operationId!]);
+    expect(p.productionHistory).toEqual(beforeAdoption.productionHistory); expect(p.assets.find((asset): boolean => asset.id === base)).toEqual(beforeAdoption.assets.find((asset): boolean => asset.id === base));
   });
   it('已提交结果不明或已生成下载失败不能通过新意见再次生成', async (): Promise<void> => {
     p = await projects.addMaterialImage(p.id, p.revision, p.materials![0].id, red); const base = p.assets.at(-1)!.id;
     const first = await begin(base, '光线自然一些。'); const task = await imageTask(first.operationId!); await finishImage(task);
     failedDownload = true; p = (await operations.advance(p.id, first.operationId!)).project!;
-    await expect(begin(base, '改成另一种光线。')).rejects.toThrow('尚未结束'); expect(list()).toHaveLength(1);
+    expect(await begin(base, '改成另一种光线。')).toMatchObject({ success: false, operationId: first.operationId }); expect(list()).toHaveLength(1);
     failedDownload = false; await operations.resume(p.id, first.operationId!); await operations.advance(p.id, first.operationId!); p = (await operations.advance(p.id, first.operationId!)).project!;
     const second = await begin(base, '让眼神看左边。'); const pending = await imageTask(second.operationId!);
     const now = new Date().toISOString(); const runId = `TEST-uncertain-${pending.id}`;
@@ -424,7 +607,7 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
       input: { prompt: original.prompt, mode: original.mode, attachments: original.attachments || [], videoConfig: original.videoConfig, petstory: original.petstory } } }).success).toBe(true);
     await production.bindRun(p.id, original.id, runId);
     core.updateRuntime({ taskId: original.id, status: 'paused', runtime: { submittedAt: now }, errorInfo: { code: 'submission_uncertain', message: 'TEST 原图片受理不明', recoverable: true, detectedAt: now } });
-    await production.pause(p.id); p = (await operations.advance(p.id, begun.operationId!)).project!;
+    await operations.pause(p.id, begun.operationId!); p = (await operations.advance(p.id, begun.operationId!)).project!;
     expect(p.imageOperations!.at(-1)?.stage).toBe('failed'); const originalRun = list()[0].runtime;
     const request = { taskId: original.id, runId, submittedAt: now, authorizationId: 'TEST-explicit-image-replacement', acceptDuplicateRisk: true as const };
     const replacement = await production.resubmit(p.id, p.revision, request); p = replacement.project!;
@@ -438,7 +621,7 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     expect(operation).toMatchObject({ stage: 'complete', taskId: replacement.taskId, outputAssetId: expect.any(String) });
     expect(p.assets.find((asset): boolean => asset.id === operation.outputAssetId)).toMatchObject({ taskId: replacement.taskId, imageReview: { state: 'candidate' }, validation: { decoded: true } });
     expect(p.materials![0].selectedAssetId).toBe(base); expect(list().find((task): boolean => task.id === original.id)?.runtime).toEqual(originalRun);
-    expect(p.production?.steps[0].resubmissionHistory?.[0]).toMatchObject({ taskId: original.id, runId }); expect(list()).toHaveLength(2);
+    expect(imageRun(p)?.steps[0].resubmissionHistory?.[0]).toMatchObject({ taskId: original.id, runId }); expect(list()).toHaveLength(2);
   });
   it('已完成下载的本地缓存缺失时只重下原图片，失败可继续且不永久排除原产物', async (): Promise<void> => {
     const materialId = p.materials![0].id;
@@ -450,14 +633,14 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     failedDownload = true;
     const stopped = await operations.advance(p.id, begun.operationId!); p = stopped.project!;
     expect(stopped.success).toBe(false); expect(stopped.error).toContain('下载失败');
-    expect(p.production?.steps[0].rejectedArtifactIds).toBeUndefined(); expect(list()).toHaveLength(1);
+    expect(imageRun(p)?.steps[0].rejectedArtifactIds).toBeUndefined(); expect(list()).toHaveLength(1);
     failedDownload = false; await operations.resume(p.id, begun.operationId!);
     await operations.advance(p.id, begun.operationId!); p = (await operations.advance(p.id, begun.operationId!)).project!;
     const operation = p.imageOperations!.at(-1)!;
     expect(operation).toMatchObject({ stage: 'complete', taskId: task.id, outputAssetId: expect.any(String) });
     expect(p.assets.find((asset): boolean => asset.id === operation.outputAssetId)).toMatchObject({ artifactId: artifact.id, taskId: task.id,
       downloadJobId: 'TEST-download-1', imageReview: { state: 'candidate' }, validation: { decoded: true } });
-    expect(p.production?.steps[0].rejectedArtifactIds).toBeUndefined(); expect(list()).toEqual([original]); expect(downloads).toHaveLength(2);
+    expect(imageRun(p)?.steps[0].rejectedArtifactIds).toBeUndefined(); expect(list()).toEqual([original]); expect(downloads).toHaveLength(2);
   });
   it('图片准备根任务与操作关联一次原子保存，重入只能取得同一任务', async (): Promise<void> => {
     const directory = projects.directory(p.id); let linkedWrites = 0;
@@ -492,9 +675,9 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     p = await projects.addMaterialImage(p.id, p.revision, p.materials![0].id, red); const base = p.assets.at(-1)!.id;
     const wrong = productionCapability(p); wrong.accountId = 'TEST-other-account';
     const failed = await operations.begin(p.id, p.revision, { requestId: 'TEST-uncreated-modification', target: { materialId: p.materials![0].id }, baseAssetId: base, feedback: '稍微微笑。' }, wrong);
-    p = failed.project!; expect(failed.success).toBe(false); expect(p.production).toBeUndefined(); expect(list()).toEqual([]);
+    p = failed.project!; expect(failed.success).toBe(false); expect(imageRun(p)).toBeUndefined(); expect(list()).toEqual([]);
     const resumed = await operations.resume(p.id, failed.operationId!); expect(resumed.success, resumed.error).toBe(true); p = resumed.project!;
-    expect(p.imageOperations).toHaveLength(1); expect(p.production?.imageOperationId).toBe(failed.operationId); expect(list()).toEqual([]);
+    expect(p.imageOperations).toHaveLength(1); expect(imageRun(p)?.imageOperationId).toBe(failed.operationId); expect(list()).toEqual([]);
     await finishOperation(failed.operationId!); expect(list()).toHaveLength(1);
   });
   it.each(['orphan', 'facts'] as const)('未建计划的失败修改遇到%s时保持原授权且拒绝补建', async (reason): Promise<void> => {
@@ -505,7 +688,7 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     else p = await projects.saveMaterialPrompt(p.id, p.revision, p.materials![0].id, p.materials![0].prompt.original);
     const count = list().length;
     await expect(operations.resume(p.id, failed.operationId!)).rejects.toThrow(reason === 'orphan' ? '已有记录或创建结果不明' : '事实已变化');
-    expect((await read()).production).toBeUndefined(); expect(p.imageOperations).toHaveLength(1); expect(list()).toHaveLength(count);
+    expect(imageRun(await read())).toBeUndefined(); expect(p.imageOperations).toHaveLength(1); expect(list()).toHaveLength(count);
   });
   it('活跃原运行从提交中到生成中再完成的轮询只等待，不因受理证据尚未保存而暂停或启动新控制器', async (): Promise<void> => {
     p = await projects.addMaterialImage(p.id, p.revision, p.materials![0].id, red); const base = p.assets.at(-1)!.id;
@@ -517,13 +700,13 @@ describe('一键图片操作的真实服务链（离线）', (): void => {
     for (const status of ['executing', 'generating', 'manual_submission_observing'] as const) {
       core.updateRuntime({ taskId: task.id, status, runtime: { stage: status === 'executing' ? 'submitting' : status, submittedAt: now } });
       const polled = await operations.advance(p.id, begun.operationId!); expect(polled.success, polled.error).toBe(true); p = polled.project!;
-      expect(polled.action).toBe('wait'); expect(polled.taskId).toBeUndefined(); expect(p.production?.state).toBe('running');
+      expect(polled.action).toBe('wait'); expect(polled.taskId).toBeUndefined(); expect(imageRun(p)?.state).toBe('running');
       expect(p.imageOperations!.at(-1)).toMatchObject({ stage: 'generating', taskId: task.id }); expect(list()).toHaveLength(1); expect(downloads).toEqual([]);
       expect(list()[0].runtime?.acceptanceObservation).toBeUndefined();
     }
     // 已误暂停的项目可显式继续仍活跃的原运行；恢复不要求另建受理观察器或重试发送。
     core.updateRuntime({ taskId: task.id, status: 'generating', runtime: { stage: 'generating' } });
-    await production.pause(p.id); const before = list();
+    await operations.pause(p.id, begun.operationId!); const before = list();
     const resumed = await operations.resume(p.id, begun.operationId!); expect(resumed.success, resumed.error).toBe(true);
     expect(list()).toEqual(before); const waiting = await operations.advance(p.id, begun.operationId!);
     expect(waiting.action).toBe('wait'); expect(waiting.taskId).toBeUndefined();

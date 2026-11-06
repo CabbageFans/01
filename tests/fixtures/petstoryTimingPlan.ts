@@ -1,8 +1,12 @@
-/** 仅补齐离线模拟回复的新时间合同，不改剧本、台词或已有（包括故意错误的）字段。 */
+/** 补齐离线模拟回复的时间与自动模式合同，不改剧本、台词或已有（包括故意错误的）字段。 */
 export function withOfflineTimingPlan<T extends object>(value: T, originalText: string): T {
   const result = structuredClone(value) as T & { shots?: Record<string, unknown>[] };
   const occurrences = new Map<string, number>();
   for (const shot of result.shots || []) {
+    if (shot.requestedMode === 'auto' && shot.autoModePlan === undefined) {
+      const prompts = shot.prompts && typeof shot.prompts === 'object' ? shot.prompts as Record<string, unknown> : undefined;
+      shot.autoModePlan = { mode: prompts?.lastFrame ? 'first_last_frame' : 'reference', reason: 'TEST离线夹具明确指定原测试的图片输入安排，不作为真实剧情判断或模型验收' };
+    }
     const dialogue = Array.isArray(shot.dialogue) ? shot.dialogue as Record<string, unknown>[] : [];
     for (const line of dialogue) {
       if (typeof line.text !== 'string') continue;

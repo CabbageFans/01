@@ -31,6 +31,7 @@ import { completeAcceptedObservation, hasPlatformAcceptance, renewObservationLea
 import { canContinueUnsubmittedVerification, canRecoverTaskAfterVerification, hasVerificationRecoveryConflict, matchesVerificationRecoveryRun, verificationRecoveryInputMatches, type TaskVerificationRecoveryDetail, type UnsubmittedVerificationRecovery } from '../utils/verificationRecovery';
 import { resolveTaskConversationTarget } from '../utils/taskConversationLocator';
 import { runTaskDispatchGuards } from '../automation/taskDispatchGuards';
+import { executionScopesConflict, getTaskAccountIdForScope, getTaskExecutionScope, isImageExecutionTask, IMAGE_EXECUTION_CONCURRENCY, tasksExecutionConflict } from '../utils/taskExecutionScope';
 
 let resumeAllInFlight: Promise<boolean> | null = null;
 const verificationRecoveryInFlight = new Map<string, Promise<boolean>>();
@@ -75,7 +76,7 @@ interface TaskState {
   schedulerPaused: boolean;
 
   // ---- V3: 多账号并行执行 ----
-  /** 每个账号正在执行的任务 ID */
+  /** 执行槽正在运行的任务 ID；普通任务按账号，基础图片按账号/项目/素材。 */
   executingTasks: Record<string, string>;
   /** 每个账号是否正在忙碌 */
   accountBusy: Record<string, boolean>;
@@ -109,7 +110,7 @@ interface TaskState {
 
   // V3 自动化方法
   startAutomation: (taskId: string, beforeDispatch?: (task: Task) => Promise<void>, verificationRecovery?: UnsubmittedVerificationRecovery) => Promise<boolean>;
-  setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage) => void;
+  setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage, taskId?: string) => void;
   updateTaskRuntime: (taskId: string, patch: {
     status?: TaskStatus;
     runtime?: Partial<TaskRunSnapshot>;
@@ -148,8 +149,83 @@ const runtimePersistState = new Map<string, { stage?: TaskStage; savedAt: number
 let queueProcessing = false;
 
 function verificationRecoveryDispatchBlocked(state: TaskState, accountId: string): boolean {
-  return state.schedulerPaused || Boolean(state.accountBusy[accountId] || state.executingTasks[accountId])
+  return state.schedulerPaused || Object.entries(state.accountBusy).some(([scope, busy]: [string, boolean]): boolean => busy && getTaskAccountIdForScope(scope) === accountId)
+    || Object.keys(state.executingTasks).some((scope: string): boolean => getTaskAccountIdForScope(scope) === accountId)
     || Boolean(findInteractiveAccountId(state.accountAutomationState));
+}
+
+function executionSlotBusy(state: TaskState, task: Task): boolean {
+  const scope = getTaskExecutionScope(task);
+  return Object.entries(state.accountBusy).some(([otherScope, busy]: [string, boolean]): boolean => busy && executionScopesConflict(scope, otherScope))
+    || Object.keys(state.executingTasks).some((otherScope: string): boolean => executionScopesConflict(scope, otherScope))
+    || isImageExecutionTask(task) && imageExecutionCapacityReached(state, task);
+}
+
+/** 图片准备、生成和观察全局单行；已释放执行权的历史等待不占运行容量。 */
+function imageExecutionCapacityReached(state: TaskState, task: Task): boolean {
+  const occupiedScopes = new Set<string>();
+  const imageScope = (scope: string): boolean => {
+    const running = state.tasks.find((item: Task): boolean => item.id === state.executingTasks[scope]);
+    return running ? isImageExecutionTask(running) : scope.startsWith('image:');
+  };
+  for (const [scope, taskId] of Object.entries(state.executingTasks)) {
+    if (taskId !== task.id && imageScope(scope)) occupiedScopes.add(scope);
+  }
+  for (const [scope, busy] of Object.entries(state.accountBusy)) {
+    if (busy && state.executingTasks[scope] !== task.id && imageScope(scope)) occupiedScopes.add(scope);
+  }
+  for (const other of state.tasks) {
+    if (other.id === task.id || !isImageExecutionTask(other)) continue;
+    if (['executing', 'generating', 'manual_submission_observing'].includes(other.status) || automationEngine.isReserved(other.id)) occupiedScopes.add(getTaskExecutionScope(other));
+  }
+  return occupiedScopes.size >= IMAGE_EXECUTION_CONCURRENCY;
+}
+
+/** 原受理证据继续防止重发；已完成或明确停止的图片不能因此永久占用账号。 */
+function hasPendingAccountObservation(task: Task): boolean {
+  if (task.status === 'done' || task.status === 'cancelled') return false;
+  if (isImageExecutionTask(task) && task.status === 'paused' && task.executionIntent === 'hold' && task.errorInfo?.code === 'cancelled') return false;
+  return task.runtime?.acceptanceObservation?.outcome === 'observing';
+}
+
+function conflictingExecutionTask(state: TaskState, task: Task): Task | undefined {
+  return state.tasks.find((other: Task): boolean => other.id !== task.id && tasksExecutionConflict(other, task)
+    && (['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(other.status)
+      || hasPendingAccountObservation(other)));
+}
+
+/** 单图片模式下，忙碌拒绝必须发生在armed写盘前，不能暗中变成稍后启动的排队授权。 */
+function imageStartBlockReason(state: TaskState, task: Task): string | null {
+  if ([...startingAutomationTasks].some((id: string): boolean => id !== task.id) || findInteractiveAccountId(state.accountAutomationState)) {
+    return '已有任务正在配置或提交，请等待完成后再开始图片任务';
+  }
+  if (executionSlotBusy(state, task) || conflictingExecutionTask(state, task)) return '已有图片或原账号任务正在处理，请等待完成或暂停后再开始';
+  return null;
+}
+
+function executionScopeForTask(state: TaskState, taskId: string, accountId: string): string {
+  const task = state.tasks.find((item: Task): boolean => item.id === taskId);
+  return Object.entries(state.executingTasks).find((entry: [string, string]): boolean => entry[1] === taskId)?.[0]
+    || (task ? getTaskExecutionScope(task) : accountId);
+}
+
+function accountHasExecutingScope(state: TaskState, accountId: string): boolean {
+  return Object.keys(state.executingTasks).some((scope: string): boolean => getTaskAccountIdForScope(scope) === accountId);
+}
+
+/** 完成回执只能释放自己的槽；迟到回执不得覆盖后来运行的占位。 */
+function completedExecutionScope(state: TaskState, scope: string, taskId: string): Pick<TaskState, 'executingTasks' | 'accountBusy' | 'accountAutomationState' | 'accountAutoMessage'> {
+  const executingTasks = { ...state.executingTasks };
+  const accountBusy = { ...state.accountBusy };
+  const accountAutomationState = { ...state.accountAutomationState };
+  const accountAutoMessage = { ...state.accountAutoMessage };
+  if (!executingTasks[scope] || executingTasks[scope] === taskId) {
+    delete executingTasks[scope];
+    delete accountBusy[scope];
+    accountAutomationState[scope] = 'completed';
+    accountAutoMessage[scope] = '生成完成！';
+  }
+  return { executingTasks, accountBusy, accountAutomationState, accountAutoMessage };
 }
 
 /** 异步取锁与业务回读后，必须仍是同一份未发送任务；不能覆盖期间的暂停或输入变更。 */
@@ -303,7 +379,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         }
         if (activeTasks.length > 0 || resumableObservations.length > 0) tasks = await window.electronAPI.tasks.list();
       }
-      set({ tasks, loading: false, executingTasks: {}, accountBusy: {} });
+      // 新素材创建任务后的回读不能清掉其它图片仍持有的运行槽。
+      set({ tasks, loading: false, ...(recoverInterrupted ? { executingTasks: {}, accountBusy: {}, accountAutomationState: {}, accountAutoMessage: {} } : {}) });
     } catch (err: any) {
       set({ error: err.message, loading: false });
     }
@@ -649,11 +726,6 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       set({ error: '任务调度已暂停' });
       return false;
     }
-    const interactiveAccountId = findInteractiveAccountId(get().accountAutomationState);
-    if (interactiveAccountId) {
-      set({ error: '另一账号正在配置或提交，请等待其进入生成阶段' });
-      return false;
-    }
     let task = get().tasks.find((t) => t.id === taskId);
     if (!task || !task.assignedAccountId) {
       console.warn('[TaskStore] startAutomation: 任务未指派账号', taskId);
@@ -665,8 +737,20 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       set({ error: '只有排队中的任务可以启动' });
       return false;
     }
+    if (!isImageExecutionTask(task) && findInteractiveAccountId(get().accountAutomationState)) {
+      set({ error: '另一账号正在配置或提交，请等待其进入生成阶段' });
+      return false;
+    }
     if (verificationRecovery && !canContinueUnsubmittedVerification(task,
       useAccountStore.getState().accounts.find((account): boolean => account.id === task?.assignedAccountId), verificationRecovery)) return false;
+    if (task.runtime?.submittedAt || task.runtime?.chatResponse) {
+      set({ error: '原任务已有提交或回复证据，请只读检查原结果；不会重新发送' });
+      return false;
+    }
+    if (isImageExecutionTask(task)) {
+      const blocked = imageStartBlockReason(get(), task);
+      if (blocked) { set({ error: blocked }); return false; }
+    }
 
     // 显式启动必须先持久化 armed，写失败则绝不进入账号与页面动作。
     if (task.executionIntent !== 'armed') {
@@ -724,22 +808,19 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
 
     // 检查账号是否忙碌
-    const reservedTask = get().tasks.find((item) =>
-      item.id !== taskId && item.assignedAccountId === accountId &&
-      ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(item.status),
-    );
+    const reservedTask = conflictingExecutionTask(get(), refreshed);
     if (reservedTask) {
       set({ error: '该账号仍绑定生成确认或人工提交观察会话；请先完成只读回读或人工取消' });
       return false;
     }
-    if (get().accountBusy[accountId]) {
+    if (executionSlotBusy(get(), task)) {
       console.log('[TaskStore] 账号', accountId, '忙碌，任务排队');
       set({ error: '该账号正在执行其他任务' });
       return false;
     }
 
     const runId = verificationRecovery?.runId || `${taskId}-${Date.now()}`;
-    const reservation = await automationEngine.reserve(taskId, accountId, runId);
+    const reservation = await automationEngine.reserve(taskId, accountId, runId, task);
     if (!reservation.ok) {
       set({ error: reservation.error || '任务锁定失败' });
       return false;
@@ -747,7 +828,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     const reservedState = get();
     const reservedSnapshot = reservedState.tasks.find((item): boolean => item.id === taskId);
     if (reservedState.schedulerPaused || !sameDispatchTask(reservedSnapshot, task, expectedStatus)
-      || reservedState.accountBusy[accountId] || reservedState.executingTasks[accountId] || findInteractiveAccountId(reservedState.accountAutomationState)) {
+      || executionSlotBusy(reservedState, task) || findInteractiveAccountId(reservedState.accountAutomationState)) {
       await automationEngine.release(taskId);
       set({ error: '取得执行锁期间任务或调度状态已变化，原任务保留且未发送' });
       return false;
@@ -816,7 +897,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         const latest = state.tasks.find((item): boolean => item.id === taskId);
         const interactive = findInteractiveAccountId(state.accountAutomationState);
         if (state.schedulerPaused || !sameDispatchTask(latest, runningTask, 'executing') || latest.runtime?.runId !== runId
-          || state.accountBusy[accountId] || state.executingTasks[accountId] || interactive) {
+          || executionSlotBusy(state, runningTask) || interactive) {
           throw new Error('运行绑定期间任务或调度状态已变化，未向页面发送');
         }
         runningTask = latest;
@@ -826,7 +907,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         const latest = get().tasks.find((item): boolean => item.id === taskId);
         // 不覆盖绑定等待期间已经暂停、完成或换成另一运行的权威状态。
         if (latest?.runtime?.runId === runId && latest.status === 'executing' && !latest.runtime.submittedAt) {
-          await get().updateTaskRuntime(taskId, { status: 'paused', executionIntent: 'hold', runtime: { stage: 'paused', message } });
+          // 正式绑定门禁尚未发布执行状态，页面从未取得本次运行；保存可恢复的派发前原因。
+          await get().updateTaskRuntime(taskId, { status: 'paused', executionIntent: 'hold',
+            errorInfo: { code: 'dispatch_not_ready', message, recoverable: true, detectedAt: new Date().toISOString() },
+            runtime: { stage: 'paused', message } });
         }
         await automationEngine.release(taskId);
         set({ error: message });
@@ -837,12 +921,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     console.log('[TaskStore] 启动任务', taskId, '在账号', accountId);
     void window.electronAPI.logs.append({ level: 'info', scope: 'automation', message: '任务开始执行', taskId, accountId });
 
+    const executionScope = getTaskExecutionScope(runningTask);
     set({
       tasks: get().tasks.map((item) => item.id === taskId ? runningTask : item),
-      executingTasks: { ...get().executingTasks, [accountId]: taskId },
-      accountBusy: { ...get().accountBusy, [accountId]: true },
-      accountAutomationState: { ...get().accountAutomationState, [accountId]: 'injecting' },
-      accountAutoMessage: { ...get().accountAutoMessage, [accountId]: '准备执行...' },
+      executingTasks: { ...get().executingTasks, [executionScope]: taskId },
+      accountBusy: { ...get().accountBusy, [executionScope]: true },
+      accountAutomationState: { ...get().accountAutomationState, [executionScope]: 'injecting' },
+      accountAutoMessage: { ...get().accountAutoMessage, [executionScope]: '准备执行...' },
       // 向后兼容
       activeTaskId: taskId,
       automationState: 'injecting',
@@ -892,9 +977,11 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     });
   },
 
-  setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage) => {
-    const previousState = get().accountAutomationState[accountId];
-    const taskId = get().executingTasks[accountId];
+  setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage, explicitTaskId?: string) => {
+    const scope = explicitTaskId ? executionScopeForTask(get(), explicitTaskId, accountId) : accountId;
+    if (explicitTaskId && get().executingTasks[scope] && get().executingTasks[scope] !== explicitTaskId) return;
+    const previousState = get().accountAutomationState[scope];
+    const taskId = explicitTaskId || get().executingTasks[scope];
     const now = new Date().toISOString();
     const status: TaskStatus | undefined = stage === 'waiting_verification' || stage === 'waiting_generation_confirmation'
       ? stage
@@ -925,9 +1012,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       : get().tasks;
     set({
       tasks,
-      accountAutomationState: { ...get().accountAutomationState, [accountId]: state },
+      accountAutomationState: { ...get().accountAutomationState, [scope]: state },
       accountAutoMessage: message !== undefined
-        ? { ...get().accountAutoMessage, [accountId]: message }
+        ? { ...get().accountAutoMessage, [scope]: message }
         : get().accountAutoMessage,
     });
     if (taskId) {
@@ -1062,40 +1149,31 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
     const tasks = get().tasks;
 
-    // 清除该账号的执行状态
-    const newExecuting = { ...get().executingTasks };
-    const newBusy = { ...get().accountBusy };
-    const newAutoState = { ...get().accountAutomationState };
-    const newAutoMsg = { ...get().accountAutoMessage };
-    delete newExecuting[accountId];
-    delete newBusy[accountId];
-    newAutoState[accountId] = 'completed';
-    newAutoMsg[accountId] = '生成完成！';
+    // 只释放本任务的素材槽；同账号其它图片的执行与观察继续保留。
+    const scope = executionScopeForTask(get(), taskId, accountId);
+    const completedScope = completedExecutionScope(get(), scope, taskId);
 
     // 向后兼容：如果完成的是活跃任务
     const isActive = get().activeTaskId === taskId;
 
     set({
       tasks,
-      executingTasks: newExecuting,
-      accountBusy: newBusy,
-      accountAutomationState: newAutoState,
-      accountAutoMessage: newAutoMsg,
+      ...completedScope,
       activeTaskId: isActive ? null : get().activeTaskId,
       automationState: isActive ? 'completed' : get().automationState,
     });
 
     // 更新账号状态
-    window.electronAPI.accounts.setStatus(accountId, 'idle');
+    if (!accountHasExecutingScope(get(), accountId)) void window.electronAPI.accounts.setStatus(accountId, 'idle');
 
     // 延迟后清理完成状态 + 处理队列
     setTimeout(() => {
       const s = get();
       const cleanState = { ...s.accountAutomationState };
       const cleanMsg = { ...s.accountAutoMessage };
-      if (cleanState[accountId] === 'completed') {
-        cleanState[accountId] = 'idle';
-        cleanMsg[accountId] = '';
+      if (!s.executingTasks[scope] && cleanState[scope] === 'completed') {
+        cleanState[scope] = 'idle';
+        cleanMsg[scope] = '';
       }
       set({
         accountAutomationState: cleanState,
@@ -1148,10 +1226,11 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       },
     });
 
+    const scope = executionScopeForTask(get(), taskId, accountId);
     const newExecuting = { ...get().executingTasks };
     const newBusy = { ...get().accountBusy };
-    delete newExecuting[accountId];
-    delete newBusy[accountId];
+    const ownsScope = !newExecuting[scope] || newExecuting[scope] === taskId;
+    if (ownsScope) { delete newExecuting[scope]; delete newBusy[scope]; }
     set({
       tasks: get().tasks.map((task) => task.id === taskId ? {
         ...task,
@@ -1170,12 +1249,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       } : task),
       executingTasks: newExecuting,
       accountBusy: newBusy,
-      accountAutomationState: { ...get().accountAutomationState, [accountId]: 'idle' },
-      accountAutoMessage: { ...get().accountAutoMessage, [accountId]: pauseMessage },
+      accountAutomationState: ownsScope ? { ...get().accountAutomationState, [scope]: 'idle' } : get().accountAutomationState,
+      accountAutoMessage: ownsScope ? { ...get().accountAutoMessage, [scope]: pauseMessage } : get().accountAutoMessage,
       activeTaskId: get().activeTaskId === taskId ? null : get().activeTaskId,
       automationState: get().activeTaskId === taskId ? 'idle' : get().automationState,
     });
-    void window.electronAPI.accounts.setStatus(accountId, 'idle');
+    if (!accountHasExecutingScope(get(), accountId)) void window.electronAPI.accounts.setStatus(accountId, 'idle');
   },
 
   failAutomation: async (taskId: string, accountId: string, errorMsg: string, errorInfo?: TaskErrorInfo) => {
@@ -1203,14 +1282,17 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         : t
     );
 
+    const scope = executionScopeForTask(get(), taskId, accountId);
     const newExecuting = { ...get().executingTasks };
     const newBusy = { ...get().accountBusy };
     const newAutoState = { ...get().accountAutomationState };
     const newAutoMsg = { ...get().accountAutoMessage };
-    delete newExecuting[accountId];
-    delete newBusy[accountId];
-    newAutoState[accountId] = 'failed';
-    newAutoMsg[accountId] = errorMsg;
+    if (!newExecuting[scope] || newExecuting[scope] === taskId) {
+      delete newExecuting[scope];
+      delete newBusy[scope];
+      newAutoState[scope] = 'failed';
+      newAutoMsg[scope] = errorMsg;
+    }
 
     const isActive = get().activeTaskId === taskId;
 
@@ -1224,16 +1306,16 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       automationState: isActive ? 'failed' : get().automationState,
     });
 
-    window.electronAPI.accounts.setStatus(accountId, 'idle');
+    if (!accountHasExecutingScope(get(), accountId)) void window.electronAPI.accounts.setStatus(accountId, 'idle');
 
     // 延迟后清理 + 处理队列
     setTimeout(() => {
       const s = get();
       const cleanState = { ...s.accountAutomationState };
       const cleanMsg = { ...s.accountAutoMessage };
-      if (cleanState[accountId] === 'failed') {
-        cleanState[accountId] = 'idle';
-        cleanMsg[accountId] = '';
+      if (!s.executingTasks[scope] && cleanState[scope] === 'failed') {
+        cleanState[scope] = 'idle';
+        cleanMsg[scope] = '';
       }
       set({
         accountAutomationState: cleanState,
@@ -1304,8 +1386,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         if (!latestTask || latestTask.status !== 'queued' || !latestTask.assignedAccountId) continue;
         const accountId = latestTask.assignedAccountId;
         const accountHasObservation = get().tasks.some((item) =>
-          item.id !== taskId && item.assignedAccountId === accountId &&
-          item.runtime?.acceptanceObservation?.outcome === 'observing',
+          item.id !== taskId && tasksExecutionConflict(item, latestTask) &&
+          hasPendingAccountObservation(item),
         );
         if (accountHasObservation) continue;
         const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
@@ -1331,11 +1413,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         if (getAssignedAccountBlockReason(account)) {
           continue;
         }
-        if (!get().accountBusy[accountId]) {
+        if (!executionSlotBusy(get(), latestTask)) {
           console.log('[TaskStore] 队列调度：启动任务', taskId, '在账号', accountId);
           const started = await get().startAutomation(taskId);
           if (started) {
-            setTimeout(() => { void get().processQueue(); }, 0);
+            // 接受排队不等于已经派发；等待正在准备的任务进入生成后再唤醒，避免空转。
+            if (get().tasks.find((item: Task): boolean => item.id === taskId)?.status !== 'queued') setTimeout(() => { void get().processQueue(); }, 0);
             return;
           }
         }

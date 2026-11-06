@@ -1,4 +1,4 @@
-import type { PetStoryPlan, PetStoryShot, PetStoryCharacter, PetStoryPrompt, PetStoryMode, PetStoryProp, PetStoryScene, PetStoryMaterialEditIntent, PetStoryPromptTaskContract, PetStoryPromptReference, PetStoryProject, PetStoryChatJob } from '@doubao-studio/contracts';
+import type { PetStoryAutoModePlan, PetStoryPlan, PetStoryShot, PetStoryCharacter, PetStoryPrompt, PetStoryMode, PetStoryProp, PetStoryScene, PetStoryMaterialEditIntent, PetStoryPromptTaskContract, PetStoryPromptReference, PetStoryProject, PetStoryChatJob } from '@doubao-studio/contracts';
 
 export { PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptQuality';
 import { compileReferencedText, PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptQuality';
@@ -236,6 +236,16 @@ function legacySceneReferences(s: Record<string, unknown>, model: boolean): stri
 }
 
 function shotPromptRecord(shot: Record<string, unknown>): Record<string, unknown> { return shot.prompts === undefined ? {} : record(shot.prompts); }
+function autoModePlan(value: unknown, shotId: string, model: boolean): PetStoryAutoModePlan | undefined {
+  if (value === undefined) return undefined;
+  const plan = record(value);
+  if (typeof plan.mode !== 'string' || !['first_frame', 'first_last_frame', 'reference'].includes(plan.mode)) throw new Error(`${shotId}.autoModePlan.mode必须是首帧、首尾帧或多参考模式`);
+  if (!model && plan.source !== undefined && (typeof plan.source !== 'string' || !['analysis', 'legacy'].includes(plan.source))) throw new Error(`${shotId}.autoModePlan.source无效`);
+  return { mode: plan.mode as PetStoryAutoModePlan['mode'], reason: text(plan.reason, `${shotId}.autoModePlan.reason`), source: model ? 'analysis' : plan.source as PetStoryAutoModePlan['source'] };
+}
+function requiresTailPrompt(mode: PetStoryMode, automaticPlan: PetStoryAutoModePlan | undefined): boolean {
+  return mode === 'first_last_frame' || mode === 'auto' && automaticPlan?.mode === 'first_last_frame';
+}
 export function validatePetStoryPlan(value: unknown, model: boolean = false, allowHistoricalFractional: boolean = false): PetStoryPlan {
   // 仅旧项目读取可展示原有小数；新生成、编辑保存和采用始终走默认整秒门禁。
   const issues = collectPetStoryPlanIssues(value).filter((issue): boolean => !(allowHistoricalFractional && issue.code === 'duration' && historicalFractionalDuration(issue.actual)));
@@ -289,6 +299,7 @@ function validatePetStoryPlanStrict(value: unknown, model: boolean, allowHistori
     }
     if (!['cut', 'continue'].includes(String(s.transition))) throw new Error(`${shotId}切镜关系无效`);
     if (!MODES.includes(s.requestedMode as PetStoryMode)) throw new Error(`${shotId}模式无效`);
+    const automaticPlan = autoModePlan(s.autoModePlan, shotId, model);
     const prompts = shotPromptRecord(s);
     const propIds = s.propIds === undefined ? undefined : ids(s.propIds, `${shotId}.propIds`);
     const sceneId = s.sceneId === undefined ? undefined : id(s.sceneId, '场景引用');
@@ -315,7 +326,8 @@ function validatePetStoryPlanStrict(value: unknown, model: boolean, allowHistori
         return { speakerId, text: text(d.text, '已有台词'), tone: optionalText(d.tone, '语气') || '', pace: optionalText(d.pace, '节奏') || '', delivery: delivery as 'onscreen' | 'offscreen' | 'voiceover' | undefined, source: d.source === undefined ? undefined : structuredClone(normalizePetStoryDialogueSource(d)) as NonNullable<PetStoryShot['dialogue']>[number]['source'] };
       });
     }
-    const lastFrame = prompts.lastFrame === undefined && s.requestedMode !== 'first_last_frame' ? undefined : prompt(prompts.lastFrame, `${shotId}.lastFrame`, model);
+    const needsLastFrame = requiresTailPrompt(s.requestedMode as PetStoryMode, automaticPlan);
+    const lastFrame = prompts.lastFrame === undefined && !needsLastFrame ? undefined : prompt(prompts.lastFrame, `${shotId}.lastFrame`, model);
     if (s.requestedMode === 'first_last_frame' && !lastFrame) throw new Error(`${shotId}首尾帧模式缺少尾帧提示词`);
 
     return { id: shotId, order: index + 1, predecessorShotIds: s.predecessorShotIds === undefined ? undefined : ids(s.predecessorShotIds, '前身镜头ID'), characterIds: refs, sceneReferenceAssetIds: legacySceneReferences(s, model), scene: text(s.scene, `${shotId}.scene`),
@@ -328,6 +340,7 @@ function validatePetStoryPlanStrict(value: unknown, model: boolean, allowHistori
       transition: s.transition as PetStoryShot['transition'],
       previousShotId: s.previousShotId === undefined ? undefined : id(s.previousShotId, '前镜头引用'),
       requestedMode: s.requestedMode as PetStoryMode,
+      autoModePlan: automaticPlan,
       prompts: { firstFrame: prompt(prompts.firstFrame, `${shotId}.firstFrame`, model), lastFrame,
         video: prompt(prompts.video, `${shotId}.video`, model) } };
   });

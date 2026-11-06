@@ -5932,7 +5932,7 @@ export async function readAcceptedImageOutputs(
   };
   try {
     const outputs = await waitForImageArtifactReadback({
-      context, ensureCurrent, signal, timeoutMs, wait: sleep, onProgress: options.onProgress,
+      context, ensureCurrent, signal, timeoutMs, wait: sleep, onProgress: options.onProgress, stopOnStableAmbiguity: options.stopOnStableAmbiguity,
       read: (): Promise<ChatPageSnapshot> => getCreationReadbackSnapshot(webview, { conversationUrl, signal, ensureCurrent, allowProviderConversation: true }),
     });
     ensureCurrent();

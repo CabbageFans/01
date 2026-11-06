@@ -5,6 +5,8 @@ export const canvasPromptNames: Record<PetStoryPromptKind, string> = {
   firstFrame: '首帧生图提示词', lastFrame: '尾帧编辑提示词', video: '视频提示词 / 运镜',
 };
 export const isCanvasPlanLocked = (project: PetStoryProject): boolean => {
+  if (project.imageOperations?.some((operation): boolean => !['complete', 'failed'].includes(operation.stage))
+    || Object.values(project.imageProductions || {}).some((run): boolean => run.state === 'running' || run.steps.some((step): boolean => step.status !== 'complete'))) return true;
   const production = project.production;
   if (!production) return false;
   if (production.state === 'running' || production.steps.some((step): boolean => step.status !== 'complete')) return true;

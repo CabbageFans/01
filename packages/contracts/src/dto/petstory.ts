@@ -170,6 +170,13 @@ export interface PetStoryDialogueSource {
   start: number;
   end: number;
 }
+/** 自动模式的逐镜剧情判断；不是平台能力或已有任务的实际执行结果。 */
+export interface PetStoryAutoModePlan {
+  mode: PetStoryResolvedMode;
+  reason: string;
+  /** 旧方案的保守判断随起终状态重算，不冒充模型的逐镜剧情判断。 */
+  source?: 'analysis' | 'legacy';
+}
 export interface PetStoryShot {
   id: string;
   order: number;
@@ -205,6 +212,8 @@ export interface PetStoryShot {
   transition: 'cut' | 'continue';
   previousShotId?: string;
   requestedMode: PetStoryMode;
+  /** 旧项目可缺省；新分析为自动模式记录具体剧情依据。 */
+  autoModePlan?: PetStoryAutoModePlan;
   prompts: { firstFrame: PetStoryPrompt; lastFrame?: PetStoryPrompt; video: PetStoryPrompt };
 }
 export interface PetStoryPlan {
@@ -313,6 +322,9 @@ export interface PetStoryModeResolution {
 export interface PetStoryTaskBinding {
   projectId: string;
   stepId: string;
+  /** 独立图片流水线；只有明确绑定的任务可使用图片并行执行槽。 */
+  imageOperationId?: string;
+  materialId?: string;
 }
 export interface PetStoryProductionStep {
   id: string;
@@ -524,6 +536,8 @@ export interface PetStoryChatJob {
 }
 export interface PetStoryProject {
   imageOperations?: PetStoryImageOperation[];
+  /** 每次图片操作独立推进，正式批量／视频制作继续使用 production。 */
+  imageProductions?: Record<string, PetStoryProduction>;
   /** 同一项目内的对象级自由对话记录，不改变任务执行事实。 */
   chatAdjustment?: PetStoryChatAdjustment;
   chatAdjustmentHistory?: PetStoryChatAdjustment[];
@@ -608,6 +622,7 @@ export interface PetStoryAPI {
   beginImageOperation: (projectId: string, revision: number, request: PetStoryImageOperationRequest, capability?: PetStoryCapability) => Promise<PetStoryImageOperationResult>;
   advanceImageOperation: (projectId: string, operationId: string) => Promise<PetStoryImageOperationResult>;
   resumeImageOperation: (projectId: string, operationId: string, capability?: PetStoryCapability) => Promise<PetStoryImageOperationResult>;
+  pauseImageOperation: (projectId: string, operationId: string) => Promise<PetStoryImageOperationResult>;
   previewAdjustmentReply: (projectId: string, revision: number, adjustmentId: string, replyKey: string) => Promise<PetStoryAdjustmentPreviewResult>;
   beginAdjustment: (projectId: string, revision: number, target: PetStoryRuntimeTarget) => Promise<PetStoryAdjustmentResult>;
   captureAdjustmentReplies: (projectId: string, adjustmentId: string, conversationUrl: string, replies: PetStoryConversationReply[]) => Promise<PetStoryAdjustmentResult>;

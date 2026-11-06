@@ -17,6 +17,7 @@ import { downloadTaskOutputs, listTaskDownloads, bindPetStoryTask, bindPetStoryP
 import { listAccountsForLocalControl } from './accounts';
 import { loadProjects } from './projects';
 import { replaceIpcHandlers } from './lifecycle';
+import { plannedPetStoryMode } from '../utils/petstoryModes';
 
 const projects = new PetStoryProjects();
 const chats = new PetStoryChatService(projects, { list: listTasksForLocalControl, create: createPetStoryTask, reviseHeldPrompt: revisePetStoryHeldPrompt, retryUnsubmitted: retryPetStoryTask, setConversationGuard: setPetStoryConversationGuard });
@@ -43,7 +44,8 @@ function dialogOwner(event: IpcMainInvokeEvent): BrowserWindow {
   return owner;
 }
 export function registerPetStoryIPC(): () => void {
-  const dispose = replaceIpcHandlers(ipcMain, [...CHANNELS, ...RUNTIME_CHANNELS, 'petstory:importAdjustmentImages', 'petstory:beginImageOperation', 'petstory:advanceImageOperation', 'petstory:resumeImageOperation']);
+  const dispose = replaceIpcHandlers(ipcMain, [...CHANNELS, ...RUNTIME_CHANNELS, 'petstory:importAdjustmentImages', 'petstory:beginImageOperation', 'petstory:advanceImageOperation', 'petstory:resumeImageOperation', 'petstory:pauseImageOperation']);
+  ipcMain.handle('petstory:pauseImageOperation', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => projects.serial(String(p.id), (): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => imageOperations.pause(String(p.id), String(p.operationId)))));
   ipcMain.handle('petstory:beginImageOperation', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => projects.serial(String(p.id), (): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => imageOperations.begin(String(p.id), Number(p.revision), p.request as import('@doubao-studio/contracts').PetStoryImageOperationRequest, p.capability as PetStoryCapability | undefined))));
   ipcMain.handle('petstory:advanceImageOperation', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => projects.serial(String(p.id), (): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => imageOperations.advance(String(p.id), String(p.operationId)))));
   ipcMain.handle('petstory:resumeImageOperation', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => projects.serial(String(p.id), (): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => imageOperations.resume(String(p.id), String(p.operationId), p.capability as PetStoryCapability | undefined))));
@@ -122,7 +124,10 @@ export function registerPetStoryIPC(): () => void {
   ipcMain.handle('petstory:previewPrompt', hostGuard(async (_event: IpcMainInvokeEvent, args: Record<string, unknown>): Promise<PetStoryResult> => {
     const p = await projects.read(String(args.id));
     const shotId = String(args.shotId); const kind = args.kind as PetStoryPromptKind;
-    const mode = p.production?.shots[shotId]?.resolvedMode || args.resolvedMode as PetStoryResolvedMode | undefined;
+    const shot = p.plan?.shots.find((item): boolean => item.id === shotId);
+    const originalVideo = p.production?.steps.some((step): boolean => step.shotId === shotId && step.kind === 'video');
+    const mode = originalVideo ? p.production?.shots[shotId]?.resolvedMode
+      : args.resolvedMode as PetStoryResolvedMode | undefined || (shot ? plannedPetStoryMode(shot) : undefined);
     return { success: true, compiledPrompt: compilePrompt(p, shotId, kind, mode, true) };
   }));
   ipcMain.handle('petstory:savePromptProfile', hostGuard(async (_event: IpcMainInvokeEvent, args: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(args.id), async (): Promise<PetStoryResult> => ({

@@ -1,4 +1,5 @@
 import type { Account } from '../types';
+import { getTaskAccountIdForScope } from './taskExecutionScope';
 
 /**
  * 启动时只挂载当前账号；任务真正进入执行态时再补挂对应账号。
@@ -13,8 +14,9 @@ export function getWebviewHydrationAccountIds(
   const desired = new Set<string>();
 
   if (activeAccountId && existingIds.has(activeAccountId)) desired.add(activeAccountId);
-  for (const accountId of Object.keys(executingTasks)) {
-    if (executingTasks[accountId] && existingIds.has(accountId)) desired.add(accountId);
+  for (const scope of Object.keys(executingTasks)) {
+    const accountId = getTaskAccountIdForScope(scope);
+    if (executingTasks[scope] && existingIds.has(accountId)) desired.add(accountId);
   }
 
   return [...desired];
@@ -54,7 +56,7 @@ export function getSupersededLoadingAccountIds(
   return registeredAccountIds.filter((accountId) =>
     accountId !== activeAccountId &&
     loadingAccountIds.has(accountId) &&
-    !executingTasks[accountId],
+    !Object.entries(executingTasks).some(([scope, taskId]: [string, string]): boolean => !!taskId && getTaskAccountIdForScope(scope) === accountId),
   );
 }
 

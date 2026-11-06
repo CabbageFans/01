@@ -35,7 +35,7 @@ const MaterialCard: React.FC<MaterialCardProps> = ({ project, material, disabled
   const state = usePetStoryStore();
   const tasks = useTaskStore((store) => store.tasks);
   const target = { materialId: material.id };
-  const progress = petStoryImageProgress(project, target, tasks, state.activeImageOperationId);
+  const progress = petStoryImageProgress(project, target, tasks, state.activeImageOperationIds.length ? state.activeImageOperationIds : state.activeImageOperationId);
   const block = petStoryMaterialPromptBlock(project, material.id, tasks);
   const approved = isPetStoryMaterialImageApproved(project, material);
   const candidateCount = materialCandidateCount(project, material);

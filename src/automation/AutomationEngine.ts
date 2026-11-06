@@ -1,9 +1,12 @@
-import type { ElectronAPI } from '@doubao-studio/contracts';
+import type { ElectronAPI, Task } from '@doubao-studio/contracts';
+import { executionScopesConflict, getTaskExecutionScope, isImageExecutionTask, IMAGE_EXECUTION_CONCURRENCY } from '../utils/taskExecutionScope';
 
 interface Reservation {
   taskId: string;
   accountId: string;
   ownerId: string;
+  scope: string;
+  imageExecution: boolean;
   controller?: AbortController;
   heartbeat?: ReturnType<typeof setInterval>;
 }
@@ -18,15 +21,23 @@ export class AutomationEngine {
   private reservations = new Map<string, Reservation>();
   private accountTasks = new Map<string, string>();
 
-  async reserve(taskId: string, accountId: string, ownerId: string): Promise<{ ok: boolean; error?: string }> {
-    const accountTask = this.accountTasks.get(accountId);
-    if (accountTask && accountTask !== taskId) return { ok: false, error: '该账号已有执行中的任务' };
+  async reserve(taskId: string, accountId: string, ownerId: string, task?: Task): Promise<{ ok: boolean; error?: string }> {
+    if (task && (task.id !== taskId || task.assignedAccountId !== accountId)) return { ok: false, error: '任务执行归属不一致' };
+    const scope = task ? getTaskExecutionScope(task) : accountId;
+    const imageExecution = !!task && isImageExecutionTask(task);
+    if ([...this.accountTasks].some(([otherScope, otherTask]: [string, string]): boolean => otherTask !== taskId && executionScopesConflict(scope, otherScope))) {
+      return { ok: false, error: '该账号已有执行中的任务' };
+    }
+    if (imageExecution && [...this.reservations.values()].filter((reservation: Reservation): boolean =>
+      reservation.taskId !== taskId && reservation.imageExecution).length >= IMAGE_EXECUTION_CONCURRENCY) {
+      return { ok: false, error: '已有图片任务正在处理，请等待完成或暂停后再开始' };
+    }
     const existing = this.reservations.get(taskId);
     if (existing) return existing.ownerId === ownerId ? { ok: true } : { ok: false, error: '任务已在运行' };
 
-    const reservation: Reservation = { taskId, accountId, ownerId };
+    const reservation: Reservation = { taskId, accountId, ownerId, scope, imageExecution };
     this.reservations.set(taskId, reservation);
-    this.accountTasks.set(accountId, taskId);
+    this.accountTasks.set(scope, taskId);
     try {
       const result = await getElectronAPI().tasks.acquireLock(taskId, ownerId);
       if (!result.success) throw new Error(result.error || '任务锁定失败');
@@ -40,7 +51,7 @@ export class AutomationEngine {
       // IPC 抛错与明确失败都释放本次本地占位；迟到失败不能删掉后来运行。
       if (this.reservations.get(taskId) === reservation) {
         this.reservations.delete(taskId);
-        if (this.accountTasks.get(accountId) === taskId) this.accountTasks.delete(accountId);
+        if (this.accountTasks.get(scope) === taskId) this.accountTasks.delete(scope);
       }
       return { ok: false, error: reason instanceof Error ? reason.message : '任务锁定失败' };
     }
@@ -59,8 +70,8 @@ export class AutomationEngine {
     reservation.controller?.abort();
     if (reservation.heartbeat) clearInterval(reservation.heartbeat);
     this.reservations.delete(reservation.taskId);
-    if (this.accountTasks.get(reservation.accountId) === reservation.taskId) {
-      this.accountTasks.delete(reservation.accountId);
+    if (this.accountTasks.get(reservation.scope) === reservation.taskId) {
+      this.accountTasks.delete(reservation.scope);
     }
     console.error(`[AutomationEngine] 任务租约续租失败，已中止执行: ${error}`);
   }
@@ -97,7 +108,7 @@ export class AutomationEngine {
   ownsAccountController(taskId: string, accountId: string, controller: AbortController): boolean {
     const reservation = this.reservations.get(taskId);
     return !!reservation && reservation.accountId === accountId && reservation.controller === controller
-      && this.accountTasks.get(accountId) === taskId && !controller.signal.aborted;
+      && this.accountTasks.get(reservation.scope) === taskId && !controller.signal.aborted;
   }
 
   /** 外部提交前向正式任务域确认原账号租约；等待期间失去控制权也不能继续发送。 */
@@ -116,7 +127,7 @@ export class AutomationEngine {
     }
     if (reservation.heartbeat) clearInterval(reservation.heartbeat);
     this.reservations.delete(taskId);
-    if (this.accountTasks.get(reservation.accountId) === taskId) this.accountTasks.delete(reservation.accountId);
+    if (this.accountTasks.get(reservation.scope) === taskId) this.accountTasks.delete(reservation.scope);
     await getElectronAPI().tasks.releaseLock(taskId, reservation.ownerId);
   }
 }

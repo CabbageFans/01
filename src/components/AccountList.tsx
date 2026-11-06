@@ -28,7 +28,7 @@ import { useTaskStore } from '../store/useTaskStore';
 import { AUTO_STATE_DISPLAY } from '../types';
 import type { Account, AccountPlatform } from '../types';
 import type { AutomationState } from '../store/useTaskStore';
-import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
+import { canSelectAccount, findInteractiveAccountId, getAccountAutomationScope, isAccountExecutionBusy } from '../utils/interactiveAccount';
 import { getAccountWarmupSortRank } from '../utils/accountAvailability';
 
 export const AccountList: React.FC = (): React.ReactElement => {
@@ -86,17 +86,18 @@ export const AccountList: React.FC = (): React.ReactElement => {
   /** 获取账号的实时展示状态 */
   const getAccountDisplay = useCallback(
     (accountId: string): { label: string; color: string; animated: boolean; detail: string } => {
-      const autoState = accountAutomationState[accountId] as AutomationState | undefined;
+      const scope = getAccountAutomationScope(accountAutomationState, accountId);
+      const autoState = accountAutomationState[scope] as AutomationState | undefined;
       const account = accounts.find((item) => item.id === accountId);
       if (autoState && autoState !== 'idle') {
         const display = AUTO_STATE_DISPLAY[autoState] || AUTO_STATE_DISPLAY.idle;
         return {
           ...display,
           color: autoState === 'injecting' || autoState === 'submitting' ? '#087F72' : display.color,
-          detail: accountAutoMessage[accountId] || '',
+          detail: accountAutoMessage[scope] || '',
         };
       }
-      const isBusy = accountBusy[accountId];
+      const isBusy = isAccountExecutionBusy(accountBusy, accountId);
       if (isBusy) {
         return { label: '忙碌', color: '#a76a12', animated: true, detail: '' };
       }
@@ -174,8 +175,8 @@ export const AccountList: React.FC = (): React.ReactElement => {
         return a.pinned ? -1 : 1;
       }
       // 4. 空闲 vs 忙碌
-      const aBusy = accountBusy[a.id] || false;
-      const bBusy = accountBusy[b.id] || false;
+      const aBusy = isAccountExecutionBusy(accountBusy, a.id);
+      const bBusy = isAccountExecutionBusy(accountBusy, b.id);
       if (aBusy !== bBusy) {
         return aBusy ? 1 : -1;
       }

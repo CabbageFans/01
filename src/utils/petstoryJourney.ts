@@ -67,11 +67,10 @@ function hasNewCandidate(project: PetStoryProject, { prompt, materialId, shotId,
     && job.materialId === materialId && job.shotId === shotId && job.promptKind === promptKind && job.parsedResult?.optimized === prompt.optimized && (!prompt.candidateJobId || prompt.candidateJobId === job.id));
 }
 
-function requiresLastFrame(project: PetStoryProject, shot: PetStoryShot): boolean {
-  // 已解析模式由原制作服务保存；未解析的自动模式保留方案已有尾帧目标，不自行解析平台能力。
+function requiresLastFrame(shot: PetStoryShot): boolean {
+  // 进度跟随当前剧情计划；图片制作的历史模式不能取消当前尾帧目标。
   if (shot.requestedMode !== 'auto') return shot.requestedMode === 'first_last_frame';
-  const resolved = productions(project).find((production): boolean => !!production.shots[shot.id])?.shots[shot.id]?.resolvedMode;
-  return resolved === 'first_last_frame' || !resolved && !!shot.prompts.lastFrame;
+  return shot.autoModePlan ? shot.autoModePlan.mode === 'first_last_frame' : !!shot.prompts.lastFrame;
 }
 
 export function journeyMaterialImageApproved(project: PetStoryProject, material: PetStoryMaterial): boolean {
@@ -91,7 +90,7 @@ export function selectPetStoryJourney(project: PetStoryProject, tasks: Task[] = 
     const firstFrame = journeyShotAsset(project, shot, 'firstFrame');
     const lastFrame = journeyShotAsset(project, shot, 'lastFrame');
     const video = journeyShotAsset(project, shot, 'video');
-    const tail = requiresLastFrame(project, shot);
+    const tail = requiresLastFrame(shot);
     const missing: string[] = [];
     if (!journeyAssetMatchesPrompt(firstFrame, shot.prompts.firstFrame)) missing.push(firstFrame ? '首帧需核对当前正文或文件校验' : '缺首帧');
     if (tail && !journeyAssetMatchesPrompt(lastFrame, shot.prompts.lastFrame)) missing.push(lastFrame ? '尾帧需核对当前正文或文件校验' : '缺尾帧');

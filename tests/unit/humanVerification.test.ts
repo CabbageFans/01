@@ -12,6 +12,7 @@ import { useAccountStore } from '../../src/store/useAccountStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
 import { createAcceptedObservationBinding } from '../../src/utils/acceptedObservation';
 import { getAssignedAccountBlockReason } from '../../src/utils/queueAccountDecision';
+import { PageAvailabilityCoordinator } from '../../src/utils/pageAvailability';
 
 class VerificationNode {
   parentElement: VerificationNode | null = null;
@@ -115,10 +116,17 @@ describe('账号验证阻断与旧ready回执', (): void => {
   it('BrowserPanel的真实暂停回调使该账号旧探测失效，并保留独立账号状态', async (): Promise<void> => {
     const accounts = [account('OFFLINE-a'), account('OFFLINE-b')]; useAccountStore.setState({ accounts });
     vi.stubGlobal('window', { electronAPI: { accounts: { setAvailability: async (id: string, availability: AccountAvailability): Promise<object> => ({ success: true, account: { ...accounts[0], id, health: { ...accounts[0].health!, verificationRequired: true, availability } } }) } } });
-    const sequence = { current: { 'OFFLINE-a': 7 } };
-    const pause = actualPanelCallback('pauseForHumanVerification', { availabilityProbeSequenceRef: sequence, useAccountStore, AccountAvailabilityPauseError: OfflineVerificationPause });
+    const coordinator = new PageAvailabilityCoordinator();
+    const originalReady = coordinator.begin('OFFLINE-a', {}); const otherReady = coordinator.begin('OFFLINE-b', {});
+    const pause = actualPanelCallback('pauseForHumanVerification', { availabilityProbesRef: { current: coordinator }, useAccountStore, AccountAvailabilityPauseError: OfflineVerificationPause });
     await expect(pause('OFFLINE-a')).rejects.toMatchObject({ code: 'human_verification' });
-    expect(sequence.current['OFFLINE-a']).toBe(8); expect(useAccountStore.getState().selectedAccountId).toBe('OFFLINE-a');
+    expect(coordinator.isCurrent(originalReady)).toBe(false); expect(coordinator.isCurrent(otherReady)).toBe(true);
+    const block = coordinator.currentAccountBlock('OFFLINE-a');
+    expect(block).toMatchObject({ state: 'action_required', reason: 'human_verification' });
+    expect(coordinator.currentAccountBlock('OFFLINE-b')).toBeUndefined();
+    expect(coordinator.settle(originalReady, accounts[0].health!.availability!)).toMatchObject({ current: false, accountBlock: block });
+    expect(coordinator.settle(otherReady, accounts[1].health!.availability!)).toMatchObject({ current: true, accountUpdate: accounts[1].health!.availability });
+    expect(useAccountStore.getState().selectedAccountId).toBe('OFFLINE-a');
     expect(getAssignedAccountBlockReason(useAccountStore.getState().accounts[0])).toContain('验证'); expect(getAssignedAccountBlockReason(useAccountStore.getState().accounts[1])).toBeNull();
   });
 });
@@ -129,7 +137,8 @@ describe('只读观察中的验证守卫', (): void => {
     useAccountStore.setState({ accounts: [originalAccount] });
     vi.stubGlobal('window', { electronAPI: { accounts: { setAvailability: async (_id: string, availability: AccountAvailability): Promise<object> => ({ success: true,
       account: { ...originalAccount, health: { ...originalAccount.health!, verificationRequired: true, availability } } }) } } });
-    const pauseAccount = actualPanelCallback('pauseForHumanVerification', { availabilityProbeSequenceRef: { current: {} }, useAccountStore, AccountAvailabilityPauseError: OfflineVerificationPause });
+    const coordinator = new PageAvailabilityCoordinator();
+    const pauseAccount = actualPanelCallback('pauseForHumanVerification', { availabilityProbesRef: { current: coordinator }, useAccountStore, AccountAvailabilityPauseError: OfflineVerificationPause });
     let release: (() => void) | undefined; let owns = true;
     const current = { id: taskId, status: 'generating', runtime: { runId: 'OFFLINE-old-run', submittedAt: 'OFFLINE-intent' } };
     const afterGuard = vi.fn(async (): Promise<void> => undefined);
@@ -148,6 +157,7 @@ describe('只读观察中的验证守卫', (): void => {
     release?.(); await pending;
     expect(afterGuard).not.toHaveBeenCalled(); expect(current.status).toBe(change === 'completed' ? 'done' : 'generating');
     expect(current.runtime.submittedAt).toBe('OFFLINE-intent'); expect(getAssignedAccountBlockReason(useAccountStore.getState().accounts[0])).toContain('验证');
+    expect(coordinator.currentAccountBlock(accountId)).toMatchObject({ state: 'action_required', reason: 'human_verification' });
   });
   it('真实失败暂停分支优先保留human原因，原提交和已受理观察不丢失', async (): Promise<void> => {
     const now = '2026-10-31T00:00:00.000Z'; const accountId = 'OFFLINE-account'; const taskId = 'OFFLINE-task'; const runId = 'OFFLINE-run';

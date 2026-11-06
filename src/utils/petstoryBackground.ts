@@ -1,5 +1,6 @@
 import type { PetStoryChatJob, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { imageOperationForChatJob } from './petstoryImageFlow';
+import { getTaskAccountIdForScope } from './taskExecutionScope';
 
 /** 只授权项目台账中的图片操作及其结构修订；自由聊天和其他制作继续沿用原可见规则。 */
 export function isBackgroundImageOperationTask(project: PetStoryProject | null, taskId: string | undefined): boolean {
@@ -48,10 +49,11 @@ export function isBackgroundPetStoryTask(project: PetStoryProject | null, taskId
 
 /** 临时调度映射尚未重建时，仍从正式运行台账识别同一账号的后台任务。 */
 export function hasForegroundAccountInteraction(project: PetStoryProject | null, tasks: Task[], automationStates: Record<string, string>, executingTasks: Record<string, string>): boolean {
-  return Object.entries(automationStates).some(([accountId, state]): boolean => {
+  return Object.entries(automationStates).some(([scope, state]): boolean => {
     if (state !== 'injecting' && state !== 'submitting') return false;
+    const accountId = getTaskAccountIdForScope(scope);
     // 状态回写与调度映射可能错开；优先实际注入任务，不能让旧只读观察遮蔽同账号的新前台操作。
-    const taskId = executingTasks[accountId]
+    const taskId = executingTasks[scope]
       || tasks.find((task): boolean => task.assignedAccountId === accountId && task.status === 'executing')?.id
       || tasks.find((task): boolean => task.assignedAccountId === accountId && task.status === 'generating')?.id
       || tasks.find((task): boolean => task.assignedAccountId === accountId && task.status === 'manual_submission_observing')?.id;

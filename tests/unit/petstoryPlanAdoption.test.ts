@@ -191,6 +191,35 @@ describe('明确采用方案才保留并核对受影响成果', (): void => {
     expect(p.assets.find((asset): boolean => asset.shotId === removed.id)).toEqual(oldAssets.find((asset): boolean => asset.shotId === removed.id)); expect(p.productionHistory).toHaveLength(1); expect(tasks).toHaveLength(1);
   });
 
+  it('新自动方案省略尾帧字段时保留旧正文、已采用图片和全部媒体历史', async (): Promise<void> => {
+    const shot = p.plan!.shots[1]; const target = { shotId: shot.id, kind: 'lastFrame' as const };
+    shot.requestedMode = 'auto';
+    shot.autoModePlan = { mode: 'first_last_frame', reason: 'TEST原剧情需要明确终点' };
+    const tail: PetStoryAsset = { id: 'TEST-auto-tail', kind: 'plannedEndImage', shotId: shot.id, relativePath: `shots/${shot.id}/auto-tail.png`,
+      generationFinal: shot.prompts.lastFrame!.final,
+      validation: { decoded: true, sha256: 'e'.repeat(64), bytes: 4, width: 64, height: 64, checkedAt: now },
+      imageReview: { state: 'adopted', target, basisHash: imageTargetBasis(p, target), adoptedAt: now, sha256: 'e'.repeat(64) } };
+    p.assets.push(tail); p.adoptedImages![shot.id].plannedEndImageId = tail.id;
+    await fs.writeFile(path.join(directory, tail.relativePath), 'TEST'); p = await projects.write(p);
+    const before = structuredClone(p); const incoming = structuredClone(p.plan!);
+    incoming.shots[1].autoModePlan = { mode: 'first_frame', reason: 'TEST新判断只需要起点，旧尾帧仍作为用户已采用成果保留' };
+    delete incoming.shots[1].prompts.lastFrame;
+    const job = await candidate(incoming);
+    expect(job.parsedResult?.plan?.shots[1].prompts.lastFrame).toBeUndefined();
+    await adopt(job);
+    const reopened = await new PetStoryProjects().open(directory);
+    for (const project of [p, reopened]) {
+      expect(project.plan!.shots[1].autoModePlan?.mode).toBe('first_frame');
+      expect(project.plan!.shots[1].prompts.lastFrame).toEqual(before.plan!.shots[1].prompts.lastFrame);
+      expect(project.assets).toEqual(before.assets);
+      expect(project.adoptedImages).toEqual(before.adoptedImages);
+      expect(project.productionHistory).toEqual(before.productionHistory);
+      expect(project.production).toBeUndefined();
+    }
+    expect(await fs.readFile(path.join(directory, tail.relativePath), 'utf8')).toBe('TEST');
+    expect(tasks).toHaveLength(1); expect(tasks[0].mode).toBe('chat');
+  });
+
   it('方案取消尾帧时只移出当前引用，旧尾帧文件和历史仍保留', async (): Promise<void> => {
     const shot = p.plan!.shots[1]; const target = { shotId: shot.id, kind: 'lastFrame' as const };
     const tail: PetStoryAsset = { id: 'TEST-tail', kind: 'plannedEndImage', shotId: shot.id, relativePath: `shots/${shot.id}/tail.png`,

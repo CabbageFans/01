@@ -72,10 +72,9 @@ export async function readCreationHistorySnapshot(doc: Document, readMessages: (
     return raw.length ? raw.join('\n') : undefined;
   };
   // 自包含：此函数随消息读取器一起序列化，不依赖宿主模块或整页全局媒体缓存。
-  const readOriginalImageCards = (node: Element, suppliedModel?: Record<string, unknown>): Pick<Message, 'imageArtifactUrls' | 'imageArtifactPending' | 'imageArtifactFailure'> => {
+  const readOriginalImageCards = (node: Element, suppliedModel?: Record<string, unknown>): Pick<Message, 'imageArtifactUrls' | 'imageArtifactPending' | 'imageArtifactFailure' | 'imageArtifactDiagnostics'> => {
     if (node.getAttribute('data-testid') !== 'receive_message') return {};
     const cards = Array.from(node.querySelectorAll('[data-testid="message_image_content"]'));
-    if (!cards.length) return {};
     type Value = Record<string, unknown>;
     const object = (value: unknown): Value | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Value : undefined;
     const modelForMessage = (): Value | undefined => {
@@ -102,17 +101,42 @@ export async function readCreationHistorySnapshot(doc: Document, readMessages: (
       }) : [];
     }) : [];
     const normalized = creationsIn(model?.content_blocks, true);
-    const modern = normalized.length ? normalized : creationsIn(model?.content_blocks_v2, false);
+    // v2 同时存在归一化 content_obj 与旧 creation_block；只读当前消息明确的字段。
+    const normalizedV2 = creationsIn(model?.content_blocks_v2, true);
+    const modern = normalized.length ? normalized : normalizedV2.length ? normalizedV2 : creationsIn(model?.content_blocks_v2, false);
     const creations = modern.length ? modern : creationsIn(model?.content_block, false);
     const remoteUrl = (value: unknown): value is string => {
       if (typeof value !== 'string' || !/^https:\/\//i.test(value)) return false;
       try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password; } catch { return false; }
     };
+    const matchedVariantCards = (sources: string[]): number => cards.filter((card: Element): boolean => Array.from(card.querySelectorAll('img')).some((element: HTMLImageElement): boolean => !element.closest('video')
+      && (sources.includes(element.currentSrc || element.src) || sources.includes(element.src)))).length;
+    // 诊断只读取已知字段的存在、类型及比较结果；不输出任意 provider 值或媒体地址。
+    const blockCount = (blocks: unknown): number => Array.isArray(blocks) ? blocks.length : 0;
+    const diagnostics: NonNullable<ChatPageSnapshot['messages'][number]['imageArtifactDiagnostics']> = {
+      cardCount: cards.length, renderedImageCount: cards.reduce((count: number, card: Element): number => count + card.querySelectorAll('img').length, 0), modelFound: !!model,
+      blockCounts: { normalized: blockCount(model?.content_blocks), v2: blockCount(model?.content_blocks_v2), legacy: blockCount(model?.content_block) },
+      creationCount: creations.length, matchedCreationCount: 0, matchedCardCount: 0,
+      creations: creations.slice(0, 32).map((creation: Value): NonNullable<ChatPageSnapshot['messages'][number]['imageArtifactDiagnostics']>['creations'][number] => {
+        const image = object(creation.image);
+        return { imagePresent: !!image, statusType: typeof image?.status, ...(typeof image?.status === 'number' && Number.isFinite(image.status) ? { status: image.status } : {}),
+          finishedType: typeof creation.finished, ...(typeof creation.finished === 'boolean' ? { finished: creation.finished } : {}), matchedCardCount: 0,
+          variants: ['image_thumb', 'image_ori', 'image_preview', 'image_ori_raw', 'image_preview_resize'].map((field: string): NonNullable<ChatPageSnapshot['messages'][number]['imageArtifactDiagnostics']>['creations'][number]['variants'][number] => {
+            const variant = image ? object(image[field]) : undefined; const variantUrl = variant?.url; const valid = remoteUrl(variantUrl);
+            return { field, present: !!variant, urlValid: valid, widthType: typeof variant?.width, heightType: typeof variant?.height,
+              widthPositive: typeof variant?.width === 'number' && Number.isFinite(variant.width) && variant.width > 0,
+              heightPositive: typeof variant?.height === 'number' && Number.isFinite(variant.height) && variant.height > 0,
+              matchedCardCount: valid ? matchedVariantCards([variantUrl]) : 0 };
+          }) };
+      }),
+    };
+    // 无卡时只记录真实 provider 的结构；普通 Chat 保持原快照契约。
+    if (!cards.length) return model ? { imageArtifactDiagnostics: diagnostics } : {};
     const failureFor = (card: Element): string | undefined => (card.textContent || '').normalize('NFKC').trim()
       .match(/^(?:图片生成失败|生成图片失败|图片生成异常|图片生成出错|生成失败|图片生成次数已用完|图片生成额度不足|请求未通过内容审核)/)?.[0];
     let imageArtifactFailure: string | undefined; let imageArtifactPending = false;
     const matchedCards = new Set<Element>(); const urls: string[] = [];
-    for (const creation of creations) {
+    for (const [creationIndex, creation] of creations.entries()) {
       const image = object(creation.image); if (!image) continue;
       const variants = ['image_thumb', 'image_ori', 'image_preview', 'image_ori_raw', 'image_preview_resize'].flatMap((key: string): string[] => {
         const variant = object(image[key]); return remoteUrl(variant?.url) ? [variant.url] : [];
@@ -120,6 +144,8 @@ export async function readCreationHistorySnapshot(doc: Document, readMessages: (
       // 原图字段必须与本消息图片卡的某个真实渲染源精确关联；不按最大尺寸猜地址。
       const owned = cards.filter((card: Element): boolean => Array.from(card.querySelectorAll('img')).some((element: HTMLImageElement): boolean => !element.closest('video')
         && (variants.includes(element.currentSrc || element.src) || variants.includes(element.src))));
+      if (owned.length) diagnostics.matchedCreationCount++;
+      if (diagnostics.creations[creationIndex]) diagnostics.creations[creationIndex].matchedCardCount = owned.length;
       if (!owned.length) { imageArtifactPending = true; continue; }
       for (const card of owned) matchedCards.add(card);
       const original = ['image_ori', 'image_ori_raw'].map((key: string): Value | undefined => object(image[key])).find((variant: Value | undefined): variant is Value => !!variant && remoteUrl(variant.url)
@@ -133,9 +159,10 @@ export async function readCreationHistorySnapshot(doc: Document, readMessages: (
       const failure = failureFor(card); if (failure) imageArtifactFailure = failure;
       if (card.getAttribute('data-finished') === 'false' || !matchedCards.has(card) && !failure) imageArtifactPending = true;
     }
-    return { imageArtifactUrls: [...new Set(urls)], imageArtifactPending, ...(imageArtifactFailure ? { imageArtifactFailure } : {}) };
+    diagnostics.matchedCardCount = matchedCards.size;
+    return { imageArtifactDiagnostics: diagnostics, imageArtifactUrls: [...new Set(urls)], imageArtifactPending, ...(imageArtifactFailure ? { imageArtifactFailure } : {}) };
   };
-  const imageEvidence = (node: Element, model: RecordValue): Pick<Message, 'imageUrls' | 'imageArtifactUrls' | 'imageArtifactPending' | 'imageArtifactFailure'> => {
+  const imageEvidence = (node: Element, model: RecordValue): Pick<Message, 'imageUrls' | 'imageArtifactUrls' | 'imageArtifactPending' | 'imageArtifactFailure' | 'imageArtifactDiagnostics'> => {
     const evidence = readOriginalImageCards(node, model);
     return { ...evidence, ...(evidence.imageArtifactUrls?.length ? { imageUrls: evidence.imageArtifactUrls } : {}) };
   };

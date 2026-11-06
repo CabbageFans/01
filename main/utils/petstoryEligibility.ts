@@ -64,7 +64,7 @@ function designHash(p: PetStoryProject, target: PromptEligibilityTarget, legacy:
   if (material) return digest({ story: p.mobileStory, adaptedStory: p.plan?.adaptedStory, material: { id: material.id, designHash: material.designHash } });
   const shot = p.plan?.shots.find((item): boolean => item.id === target.shotId);
   if (!shot) return digest({ target: targetId(target), missing: true });
-  const { prompts: _prompts, characterIds, propIds, sceneReferenceAssetIds: _sceneReferenceAssetIds, ...design } = shot;
+  const { prompts: _prompts, autoModePlan: _autoModePlan, characterIds, propIds, sceneReferenceAssetIds: _sceneReferenceAssetIds, ...design } = shot;
   const visualBasis = effectiveVisuals ? visualSnapshot || characterVisualBasis(p, shot.id) : {};
   const shotDesign = effectiveVisuals ? Object.fromEntries(Object.entries(design).filter(([key]): boolean => key !== 'appearanceOverrides')) : design;
   const { characters, profile } = shotCharacterDesign(p, shot, effectiveVisuals) as { characters: object[]; profile: object | undefined };

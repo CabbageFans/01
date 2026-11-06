@@ -11,7 +11,7 @@ import type { PetStoryPageBinding, PetStoryRuntimeTarget, PetStoryGenerationBloc
 import { boundaryStillCurrent, finalTaskInput, frameStillCurrent, hasSupersedingJob, runtimeContextStillCurrent } from './petstoryChat';
 import { runtimePromptIssues, validatePetStoryPlan } from './petstoryValidation';
 import { validPetStoryDuration } from './petstoryValidationIssues';
-import { resolvePetStoryMode } from './petstoryModes';
+import { petStoryAutoModePlan, plannedPetStoryMode, resolvePetStoryMode } from './petstoryModes';
 import { productionCapability } from './petstoryCapability';
 import { extractActualEndFrame, mediaDigest, validatePetStoryMedia } from './petstoryMedia';
 import { inspectPromptCandidate, promptContractFactsCurrent, requirePromptEligibility, promptWritingTarget } from './petstoryEligibility';
@@ -226,8 +226,48 @@ function checkPlannedReferences(p: PetStoryProject, capability: PetStoryCapabili
 export class PetStoryProductionService {
   private readonly authorized = new Set<string>();
   private readonly validated = new Map<string, string>();
-  suspend(id: string): void { this.authorized.delete(id); }
-  constructor(private readonly projects: PetStoryProjects, private readonly tasks: ProductionPort) {}
+  private readonly imageServices = new Map<string, PetStoryProductionService>();
+  suspend(id: string): void {
+    this.authorized.delete(id);
+    for (const service of this.imageServices.values()) service.suspend(id);
+  }
+  constructor(private readonly projects: Pick<PetStoryProjects, 'read' | 'write' | 'directory' | 'referenceFile'>, private readonly tasks: ProductionPort, private readonly imageOperationId?: string) {}
+
+  /** 图片流程只投影自己的 production；落盘时还原其他流程，仍由外层项目事务串行保护。 */
+  async withImageOperation<T extends PetStoryProductionResult>(id: string, operationId: string, work: (service: PetStoryProductionService) => Promise<T>): Promise<T> {
+    let service = this.imageServices.get(operationId);
+    if (!service) {
+      const scoped: Pick<PetStoryProjects, 'read' | 'write' | 'directory' | 'referenceFile'> = {
+        directory: (projectId: string): string => this.projects.directory(projectId),
+        referenceFile: (projectId: string, assetId: string): Promise<string> => this.projects.referenceFile(projectId, assetId),
+        read: async (projectId: string): Promise<PetStoryProject> => {
+          const p = await this.projects.read(projectId);
+          return { ...p, production: p.imageProductions?.[operationId] || (p.production?.imageOperationId === operationId ? p.production : undefined) };
+        },
+        write: async (p: PetStoryProject): Promise<PetStoryProject> => {
+          const original = await this.projects.read(p.id);
+          const production = p.production;
+          if (production && production.imageOperationId !== operationId) throw new Error('图片制作授权与独立执行目标不符');
+          const saved = await this.projects.write({ ...p, production: original.production?.imageOperationId === operationId ? undefined : original.production,
+            imageProductions: { ...p.imageProductions, ...(production ? { [operationId]: production } : {}) } });
+          return { ...saved, production: saved.imageProductions?.[operationId] };
+        },
+      };
+      service = new PetStoryProductionService(scoped, this.tasks, operationId);
+      this.imageServices.set(operationId, service);
+    }
+    const result = await work(service);
+    return result.project ? { ...result, project: await this.projects.read(id) } : result;
+  }
+
+  private async imageTaskResult(taskId: string, work: (service: PetStoryProductionService) => Promise<PetStoryProductionResult>): Promise<PetStoryProductionResult | undefined> {
+    if (this.imageOperationId) return undefined;
+    const task = this.tasks.list().find((item): boolean => item.id === taskId);
+    if (!task?.petstory) return undefined;
+    const p = await this.projects.read(task.petstory.projectId);
+    const operationId = task.petstory.imageOperationId || Object.entries(p.imageProductions || {}).find(([, run]): boolean => run.steps.some((step): boolean => step.taskId === taskId))?.[0];
+    return operationId ? this.withImageOperation(p.id, operationId, work) : undefined;
+  }
 
   /** 只读复用正式生产校验；不写项目、不创建任务，也不提取连续镜头末帧。 */
   async inspectGeneration(id: string, revision: number, target: PetStoryRuntimeTarget, capability?: PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'> = {}): Promise<PetStoryGenerationEligibilityResult> {
@@ -308,7 +348,11 @@ export class PetStoryProductionService {
     return Object.fromEntries((p.plan?.shots || []).map((shot): [string, PetStoryShotMedia] => {
       const prior = [p.production, ...(p.productionHistory || []).slice().reverse()].find((run): boolean => !!run?.shots[shot.id])?.shots[shot.id];
       const latest = (kind: PetStoryAsset['kind']): string | undefined => [...p.assets].reverse().find((asset): boolean => asset.shotId === shot.id && asset.kind === kind)?.id;
-      return [shot.id, { requestedMode: shot.requestedMode, resolvedMode: prior?.resolvedMode || (shot.requestedMode === 'auto' ? 'reference' : shot.requestedMode), reason: prior?.reason || '仅图片节点授权，视频实际模式尚未确认', firstFrameId: selectedShotImageId(p, shot.id, 'firstFrame'), plannedEndImageId: selectedShotImageId(p, shot.id, 'lastFrame'), videoId: p.selectedVideos?.[shot.id] || prior?.videoId || latest('video'), actualEndFrameId: prior?.actualEndFrameId, startFromPreviousEnd: prior?.startFromPreviousEnd }];
+      // 图片制作历史只提供媒体归属，不代表用户为新视频选择了多参考模式。
+      const activeVideo = p.production?.steps.some((step): boolean => step.shotId === shot.id && step.kind === 'video');
+      const mode = activeVideo ? p.production?.shots[shot.id]?.resolvedMode || plannedPetStoryMode(shot) : plannedPetStoryMode(shot);
+      const reason = activeVideo ? p.production?.shots[shot.id]?.reason : shot.requestedMode === 'auto' ? petStoryAutoModePlan(shot).reason : '按请求模式准备，执行时读取页面控件';
+      return [shot.id, { requestedMode: shot.requestedMode, resolvedMode: mode, reason: reason || '沿用原视频任务的执行模式', firstFrameId: selectedShotImageId(p, shot.id, 'firstFrame'), plannedEndImageId: selectedShotImageId(p, shot.id, 'lastFrame'), videoId: p.selectedVideos?.[shot.id] || prior?.videoId || latest('video'), actualEndFrameId: prior?.actualEndFrameId, startFromPreviousEnd: prior?.startFromPreviousEnd }];
     }));
   }
   async preview(id: string, capability: PetStoryCapability | undefined = undefined, fallbacks: Record<string, 'first_frame' | 'reference'> = {}): Promise<PetStoryProductionResult> {
@@ -391,10 +435,13 @@ export class PetStoryProductionService {
     const p = await this.projects.read(id);
     capability = productionCapability(p, capability);
     if (!p.production || !productionPlanMatches(p)) throw new Error('原制作计划不存在或已经改变');
+    // 停止后允许上传和采用图片；先核对原授权依据，再触碰原运行或页面输入。
+    this.checked(p);
     const pending = p.production.steps.find((s): boolean => s.status !== 'complete');
     const pendingTask = pending?.taskId ? this.originalTask(p, pending) : undefined;
     const readOnly = pendingTask?.status === 'done' || !!pendingTask?.runtime?.submittedAt;
     if (!readOnly) {
+      if (pending && pendingTask) this.validateCompiledStep(p, pending, pendingTask);
       this.validateRequestContext(p, capability, productionResumeTarget(p.production, pending));
       // 继续原批次保留已选模式；真实控件支持在该任务执行时回读，不从未知状态重新推测。
     } else if (capability?.accountId !== p.accountId) throw new Error('原账号不符，禁止切换账号');
@@ -461,6 +508,8 @@ export class PetStoryProductionService {
   }
   /** 不明提交只能由用户针对原运行另行授权；新 hold 任务绑定成功后才进入正式调度。 */
   async resubmit(id: string, revision: number, request: TaskResubmitUncertainParams, capability?: PetStoryCapability): Promise<PetStoryProductionResult> {
+    const scoped = await this.imageTaskResult(request.taskId, (service: PetStoryProductionService): Promise<PetStoryProductionResult> => service.resubmit(id, revision, request, capability));
+    if (scoped) return scoped;
     const p = await this.projects.read(id);
     const production = this.checked(p);
     if (!request || request.acceptDuplicateRisk !== true || !this.tasks.resubmitUncertain) throw new Error('请明确确认本次重发及可能重复生成的风险');
@@ -487,7 +536,8 @@ export class PetStoryProductionService {
     const created = this.tasks.resubmitUncertain(request);
     // Core 已持久化原记录和唯一关联任务；后续写盘失败时该任务保持 hold，可幂等接续。
     if (created.status !== 'queued' || created.executionIntent !== 'hold' || created.runtime) throw new Error('关联重发任务已开始，请核对现有任务，不重复启动');
-    const adopted = this.tasks.adopt(created.id, { projectId: p.id, stepId: pending.id }, source?.text);
+    const adopted = this.tasks.adopt(created.id, { projectId: p.id, stepId: pending.id,
+      ...(production.imageOperationId ? { imageOperationId: production.imageOperationId, materialId: pending.materialId } : {}) }, source?.text);
     if (adopted.status !== 'queued' || adopted.executionIntent !== 'hold' || adopted.runtime || hash(adopted.prompt) !== pending.inputHash) throw new Error('重发输入绑定不符，新任务保持暂停');
     history.authorizedAt = this.tasks.list().find((task): boolean => task.id === original.id)?.resubmittedAs?.find((record): boolean => record.authorizationId === request.authorizationId)?.authorizedAt
       || requireValue(created.resubmissionOf).authorizedAt;
@@ -545,7 +595,9 @@ export class PetStoryProductionService {
     this.tasks.bindPageInput(task.id, task.runtime.runId, source.text);
   }
   private checked(p: PetStoryProject): NonNullable<PetStoryProject['production']> {
-    if (!p.production || !productionPlanMatches(p)) throw new Error('制作计划与原确认不一致');
+    const operation = this.imageOperationId ? p.imageOperations?.find((item): boolean => item.id === this.imageOperationId) : undefined;
+    const sameBasis = operation ? operation.basisHash === imageTargetBasis(p, operation.target) : productionPlanMatches(p);
+    if (!p.production || this.imageOperationId && !operation || !sameBasis) throw new Error('制作计划与原确认不一致');
     if (p.production.phase === 'shots' && !productionMaterialsMatch(p, p.production)) throw new Error('基础素材确认绑定已变化，保留原成果，不能沿用旧制作授权');
     return p.production;
   }
@@ -623,6 +675,8 @@ export class PetStoryProductionService {
     return { success: true, project: saved };
   }
   async recordPageBindings(id: string, taskId: string, runId: string, bindings: PetStoryPageBinding[]): Promise<PetStoryProductionResult> {
+    const scoped = await this.imageTaskResult(taskId, (service: PetStoryProductionService): Promise<PetStoryProductionResult> => service.recordPageBindings(id, taskId, runId, bindings));
+    if (scoped) return scoped;
     const p = await this.projects.read(id); const production = this.checked(p);
     const step = production.steps.find((s): boolean => s.taskId === taskId && s.runId === runId && s.status === 'bound');
     if (!step || !Array.isArray(bindings) || bindings.length !== step.attachmentAssetIds.length) throw new Error('页面引用清单与本次运行不符');
@@ -663,12 +717,15 @@ export class PetStoryProductionService {
   private originalTask(p: PetStoryProject, step: PetStoryProductionStep): Task {
     const task = this.tasks.list().find((t): boolean => t.id === step.taskId);
     if (!task || task.projectId !== p.studioProjectId || task.assignedAccountId !== p.accountId || hash(task.prompt) !== step.inputHash
-      || task.petstory?.projectId !== p.id || task.petstory.stepId !== step.id || task.mode !== (step.kind === 'video' ? 'video' : 'image')) throw new Error('原任务／账号／项目／输入归属不符，停止且不重建');
+      || task.petstory?.projectId !== p.id || task.petstory.stepId !== step.id || task.mode !== (step.kind === 'video' ? 'video' : 'image')
+      || task.petstory.imageOperationId && task.petstory.imageOperationId !== p.production?.imageOperationId) throw new Error('原任务／账号／项目／输入归属不符，停止且不重建');
     if (task.runtime && (task.runtime.input.mode !== task.mode || task.runtime.input.prompt !== task.prompt || JSON.stringify(task.runtime.input.attachments) !== JSON.stringify(task.attachments || []) || JSON.stringify(task.runtime.input.videoConfig) !== JSON.stringify(task.videoConfig))) throw new Error('原运行输入快照与任务不符，禁止混用产物');
     if (step.runId && task.runtime?.runId !== step.runId) throw new Error('原运行已变化，不混用不同运行素材');
     return task;
   }
   async guard(taskId: string, requireRun = true): Promise<PetStoryProductionResult> {
+    const scoped = await this.imageTaskResult(taskId, (service: PetStoryProductionService): Promise<PetStoryProductionResult> => service.guard(taskId, requireRun));
+    if (scoped) return scoped;
     const task = this.tasks.list().find((t): boolean => t.id === taskId);
     if (!task?.petstory) return { success: true };
     const p = await this.projects.read(task.petstory.projectId);
@@ -728,6 +785,8 @@ export class PetStoryProductionService {
     }
   }
   async bindRun(id: string, taskId: string, runId: string): Promise<PetStoryProductionResult> {
+    const scoped = await this.imageTaskResult(taskId, (service: PetStoryProductionService): Promise<PetStoryProductionResult> => service.bindRun(id, taskId, runId));
+    if (scoped) return scoped;
     const p = await this.projects.read(id);
     const production = this.checked(p);
     const step = production.steps.find((s): boolean => s.taskId === taskId && s.status === 'bound');
@@ -876,7 +935,7 @@ export class PetStoryProductionService {
     production.steps.push(step); production.message = `${target.characterId || target.shotId} · ${target.kind}`;
     // 创建前先登记意图；两文件写入间退出时宁可停下核对，不自动多建一次。
     p = await this.projects.write(p);
-    const binding = { projectId: p.id, stepId: step.id };
+    const binding = { projectId: p.id, stepId: step.id, ...(production.imageOperationId ? { imageOperationId: production.imageOperationId, materialId: target.materialId } : {}) };
     const draft = target.kind === 'firstFrame' ? p.drafts?.find((d): boolean => d.shotId === target.shotId && d.kind === 'firstFrame' && (d.final === final || d.final === compiledPrompt?.final.trim())) : undefined;
     const old = draft ? this.tasks.list().find((t): boolean => t.id === draft.taskId) : undefined;
     let task: Task;
@@ -890,6 +949,11 @@ export class PetStoryProductionService {
   }
   /** 仅在暂停且下游尚未使用该图时替换，旧文件保留；已经影响视频的重做属于 P5。 */
   async selectImage(id: string, stepId: string, artifactId: string): Promise<PetStoryProductionResult> {
+    if (!this.imageOperationId) {
+      const project = await this.projects.read(id);
+      const operationId = Object.entries(project.imageProductions || {}).find(([, run]): boolean => run.steps.some((step): boolean => step.id === stepId))?.[0];
+      if (operationId) return this.withImageOperation(id, operationId, (service: PetStoryProductionService): Promise<PetStoryProductionResult> => service.selectImage(id, stepId, artifactId));
+    }
     const p = await this.projects.read(id);
     const production = this.checked(p);
     const step = production.steps.find((s): boolean => s.id === stepId && s.kind !== 'video');

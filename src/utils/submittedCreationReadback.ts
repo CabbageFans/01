@@ -10,6 +10,8 @@ export type SubmittedCreationReadbackPendingReason =
 export interface SubmittedCreationReadbackSample {
   url: string;
   evidence: CreationReadbackResult;
+  /** 仅实际消息 provider 的完整历史可证明结构性歧义；可见片段不能提前终止恢复。 */
+  historyComplete?: boolean;
 }
 
 export interface SubmittedCreationReadbackProgress {
@@ -27,6 +29,8 @@ export interface SubmittedCreationReadbackOptions {
   onProgress?: (progress: SubmittedCreationReadbackProgress) => void | Promise<void>;
   /** 首次发送仍须证明编辑器清空；恢复只读不以用户后续草稿阻断原结果。 */
   requireInputCleared?: boolean;
+  /** 显式恢复对已完整加载且连续稳定的歧义快速结束；首次发送默认继续等待。 */
+  stopOnStableAmbiguity?: boolean;
 }
 
 const pendingReasonText: Record<SubmittedCreationReadbackPendingReason, string> = {
@@ -54,6 +58,13 @@ export class SubmittedCreationReadbackContextError extends Error {
   }
 }
 
+export class SubmittedCreationReadbackAmbiguityError extends Error {
+  constructor(readonly reason: 'user_ambiguous' | 'reply_ambiguous' | 'reply_identity_mismatch') {
+    super(`原会话已完整读取：${pendingReasonText[reason]}；请核对原会话，保留原任务，未重新发送`);
+    this.name = 'SubmittedCreationReadbackAmbiguityError';
+  }
+}
+
 /** 仅等待原次发送的完整消息证据；不提供注入、上传、导航或发送能力。 */
 export async function waitForSubmittedCreationReadback(
   options: SubmittedCreationReadbackOptions,
@@ -65,6 +76,7 @@ export async function waitForSubmittedCreationReadback(
   const deadline = startedAt + timeoutMs;
   let reason: SubmittedCreationReadbackPendingReason = 'conversation_url_missing';
   let pinnedUrl: string | undefined;
+  let previousAmbiguity = '';
   const assertCurrent = (): void => {
     if (options.signal?.aborted) throw new DOMException('原创作只读核对已取消', 'AbortError');
     options.ensureCurrent();
@@ -90,11 +102,20 @@ export async function waitForSubmittedCreationReadback(
       if (url) pinnedUrl = url;
       if (sample.evidence.reason === 'context_changed') throw new SubmittedCreationReadbackContextError('context_changed');
       if (url && sample.evidence.promptPublished && (!options.requireInputCleared || sample.evidence.inputCleared)) {
-        return { url, evidence: sample.evidence };
+        return { ...sample, url };
       }
       reason = !url ? 'conversation_url_missing'
         : !sample.evidence.promptPublished ? sample.evidence.reason ?? 'prompt_not_published'
           : 'input_not_cleared';
+      // 完整历史的同一结构连续复读仍歧义时，继续等60秒不会增加身份依据。
+      // 不完整历史、尚未出现的原请求和首次发送仍保留原有有界等待。
+      if (options.stopOnStableAmbiguity && sample.historyComplete && url
+        && (reason === 'user_ambiguous' || reason === 'reply_ambiguous' || reason === 'reply_identity_mismatch')) {
+        const key = JSON.stringify([reason, sample.evidence.messageCount, sample.evidence.userMessageId, sample.evidence.userTurnId,
+          sample.evidence.candidates.map((candidate: CreationReadbackResult['candidates'][number]): unknown[] => [candidate.messageIndex, candidate.messageId, candidate.turnId])]);
+        if (key === previousAmbiguity) throw new SubmittedCreationReadbackAmbiguityError(reason);
+        previousAmbiguity = key;
+      } else previousAmbiguity = '';
       if (options.onProgress) {
         await Promise.race([Promise.resolve(options.onProgress({ elapsedMs: Math.max(0, now() - startedAt), reason })), stopped]);
         assertCurrent();

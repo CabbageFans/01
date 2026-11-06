@@ -60,7 +60,7 @@ export function imageTargetBasis(project: PetStoryProject, target: PetStoryImage
     if (!shot || !['firstFrame', 'lastFrame'].includes(target.kind || '')) throw new Error('图片目标镜头不存在');
     const kind = target.kind;
     if (!kind) throw new Error('图片用途无效');
-    const { prompts, appearanceOverrides: _appearanceOverrides, ...design } = shot;
+    const { prompts, autoModePlan: _autoModePlan, appearanceOverrides: _appearanceOverrides, ...design } = shot;
     facts = { story: project.mobileStory?.id, target, design, prompt: prompts[kind]?.final,
       materials: project.materials?.filter((item): boolean => shot.characterIds.includes(item.entityId) || !!shot.propIds?.includes(item.entityId) || shot.sceneId === item.entityId)
         .map((item): object => item.kind === 'character' && item.visualBasis

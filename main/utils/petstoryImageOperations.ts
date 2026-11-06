@@ -7,14 +7,23 @@ import { requireMaterialInventory, requireMaterialPromptSource } from './petstor
 import { imageTargetBasis, imageTargetMatches } from './petstoryImageReview';
 import { mediaDigest, validatePetStoryMedia } from './petstoryMedia';
 import { productionCapability } from './petstoryCapability';
+import { imageOperationProduction as operationProduction, sameImageTarget as sameTarget, isCurrentImageOperation, imageOperationHasPendingWork } from './petstoryImageLifecycle';
 
 function operationFor(p: PetStoryProject, id: string): PetStoryImageOperation {
   const operation = p.imageOperations?.find((item): boolean => item.id === id);
   if (!operation) throw new Error('本次图片操作不存在，请重新打开素材');
   return operation;
 }
-function sameTarget(a: PetStoryImageOperationRequest['target'], b: PetStoryImageOperationRequest['target']): boolean {
-  return a.materialId ? a.materialId === b.materialId : a.shotId === b.shotId && a.kind === b.kind;
+/** 历史单图片计划迁入独立槽；不改变任何运行事实。 */
+function migrateImageProduction(p: PetStoryProject): void {
+  if (!p.production?.imageOperationId) return;
+  p.imageProductions = { ...p.imageProductions, [p.production.imageOperationId]: p.production };
+  p.production = undefined;
+}
+function archiveTargetProduction(p: PetStoryProject, target: PetStoryImageOperationRequest['target']): void {
+  const previous = [...(p.imageOperations || [])].reverse().find((item): boolean => sameTarget(item.target, target));
+  const run = previous && operationProduction(p, previous.id);
+  if (run && !p.productionHistory?.some((item): boolean => item.imageOperationId === previous.id)) p.productionHistory = [...(p.productionHistory || []), run];
 }
 /** 只跟随本次根请求的修订，不会拾取同素材其他历史候选。 */
 function operationJob(p: PetStoryProject, operation: PetStoryImageOperation): PetStoryChatJob | undefined {
@@ -27,6 +36,13 @@ function operationJob(p: PetStoryProject, operation: PetStoryImageOperation): Pe
     job = child;
   }
   return job;
+}
+/** 已绑定或已收取的准备必须沿原授权恢复；修订链同样不能被新失败请求遮蔽。 */
+function pendingPreparation(p: PetStoryProject, operation: PetStoryImageOperation): boolean {
+  const job = operationJob(p, operation);
+  if (!job || job.endedWaitingAt) return false;
+  return ['bound', 'captured'].includes(job.status) || job.status === 'applied' && job.resultStatus === 'candidate'
+    || job.status === 'invalid' && !!job.validationDetails?.length && job.validationDetails.every((issue): boolean => issue.repairable);
 }
 function resultFor(p: PetStoryProject, operation: PetStoryImageOperation): PetStoryImageOperationResult {
   return { success: operation.stage !== 'failed', project: p, operationId: operation.id, error: operation.error,
@@ -45,11 +61,11 @@ function validateRequest(request: PetStoryImageOperationRequest): void {
     || !request.target || !!request.target.materialId === !!request.target.shotId
     || request.target.shotId && !['firstFrame', 'lastFrame'].includes(request.target.kind || '')) throw new Error('请选择具体素材后生成或修改图片');
 }
-function validateBeginProject(p: PetStoryProject, revision: number, request: PetStoryImageOperationRequest, replaceableProduction: boolean): boolean {
+function validateBeginProject(p: PetStoryProject, revision: number, request: PetStoryImageOperationRequest): boolean {
   if (p.revision !== revision) throw new Error('项目版本已变化，请刷新素材');
   requireMaterialInventory(p);
   if (p.chatAdjustment?.status === 'active') throw new Error('请先结束当前豆包调整，避免覆盖对话草稿');
-  if (p.production && p.production.state !== 'complete' && !replaceableProduction) throw new Error('已有制作任务尚未结束，请先处理原任务');
+  if (p.production && p.production.state !== 'complete') throw new Error('已有制作任务尚未结束，请先处理原任务');
   const modifying = request.baseAssetId !== undefined || request.feedback !== undefined;
   if (modifying && (typeof request.baseAssetId !== 'string' || typeof request.feedback !== 'string' || !request.feedback.trim() || request.feedback.length > 4000)) throw new Error('请填写你希望怎么修改这张图片');
   return modifying;
@@ -72,8 +88,8 @@ export class PetStoryImageOperationService {
     return resultFor(await this.projects.write(p), operation);
   }
   /** 用户再次提交仅可取代确定未发送的已停止操作；下载失败或提交不明仍只恢复原任务。 */
-  private canReplaceFailedProduction(p: PetStoryProject): boolean {
-    const production = p.production;
+  private canReplaceFailedProduction(p: PetStoryProject, operationId: string): boolean {
+    const production = operationProduction(p, operationId);
     if (!production?.imageOperationId || production.state !== 'paused'
       || !p.imageOperations?.some((item): boolean => item.id === production.imageOperationId && item.stage === 'failed')) return false;
     return production.steps.every((step): boolean => {
@@ -84,6 +100,16 @@ export class PetStoryImageOperationService {
         && !task.runtime?.acceptanceObservation && !task.runtime?.chatResponse && !task.outputs?.length;
     });
   }
+  private blockingTargetOperation(p: PetStoryProject, target: PetStoryImageOperationRequest['target']): PetStoryImageOperation | undefined {
+    return p.imageOperations?.find((item): boolean => sameTarget(item.target, target)
+      && (item.stage === 'failed'
+        ? isCurrentImageOperation(p, item) && (pendingPreparation(p, item) || this.unboundPreparationTask(p, item.id) || imageOperationHasPendingWork(p, item) && !this.canReplaceFailedProduction(p, item.id))
+        : imageOperationHasPendingWork(p, item)));
+  }
+  private unboundPreparationTask(p: PetStoryProject, operationId: string): boolean {
+    return this.tasks().some((task): boolean => task.petstoryChat?.projectId === p.id && task.petstoryChat.imageOperationId === operationId
+      && !p.jobs.some((job): boolean => job.id === task.petstoryChat?.jobId && job.taskId === task.id));
+  }
   async begin(id: string, revision: number, request: PetStoryImageOperationRequest, capability?: PetStoryCapability): Promise<PetStoryImageOperationResult> {
     let p = await this.projects.read(id);
     validateRequest(request);
@@ -92,13 +118,11 @@ export class PetStoryImageOperationService {
       if (!sameTarget(prior.target, request.target) || prior.baseAssetId !== request.baseAssetId || prior.feedback !== request.feedback) throw new Error('同一次图片请求的内容已变化，请刷新后重新操作');
       return resultFor(p, prior);
     }
-    const active = p.imageOperations?.find((item): boolean => !['complete', 'failed'].includes(item.stage));
+    migrateImageProduction(p);
+    const active = this.blockingTargetOperation(p, request.target);
     if (active) return { ...resultFor(p, active), success: false, error: '已有图片任务正在进行，请先查看或继续原任务' };
-    const replaceableProduction = this.canReplaceFailedProduction(p);
-    const modifying = validateBeginProject(p, revision, request, replaceableProduction);
-    if (replaceableProduction && p.production) {
-      p.productionHistory = [...(p.productionHistory || []), p.production]; p.production = undefined;
-    }
+    const modifying = validateBeginProject(p, revision, request);
+    archiveTargetProduction(p, request.target);
     const feedback = request.feedback;
     const operation: PetStoryImageOperation = { id: randomUUID(), requestId: request.requestId, target: structuredClone(request.target),
       mode: modifying ? 'modify' : 'generate', stage: 'preparing', createdAt: new Date().toISOString(),
@@ -133,16 +157,16 @@ export class PetStoryImageOperationService {
     base.validation = await validatePetStoryMedia(file, 'image'); operation.baseSha256 = base.validation.sha256;
   }
   private async startProduction(p: PetStoryProject, operation: PetStoryImageOperation, capability?: PetStoryCapability): Promise<PetStoryImageOperationResult> {
-    const started = operation.mode === 'modify'
-      ? await this.production.generateImageFeedback(p.id, p.revision, operation.id, capability)
+    const started = await this.production.withImageOperation(p.id, operation.id, (service: PetStoryProductionService): Promise<PetStoryImageOperationResult> => operation.mode === 'modify'
+      ? service.generateImageFeedback(p.id, p.revision, operation.id, capability)
       : operation.target.shotId && operation.target.kind
-        ? await this.production.generateShotMedia(p.id, p.revision, operation.target.shotId, operation.target.kind, capability, {}, operation.id)
-        : await this.production.generateMaterials(p.id, p.revision, [materialTarget(operation)], capability, operation.id);
-    if (!started.success || !started.project?.production) throw new Error(started.error || '本次图片任务未保存');
+        ? service.generateShotMedia(p.id, p.revision, operation.target.shotId, operation.target.kind, capability, {}, operation.id)
+        : service.generateMaterials(p.id, p.revision, [materialTarget(operation)], capability, operation.id));
+    if (!started.success || !started.project || !operationProduction(started.project, operation.id)) throw new Error(started.error || '本次图片任务未保存');
     p = started.project;
     const saved = operationFor(p, operation.id);
     saved.stage = 'generating'; saved.error = undefined; saved.basisHash = imageTargetBasis(p, saved.target);
-    saved.productionApprovedAt = started.project.production?.approvedAt;
+    saved.productionApprovedAt = operationProduction(p, operation.id)?.approvedAt;
     return { ...started, project: await this.projects.write(p), operationId: saved.id };
   }
   async advance(id: string, operationId: string): Promise<PetStoryImageOperationResult> {
@@ -179,14 +203,15 @@ export class PetStoryImageOperationService {
   }
   private async advanceProduction(p: PetStoryProject, operation: PetStoryImageOperation): Promise<PetStoryImageOperationResult> {
     const id = p.id; const operationId = operation.id;
-    if (p.production?.imageOperationId !== operationId) throw new Error('本次图片制作与原授权不符，未创建新任务');
-    const advanced = await this.production.advance(id);
+    if (!operationProduction(p, operationId)) throw new Error('本次图片制作与原授权不符，未创建新任务');
+    const advanced = await this.production.withImageOperation(id, operationId, (service: PetStoryProductionService): Promise<PetStoryImageOperationResult> => service.advance(id));
     p = advanced.project || await this.projects.read(id); operation = operationFor(p, operationId);
-    const step = p.production?.steps[0];
+    const run = operationProduction(p, operationId);
+    const step = run?.steps[0];
     const task = this.tasks().find((item): boolean => item.id === step?.taskId);
     const stage = step?.assetId && p.assets.some((asset): boolean => asset.id === step.assetId && !!asset.validation?.decoded)
-      && p.production?.state === 'complete' ? 'complete' : task?.status === 'done' ? 'saving' : 'generating';
-    if (!advanced.success || p.production?.state === 'paused') throw new Error(advanced.error || p.production?.message || '本次图片任务已暂停');
+      && run?.state === 'complete' ? 'complete' : task?.status === 'done' ? 'saving' : 'generating';
+    if (!advanced.success || run?.state === 'paused') throw new Error(advanced.error || run?.message || '本次图片任务已暂停');
     if (stage !== operation.stage || operation.taskId !== step?.taskId || operation.outputAssetId !== (stage === 'complete' ? step?.assetId : undefined)) {
       operation.stage = stage; operation.taskId = step?.taskId; operation.outputAssetId = stage === 'complete' ? step?.assetId : undefined;
       p = await this.projects.write(p);
@@ -197,11 +222,12 @@ export class PetStoryImageOperationService {
   async resume(id: string, operationId: string, capability?: PetStoryCapability): Promise<PetStoryImageOperationResult> {
     let p = await this.projects.read(id); const operation = operationFor(p, operationId);
     if (operation.stage === 'complete') return resultFor(p, operation);
+    if (!isCurrentImageOperation(p, operation)) throw new Error('原图片任务已有记录或创建结果不明，请核对当前图片操作，不重新发送');
     if (p.chatAdjustment?.status === 'active') throw new Error('请先结束当前豆包调整，避免覆盖对话草稿');
-    if ((operation.mode === 'modify' || operation.target.shotId) && p.production?.imageOperationId !== operationId) return this.resumeUncreatedImage(p, operation, capability);
+    if ((operation.mode === 'modify' || operation.target.shotId) && !operationProduction(p, operationId)) return this.resumeUncreatedImage(p, operation, capability);
     operation.error = undefined;
-    if (p.production?.imageOperationId === operationId) {
-      const resumed = await this.production.resume(id, capability);
+    if (operationProduction(p, operationId)) {
+      const resumed = await this.production.withImageOperation(id, operationId, (service: PetStoryProductionService): Promise<PetStoryImageOperationResult> => service.resume(id, capability));
       if (!resumed.success || !resumed.project) return { ...resumed, operationId };
       p = resumed.project; operationFor(p, operationId).stage = 'generating'; operationFor(p, operationId).error = undefined;
     } else {
@@ -219,12 +245,13 @@ export class PetStoryImageOperationService {
     return resultFor(p, operationFor(p, operationId));
   }
   private async resumeUncreatedImage(p: PetStoryProject, operation: PetStoryImageOperation, capability?: PetStoryCapability): Promise<PetStoryImageOperationResult> {
-    const runs = [p.production, ...(p.productionHistory || [])].filter((run): run is NonNullable<typeof run> => !!run);
+    const runs = [p.production, ...Object.values(p.imageProductions || {}), ...(p.productionHistory || [])].filter((run): run is NonNullable<typeof run> => !!run);
     const knownSteps = runs.flatMap((run): typeof run.steps => run.steps);
     const orphan = this.tasks().some((task): boolean => task.petstory?.projectId === p.id
+      && (!task.petstory.imageOperationId || task.petstory.imageOperationId === operation.id)
       && !knownSteps.some((step): boolean => step.id === task.petstory?.stepId && step.taskId === task.id));
     if (operation.taskId || runs.some((run): boolean => run.imageOperationId === operation.id) || orphan
-      || p.imageOperations?.some((item): boolean => item.id !== operation.id && !['complete', 'failed'].includes(item.stage))) throw new Error('原图片任务已有记录或创建结果不明，请核对原任务，不重新发送');
+      || p.imageOperations?.some((item): boolean => item.id !== operation.id && sameTarget(item.target, operation.target) && !['complete', 'failed'].includes(item.stage))) throw new Error('原图片任务已有记录或创建结果不明，请核对原任务，不重新发送');
     // 该生产入口只登记计划，尚未创建 Task；无计划／无孤立任务才能接续同一次图片授权。
     if (operation.basisHash !== imageTargetBasis(p, operation.target)) throw new Error('素材事实已变化，请按当前素材重新提交图片操作');
     try {
@@ -232,5 +259,14 @@ export class PetStoryImageOperationService {
       this.authorize(p.id, operation.id);
       return result;
     } catch (error: unknown) { return this.failed(p.id, operation.id, error); }
+  }
+  /** 只停当前图片操作；其他目标继续生成，原任务与受理证据不变。 */
+  async pause(id: string, operationId: string): Promise<PetStoryImageOperationResult> {
+    const p = await this.projects.read(id); const operation = operationFor(p, operationId);
+    this.authorized.delete(`${id}:${operationId}`);
+    if (operation.stage === 'complete') return resultFor(p, operation);
+    if (operationProduction(p, operationId)) await this.production.withImageOperation(id, operationId,
+      (service: PetStoryProductionService): Promise<PetStoryImageOperationResult> => service.pause(id));
+    return this.failed(id, operationId, new Error('本次图片任务已暂停，请继续原任务'));
   }
 }

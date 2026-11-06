@@ -107,13 +107,16 @@ describe('原未提交运行通过正式执行门禁续用原run', (): void => {
     const task = waitingTask(false); task.promptReadback = 'exact';
     if (task.runtime) task.runtime.input.promptReadback = 'exact';
     setTasks([task]);
+    const originalTask = useTaskStore.getState().tasks[0];
     expect(await useTaskStore.getState().resumeAfterAccountVerification(accountId, checkedAt)).toBe(true);
     const current = useTaskStore.getState().tasks[0];
     expect(current).toMatchObject({ id: taskId, status: 'executing', runtime: {
       runId: 'OFFLINE-original-run', attempt: 3, stage: 'preparing_account', input: task.runtime?.input,
     } });
     expect(current.runtime?.submittedAt).toBeUndefined();
-    expect(automationEngine.reserve).toHaveBeenCalledWith(taskId, accountId, 'OFFLINE-original-run');
+    expect(automationEngine.reserve).toHaveBeenCalledOnce();
+    expect(automationEngine.reserve).toHaveBeenCalledWith(taskId, accountId, 'OFFLINE-original-run', task);
+    expect(vi.mocked(automationEngine.reserve).mock.calls[0][3]).toBe(originalTask);
     expect(useTaskStore.getState().executingTasks[accountId]).toBe(taskId);
     expect(useTaskStore.getState().accountBusy[accountId]).toBe(true);
     expect(events().map((event: CustomEvent): string => event.type)).toEqual(['task-verification-recovery-started']);

@@ -8,12 +8,37 @@ import { collectPetStoryDialogueSourceIssues, extractDouyinLink, PetStoryContent
 import { invalidateMaterialDependents, materialAsset, syncMaterials, storyHash, requireMaterialInventory } from './petstoryMaterials';
 import { mediaDigest, validatePetStoryMedia } from './petstoryMedia';
 import { archiveCompletedPetStoryProduction } from './petstoryProductionLifecycle';
+import { imageOperationBlocksTargets } from './petstoryImageLifecycle';
 import { validateCastBindings } from './petstoryCast';
 import { validatePetStoryAdjustments } from './petstoryAdjustmentValidation';
 import { imageTargetBasis, imageTargetMatches, selectedShotImageId, reconcileAdoptedImages } from './petstoryImageReview';
 import { inspectPromptCandidate, inspectPromptEligibility, promptWritingTarget } from './petstoryEligibility';
 import { boundaryStillCurrent, frameStillCurrent, hasSupersedingJob, runtimeContextStillCurrent, settlePromptBatchTarget } from './petstoryChat';
 import { validateReferenceContinuationHistory } from './petstoryReferenceContinuation';
+import { ensurePetStoryAutoModeTargets } from './petstoryModes';
+
+/** 仅补当前可编辑方案的目标，不迁移原任务、候选或制作历史，也不触发任务。 */
+function prepareEditableAutoModeTargets(project: PetStoryProject): void {
+  const lockedProduction = project.production && (project.production.state !== 'complete' || project.production.steps.some((step): boolean => step.status !== 'complete'));
+  if (!project.plan || lockedProduction || Object.values(project.imageProductions || {}).some((production): boolean => production.state !== 'complete' && !production.imageOperationId)
+    || project.jobs.some((job): boolean => !job.endedWaitingAt && ['bound', 'captured'].includes(job.status))) return;
+  // 历史曾采用的尾图仍应有可见用途，即使旧清单已经漏掉它的文字对象。
+  for (const shot of project.plan.shots) {
+    const tailId = project.adoptedImages?.[shot.id]?.plannedEndImageId;
+    if (shot.requestedMode === 'auto' && !shot.prompts.lastFrame && project.assets.some((asset): boolean => asset.id === tailId && asset.shotId === shot.id && asset.kind === 'plannedEndImage')) {
+      shot.prompts.lastFrame = { original: '', optimized: '', final: '', edited: false, rulesVersion: shot.prompts.firstFrame.rulesVersion };
+    }
+  }
+  ensurePetStoryAutoModeTargets(project.plan);
+}
+
+/** 手动改剧情后，原样带回的旧判断不再冒充针对新剧情的分析结果。 */
+function refreshEditedAutoModePlan(shot: PetStoryPlan['shots'][number], previous: PetStoryPlan['shots'][number] | undefined): void {
+  if (shot.requestedMode !== 'auto' || !previous?.autoModePlan || !isDeepStrictEqual(shot.autoModePlan, previous.autoModePlan)) return;
+  const basis = (value: PetStoryPlan['shots'][number]): object => ({ action: value.action, startState: value.startState, endState: value.endState,
+    narrativePurpose: value.narrativePurpose, blocking: value.blocking, propStates: value.propStates, durationSeconds: value.durationSeconds, timingPlan: value.timingPlan });
+  if (!isDeepStrictEqual(basis(shot), basis(previous))) shot.autoModePlan = undefined;
+}
 
 /** 格式纠正继承原请求职责；审查结果不能被当作可采用的正文。 */
 function isPromptEditCreation(project: PetStoryProject, job: PetStoryChatJob, shotId: string, kind: PetStoryPromptKind): boolean {
@@ -224,7 +249,20 @@ function validateImageReview(asset: PetStoryAsset, project: PetStoryProject): vo
           || !project.assets.some((other): boolean => other.id === id && other.kind === asset.kind && imageTargetMatches(other, review.target))))) throw new Error('图片选图决定的候选归属无效');
     }
 }
+function validateImageProductions(result: PetStoryProject, ids: Set<string>): void {
+  if (result.imageProductions === undefined) return;
+  if (!result.imageProductions || typeof result.imageProductions !== 'object' || Array.isArray(result.imageProductions)) throw new Error('独立图片制作清单无效');
+  for (const [operationId, production] of Object.entries(result.imageProductions)) {
+    const operation = result.imageOperations?.find((item): boolean => item.id === operationId);
+    if (!operation || !production || production.imageOperationId !== operationId || production.steps?.some((step): boolean => step.kind === 'video')) throw new Error('独立图片制作与原操作绑定不符');
+    if (operation.target.materialId ? production.phase !== 'materials' || production.materialIds?.length !== 1 || production.materialIds[0] !== operation.target.materialId
+      || production.steps?.some((step): boolean => step.materialId !== operation.target.materialId)
+      : production.target?.shotId !== operation.target.shotId || production.target?.kind !== operation.target.kind) throw new Error('独立图片制作目标与授权不符');
+    validateProduction({ ...result, imageProductions: undefined, production, productionHistory: undefined }, ids);
+  }
+}
 function validateProduction(result: PetStoryProject, ids: Set<string>): void {
+  validateImageProductions(result, ids);
   if (result.production) {
     const production = result.production;
     if (!result.plan || !['running', 'paused', 'complete'].includes(production.state) || !/^[a-f0-9]{64}$/.test(production.planHash)
@@ -320,6 +358,7 @@ export class PetStoryProjects {
     if (info.size > 8 * 1024 * 1024) throw new Error('项目文件超过 8 MiB');
     const project = validateProject(JSON.parse(await fs.readFile(filename, 'utf8')), true);
     if (project.id !== id) throw new Error('项目身份发生变化，已停止操作');
+    prepareEditableAutoModeTargets(project);
     return project;
   }
   async open(directory: string): Promise<PetStoryProject> {
@@ -331,6 +370,7 @@ export class PetStoryProjects {
     if (old && old !== real) throw new Error('相同项目 ID 已在其他目录打开');
     for (const asset of project.assets) await projectPath(real, asset.relativePath);
     this.directories.set(project.id, real);
+    prepareEditableAutoModeTargets(project);
     return project;
   }
   async create(directory: string, studioProjectId: string, accountId: string): Promise<PetStoryProject> {
@@ -352,6 +392,7 @@ export class PetStoryProjects {
       if (job.parsedResult?.plan && !isDeepStrictEqual(job.parsedResult.plan, previous?.parsedResult?.plan)) job.parsedResult.plan = validatePetStoryPlan(job.parsedResult.plan);
     }
     if (current.revision !== checked.revision) throw new Error('项目已被修改，请重新打开后操作');
+    prepareEditableAutoModeTargets(checked);
     const next = { ...checked, revision: checked.revision + 1, updatedAt: new Date().toISOString() };
     const target = await projectPath(this.directory(checked.id), 'project.json');
     const temporary = await projectPath(this.directory(checked.id), `project-${randomUUID()}.tmp`);
@@ -453,10 +494,13 @@ export class PetStoryProjects {
     if (!p.plan) throw new Error('请先取得本次 Chat 分析结果');
     if (p.production && !archiveCompletedPetStoryProduction(p)) throw new Error('原制作尚未结束或镜头方案已锁定，保留已有素材和任务');
     const checked = validatePetStoryPlan(value);
+    ensurePetStoryAutoModeTargets(checked);
     const sourceIssues = collectPetStoryDialogueSourceIssues(checked, p.mobileStory?.text || '');
     if (sourceIssues.length) throw new PetStoryContentValidationError(sourceIssues);
     for (const shot of checked.shots) {
       const previous = p.plan.shots.find((s): boolean => s.id === shot.id);
+      refreshEditedAutoModePlan(shot, previous);
+      if (shot.requestedMode === 'auto' && previous?.prompts.lastFrame && !shot.prompts.lastFrame) shot.prompts.lastFrame = structuredClone(previous.prompts.lastFrame);
       const timingChanged = !!previous && (previous.durationSeconds !== shot.durationSeconds || !isDeepStrictEqual(previous.timingPlan, shot.timingPlan));
       for (const kind of ['firstFrame', 'lastFrame', 'video'] as const) {
         const incoming = shot.prompts[kind];
@@ -466,6 +510,7 @@ export class PetStoryProjects {
           ...(timingChanged && incoming.final === old.final ? { timingStale: true } : {}) };
       }
     }
+    ensurePetStoryAutoModeTargets(checked);
     p.plan = checked;
     if (p.materials) p.materials = syncMaterials(p);
     reconcileAdoptedImages(p);
@@ -528,10 +573,16 @@ export class PetStoryProjects {
     if (!shot || !p.materials?.some((item): boolean => item.id === materialId)) throw new Error('请先确认当前镜头的场景素材，再上传对应图片');
     return this.addMaterialImage(id, p.revision, materialId, sourcePath);
   }
-  private editableMaterials(p: PetStoryProject, revision: number): void {
+  private editableMaterials(p: PetStoryProject, revision: number, targets?: PetStoryImageTarget[]): void {
     if (p.revision !== revision) throw new Error('项目版本变化，请刷新后操作');
     archiveCompletedPetStoryProduction(p);
-    if (p.production?.state === 'running' || p.production?.steps.some((s): boolean => s.status !== 'complete')) throw new Error('原制作尚有未结束步骤，请先处理原任务，不能替换其输入');
+    // 旧版独立图片也由同一目标／步骤策略判断，不能退回整批制作的全项目输入锁。
+    const imageProduction = p.production?.imageOperationId && p.imageOperations?.some((operation): boolean => operation.id === p.production?.imageOperationId);
+    // 停止后允许图片上传／选用；剧本和正文仍受原制作约束，恢复时另校验原输入依据。
+    const pausedImageEdit = targets !== undefined && p.production?.state === 'paused';
+    if (!imageProduction && !pausedImageEdit && (p.production?.state === 'running' || p.production?.steps.some((s): boolean => s.status !== 'complete'))) throw new Error('原制作尚有未结束步骤，请先处理原任务，不能替换其输入');
+    const affected = p.imageOperations?.some((operation): boolean => imageOperationBlocksTargets(p, operation, targets));
+    if (affected) throw new Error('当前图片或其实际引用仍有未结束任务，请先处理原任务');
   }
   async confirmStory(id: string, revision: number): Promise<PetStoryProject> {
     const p = await this.read(id); this.editableMaterials(p, revision);
@@ -548,7 +599,7 @@ export class PetStoryProjects {
     return this.write(p);
   }
   async selectMaterialImage(id: string, revision: number, materialId: string, assetId: string): Promise<PetStoryProject> {
-    const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
+    const p = await this.read(id); this.editableMaterials(p, revision, [{ materialId }]); requireMaterialInventory(p);
     const m = p.materials?.find((m): boolean => m.id === materialId);
     if (!m) throw new Error('基础素材不存在');
     const asset = p.assets.find((item): boolean => item.id === assetId && imageTargetMatches(item, { materialId }));
@@ -557,7 +608,7 @@ export class PetStoryProjects {
     return p;
   }
   async addMaterialImage(id: string, revision: number, materialId: string, sourcePath: string, source?: PetStoryImageImportSource): Promise<PetStoryProject> {
-    const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
+    const p = await this.read(id); this.editableMaterials(p, revision, [{ materialId }]); requireMaterialInventory(p);
     const m = p.materials?.find((m): boolean => m.id === materialId);
     if (!m) throw new Error('基础素材不存在');
     const info = await fs.lstat(sourcePath); const ext = path.extname(sourcePath).toLowerCase();
@@ -574,7 +625,7 @@ export class PetStoryProjects {
     return this.write(p);
   }
   async addShotImage(id: string, revision: number, shotId: string, kind: 'firstFrame' | 'lastFrame', sourcePath: string, source?: PetStoryImageImportSource): Promise<PetStoryProject> {
-    const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
+    const p = await this.read(id); this.editableMaterials(p, revision, [{ shotId, kind }]); requireMaterialInventory(p);
     const target: PetStoryImageTarget = { shotId, kind };
     const basisHash = imageTargetBasis(p, target);
     const info = await fs.lstat(sourcePath); const ext = path.extname(sourcePath).toLowerCase();
@@ -640,13 +691,13 @@ export class PetStoryProjects {
     }
   }
   async adoptImage(id: string, revision: number, target: PetStoryImageTarget, assetId: string): Promise<PetStoryProject> {
-    const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
+    const p = await this.read(id); this.editableMaterials(p, revision, [target]); requireMaterialInventory(p);
     if (!target || !!target.materialId === !!target.shotId) throw new Error('请选择唯一图片目标');
     await this.adoptProjectImage(p, target, assetId);
     return this.write(p);
   }
   async approveMaterials(id: string, revision: number, selections: { materialId: string; assetId: string }[]): Promise<PetStoryProject> {
-    const p = await this.read(id); this.editableMaterials(p, revision); requireMaterialInventory(p);
+    const p = await this.read(id); this.editableMaterials(p, revision, selections?.map((item): PetStoryImageTarget => ({ materialId: item.materialId }))); requireMaterialInventory(p);
     if (!Array.isArray(selections) || !selections.length || new Set(selections.map((s): string => s.materialId)).size !== selections.length) throw new Error('请选择已经查看的具体图片');
     for (const selection of selections) {
       const m = p.materials?.find((m): boolean => m.id === selection.materialId);
