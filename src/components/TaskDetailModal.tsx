@@ -383,7 +383,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
         <div style={{ marginBottom: 16 }}>
           {task.qualityVerdict && (
             <div style={{ marginBottom: 8, fontSize: 12, color: task.qualityVerdict.status === 'accepted' ? '#238563' : '#c44352' }}>
-              当前：{task.qualityVerdict.status === 'accepted' ? '合格' : `拒收（${(task.qualityVerdict.rejectionTags || []).map((tag) => QUALITY_REJECTION_LABELS[tag]).join('、')}）`}
+              当前：{task.qualityVerdict.status === 'accepted' ? '合格' : `拒收（${(task.qualityVerdict.rejectionTags || []).map((tag: QualityRejectionTag): string => QUALITY_REJECTION_LABELS[tag]).join('、')}）`}
               {' · '}{new Date(task.qualityVerdict.decidedAt).toLocaleString('zh-CN')}
             </div>
           )}

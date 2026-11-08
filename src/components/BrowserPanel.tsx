@@ -115,7 +115,6 @@ import {
 import {
   applyWebviewActivationStyle,
   forceWebviewLayoutRepaint,
-  getSupersededLoadingAccountIds,
   getWebviewHydrationAccountIds,
   isWebviewDocumentReady,
 } from '../utils/webviewHydration';
@@ -261,6 +260,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const poolRef = useRef<HTMLDivElement>(null);
   const registryRef = useRef<Map<string, HTMLWebViewElement>>(new Map());
   const loadingMapRef = useRef<Map<string, boolean>>(new Map());
+  /** 首个文档出现后不再用不透明遮罩覆盖页面；导航就绪仍由 loadingMap 独立管理。 */
+  const displayedAccountsRef = useRef<Set<string>>(new Set());
+  const loadErrorsRef = useRef<Map<string, string>>(new Map());
   const runningRef = useRef<Set<string>>(new Set());
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
@@ -276,7 +278,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const submissionReconcileUsageRef = useRef<Set<string>>(new Set());
   const availabilityRequestHandledRef = useRef<Record<string, number>>({});
   const availabilityProbesRef = useRef(new PageAvailabilityCoordinator());
-  /** 启动期后台巡检一次只保留一个临时 Webview，完成后立即释放。 */
+  /** 启动期一次只预热一个后台 Webview，完成后原分区页面常驻。 */
   const backgroundProbeRef = useRef<Set<string>>(new Set());
   const backgroundAuditedRef = useRef<Set<string>>(new Set());
   /** 当前预热完成后直接唤醒下一账号；定时轮询仅作为 Electron 漏事件兜底。 */
@@ -293,16 +295,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     return !!current && getTaskWebview(current) === webview;
   }, [getTaskWebview]);
   const taskWebviewReady = useCallback((task: Task): boolean => materialPagesRef.current.uses(task)
-    ? materialPagesRef.current.ready(task) : loadingMapRef.current.get(task.assignedAccountId || '') === false, []);
+    ? materialPagesRef.current.ready(task) : loadingMapRef.current.get(task.assignedAccountId || '') === false
+      && !loadErrorsRef.current.has(task.assignedAccountId || ''), []);
   const ensureTaskWebview = useCallback((task: Task): HTMLWebViewElement | undefined => {
     if (!materialPagesRef.current.uses(task)) return getTaskWebview(task);
     const account = useAccountStore.getState().accounts.find((item): boolean => item.id === task.assignedAccountId);
     if (!account || !poolRef.current) return undefined;
     return materialPagesRef.current.ensure(task, account, poolRef.current, (): void => setWebviewEpoch((value: number): number => value + 1));
   }, [getTaskWebview]);
-  const pauseFailedMaterialPage = useCallback(async (task: Task, failure: MaterialImagePageFailure): Promise<void> => {
+  const pauseFailedTaskPage = useCallback(async (task: Task, failure: MaterialImagePageFailure): Promise<void> => {
     const current = useTaskStore.getState().tasks.find((item: Task): boolean => item.id === task.id);
-    if (current?.runtime?.runId !== failure.runId || current.assignedAccountId !== failure.accountId
+    if (!current || (current.runtime?.runId || '') !== failure.runId || current.assignedAccountId !== failure.accountId
       || current.status !== 'executing' || automationEngine.hasController(task.id)) return;
     const scope = getTaskExecutionScope(current);
     runningRef.current.add(scope);
@@ -311,14 +314,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     } catch { message.error('页面加载失败，任务暂停状态暂未保存；本次未进入输入或发送'); }
     finally {
       const latest = useTaskStore.getState().tasks.find((item: Task): boolean => item.id === task.id);
-      if (!latest || latest.runtime?.runId === failure.runId) await automationEngine.release(task.id);
+      if (!latest || (latest.runtime?.runId || '') === failure.runId) await automationEngine.release(task.id);
       if (!automationEngine.hasController(task.id)) runningRef.current.delete(scope);
       setTimeout((): void => { void useTaskStore.getState().processQueue(); }, 0);
     }
   }, []);
 
-  const [activeLoading, setActiveLoading] = useState(true);
+  const [activeLoading, setActiveLoading] = useState(false);
   const [loadText, setLoadText] = useState('加载豆包中...');
+  const [loadError, setLoadError] = useState('');
   /** webview 注册完成时递增，确保已预留的任务会在页面实例出现后重新路由。 */
   const [webviewEpoch, setWebviewEpoch] = useState(0);
   const [manualVideoExtracting, setManualVideoExtracting] = useState(false);
@@ -1231,6 +1235,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       registryRef.current.delete(accountId);
     }
     loadingMapRef.current.delete(accountId);
+    displayedAccountsRef.current.delete(accountId);
+    loadErrorsRef.current.delete(accountId);
+    backgroundProbeRef.current.delete(accountId);
+    backgroundAuditedRef.current.delete(accountId);
     const state = useTaskStore.getState();
     const taskIds = new Set(
       state.tasks
@@ -1269,26 +1277,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     });
 
-    // 用户快速切换账号时，只保留最后选择的前台加载。没有执行任务的旧加载页
-    // 立即释放，防止多个 Chromium 导航同时堆积并拖死 NetworkService。
-    const loadingIds = new Set(
-      [...loadingMapRef.current.entries()]
-        .filter(([, loading]) => loading)
-        .map(([accountId]) => accountId),
-    );
-    const supersededIds = getSupersededLoadingAccountIds(
-      [...registryRef.current.keys()],
-      loadingIds,
-      activeAccount?.id || null,
-      protectedTasks,
-    );
-    for (const accountId of supersededIds) {
-      backgroundProbeRef.current.delete(accountId);
-      disposeAccountWebview(accountId);
-    }
-
-    // 启动时只挂载当前账号，避免十几个账号同时访问平台后留下黑屏。
-    // 已经进入执行态的后台账号必须同时挂载；其余账号在用户切换时按需创建。
+    // 优先挂载当前／任务账号，其余账号由下方单通道依次预热。
+    // 已创建页面始终保留，任务更新和账号切换不能中断在途导航再重新加载。
     const hydrationIds = getWebviewHydrationAccountIds(
       accounts,
       activeAccount?.id || null,
@@ -1302,16 +1292,20 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     // 确保当前活跃账号的加载状态同步
     if (activeAccount) {
       const isLoading = loadingMapRef.current.get(activeAccount.id);
-      setActiveLoading(!!isLoading);
+      const error = loadErrorsRef.current.get(activeAccount.id) || '';
+      setActiveLoading(!!isLoading && !displayedAccountsRef.current.has(activeAccount.id) && !error);
+      setLoadError(error);
       if (!isLoading) setLoadText('');
       console.log(`[BrowserPanel] webview 池同步完成 (当前 ${registryRef.current.size} 个), activeAccount=${activeAccount.id}, isLoading=${isLoading}`);
     } else {
+      setActiveLoading(false);
+      setLoadError('');
       console.log(`[BrowserPanel] webview 池同步完成 (当前 ${registryRef.current.size} 个), 无活跃账号`);
     }
   }, [accountsKey, refreshKey, activeAccount?.id, executingTasks, tasks]);
 
   // ---- 创建单个 webview ----
-  const createWebview = (account: Account, container: HTMLDivElement) => {
+  const createWebview = (account: Account, container: HTMLDivElement): void => {
     if (registryRef.current.has(account.id)) return;
 
     const accId = account.id;
@@ -1337,7 +1331,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     let availabilitySettleTimer: ReturnType<typeof setTimeout> | undefined;
     let availabilityFinalTimer: ReturnType<typeof setTimeout> | undefined;
     let warmupReleaseTimer: ReturnType<typeof setTimeout> | undefined;
-    let activeLoadRecoveryAttempts = 0;
+    let navigationFailed = false;
 
     const finishBackgroundProbe = (): void => {
       if (!backgroundProbeRef.current.has(accId)) return;
@@ -1357,6 +1351,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     };
 
     const scheduleAvailabilityCheck = (source: AccountAvailabilitySource, delayMs: number = 600): void => {
+      if (navigationFailed) return;
       scope.clearTimer(availabilityTimer);
       scope.clearTimer(availabilitySettleTimer);
       scope.clearTimer(availabilityFinalTimer);
@@ -1380,23 +1375,41 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       scope.trackTimer(availabilityFinalTimer);
     };
 
-    // 统一加载完成处理
-    const markLoaded = (evt: string) => {
-      if (!scope.active) return;
+    const startLoadTimeout = (): void => {
+      scope.clearTimer(timeoutId);
+      timeoutId = setTimeout((): void => {
+        if (!scope.active || !loadingMapRef.current.get(accId)) return;
+        scope.clearTimer(pollInterval);
+        const reason = '页面连接较慢，请检查网络后刷新重试';
+        loadErrorsRef.current.set(accId, reason);
+        setWebviewEpoch((value: number): number => value + 1);
+        if (useAccountStore.getState().selectedAccountId === accId) {
+          setActiveLoading(false);
+          setLoadError(reason);
+        }
+      }, 15_000);
+      scope.trackTimer(timeoutId);
+    };
+
+    // 文档可读就直接显示，不等待隐藏宿主可能暂停的 requestAnimationFrame。
+    // 账号可用性和正式输入／提交前的控件回读仍独立执行。
+    const markLoaded = (evt: string): void => {
+      if (!scope.active || navigationFailed) return;
       if (!loadingMapRef.current.get(accId)) return; // 已标记完成，不重复处理
       loadingMapRef.current.set(accId, false);
+      displayedAccountsRef.current.add(accId);
+      loadErrorsRef.current.delete(accId);
+      // 页面状态存在 ref 中；通知正式派发 effect 重新评估等待首屏的任务。
+      setWebviewEpoch((value: number): number => value + 1);
       scope.clearTimer(pollInterval);
       scope.clearTimer(timeoutId);
       console.log(`[BrowserPanel] markLoaded: ${accId} via ${evt}`);
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
-        setLoadText('正在显示账号页面...');
-        void forceWebviewLayoutRepaint(webview).finally(() => {
-          if (!scope.active || useAccountStore.getState().selectedAccountId !== accId) return;
-          if (loadingMapRef.current.get(accId)) return;
-          setActiveLoading(false);
-          setLoadText('');
-        });
+        setActiveLoading(false);
+        setLoadText('');
+        setLoadError('');
+        void forceWebviewLayoutRepaint(webview);
       }
       if (backgroundProbeRef.current.has(accId)) {
         scope.clearTimer(warmupReleaseTimer);
@@ -1407,15 +1420,22 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     };
 
-    scope.listen(webview, 'did-start-loading', () => {
+    scope.listen(webview, 'did-start-navigation', (rawEvent: Event): void => {
       if (!scope.active) return;
+      const event = rawEvent as Event & { isMainFrame?: boolean; isInPlace?: boolean };
+      // 子框架／SPA 地址变化不代表主文档丢失；不能反复遮盖已经可交互的页面。
+      if (event.isMainFrame !== true || event.isInPlace) return;
+      navigationFailed = false;
+      loadErrorsRef.current.delete(accId);
       // 稳定窗口内再次导航说明页面尚未真正就绪，禁止提前并发下一账号。
       scope.clearTimer(warmupReleaseTimer);
       loadingMapRef.current.set(accId, true);
+      startLoadTimeout();
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
-        setActiveLoading(true);
+        setActiveLoading(!displayedAccountsRef.current.has(accId));
         setLoadText('页面加载中...');
+        setLoadError('');
       }
     });
 
@@ -1425,7 +1445,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     scope.listen(webview, 'did-navigate', () => undefined);
     scope.listen(webview, 'did-navigate-in-page', () => { scheduleAvailabilityCheck('navigation'); });
     scope.listen(webview, 'dom-ready', () => {
-      activeLoadRecoveryAttempts = 0;
       markLoaded('dom-ready');
       scheduleAvailabilityCheck(account.health?.availability ? 'navigation' : 'startup');
     });
@@ -1434,24 +1453,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const event = rawEvent as Event & { errorCode?: number; isMainFrame?: boolean };
       // Chromium 导航替换会产生 ERR_ABORTED；子资源失败也不等于主页面不可用。
       if (event.errorCode === -3 || event.isMainFrame === false) return;
+      navigationFailed = true;
       loadingMapRef.current.set(accId, false);
       scope.clearTimers();
+      const reason = '页面加载失败，请检查网络后刷新重试';
+      loadErrorsRef.current.set(accId, reason);
+      setWebviewEpoch((value: number): number => value + 1);
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
         setActiveLoading(false);
-        setLoadText('加载失败');
-        if (activeLoadRecoveryAttempts < 1) {
-          activeLoadRecoveryAttempts += 1;
-          const recoveryTimer = setTimeout(() => {
-            if (!scope.active || registryRef.current.get(accId) !== webview) return;
-            if (useAccountStore.getState().selectedAccountId !== accId) return;
-            loadingMapRef.current.set(accId, true);
-            setActiveLoading(true);
-            setLoadText('正在重新加载账号页面...');
-            webview.reload();
-          }, 1200);
-          scope.trackTimer(recoveryTimer);
-        }
+        setLoadText('');
+        setLoadError(reason);
       }
       void useAccountStore.getState().setAccountAvailability(accId, {
         state: 'unavailable',
@@ -1470,7 +1482,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     // 轮询兜底：每 2s 检查一次 webview 是否已加载内容
     // 解决 Electron webview 事件不触发的问题
     let pollRunning = false;
-    pollInterval = setInterval(async () => {
+    pollInterval = setInterval(async (): Promise<void> => {
       const wv = registryRef.current.get(accId);
       if (!wv || pollRunning) {
         if (!wv) scope.clearTimers();
@@ -1490,7 +1502,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
         // 超时 race 不会取消 Electron 等待 did-stop-loading 的脚本请求。
         // 保持 pollRunning 到实际请求结束，慢页面只挂一个探测，避免每 2s 累积监听。
-        // 下方 60s 定时器仍负责停止轮询和提示，正式加载事件仍可解除加载层。
+        // 下方有界定时器负责提示连接缓慢，正式加载事件仍可立即显示迟到文档。
         const hasDocument = await wv.executeJavaScript(
           'Boolean(document.body && document.body.childElementCount > 0 && document.readyState !== "loading")',
         );
@@ -1507,21 +1519,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     }, 2000);
     scope.trackTimer(pollInterval);
 
-    // 60s 后停止高频轮询，但保留不透明加载层；后续正式加载事件仍可解除。
-    timeoutId = setTimeout(() => {
-      scope.clearTimer(pollInterval);
-      if (!scope.active) return;
-      if (loadingMapRef.current.get(accId)) {
-        console.warn(`[BrowserPanel] 60s 超时，账号页面仍未形成可用文档: ${accId}`);
-        if (useAccountStore.getState().selectedAccountId === accId) {
-          setActiveLoading(true);
-          setLoadText('账号页面加载较慢，请稍候或点击刷新');
-        }
-      }
-      scope.clearTimer(timeoutId);
-      scope.clearTimer(pollInterval);
-    }, 60000);
-    scope.trackTimer(timeoutId);
+    startLoadTimeout();
   };
 
   // 启动后以单通道顺序巡检其余账号。每次只新增一个后台 Webview，完成
@@ -1591,22 +1589,24 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
   // ---- 切换可见性 ----
   useEffect(() => {
-    if (!activeAccount) return;
+    if (!activeAccount) {
+      setActiveLoading(false);
+      setLoadError('');
+    }
     registryRef.current.forEach((webview, accountId) => {
-      const isActive = accountId === activeAccount.id;
+      const isActive = accountId === activeAccount?.id;
       if (isActive) backgroundProbeRef.current.delete(accountId);
       applyWebviewActivationStyle(webview.style, isActive);
       if (isActive) {
         const isLoading = loadingMapRef.current.get(accountId);
-        setActiveLoading(!!isLoading);
+        const error = loadErrorsRef.current.get(accountId) || '';
+        setActiveLoading(!!isLoading && !displayedAccountsRef.current.has(accountId) && !error);
+        setLoadError(error);
         if (!isLoading) {
-          setActiveLoading(true);
-          setLoadText('正在显示账号页面...');
-          void forceWebviewLayoutRepaint(webview).finally(() => {
-            if (useAccountStore.getState().selectedAccountId !== accountId) return;
-            setActiveLoading(false);
-            setLoadText('');
-          });
+          setLoadText('');
+          void forceWebviewLayoutRepaint(webview);
+        } else {
+          setLoadText('页面加载中...');
         }
       }
     });
@@ -1965,8 +1965,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         continue;
       }
       const pageFailure = materialPagesRef.current.failure(task);
-      if (pageFailure) { void pauseFailedMaterialPage(task, pageFailure); continue; }
-      if (!webview || materialPagesRef.current.uses(task) && !taskWebviewReady(task)) continue;
+      if (pageFailure) { void pauseFailedTaskPage(task, pageFailure); continue; }
+      const accountPageError = !materialPagesRef.current.uses(task) && loadErrorsRef.current.get(accountId);
+      if (accountPageError) {
+        // 未进入执行器的共享页任务也必须收束，不能永久占住 executing 和账号槽。
+        void pauseFailedTaskPage(task, { taskId, accountId, runId: task.runtime?.runId || '',
+          code: 'page_loading', message: accountPageError });
+        continue;
+      }
+      if (!webview || !taskWebviewReady(task)) continue;
       // 共享宿主的后台任务仍保护自由聊天草稿；素材及首尾帧的独立图片页不操作用户页面。
       if (!materialPagesRef.current.uses(task) && visibleRef.current && !task.runtime?.submittedAt
         && isBackgroundPetStoryTask(usePetStoryStore.getState().project, taskId, task)) {
@@ -1991,7 +1998,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       runningRef.current.add(scope);
       void executeAutomation(accountId, taskId, task.prompt, task.mode || 'chat', webview, task.videoConfig, task.attachments, task.audioAttachment);
     }
-  }, [accountBusy, executingTasks, tasks, webviewEpoch, ensureTaskWebview, taskWebviewReady, pauseFailedMaterialPage]);
+  }, [accountBusy, executingTasks, tasks, webviewEpoch, ensureTaskWebview, taskWebviewReady, pauseFailedTaskPage]);
 
   // 页面不借用账号池；删除账号、改变运行身份或结束任务时仅释放自己的资源。
   useEffect((): void => {
@@ -2002,12 +2009,18 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     const presented = tasks.find((task: Task): boolean => task.id === foreground);
     if (presented && materialPagesRef.current.uses(presented)) {
       setActiveLoading(!materialPagesRef.current.ready(presented));
+      // 当前展示的是独立任务页，不沿用账号自由聊天页的网络错误或刷新入口。
+      setLoadError('');
       if (materialPagesRef.current.ready(presented)) setLoadText('');
+    } else if (activeAccount) {
+      const error = loadErrorsRef.current.get(activeAccount.id) || '';
+      setLoadError(error);
+      setActiveLoading(!!loadingMapRef.current.get(activeAccount.id) && !displayedAccountsRef.current.has(activeAccount.id) && !error);
     }
     registryRef.current.forEach((webview: HTMLWebViewElement, accountId: string): void => {
       applyWebviewActivationStyle(webview.style, !foreground && accountId === activeAccount?.id);
     });
-  }, [tasks, accounts, viewedTaskPageId, interactiveTaskPageId, activeAccount?.id, visible, webviewEpoch]);
+  }, [tasks, accounts, viewedTaskPageId, interactiveTaskPageId, activeAccount, visible, webviewEpoch]);
 
   // 应用重启或页面重新挂载后，只沿已持久化的原会话恢复观察；不进入注入/发送流程。
   useEffect(() => {
@@ -3363,10 +3376,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             <div className="browser-empty-content"><p>{accounts.length ? '请选择要查看的账号' : '尚无账号，请先添加本人豆包账号'}</p></div>
           </div>
         )}
-        {activeLoading && (
+        {activeAccount && activeLoading && (
           <div className="browser-loading-overlay">
             <div className="browser-loading-spinner" />
             <span>{loadText}</span>
+          </div>
+        )}
+
+        {activeAccount && loadError && (
+          <div className="browser-load-error" role="alert">
+            <span>{loadError}</span>
+            <Button size="small" onClick={handleRefresh} disabled={isAccountExecutionBusy(accountBusy, activeAccount.id)}>刷新页面</Button>
           </div>
         )}
 

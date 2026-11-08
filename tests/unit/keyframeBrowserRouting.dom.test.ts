@@ -52,13 +52,13 @@ function fixture(task: Task): {
   const bindings: Record<string, unknown> = {
     useCallback: <T>(callback: T): T => callback,
     materialPagesRef: { current: pages }, registryRef: { current: new Map([[account.id, shared]]) },
-    loadingMapRef: { current: new Map([[account.id, false]]) }, poolRef: { current: container }, setWebviewEpoch: vi.fn(),
+    loadingMapRef: { current: new Map([[account.id, false]]) }, loadErrorsRef: { current: new Map() }, poolRef: { current: container }, setWebviewEpoch: vi.fn(),
     useAccountStore: { getState: (): object => ({ accounts: [account] }) },
     useTaskStore: { getState: (): object => ({ tasks: [task], pauseAutomation: pause, failAutomation: vi.fn(async (): Promise<void> => undefined) }) },
     usePetStoryStore: { getState: (): object => ({ project }) },
     visibleRef: { current: true }, runningRef: { current: new Set<string>() },
     accountBusy: { [account.id]: true }, executingTasks: { [account.id]: task.id }, tasks: [task],
-    executeAutomation: execute, pauseFailedMaterialPage: vi.fn(), isBackgroundPetStoryTask,
+    executeAutomation: execute, pauseFailedTaskPage: vi.fn(), isBackgroundPetStoryTask,
     automationEngine: { release: vi.fn(async (): Promise<void> => undefined) },
     message: { error: vi.fn() }, readBackReleasedPetStoryTask: vi.fn(async (): Promise<void> => undefined),
   };

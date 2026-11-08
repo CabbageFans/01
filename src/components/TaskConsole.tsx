@@ -541,6 +541,7 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
 
   const renderModeTag = (mode: GenerationMode) => {
     const cfg = GENERATION_MODE_CONFIG[mode] || GENERATION_MODE_CONFIG.chat;
+    const icons: Record<GenerationMode, React.ReactNode> = { chat: <MessageOutlined />, image: <PictureOutlined />, video: <VideoCameraOutlined />, music: <AudioOutlined /> };
     return (
       <Tooltip title={cfg.description}>
         <span
@@ -551,7 +552,7 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
             border: '1px solid #E3E8EB',
           }}
         >
-          {({ chat: <MessageOutlined />, image: <PictureOutlined />, video: <VideoCameraOutlined />, music: <AudioOutlined /> })[mode]}
+          {icons[mode]}
           {cfg.label}
         </span>
       </Tooltip>

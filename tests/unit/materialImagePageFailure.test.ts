@@ -12,7 +12,7 @@ function handler(bindings: Record<string, unknown>): (task: Task, failure: Mater
   const file = ts.createSourceFile('BrowserPanel.tsx', fs.readFileSync(path.resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
   let expression = '';
   const visit = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && node.name.getText(file) === 'pauseFailedMaterialPage') expression = node.initializer!.getText(file);
+    if (ts.isVariableDeclaration(node) && node.name.getText(file) === 'pauseFailedTaskPage') expression = node.initializer!.getText(file);
     ts.forEachChild(node, visit);
   };
   visit(file); if (!expression) throw new Error('TEST actual page failure handler missing');

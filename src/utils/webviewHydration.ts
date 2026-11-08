@@ -46,20 +46,6 @@ export function applyWebviewActivationStyle(
   style.zIndex = active ? '1' : '-1';
 }
 
-/** 快速切换时回收仍在加载且没有执行任务的旧前台页，避免网络加载风暴。 */
-export function getSupersededLoadingAccountIds(
-  registeredAccountIds: readonly string[],
-  loadingAccountIds: ReadonlySet<string>,
-  activeAccountId: string | null,
-  executingTasks: Readonly<Record<string, string>>,
-): string[] {
-  return registeredAccountIds.filter((accountId) =>
-    accountId !== activeAccountId &&
-    loadingAccountIds.has(accountId) &&
-    !Object.entries(executingTasks).some(([scope, taskId]: [string, string]): boolean => !!taskId && getTaskAccountIdForScope(scope) === accountId),
-  );
-}
-
 interface WebviewRepaintTarget {
   readonly offsetWidth: number;
   style: { width: string };

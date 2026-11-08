@@ -20,6 +20,7 @@ import {
   PushpinOutlined,
   PushpinFilled,
   SafetyCertificateOutlined,
+  SearchOutlined,
 } from '@ant-design/icons';
 import { Input, Modal, Dropdown, message, Empty, Segmented, Button } from 'antd';
 import type { MenuProps } from 'antd';
@@ -314,14 +315,17 @@ export const AccountList: React.FC = (): React.ReactElement => {
   return (
     <div className="account-list flex flex-col">
       {/* 面板标题栏 */}
-      <div className="panel-header">
-        <div className="flex items-center gap-2">
-          <span className="panel-title">账号列表</span>
-          <span className="text-xs text-db-text-muted bg-db-surface px-1.5 py-0.5 rounded-full">
-            {accounts.length}
-          </span>
-          <span className="text-2xs text-db-text-muted">
-            可用 {accounts.filter((account) => account.health?.availability?.state === 'ready').length}
+      <div className="panel-header account-list-header">
+        <div className="account-list-heading">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="panel-title">账号列表</span>
+            <span className="account-count">
+              {accounts.length}
+            </span>
+          </div>
+          <span className="account-list-summary">
+            <span className="account-summary-dot" />
+            {accounts.filter((account) => account.health?.availability?.state === 'ready').length} 个可用
           </span>
         </div>
         <Button size="small" type="primary" icon={<PlusOutlined />} onClick={(): void => setAddModalOpen(true)}>添加</Button>
@@ -329,20 +333,21 @@ export const AccountList: React.FC = (): React.ReactElement => {
 
       {/* 搜索框 */}
       {accounts.length > 0 && (
-        <div className="px-2 pb-1">
+        <div className="account-search">
+          <SearchOutlined aria-hidden="true" />
           <input
             type="text"
             aria-label="搜索账号"
             placeholder="搜索账号"
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
-            className="w-full px-2.5 py-1.5 text-xs rounded-md border border-db-border bg-db-surface text-db-text-primary placeholder-db-text-muted focus:outline-none focus:border-db-accent/50"
+            className="account-search-input"
           />
         </div>
       )}
 
       {/* 账号列表 */}
-      <div className="account-rows p-2 space-y-1">
+      <div className="account-rows">
         {sortedAccounts.length === 0 ? (
           <div className="flex items-center justify-center h-full">
             <Empty
@@ -366,11 +371,7 @@ export const AccountList: React.FC = (): React.ReactElement => {
                 trigger={['contextMenu']}
               >
                 <div
-                  className={`account-row ${isSelected ? 'account-row-selected' : ''} flex items-center gap-3 px-3 py-2.5 rounded-db cursor-pointer transition-all duration-200 border ${
-                    isSelected
-                      ? 'border-db-accent/40'
-                      : 'bg-db-surface hover:bg-db-surface-hover border-transparent'
-                  }`}
+                  className={`account-row ${isSelected ? 'account-row-selected' : ''}`}
                   role="button"
                   tabIndex={0}
                   aria-label={`选择账号${account.name}`}
@@ -379,11 +380,7 @@ export const AccountList: React.FC = (): React.ReactElement => {
                   onClick={() => handleSelectAccount(account.id)}
                 >
                   {/* 头像 */}
-                  <div
-                    className={`account-avatar flex items-center justify-center w-9 h-9 rounded-full flex-shrink-0 text-white text-sm font-semibold ${
-                      isSelected ? 'bg-db-accent' : 'bg-db-border'
-                    }`}
-                  >
+                  <div className="account-avatar">
                     {account.avatar ? (
                       <img
                         src={account.avatar}
@@ -396,8 +393,8 @@ export const AccountList: React.FC = (): React.ReactElement => {
                   </div>
 
                   {/* 名称 + 实时状态 */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5">
+                  <div className="account-row-content">
+                    <div className="account-name-line">
                       {/* 置顶标记 */}
                       {account.pinned && (
                         <PushpinFilled
@@ -405,32 +402,28 @@ export const AccountList: React.FC = (): React.ReactElement => {
                           title="已置顶"
                         />
                       )}
-                      <span className="text-sm font-medium text-db-text-primary truncate">
+                      <span className="account-name" title={account.name}>
                         {account.name}
                       </span>
-                      <span className="text-2xs text-db-text-muted uppercase">
+                      <span className="account-platform">
                         {(account.platform || 'doubao') === 'dola' ? 'Dola' : '豆包'}
                       </span>
                     </div>
-                    <div className="flex items-center gap-1.5 mt-0.5">
+                    {/* 状态独占一行，避免窄栏中被长详情挤成逐字换行。 */}
+                    <div className="account-status" style={{ color: display.color }}>
                       {/* 状态指示点 */}
                       <span
                         className={`status-dot ${display.animated ? 'animate-pulse' : ''}`}
                         style={{ backgroundColor: display.color }}
                       />
-                      <span className="text-2xs text-db-text-muted">
+                      <span className="account-status-label">
                         {display.label}
                       </span>
-                      {/* 详细状态信息 */}
-                      {display.detail && (
-                        <span className="text-2xs text-db-text-muted truncate ml-1 opacity-70">
-                          {display.detail}
-                        </span>
-                      )}
                     </div>
+                    {display.detail && <div className="account-detail" title={display.detail}>{display.detail}</div>}
                     {account.seedanceQuota && (
                       <div
-                        className="text-2xs mt-0.5 truncate"
+                        className="account-metadata"
                         style={{ color: account.seedanceQuota.exhausted ? '#B42318' : '#697584' }}
                         title="仅为本地使用记录预测，不是豆包官方剩余额度；不影响任务启动"
                       >
@@ -439,10 +432,10 @@ export const AccountList: React.FC = (): React.ReactElement => {
                           : `本地预测剩余 ${Math.max(0, account.seedanceQuota.estimatedTotalUnits - account.seedanceQuota.usedUnits)} 单位`}
                       </div>
                     )}
-                    {!account.seedanceQuota && <div className="text-2xs text-db-text-muted mt-1">额度来源：未知</div>}
-                    {account.platform === 'dola' && <div className="text-2xs text-db-text-muted mt-1">实验配置 · 尚未完成端到端验收</div>}
+                    {!account.seedanceQuota && <div className="account-metadata">额度来源：未知</div>}
+                    {account.platform === 'dola' && <div className="account-metadata" title="实验配置 · 尚未完成端到端验收">实验配置 · 尚未完成端到端验收</div>}
                     {!!account.health && (account.health.successCount > 0 || account.health.failureCount > 0) && (
-                      <div className="text-2xs mt-0.5 text-db-text-muted truncate">
+                      <div className="account-metadata">
                         成功 {account.health.successCount} · 失败 {account.health.failureCount}
                         {account.health.consecutiveFailures > 0 ? ` · 连续失败 ${account.health.consecutiveFailures}` : ''}
                       </div>
@@ -456,7 +449,7 @@ export const AccountList: React.FC = (): React.ReactElement => {
                   >
                     <button
                       aria-label={`${account.name}更多操作`}
-                      className="btn-ghost w-7 h-7"
+                      className="btn-ghost account-menu-button"
                       onClick={(e) => e.stopPropagation()}
                     >
                       <MoreOutlined style={{ fontSize: 13 }} />

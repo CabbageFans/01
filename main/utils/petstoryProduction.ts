@@ -488,7 +488,7 @@ export class PetStoryProductionService {
     const task = this.originalTask(p, step); const runtime = referenceVideoRecoveryRuntime(step, task, request);
     const { media, shot } = referenceVideoFrames(p, production, step, request);
     const capability = productionCapability(p, production.capability);
-    if (!task.videoConfig?.model || capability.videoConfig?.model !== task.videoConfig.model || capability.videoConfig.aspectRatio !== task.videoConfig.aspectRatio) throw new Error('当前模型或比例与原任务不一致，不能借此授权更换参数');
+    if (!task.videoConfig?.model || !capability.videoConfig || capability.videoConfig.model !== task.videoConfig.model || capability.videoConfig.aspectRatio !== task.videoConfig.aspectRatio) throw new Error('当前模型或比例与原任务不一致，不能借此授权更换参数');
     this.validateRequestContext(p, capability, { shotId: shot.id, promptKind: 'video' });
     await this.validateStepInputs(p, step, task);
     const source = requireValue(step.compiledPrompt, '原编译正文缺失');

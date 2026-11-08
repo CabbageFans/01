@@ -121,7 +121,8 @@ export const useAccountStore = create<AccountState>((set, get) => ({
       const result = await window.electronAPI.accounts.add(name, platform);
       if (result.success && result.account) {
         const accounts = [...get().accounts, prepareAccountForRuntime(result.account, new Date().toISOString())];
-        set({ accounts });
+        // 首个新增账号直接显示其隔离页面；已有当前账号时保留原交互现场。
+        set({ accounts, selectedAccountId: resolveStartupAccountId(accounts, get().selectedAccountId) });
         return true;
       } else {
         set({ error: result.error || '添加失败' });

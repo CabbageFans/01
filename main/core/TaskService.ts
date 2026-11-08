@@ -765,7 +765,7 @@ export class TaskService {
       const normalized = normalizeMediaSubmissionReceipt(receipt, task.mode, prospective, task.assignedAccountId);
       const input = originalRuntime?.input;
       const previousReceipt = originalRuntime?.mediaSubmissionReceipt;
-      if (!originalRuntime?.submittedAt || newRun || !normalized || receiptRequested && !params.runtime?.mediaSubmissionReceipt
+      if (!originalRuntime?.submittedAt || !input || newRun || !normalized || receiptRequested && !params.runtime?.mediaSubmissionReceipt
         || !samePersistedChatEvidence(normalized, receipt)
         || !!previousReceipt && (previousReceipt.conversationUrl !== receipt?.conversationUrl
           || !!previousReceipt.userMessageId && previousReceipt.userMessageId !== receipt?.userMessageId

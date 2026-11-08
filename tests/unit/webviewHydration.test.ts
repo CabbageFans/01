@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   applyWebviewActivationStyle,
   forceWebviewLayoutRepaint,
-  getSupersededLoadingAccountIds,
   getWebviewHydrationAccountIds,
   isWebviewDocumentReady,
 } from '../../src/utils/webviewHydration';
@@ -32,10 +31,9 @@ describe('webview 按需挂载策略', () => {
     })).toEqual([]);
   });
 
-  it('独立图片执行范围映射回原账号，不创建虚构账号宿主或回收任务账号', (): void => {
+  it('独立图片执行范围映射回原账号，不创建虚构账号宿主', (): void => {
     const scoped = { 'image:account-b:TEST-project:character%3Ab': 'TEST-task-b' };
     expect(getWebviewHydrationAccountIds(accounts, 'account-a', scoped)).toEqual(['account-a', 'account-b']);
-    expect(getSupersededLoadingAccountIds(['account-a', 'account-b'], new Set(['account-b']), 'account-a', scoped)).toEqual([]);
   });
 
   it('后台账号移出可视区，避免 Electron guest surface 串画面', () => {
@@ -63,15 +61,6 @@ describe('webview 按需挂载策略', () => {
     expect(style.pointerEvents).toBe('auto');
     expect(style.zIndex).toBe('1');
     expect(style.transform).toBe('translate3d(0, 0, 0)');
-  });
-
-  it('快速切换只回收无执行任务的旧加载页', () => {
-    expect(getSupersededLoadingAccountIds(
-      ['account-a', 'account-b', 'account-c'],
-      new Set(['account-a', 'account-b', 'account-c']),
-      'account-c',
-      { 'account-b': 'task-b' },
-    )).toEqual(['account-a']);
   });
 
   it('真实平台标题与 URL 可作为不读取账号数据的就绪证据', () => {
