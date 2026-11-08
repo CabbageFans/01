@@ -806,6 +806,22 @@ button:focus-visible,a:focus-visible,summary:focus-visible,[role=button]:focus-v
 .story-project-copy p { color:var(--studio-muted); font-size:12px; line-height:1.8; margin-bottom:12px; }
 .story-project-copy .ant-btn { margin-top:6px; }
 .story-project-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; border-top:1px solid var(--studio-border); margin-top:16px; padding-top:18px; }
+/* 新建短剧聚焦账号与创建动作，标题和唯一主按钮居中。 */
+.story-create-modal .ant-modal-content { padding:32px; border-radius:12px; box-shadow:0 20px 64px rgba(32,42,53,.16); }
+.story-create-modal .ant-modal-header { margin-bottom:0; }
+.story-create-modal .ant-modal-close { top:16px; inset-inline-end:16px; color:var(--studio-muted); }
+.story-create-heading { display:flex; flex-direction:column; align-items:center; gap:16px; }
+.story-create-icon { display:grid; place-items:center; width:48px; height:48px; border:1px solid #D5ECE6; border-radius:12px; background:#EDF7F4; color:var(--studio-accent); font-size:24px; }
+.story-create-title { color:var(--studio-text); font-size:22px; font-weight:600; line-height:1.5; }
+.story-create-intro { margin:8px 0 28px; color:var(--studio-muted); font-size:13px; text-align:center; line-height:1.7; }
+.story-create-field label { display:block; margin-bottom:10px; color:var(--studio-text); font-size:13px; font-weight:600; }
+.story-create-field .ant-select { height:44px; font-size:14px; }
+.story-create-field-hint { margin:8px 0 0; color:var(--studio-muted); font-size:12px; line-height:1.7; }
+.story-create-save-hint { margin:14px 0 0; color:var(--studio-muted); font-size:12px; line-height:1.8; }
+.story-create-modal .ant-alert { margin-top:16px; }
+.story-create-modal .ant-modal-footer { display:flex; justify-content:center; margin-top:28px; }
+.story-create-modal .ant-modal-footer .ant-btn { min-width:168px; max-width:100%; height:42px; font-size:14px; font-weight:500; }
+@media (max-width:480px) { .story-create-modal .ant-modal-content { padding:28px 24px; } }
 .local-project-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
 .story-start-empty { padding:30px 12px; text-align:center; }
 .story-start-empty>.anticon { font-size:38px; color:#79948F; margin-bottom:18px; }

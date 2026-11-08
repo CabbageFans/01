@@ -560,22 +560,20 @@ describe('默认可见的任务恢复与新建账号处理', (): void => {
     rerender(<PetStoryCurrentTasks project={usePetStoryStore.getState().project!} />);
     expect(screen.getByText(/平台任务未被取消/)).toBeDefined(); expect(screen.queryByRole('button', { name: '继续原文字任务（尚未发送）' })).toBeNull();
   });
-  it('新建弹窗未选账号有直接添加入口，添加后可选择保存目录创建，不要求先去另一页', async (): Promise<void> => {
-    usePetStoryStore.setState({ project: null }); useAccountStore.setState({ accounts: [], selectedAccountId: null });
-    const added = { ...account, id: 'TEST-added-account', name: 'TEST 新账号' };
-    const add = vi.fn(async (): Promise<boolean> => { useAccountStore.setState({ accounts: [added] }); return true; });
+  it('新建弹窗仅选择执行账号后创建，移除账号管理和项目关联入口', async (): Promise<void> => {
+    usePetStoryStore.setState({ project: null });
     const create = vi.fn(async (): Promise<void> => undefined);
-    useAccountStore.setState({ addAccount: add }); usePetStoryStore.setState({ createProject: create });
+    usePetStoryStore.setState({ createProject: create });
     render(<PetStoryPanel />); fireEvent.click(screen.getByRole('button', { name: '新建短剧项目' }));
     const dialog = screen.getByRole('dialog', { name: '新建短剧项目' });
-    expect(within(dialog).getByText(/还没有选择可用的豆包执行账号/)).toBeDefined();
-    expect(within(dialog).getByRole('button', { name: '选择保存目录并创建' }).hasAttribute('disabled')).toBe(true);
-    fireEvent.change(within(dialog).getByRole('textbox', { name: '添加豆包账号名称' }), { target: { value: added.name } });
-    fireEvent.click(within(dialog).getByRole('button', { name: '添加账号' }));
-    await waitFor((): void => expect(within(dialog).getByRole('button', { name: '选择保存目录并创建' }).hasAttribute('disabled')).toBe(false));
-    fireEvent.click(within(dialog).getByRole('button', { name: '选择保存目录并创建' }));
-    await waitFor((): void => expect(create).toHaveBeenCalledWith({ accountId: added.id, studioProjectId: p.studioProjectId }));
-    expect(add).toHaveBeenCalledWith(added.name, 'doubao');
+    expect(within(dialog).getAllByRole('combobox')).toHaveLength(1);
+    expect(within(dialog).queryByRole('textbox', { name: '添加豆包账号名称' })).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: '添加账号' })).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: /登录|检查账号|暂不创建/ })).toBeNull();
+    expect(within(dialog).queryByText('关联项目')).toBeNull();
+    const button = within(dialog).getByRole('button', { name: '创建项目' });
+    expect(button.hasAttribute('disabled')).toBe(false); fireEvent.click(button);
+    await waitFor((): void => expect(create).toHaveBeenCalledWith({ accountId: account.id, studioProjectId: p.studioProjectId }));
   });
 });
 

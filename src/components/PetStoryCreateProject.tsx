@@ -1,51 +1,87 @@
-import React, { useState, useRef } from 'react';
-import { Alert, Button, Input, Modal, Select, Space, message } from 'antd';
+import React, { useId, useRef, useState } from 'react';
+import { Alert, Button, Modal, Select, message } from 'antd';
+import { VideoCameraOutlined } from '@ant-design/icons';
 import { useAccountStore } from '../store/useAccountStore';
 import { useProjectStore } from '../store/useProjectStore';
 import { usePetStoryStore } from '../store/usePetStoryStore';
-import { navigateWorkspace } from '../utils/workspace';
-import { useTaskStore } from '../store/useTaskStore';
-import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
 
-/** 账号和项目选择属于新建本身，不改变正在浏览的账号或已有短剧绑定。 */
+/** 新建只选择执行账号；任务归属沿用工作台项目，不改变当前浏览的账号。 */
 export const PetStoryCreateProject: React.FC<{ disabled?: boolean; primary?: boolean; label?: string; onCreated?: () => void }> = ({ disabled = false, primary = false, label = '新建短剧项目', onCreated }): React.ReactElement => {
-  const state = usePetStoryStore(); const accountState = useAccountStore(); const projectState = useProjectStore();
-  const [open, setOpen] = useState(false); const [accountId, setAccountId] = useState<string>(); const [studioProjectId, setStudioProjectId] = useState<string>();
-  const [newName, setNewName] = useState(''); const [adding, setAdding] = useState(false);
-  const selectedAccount = accountState.accounts.find((account): boolean => account.id === accountId && account.platform !== 'dola');
-  const selectedProject = projectState.projects.find((project): boolean => project.id === studioProjectId && !project.archived);
+  const state = usePetStoryStore();
+  const accountState = useAccountStore();
+  const projectState = useProjectStore();
+  const [open, setOpen] = useState(false);
+  const [accountId, setAccountId] = useState<string>();
+  const [error, setError] = useState('');
+  const [messageApi, contextHolder] = message.useMessage();
+  const accountSelectId = useId();
+  const submitting = useRef(false);
+  const accounts = accountState.accounts.filter((account): boolean => account.platform !== 'dola');
+  const selectedAccount = accounts.find((account): boolean => account.id === accountId);
+  const projects = projectState.projects.filter((project): boolean => !project.archived);
+  const studioProject = projects.find((project): boolean => project.id === projectState.activeProjectId)
+    || projects.find((project): boolean => project.id === 'default-project') || projects[0];
+
+  const show = (): void => {
+    setAccountId(accounts.find((account): boolean => account.id === accountState.selectedAccountId)?.id || accounts[0]?.id);
+    setError('');
+    setOpen(true);
+  };
   const create = async (): Promise<void> => {
-    if (!selectedAccount || !selectedProject) return;
-    await state.createProject({ accountId: selectedAccount.id, studioProjectId: selectedProject.id });
-    if (!usePetStoryStore.getState().error && usePetStoryStore.getState().project) { setOpen(false); onCreated?.(); }
+    if (!selectedAccount || !studioProject || state.busy || submitting.current) return;
+    submitting.current = true;
+    setError('');
+    try {
+      await state.createProject({ accountId: selectedAccount.id, studioProjectId: studioProject.id });
+      const current = usePetStoryStore.getState();
+      // 取消目录选择是正常返回，保留配置，也不能把原先打开的项目误判为新建成功。
+      if (current.error === '已取消') {
+        usePetStoryStore.setState({ error: '' });
+        void messageApi.info('已取消', 2);
+        return;
+      }
+      if (current.error) { setError(current.error); return; }
+      if (current.project) { setOpen(false); onCreated?.(); }
+    } finally { submitting.current = false; }
   };
-  const openLogin = (): void => {
-    if (!selectedAccount) return;
-    const interactiveId = findInteractiveAccountId(useTaskStore.getState().accountAutomationState);
-    if (!canSelectAccount(selectedAccount.id, interactiveId)) {
-      const interactiveAccount = accountState.accounts.find((account): boolean => account.id === interactiveId);
-      message.warning(`任务正在 ${interactiveAccount?.name || '当前账号'} 配置或提交，进入生成阶段后即可切换`);
-      return;
-    }
-    accountState.selectAccount(selectedAccount.id); navigateWorkspace('accounts'); setOpen(false);
-  };
-  const add = async (): Promise<void> => {
-    const before = new Set(accountState.accounts.map((account): string => account.id)); setAdding(true);
-    try { if (await accountState.addAccount(newName.trim(), 'doubao')) { const added = useAccountStore.getState().accounts.find((account): boolean => !before.has(account.id)); setAccountId(added?.id); setNewName(''); } }
-    finally { setAdding(false); }
-  };
-  const initialized = useRef(false);
-  return <><Button type={primary ? 'primary' : 'default'} disabled={disabled || state.busy} onClick={(): void => { if (!initialized.current) { setAccountId(accountState.accounts.find((account): boolean => account.id === accountState.selectedAccountId && account.platform !== 'dola')?.id); setStudioProjectId(projectState.activeProjectId); initialized.current = true; } setOpen(true); }}>{label}</Button>
-    <Modal title="新建短剧项目" open={open} onCancel={(): void => setOpen(false)} footer={<><Button onClick={(): void => setOpen(false)}>暂不创建</Button><Button type="primary" disabled={!selectedAccount || !selectedProject || state.busy} loading={state.busy} onClick={(): void => { void create(); }}>选择保存目录并创建</Button></>}>
-      <Space direction="vertical" className="w-full">
-        <label>执行账号</label><Select aria-label="新短剧执行账号" className="w-full" allowClear placeholder="请选择已登录的豆包账号" value={accountId} options={accountState.accounts.filter((account): boolean => account.platform !== 'dola').map((account): { value: string; label: string } => ({ value: account.id, label: account.name }))} onChange={(value?: string): void => setAccountId(value)} />
-        {!selectedAccount && <Alert type="info" message="还没有选择可用的豆包执行账号；可在这里选择、添加，或前往登录后返回。" />}
-        <Space.Compact className="w-full"><Input aria-label="添加豆包账号名称" placeholder="新账号名称" value={newName} onChange={(event): void => setNewName(event.target.value)} /><Button loading={adding} disabled={!newName.trim()} onClick={(): void => { void add(); }}>添加账号</Button></Space.Compact>
-        <Button disabled={!selectedAccount} onClick={openLogin}>去登录／检查账号（返回后继续新建）</Button>
-        <label>关联项目</label><Select aria-label="新短剧关联项目" className="w-full" value={studioProjectId} options={projectState.projects.filter((project): boolean => !project.archived).map((project): { value: string; label: string } => ({ value: project.id, label: project.name }))} onChange={(value: string): void => setStudioProjectId(value)} />
-        {!selectedProject && <Alert type="info" message="请选择仍在使用的关联项目，任务会归集到这里。" />}
-        <p>短剧保存在你选择的本地目录；关联项目用于归集任务。点击下方按钮选择一个空目录，取消选择会保留当前配置。</p>
-        {(state.error || accountState.error) && <Alert type="error" message={state.error || accountState.error} />}
-      </Space>
-    </Modal></>;
+
+  return <>
+    {contextHolder}
+    <Button type={primary ? 'primary' : 'default'} disabled={disabled || state.busy} onClick={show}>{label}</Button>
+    <Modal
+      title={<div className="story-create-heading">
+        <span className="story-create-icon" aria-hidden="true"><VideoCameraOutlined /></span>
+        <span className="story-create-title">新建短剧项目</span>
+      </div>}
+      className="story-create-modal"
+      width={460}
+      centered
+      open={open}
+      closable={!state.busy}
+      maskClosable={!state.busy}
+      keyboard={!state.busy}
+      onCancel={(): void => setOpen(false)}
+      footer={<Button type="primary" disabled={!selectedAccount || !studioProject || state.busy} loading={state.busy} onClick={(): void => { void create(); }}>创建项目</Button>}
+    >
+      <p className="story-create-intro">从一个故事，开始下一部短剧。</p>
+      <div className="story-create-field">
+        <label htmlFor={accountSelectId}>执行账号</label>
+        <Select
+          id={accountSelectId}
+          aria-label="新短剧执行账号"
+          className="w-full"
+          size="large"
+          placeholder="请选择豆包账号"
+          value={selectedAccount?.id}
+          options={accounts.map((account): { value: string; label: string } => ({ value: account.id, label: account.name }))}
+          onChange={(value: string): void => { setAccountId(value); setError(''); }}
+          notFoundContent="暂无豆包账号"
+        />
+        {!accounts.length && <p className="story-create-field-hint">暂无豆包账号，请先在账号管理中添加。</p>}
+      </div>
+      <p className="story-create-save-hint">点击创建后，选择一个空文件夹保存项目。</p>
+      {!studioProject && <Alert type="info" showIcon message="项目信息尚未就绪，请稍后重试。" />}
+      {error && <Alert type="error" showIcon message={error} />}
+    </Modal>
+  </>;
 };

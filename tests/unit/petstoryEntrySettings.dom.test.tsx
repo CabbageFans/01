@@ -1,6 +1,7 @@
 /** 离线 DOM 点击只验证前端入口与并发保存；平台及持久化使用明确替身。 */
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { ConfigProvider } from 'antd';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Account, PetStoryPlan, PetStoryProject } from '@doubao-studio/contracts';
 import { PetStoryCreateProject } from '../../src/components/PetStoryCreateProject';
@@ -29,22 +30,67 @@ describe('新建入口沿用真实账号边界', (): void => {
     useAccountStore.setState({ accounts: [{ ...account, id: 'TEST-dola', platform: 'dola' }], selectedAccountId: 'TEST-dola' });
     const create = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ createProject: create });
     render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建短剧项目' }));
-    const button = screen.getByRole('button', { name: '选择保存目录并创建' });
+    const button = screen.getByRole('button', { name: '创建项目' });
     expect(button.hasAttribute('disabled')).toBe(true); fireEvent.click(button); expect(create).not.toHaveBeenCalled();
-    expect(screen.getByText('还没有选择可用的豆包执行账号；可在这里选择、添加，或前往登录后返回。')).toBeDefined();
+    expect(screen.getByText('暂无豆包账号，请先在账号管理中添加。')).toBeDefined();
   });
-  it('其他账号配置／提交期间登录入口保留弹窗，不抢占前台租约', (): void => {
-    const select = vi.fn(); const navigate = vi.fn(); window.addEventListener('navigate-workspace', navigate);
-    useAccountStore.setState({ selectAccount: select }); useTaskStore.setState({ accountAutomationState: { 'TEST-other': 'submitting' } });
+  it('全局选择 Dola 时自动选用豆包，创建不切换正在浏览的账号或项目', async (): Promise<void> => {
+    const dola = { ...account, id: 'TEST-dola', platform: 'dola' as const };
+    const selectAccount = vi.fn(); const selectProject = vi.fn();
+    const create = vi.fn(async (): Promise<void> => undefined);
+    useAccountStore.setState({ accounts: [dola, account], selectedAccountId: dola.id, selectAccount });
+    useProjectStore.setState({ selectProject }); usePetStoryStore.setState({ createProject: create });
+    useTaskStore.setState({ accountAutomationState: { 'TEST-other': 'submitting' } });
     render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建短剧项目' }));
-    fireEvent.click(screen.getByRole('button', { name: '去登录／检查账号（返回后继续新建）' }));
-    expect(select).not.toHaveBeenCalled(); expect(navigate).not.toHaveBeenCalled(); expect(screen.getByRole('dialog', { name: '新建短剧项目' })).toBeDefined();
-    window.removeEventListener('navigate-workspace', navigate);
+    fireEvent.click(screen.getByRole('button', { name: '创建项目' }));
+    await waitFor((): void => expect(create).toHaveBeenCalledWith({ accountId: account.id, studioProjectId: p.studioProjectId }));
+    expect(selectAccount).not.toHaveBeenCalled(); expect(selectProject).not.toHaveBeenCalled();
+    expect(useAccountStore.getState().selectedAccountId).toBe(dola.id);
   });
-  it('关联项目已归档时选择保存目录不可用', (): void => {
+  it('所有任务归集项目已归档时不允许创建', (): void => {
     useProjectStore.setState({ projects: useProjectStore.getState().projects.map((project): typeof project => ({ ...project, archived: true })) });
     render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建短剧项目' }));
-    expect(screen.getByRole('button', { name: '选择保存目录并创建' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: '创建项目' }).hasAttribute('disabled')).toBe(true);
+  });
+  it('当前项目不可用时自动沿用默认归集项目，不要求选择关联项目', async (): Promise<void> => {
+    const archived = { ...useProjectStore.getState().projects[0], archived: true };
+    const fallback = { ...archived, id: 'default-project', archived: false };
+    useProjectStore.setState({ projects: [archived, fallback] });
+    const create = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ createProject: create });
+    render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建短剧项目' }));
+    fireEvent.click(screen.getByRole('button', { name: '创建项目' }));
+    await waitFor((): void => expect(create).toHaveBeenCalledWith({ accountId: account.id, studioProjectId: fallback.id }));
+    expect(useProjectStore.getState().activeProjectId).toBe(archived.id);
+  });
+  it('取消目录选择仅短暂提示，保留原项目并可再次创建', async (): Promise<void> => {
+    const created = { ...p, id: 'TEST-created-project' }; const onCreated = vi.fn();
+    const create = vi.fn(async (): Promise<void> => { usePetStoryStore.setState({ error: '已取消' }); });
+    create.mockImplementationOnce(async (): Promise<void> => { usePetStoryStore.setState({ error: '已取消' }); });
+    create.mockImplementationOnce(async (): Promise<void> => { usePetStoryStore.setState({ project: created, error: '' }); });
+    usePetStoryStore.setState({ createProject: create });
+    // happy-dom 不播放 CSS 退场动画；仅关闭动效，仍验证真实消息定时关闭。
+    render(<ConfigProvider theme={{ token: { motion: false } }}><PetStoryCreateProject onCreated={onCreated} /></ConfigProvider>); fireEvent.click(screen.getByRole('button', { name: '新建短剧项目' }));
+    const dialog = screen.getByRole('dialog', { name: '新建短剧项目' });
+    fireEvent.click(within(dialog).getByRole('button', { name: '创建项目' }));
+    await waitFor((): void => expect(screen.getByText('已取消')).toBeDefined());
+    expect(within(dialog).queryByText('已取消')).toBeNull();
+    expect(usePetStoryStore.getState().error).toBe(''); expect(usePetStoryStore.getState().project?.id).toBe(p.id);
+    expect(onCreated).not.toHaveBeenCalled();
+    await waitFor((): void => expect(screen.queryByText('已取消')).toBeNull(), { timeout: 3500 });
+    fireEvent.click(within(dialog).getByRole('button', { name: '创建项目' }));
+    await waitFor((): void => expect(onCreated).toHaveBeenCalledOnce());
+    expect(create).toHaveBeenNthCalledWith(2, { accountId: account.id, studioProjectId: p.studioProjectId });
+    await waitFor((): void => expect(screen.queryByRole('dialog', { name: '新建短剧项目' })).toBeNull());
+  });
+  it('不带入其他操作错误，本次创建失败显示实际原因并允许重试', async (): Promise<void> => {
+    useAccountStore.setState({ error: 'TEST 无关账号错误' });
+    const create = vi.fn(async (): Promise<void> => { usePetStoryStore.setState({ error: 'TEST 目录非空' }); });
+    usePetStoryStore.setState({ error: 'TEST 上次操作错误', createProject: create });
+    render(<PetStoryCreateProject />); fireEvent.click(screen.getByRole('button', { name: '新建短剧项目' }));
+    expect(screen.queryByText('TEST 无关账号错误')).toBeNull(); expect(screen.queryByText('TEST 上次操作错误')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '创建项目' }));
+    await waitFor((): void => expect(screen.getByText('TEST 目录非空')).toBeDefined());
+    expect(screen.getByRole('button', { name: '创建项目' }).hasAttribute('disabled')).toBe(false);
   });
 });
 

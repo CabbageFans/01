@@ -231,7 +231,7 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
   return <section className={`petstory-panel ${canvasMode ? 'is-canvas-workspace' : 'space-y-4'}`} aria-label="短剧创作">
     {!p && <Space wrap><PetStoryCreateProject primary disabled={drafts.length > 0} /><PetStoryOpenProject disabled={state.busy || drafts.length > 0} /></Space>}
     {state.error && stage !== 2 && !canvasMode && <Alert type="error" showIcon message={petStoryVideoRecoveryMessage(state.error)} />}{state.exportStatus && !canvasMode && <Alert type="info" message={state.exportStatus} />}
-    {!p && <Card title="从剧本开始制作"><p>新建短剧项目，在弹窗中选择执行账号、关联项目和保存目录，然后粘贴完整剧本。已有项目可直接打开继续。</p></Card>}
+    {!p && <Card title="从剧本开始制作"><p>新建短剧项目，选择执行账号并创建，在本地保存后粘贴完整剧本。已有项目可直接打开继续。</p></Card>}
     {p && <>
       {!canvasMode && <div className="petstory-project-heading"><div><h2>{state.projectName || '当前短剧'}</h2><p>{accountName} · {projects.find((project): boolean => project.id === p.studioProjectId)?.name || '请核对关联项目'}</p></div><div className="petstory-project-tools"><span>{drafts.length ? '有未保存修改' : '已保存'}</span>{stage === 2 ? <PetStoryOpenProject disabled={state.busy || drafts.length > 0} /> : <details className="petstory-more"><summary aria-label="项目更多操作">更多</summary><div>
         <PetStoryCreateProject disabled={drafts.length > 0} /><PetStoryOpenProject disabled={state.busy || drafts.length > 0} />
