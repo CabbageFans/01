@@ -13,6 +13,7 @@ import { useProjectStore } from '../../src/store/useProjectStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
 import snapshot from '../fixtures/storyboard-five-shots.json';
 import { pendingPetStoryDrafts } from '../../src/utils/petstoryDraftPresence';
+import { isCanvasPlanEditLocked } from '../../src/components/petStoryCanvasShared';
 
 const originals = { pet: usePetStoryStore.getState(), accounts: useAccountStore.getState(), projects: useProjectStore.getState(), tasks: useTaskStore.getState() };
 const now = '2026-10-28T00:00:00.000Z';
@@ -245,12 +246,12 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     await waitFor((): void => expect(adopt).toHaveBeenCalledExactlyOnceWith(p.id, corrected.revision, job.id));
     expect(generate).not.toHaveBeenCalled(); expect(inspect.mock.calls.length).toBeLessThanOrEqual(2);
   });
-  it.each(['制作关键帧', '制作镜头视频'])('%s通过故事栏返回素材直接操作图片，保留已有手改正文', async (stageName: string): Promise<void> => {
+  it.each(['制作关键帧', '制作镜头视频'])('%s通过阶段导航返回素材直接操作图片，保留已有手改正文', async (stageName: string): Promise<void> => {
     readyMediaJourney(1, 1); const material = p.materials![0]; material.prompt.edited = true;
     const generate = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ generateMaterialImage: generate }); render(<PetStoryPanel />);
     const navigation = screen.getByRole('navigation', { name: '短剧制作阶段' });
     await act(async (): Promise<void> => { fireEvent.click(within(navigation).getByRole('button', { name: new RegExp(stageName) })); });
-    fireEvent.click(screen.getByRole('button', { name: '查看并准备基础素材' }));
+    fireEvent.click(within(navigation).getByRole('button', { name: /准备基础素材/ }));
     expect(screen.getByText('当前：准备基础素材')).toBeDefined();
     expect(document.querySelector('.petstory-panel.is-canvas-workspace')).toBeNull();
     const materialCard = document.getElementById(`material-${material.id}`); if (!materialCard) throw new Error('实际素材卡缺失');
@@ -338,16 +339,18 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     expect(usePetStoryStore.getState().project?.mobileStory?.text).toBe(snapshot.mobileStory);
     expect(pendingPetStoryDrafts(p.id)).toEqual([]);
   });
-  it('跨页草稿显示具体对象，查看修改返回原输入，放弃后解除提示', async (): Promise<void> => {
+  it('跨页保留剧本草稿和顶部保存状态，不显示全局草稿黄块', (): void => {
     render(<PetStoryPanel />);
     fireEvent.change(screen.getByRole('textbox', { name: '完整剧本原文' }), { target: { value: snapshot.mobileStory } });
     fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: /确认方案/ }));
-    expect(screen.getByText('原剧本 · 输入剧本')).toBeDefined(); expect(screen.queryByRole('textbox', { name: '完整剧本原文' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '查看修改' }));
+    expect(screen.getByText('有未保存修改')).toBeDefined(); expect(screen.queryByRole('textbox', { name: '完整剧本原文' })).toBeNull();
+    expect(screen.queryByText('以下对象有未保存修改；草稿随页面保留')).toBeNull();
+    expect(screen.queryByRole('button', { name: '保存并继续' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '查看修改' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '放弃修改' })).toBeNull();
+    expect(pendingPetStoryDrafts(p.id)).toEqual(['原剧本 · 输入剧本']);
+    fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: /输入剧本/ }));
     expect((screen.getByRole('textbox', { name: '完整剧本原文' }) as HTMLTextAreaElement).value).toBe(snapshot.mobileStory);
-    fireEvent.click(screen.getByRole('button', { name: '放弃修改' }));
-    await waitFor((): void => expect(screen.queryByText('原剧本 · 输入剧本')).toBeNull());
-    expect((screen.getByRole('textbox', { name: '完整剧本原文' }) as HTMLTextAreaElement).value).toBe('');
   });
   it('剧本和方案草稿都带项目归属，外部采用门可完整读取', async (): Promise<void> => {
     p.plan = storedPlan(); p.mobileStory = { id: 'TEST-story', text: snapshot.mobileStory, importedAt: now };
@@ -362,17 +365,6 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     await waitFor((): void => expect(pendingPetStoryDrafts(p.id)).toEqual(expect.arrayContaining(['原剧本 · 输入剧本', '故事、角色与镜头设定 · 高级编辑'])));
     expect(pendingPetStoryDrafts(`${p.id}-other`)).toEqual([]);
     view.unmount(); expect(pendingPetStoryDrafts(p.id)).toEqual([]);
-  });
-  it('跨页草稿可直接保存，保存成功解除对象提示且不调用分析', async (): Promise<void> => {
-    const analyze = usePetStoryStore.getState().analyze; const save = usePetStoryStore.getState().saveOriginalStory;
-    render(<PetStoryPanel />);
-    fireEvent.change(screen.getByRole('textbox', { name: '完整剧本原文' }), { target: { value: snapshot.mobileStory } });
-    fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: /确认方案/ }));
-    fireEvent.click(screen.getByRole('button', { name: '保存并继续' }));
-    await waitFor((): void => expect(screen.queryByText('原剧本 · 输入剧本')).toBeNull());
-    expect(save).toHaveBeenCalledWith(snapshot.mobileStory); expect(analyze).not.toHaveBeenCalled();
-    fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: /输入剧本/ }));
-    expect((screen.getByRole('textbox', { name: '完整剧本原文' }) as HTMLTextAreaElement).value).toBe(snapshot.mobileStory);
   });
   it('重开有成果方案只显示已有结果与真实缺项，不因六步导航或画布查看调用生成', async (): Promise<void> => {
     p.mobileStory = { id: 'TEST-story', text: snapshot.mobileStory, importedAt: now }; p.plan = storedPlan();
@@ -578,6 +570,59 @@ describe('默认可见的任务恢复与新建账号处理', (): void => {
 });
 
 describe('媒体直接开始与真实制作条件', (): void => {
+  it('历史图片失败及重开后仍保护方案编辑，但不锁住已备好首帧正文的视频入口，原视频在途继续防重', async (): Promise<void> => {
+    readyMediaJourney(1, 1); const shot = p.plan!.shots[0];
+    const capability = usePetStoryStore.getState().capability; if (!capability) throw new Error('TEST 缺少离线制作条件');
+    shot.requestedMode = 'auto'; shot.autoModePlan = { mode: 'first_frame', reason: 'TEST 持续推进镜头无需锁定终态' };
+    shot.prompts.video.final = 'TEST 当前已保存的视频正文'; delete shot.prompts.lastFrame;
+    p.assets.push({ id: 'TEST-adopted-first', kind: 'firstFrame', shotId: shot.id, relativePath: 'TEST-adopted-first.png',
+      validation: { decoded: true, sha256: 'TEST-first-sha', bytes: 20, width: 720, height: 1280, checkedAt: now },
+      imageReview: { state: 'adopted', target: { shotId: shot.id, kind: 'firstFrame' }, basisHash: 'TEST', sha256: 'TEST-first-sha', adoptedAt: now } });
+    p.adoptedImages = { [shot.id]: { firstFrameId: 'TEST-adopted-first' } };
+    p.imageOperations = [{ id: 'TEST-old-prop-op', requestId: 'TEST-old-prop-request', mode: 'generate', target: { materialId: 'prop:TEST-old-prop' },
+      stage: 'failed', createdAt: now, basisHash: 'TEST', taskId: 'TEST-old-prop-task', error: 'TEST 旧道具图片已失败' }];
+    p.imageProductions = { 'TEST-old-prop-op': { phase: 'materials', imageOperationId: 'TEST-old-prop-op', materialIds: ['prop:TEST-old-prop'],
+      state: 'paused', planHash: 'TEST', approvedAt: now, capability, fallbacks: {}, shots: {}, message: 'TEST 原图片制作已暂停',
+      steps: [{ id: 'TEST-old-prop-step', materialId: 'prop:TEST-old-prop', kind: 'prop', taskId: 'TEST-old-prop-task', status: 'bound', inputHash: 'TEST', attachmentAssetIds: [] }] } };
+    const oldTask: Task = { id: 'TEST-old-prop-task', projectId: p.studioProjectId, assignedAccountId: p.accountId, mode: 'image', status: 'paused',
+      prompt: 'TEST 旧道具请求', outputs: [], result: null, createdAt: now, updatedAt: now };
+    const generate = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ project: p, generateShotMedia: generate }); useTaskStore.setState({ tasks: [oldTask] });
+    expect(p.production).toBeUndefined(); expect(isCanvasPlanEditLocked(p)).toBe(true);
+    const beforeHistory = structuredClone({ operations: p.imageOperations, productions: p.imageProductions });
+    const storedProject = structuredClone(p);
+    const view = render(<PetStoryPanel />);
+    fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: /制作镜头视频/ }));
+    const node = document.getElementById(`shot-media-${shot.id}-video`); if (!node) throw new Error('TEST 实际视频节点缺失');
+    const button = within(node).getByRole('button', { name: /生成视频$/ });
+    expect(button.hasAttribute('disabled')).toBe(false); expect(generate).not.toHaveBeenCalled();
+    fireEvent.click(button); await waitFor((): void => expect(generate).toHaveBeenCalledExactlyOnceWith(shot.id, 'video'));
+    expect({ operations: p.imageOperations, productions: p.imageProductions }).toEqual(beforeHistory);
+    // 卸载后重新装载原始快照，不修写任何 failed／paused／bound 记录，验证入口规则持续生效。
+    view.unmount();
+    const reopened = structuredClone(storedProject);
+    usePetStoryStore.setState({ project: reopened }); useTaskStore.setState({ tasks: [structuredClone(oldTask)] });
+    render(<PetStoryPanel />);
+    fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: /制作镜头视频/ }));
+    const reopenedNode = document.getElementById(`shot-media-${shot.id}-video`); if (!reopenedNode) throw new Error('TEST 重开后视频节点缺失');
+    const reopenedButton = within(reopenedNode).getByRole('button', { name: /生成视频$/ });
+    expect(reopenedButton).not.toBe(button); expect(reopenedButton.hasAttribute('disabled')).toBe(false);
+    expect(isCanvasPlanEditLocked(reopened)).toBe(true); expect(generate).toHaveBeenCalledOnce();
+    fireEvent.click(reopenedButton); await waitFor((): void => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate).toHaveBeenNthCalledWith(2, shot.id, 'video');
+    expect({ operations: reopened.imageOperations, productions: reopened.imageProductions }).toEqual(beforeHistory);
+    expect(usePetStoryStore.getState().project).toEqual(storedProject);
+    // 实际本镜视频在途时仍等待原任务，不能因放开历史图片锁而重复启动。
+    const current = structuredClone(reopened);
+    current.production = { phase: 'shots', target: { shotId: shot.id, kind: 'video' }, state: 'running', planHash: 'TEST', approvedAt: now,
+      capability, fallbacks: {}, shots: {}, message: 'TEST 当前视频在途',
+      steps: [{ id: 'TEST-current-video-step', shotId: shot.id, kind: 'video', taskId: 'TEST-current-video-task', status: 'bound', inputHash: 'TEST', attachmentAssetIds: [] }] };
+    const videoTask: Task = { id: 'TEST-current-video-task', projectId: p.studioProjectId, assignedAccountId: p.accountId, mode: 'video', status: 'generating',
+      prompt: 'TEST 当前视频请求', outputs: [], result: null, createdAt: now, updatedAt: now };
+    await act(async (): Promise<void> => { usePetStoryStore.setState({ project: current }); useTaskStore.setState({ tasks: [oldTask, videoTask] }); });
+    expect(within(reopenedNode).getByText('等待原任务产物')).toBeDefined();
+    expect(reopenedButton.hasAttribute('disabled')).toBe(true); fireEvent.click(reopenedButton); expect(generate).toHaveBeenCalledTimes(2);
+  });
   it('画布以只读正文保留手改，镜头与素材制作入口互不改写采用正文', async (): Promise<void> => {
     readyMediaJourney(2, 1); const [first, second] = p.plan!.shots; const material = p.materials![0];
     const generateShot = vi.fn(async (): Promise<void> => undefined); const generateMaterials = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ generateShotMedia: generateShot, generateMaterialImage: generateMaterials }); render(<PetStoryPanel />);

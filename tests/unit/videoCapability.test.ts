@@ -424,29 +424,12 @@ describe('豆包新 UI 只读能力快照与 dry-run', () => {
 });
 
 describe('新版视频控件适配契约', () => {
-  it('视频模式首击仅展开菜单时，必须二次精确选择并等待权威控件挂载', async () => {
-    let injected = '';
-    const webview = {
-      executeJavaScript: async (code: string) => {
-        injected = code;
-        return { ok: true, method: 'button-bottom-menu-confirmed', tag: 'BUTTON', pos: '1,1' };
-      },
-      getURL: () => 'https://www.doubao.com/chat/',
-      loadURL: () => undefined,
-    };
-
-    expect(await clickAITab(webview, 'video')).toBe(true);
-    expect(injected).toContain('data-valid-btn="mode-select-action-btn"');
-    expect(injected).toContain('data-input-engine-actionbar-control-key="video-model"');
-    expect(injected).toContain('data-creation-params-panel-id');
-    expect(injected).toContain('data-input-engine-actionbar-render-entry-key="video-generation-params-panel"');
-    expect(injected).toContain('findVisibleModeMenuOption(5000, initialElement)');
-    expect(injected).toContain('waitForVideoControls(15000)');
-  });
+  // 真实模式菜单与技能选中行为由 videoModeSurface.dom.test.ts 执行实际序列化脚本覆盖。
+  // 模式阶段不混入参数挂载要求；参数控件由下方独立配置契约验证。
 
   it('视频入口超时返回 false，调用链必须在参数配置前 fail-closed', async () => {
     const webview = {
-      executeJavaScript: async () => ({ ok: false, error: '视频生成模式入口未在等待窗口内挂载' }),
+      executeJavaScript: async () => ({ ready: false, elapsedMs: 15_000, attempts: 150, stableSamples: 0, controlOperation: 'mode_selection', failureReason: 'not_found', reason: '视频生成模式入口未在等待窗口内挂载' }),
       getURL: () => 'https://www.doubao.com/chat/',
       loadURL: () => undefined,
     };

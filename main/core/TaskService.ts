@@ -748,6 +748,9 @@ export class TaskService {
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
+    if (params.expectedRunId !== undefined && (typeof params.expectedRunId !== 'string' || !params.expectedRunId || task.runtime?.runId !== params.expectedRunId)) {
+      return { success: false, error: '原任务运行已变化，未更新运行状态' };
+    }
     if (params.runtime && Object.prototype.hasOwnProperty.call(params.runtime, 'chatAdjustmentGuard')) return { success: false, error: '对话保护只能由对应创作调整操作更新' };
     if (task.runtime?.chatAdjustmentGuard?.active && params.runtime && Object.prototype.hasOwnProperty.call(params.runtime, 'runId') && params.runtime.runId !== task.runtime.runId) return { success: false, error: '自由对话调整尚未结束，不得替换原运行' };
 

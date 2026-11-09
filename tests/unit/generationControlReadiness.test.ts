@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { classifyGenerationConfirmationText, isGenerationConfirmationTask } from '../../src/utils/generationConfirmation';
 import {
   buildVideoPageStructureVersion,
+  createVideoModeEntryCheckpoint,
   createVideoReadinessCheckpoint,
   VideoControlReadinessError,
   waitForVideoControlReadiness,
@@ -69,6 +70,34 @@ describe('视频生成参数确认独立状态', () => {
 });
 
 describe('视频参数控件有界分段等待', () => {
+  it('模式失败保留真实采样与结构化原因，不写入原始页面诊断', (): void => {
+    const diagnostic = {
+      ready: false, elapsedMs: 13058, attempts: 17, stableSamples: 0,
+      controlOperation: 'mode_selection' as const, failureReason: 'value_not_applied' as const, missingControl: 'video_entry' as const,
+      reason: 'TEST 页面原文与素材路径不得进入运行诊断', method: 'TEST 页面选择器不得进入运行诊断',
+    };
+    const checkpoint = createVideoModeEntryCheckpoint(diagnostic, 15000);
+    const error = new VideoControlReadinessError('mode_entry', checkpoint);
+    expect(error.diagnostic).toMatchObject({ currentStage: 'video_entry', failureStage: 'video_entry',
+      attempts: 17, stableSamples: 0, elapsedMs: 13058, modeEntryElapsedMs: 13058,
+      controlOperation: 'mode_selection', failureReason: 'value_not_applied', missingControl: 'video_entry' });
+    expect(error.message).toContain('设置后回读不一致');
+    expect(JSON.stringify(error.diagnostic)).not.toMatch(/TEST|reason|method|页面原文|素材路径/);
+  });
+
+  it('技能选中检查点不冒充模型参数及提交控件已就绪，旧失败细因清空', (): void => {
+    const checkpoint = createVideoModeEntryCheckpoint({ ready: true, elapsedMs: 750, attempts: 4, stableSamples: 3,
+      controlOperation: 'mode_selection', failureReason: 'changed', missingControl: 'video_entry' }, 1000);
+    expect(checkpoint).toMatchObject({ currentStage: 'video_entry', ready: false, attempts: 4, stableSamples: 3, elapsedMs: 750 });
+    expect(checkpoint.failureStage).toBeUndefined(); expect(checkpoint.failureReason).toBeUndefined(); expect(checkpoint.missingControl).toBeUndefined();
+    expect(checkpoint.modelVisibleAtMs).toBeUndefined(); expect(checkpoint.aspectRatioVisibleAtMs).toBeUndefined();
+  });
+
+  it('旧入口没有记录采样次数时不伪造一次检查', (): void => {
+    expect(createVideoModeEntryCheckpoint(undefined, 13058)).toMatchObject({ ready: false, failureStage: 'video_entry', attempts: 0, elapsedMs: 13058, missingControl: 'video_entry' });
+    expect(createVideoModeEntryCheckpoint(undefined, 13058).stableSamples).toBeUndefined();
+  });
+
   it('模型与组合控件连续三次稳定后才通过', async () => {
     let now = 0;
     let attempt = 0;

@@ -39,6 +39,7 @@ import { useTaskStore, describeDependencyBlock, isDependencyBlockedTask } from '
 import { useAccountStore } from '../store/useAccountStore';
 import { requiresSubmissionReconciliation } from '../utils/realSendStateMachine';
 import { isTaskConversationMissing } from '../utils/taskConversationLocator';
+import { VIDEO_CONTROL_STAGE_LABELS } from '../utils/videoControlReadiness';
 
 // ==================== 组件 ====================
 
@@ -471,8 +472,10 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
               {(task.runtime.controlReadiness || task.runtime.executionDiagnostics?.upload) && <Descriptions.Item label="诊断" span={2}><details><summary>展开控件与上传诊断</summary><Descriptions column={1} size="small">              {task.runtime.controlReadiness && (
                 <Descriptions.Item label="控件诊断" span={2}>
                   {task.runtime.controlReadiness.failureStage
-                    ? `失败阶段 ${task.runtime.controlReadiness.failureStage}`
-                    : '模型、比例与时长已连续稳定回读'} · {task.runtime.controlReadiness.elapsedMs}ms / {task.runtime.controlReadiness.attempts}次
+                    ? `失败阶段 ${VIDEO_CONTROL_STAGE_LABELS[task.runtime.controlReadiness.failureStage]}`
+                    : task.runtime.controlReadiness.ready
+                      ? `当前阶段已就绪${task.runtime.controlReadiness.currentStage ? ` · ${VIDEO_CONTROL_STAGE_LABELS[task.runtime.controlReadiness.currentStage]}` : ''}`
+                      : `当前准备阶段 ${task.runtime.controlReadiness.currentStage ? VIDEO_CONTROL_STAGE_LABELS[task.runtime.controlReadiness.currentStage] : '待回读'}`} · {task.runtime.controlReadiness.elapsedMs}ms / {task.runtime.controlReadiness.attempts}次
                 </Descriptions.Item>
               )}
               {task.runtime.executionDiagnostics?.upload && (

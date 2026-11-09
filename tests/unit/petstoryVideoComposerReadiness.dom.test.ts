@@ -1,7 +1,7 @@
 /** 真实序列化探针配合异步 DOM 重建；不连接豆包、不上传、不提交。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PetStoryExecutionGuard } from '@doubao-studio/contracts';
-import { waitForPetStoryVideoComposer } from '../../src/utils/doubaoBridge';
+import { readPetStoryComposer, waitForPetStoryVideoComposer } from '../../src/utils/doubaoBridge';
 import type { WebviewHandle } from '../../src/utils/doubaoBridge';
 import type { PetStoryComposerSnapshot } from '../../src/utils/petstoryControls';
 
@@ -18,8 +18,9 @@ function sized<T extends HTMLElement>(element: T): T {
 function fixture(initialMode: 'reference' | 'first_frame' | 'first_last_frame' = 'first_last_frame'): {
   view: WebviewHandle & { executeJavaScript: ReturnType<typeof vi.fn>; loadURL: ReturnType<typeof vi.fn>; sendInputEvent: ReturnType<typeof vi.fn> };
   root: HTMLDivElement; parameters: HTMLButtonElement; nativeButton: HTMLButtonElement;
-  nativeClick: ReturnType<typeof vi.fn>; referenceClick: ReturnType<typeof vi.fn>; fileChange: ReturnType<typeof vi.fn>;
+  nativeClick: ReturnType<typeof vi.fn>; referenceClick: ReturnType<typeof vi.fn>; skillClick: ReturnType<typeof vi.fn>; fileChange: ReturnType<typeof vi.fn>;
   renderMode: (mode: 'reference' | 'first_frame' | 'first_last_frame') => void;
+  renderSkill: (skill: NonNullable<PetStoryComposerSnapshot['selectedSkill']>) => void;
 } {
   const root = sized(document.createElement('div')); root.className = 'guidance-input-surface'; document.body.append(root);
   root.append(sized(document.createElement('textarea')));
@@ -27,8 +28,17 @@ function fixture(initialMode: 'reference' | 'first_frame' | 'first_last_frame' =
   const model = sized(document.createElement('button')); model.setAttribute('data-input-engine-actionbar-control-key', 'video-model'); model.textContent = '模型 Seedance 2.0'; root.append(model);
   const nativeButton = sized(document.createElement('button')); nativeButton.textContent = '首尾帧'; root.append(nativeButton);
   const referenceButton = sized(document.createElement('button')); referenceButton.textContent = '参考图'; root.append(referenceButton);
-  const nativeClick = vi.fn(); const referenceClick = vi.fn(); const fileChange = vi.fn();
+  const nativeClick = vi.fn(); const referenceClick = vi.fn(); const skillClick = vi.fn(); const fileChange = vi.fn();
   nativeButton.addEventListener('click', nativeClick); referenceButton.addEventListener('click', referenceClick);
+  const renderSkill = (skill: NonNullable<PetStoryComposerSnapshot['selectedSkill']>): void => {
+    root.querySelectorAll('[data-testid="skill_input_exit_button"]').forEach((element): void => element.remove());
+    const labels = skill === 'none' ? [] : skill === 'ambiguous' ? ['视频生成', '图像生成'] : [skill === 'video' ? '视频生成' : '图像生成'];
+    for (const label of labels) {
+      const selected = sized(document.createElement('div')); selected.setAttribute('data-testid', 'skill_input_exit_button'); selected.textContent = label;
+      selected.addEventListener('click', skillClick); root.append(selected);
+    }
+  };
+  renderSkill('video');
   const holder = sized(document.createElement('div')); root.append(holder);
   const renderMode = (mode: 'reference' | 'first_frame' | 'first_last_frame'): void => {
     holder.replaceChildren();
@@ -42,13 +52,42 @@ function fixture(initialMode: 'reference' | 'first_frame' | 'first_last_frame' =
   renderMode(initialMode);
   const view = { executeJavaScript: vi.fn(async (code: string): Promise<PetStoryComposerSnapshot> => window.eval(code) as PetStoryComposerSnapshot),
     loadURL: vi.fn(), getURL: (): string => 'https://www.doubao.com/chat/TEST-video-composer', sendInputEvent: vi.fn() };
-  return { view, root, parameters, nativeButton, nativeClick, referenceClick, fileChange, renderMode };
+  return { view, root, parameters, nativeButton, nativeClick, referenceClick, skillClick, fileChange, renderMode, renderSkill };
 }
 
 beforeEach((): void => { vi.useFakeTimers(); vi.setSystemTime('2026-10-31T00:00:00.000Z'); });
 afterEach((): void => { document.body.replaceChildren(); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('视频上传前真实控件稳定等待', (): void => {
+  it.each(['none', 'image', 'ambiguous'] as const)('完整参数残留但已选技能为%s时等待拒绝，不点击模式或上传', async (skill): Promise<void> => {
+    const test = fixture('reference'); test.renderSkill(skill);
+    expect(await readPetStoryComposer(test.view)).toMatchObject({ selectedSkill: skill, generic: true, duration: 5, model: 'Seedance 2.0', aspectRatio: '9:16' });
+    const rejected = expect(waitForPetStoryVideoComposer(test.view, guard(), new AbortController().signal, 1_000)).rejects.toThrow(/视频/);
+    await vi.advanceTimersByTimeAsync(1_000); await rejected;
+    expect(test.nativeClick).not.toHaveBeenCalled(); expect(test.referenceClick).not.toHaveBeenCalled(); expect(test.skillClick).not.toHaveBeenCalled();
+    expect(test.fileChange).not.toHaveBeenCalled(); expect(test.view.loadURL).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled();
+  });
+
+  it.each(['none', 'image', 'ambiguous'] as const)('原生槽位和参数都残留但技能为%s时仍拒绝放行', async (skill): Promise<void> => {
+    const test = fixture(); test.renderSkill(skill);
+    expect(await readPetStoryComposer(test.view)).toMatchObject({ selectedSkill: skill, first: true, last: true, duration: 5, model: 'Seedance 2.0', aspectRatio: '9:16' });
+    const rejected = expect(waitForPetStoryVideoComposer(test.view, guard(), new AbortController().signal, 1_000)).rejects.toThrow(/视频/);
+    await vi.advanceTimersByTimeAsync(1_000); await rejected;
+    expect(test.nativeClick).not.toHaveBeenCalled(); expect(test.referenceClick).not.toHaveBeenCalled(); expect(test.skillClick).not.toHaveBeenCalled(); expect(test.fileChange).not.toHaveBeenCalled();
+  });
+
+  it('视频技能异步重建后重新连续稳定回读，不凭保留的参数提前放行', async (): Promise<void> => {
+    const test = fixture(); const completed = vi.fn();
+    setTimeout((): void => test.renderSkill('none'), 200);
+    setTimeout((): void => test.renderSkill('video'), 600);
+    const result = waitForPetStoryVideoComposer(test.view, guard(), new AbortController().signal, 2_000)
+      .then((value: PetStoryComposerSnapshot): PetStoryComposerSnapshot => { completed(); return value; });
+    await vi.advanceTimersByTimeAsync(750); expect(completed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await result).toMatchObject({ selectedSkill: 'video', first: true, last: true, duration: 5, aspectRatio: '9:16' });
+    expect(test.nativeClick).not.toHaveBeenCalled(); expect(test.referenceClick).not.toHaveBeenCalled(); expect(test.skillClick).not.toHaveBeenCalled(); expect(test.fileChange).not.toHaveBeenCalled();
+  });
+
   it('输入区早期缺失，模式点击后首尾槽延迟出现，等连续稳定后才放行', async (): Promise<void> => {
     const test = fixture('reference'); test.root.style.display = 'none';
     setTimeout((): void => { test.root.style.display = ''; }, 350);
@@ -151,7 +190,7 @@ describe('视频上传前真实控件稳定等待', (): void => {
     const completed = vi.fn(); const result = waitForPetStoryVideoComposer(test.view, guard(), controller.signal).then((): void => { completed(); });
     const rejected = expect(result).rejects.toMatchObject({ name: 'AbortError' });
     controller.abort(); await rejected;
-    release?.({ present: true, first: true, last: true, generic: false, nativeLabel: true, firstLabel: true, duration: 5, aspectRatio: '9:16', model: 'Seedance 2.0', durations: [5], count: 0, pending: false });
+    release?.({ present: true, selectedSkill: 'video', first: true, last: true, generic: false, nativeLabel: true, firstLabel: true, duration: 5, aspectRatio: '9:16', model: 'Seedance 2.0', durations: [5], count: 0, pending: false });
     await vi.advanceTimersByTimeAsync(1_000); expect(completed).not.toHaveBeenCalled(); expect(test.view.executeJavaScript).toHaveBeenCalledTimes(1);
   });
 

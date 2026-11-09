@@ -133,7 +133,8 @@ describe('独立图片页输入区实际就绪后才判账号及准备发送', (
     expect(test.probe).not.toHaveBeenCalled(); expect(test.pause).not.toHaveBeenCalled();
     test.readiness.resolve(true); await pending;
     expect(test.waitForChatReady).toHaveBeenCalledExactlyOnceWith(test.view, 15000);
-    expect(test.newConversation).toHaveBeenCalledExactlyOnceWith(test.view, 20_000, mode === 'chat', true, undefined);
+    // 图片走专属的只读创作准备；文字准备仍保留普通 Chat 的空会话检查。
+    expect(test.newConversation).toHaveBeenCalledExactlyOnceWith(test.view, 20_000, mode === 'chat', true, undefined, mode === 'image' ? 'image' : undefined);
     expect(test.pause).toHaveBeenCalledOnce();
     expect(test.pause.mock.calls[0][2]).toContain('输入区尚未就绪');
     expect(test.pause.mock.calls[0][2]).not.toContain('豆包对话正在打开');

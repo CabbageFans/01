@@ -1,12 +1,12 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Alert, Button, Card, Collapse, Input, InputNumber, Select, Space, Tag, Typography, ConfigProvider, Empty, message } from 'antd';
-import type { PetStoryPlan, PetStoryShot, PetStoryPrompt, PetStoryCharacter, PetStoryProject } from '@doubao-studio/contracts';
+import type { PetStoryPlan, PetStoryShot, PetStoryPrompt, PetStoryCharacter, PetStoryProject, PetStoryResult } from '@doubao-studio/contracts';
 import { PetStoryPlanReview } from './PetStoryPlanReview';
 import { PetStoryPlanAssets } from './PetStoryPlanAssets';
 import { PetStoryMaterials } from './PetStoryMaterials';
 import { PetStoryCanvas } from './PetStoryCanvas';
 import { isTaskConversationMissing } from '../utils/taskConversationLocator';
-import { isCanvasPlanLocked, petStoryVideoRecoveryMessage } from './petStoryCanvasShared';
+import { isCanvasPlanEditLocked, petStoryVideoRecoveryMessage } from './petStoryCanvasShared';
 import { PetStoryOpenProject } from './PetStoryOpenProject';
 import { usePetStoryStore, petStoryPromptActionTargets } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
@@ -27,7 +27,7 @@ import { canSelectAccount, findInteractiveAccountId } from '../utils/interactive
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
-function planLocked(project: PetStoryProject | null): boolean { return project ? isCanvasPlanLocked(project) : false; }
+function planLocked(project: PetStoryProject | null): boolean { return project ? isCanvasPlanEditLocked(project) : false; }
 function blankPrompt(): PetStoryPrompt {
   return { original: '', optimized: '', final: '', edited: true, rulesVersion: 'manual' };
 }
@@ -117,6 +117,12 @@ export const ProductionControls: React.FC<{ project: PetStoryProject; disabled: 
 };
 const JOURNEY_STAGES: PetStoryJourneyStage[] = ['script', 'plan', 'materials', 'keyframes', 'videos', 'results'];
 const STAGE_LABELS = ['输入剧本', '确认方案', '准备基础素材', '制作关键帧', '制作镜头视频', '查看成果'];
+interface PromptStageInspection {
+  projectId?: string;
+  targets: NonNullable<PetStoryResult['promptTargets']>;
+  candidates: string[];
+  error: string;
+}
 
 export const PetStoryPanel: React.FC = (): React.ReactElement => {
   const registry = usePetStoryDraftRegistry();
@@ -132,8 +138,13 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
   const [plan, setPlan] = useState<PetStoryPlan | null>(null); const planBase = useRef<PetStoryPlan | null>(null);
   const [dirty, setDirty] = useState(false); const [, setCanvasDirty] = useState(false);
   const [sourceEditing, setSourceEditing] = useState(false);
-  const [promptTargets, setPromptTargets] = useState<NonNullable<import('@doubao-studio/contracts').PetStoryResult['promptTargets']>>([]);
-  const [targetError, setTargetError] = useState(''); const [candidates, setCandidates] = useState<string[]>([]);
+  const [promptInspection, setPromptInspection] = useState<PromptStageInspection>({ targets: [], candidates: [], error: '' });
+  const promptProjectId = p?.id; const promptRevision = p?.revision; const hasPromptPlan = !!p?.plan;
+  // 查询快照只属于原项目；切换项目或移除方案时，首轮渲染就停止展示旧范围。
+  const promptScopeMatches = hasPromptPlan && promptInspection.projectId === promptProjectId;
+  const promptTargets = promptScopeMatches ? promptInspection.targets : [];
+  const candidates = promptScopeMatches ? promptInspection.candidates : [];
+  const targetError = promptScopeMatches ? promptInspection.error : '';
   const analysisBefore = useRef<string>();
   const journey = p ? selectPetStoryJourney(p) : undefined;
   const canvasMode = !!p && [3, 4, 6].includes(stage);
@@ -165,11 +176,23 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
     const journeyFocus = (event: Event): void => { const detail = (event as CustomEvent<{ target?: string; stage?: string }>).detail; const index = JOURNEY_STAGES.indexOf((detail.target || detail.stage) as PetStoryJourneyStage); if (index >= 0) setStage(index); };
     window.addEventListener('petstory-journey-focus', journeyFocus); window.addEventListener('petstory-locate-draft', locate); window.addEventListener('petstory-locate-task', task); return (): void => { window.removeEventListener('petstory-journey-focus', journeyFocus); window.removeEventListener('petstory-locate-draft', locate); window.removeEventListener('petstory-locate-task',task); };
   }, []);
-  useEffect(() => {
-    let active = true; setPromptTargets([]); setCandidates([]); setTargetError('');
-    if (p?.plan) void usePetStoryStore.getState().inspectPromptStageTargets().then((result): void => { if (!active) return; if (result.success) { setPromptTargets(result.promptTargets || []); setCandidates(result.pendingCandidateJobIds || []); } else setTargetError(result.error || '当前文字目标尚未核对'); }).catch((): void => { if (active) setTargetError('当前文字目标读取失败，请重新打开项目后核对'); });
+  // 相同版本的图片轮询会返回新的 plan 对象；仅版本、项目或方案有无变化才重查。
+  useEffect((): (() => void) => {
+    let active = true;
+    // 同项目刷新保留上次有效范围，避免等待 IPC 时反复移除并重建工具栏入口。
+    setPromptInspection((current: PromptStageInspection): PromptStageInspection => {
+      if (current.projectId !== promptProjectId || !hasPromptPlan) return { projectId: promptProjectId, targets: [], candidates: [], error: '' };
+      return current.error ? { ...current, error: '' } : current;
+    });
+    if (promptProjectId && hasPromptPlan) void usePetStoryStore.getState().inspectPromptStageTargets().then((result: PetStoryResult): void => {
+      if (!active) return;
+      if (result.success) setPromptInspection({ projectId: promptProjectId, targets: result.promptTargets || [], candidates: result.pendingCandidateJobIds || [], error: '' });
+      else setPromptInspection((current: PromptStageInspection): PromptStageInspection => ({ ...current, error: result.error || '当前文字目标尚未核对' }));
+    }).catch((): void => {
+      if (active) setPromptInspection((current: PromptStageInspection): PromptStageInspection => ({ ...current, error: '当前文字目标读取失败，请重新打开项目后核对' }));
+    });
     return (): void => { active = false; };
-  }, [p?.id, p?.revision, p?.plan]);
+  }, [promptProjectId, promptRevision, hasPromptPlan]);
   useEffect((): void => {
     if (!p || !analysisBefore.current) return;
     const ids = new Set([analysisBefore.current]);
@@ -242,7 +265,6 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
       <div className="journey-sticky" aria-label="当前步骤与推荐操作">
         <nav className="petstory-stages" aria-label="短剧制作阶段">{STAGE_LABELS.map((label: string,index: number): React.ReactNode => <button key={label} className={stage === index ? 'active' : ''} aria-current={stage === index ? 'step' : undefined} onClick={(): void => setStage(index)}><span>{index+1}</span>{label}</button>)}</nav>
         {!canvasMode && <div className="journey-recommendation"><div><strong>当前：{STAGE_LABELS[stage] || (stage === 6 ? '画布全景' : '高级编辑')}</strong><p>{stageReason}</p><small>已确认基础图 {journey?.counts.materials.confirmed}/{journey?.counts.materials.total} · 正文匹配关键帧 {journey?.counts.keyframes.current}/{journey?.counts.keyframes.total} · 正文匹配视频 {journey?.counts.videos.current}/{journey?.counts.videos.total}</small></div>{stage < 5 && stage !== 1 && stage !== 2 && <Button type="primary" disabled={mainBlocked} loading={state.busy} onClick={(): void => { void runMain(); }}>{mainText}</Button>}</div>}
-        {drafts.length >0 && <Alert type="warning" message="以下对象有未保存修改；草稿随页面保留" description={<Space direction="vertical">{drafts.map((draft): React.ReactNode => <Space wrap key={draft.id}><strong>{draft.label}</strong><Button size="small" disabled={state.busy} onClick={(): void => { void draft.actions.current.save(); }}>保存并继续</Button><Button size="small" onClick={(): void => draft.actions.current.locate()}>查看修改</Button><Button size="small" disabled={state.busy} onClick={(): void => draft.actions.current.discard()}>放弃修改</Button></Space>)}</Space>} />}
       </div>
       {notice && !canvasMode && <Alert type="info" message={notice} action={notice.includes('方案已就绪') ? <Button onClick={(): void => setStage(1)}>查看方案结果</Button> : undefined} />}
       {stage !== 2 && !canvasMode && <PetStoryCurrentTasks project={p} hidePlanRequests={stage === 1} onContinue={(): void => { void state.continuePromptStage(); }} />}

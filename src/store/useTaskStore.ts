@@ -37,6 +37,8 @@ let resumeAllInFlight: Promise<boolean> | null = null;
 const verificationRecoveryInFlight = new Map<string, Promise<boolean>>();
 const pendingCompletionWrites = new Map<string, { runId?: string; submittedAt?: string }>();
 const startingAutomationTasks = new Set<string>();
+/** 业务接力只读核对通用启动占位，不重复启动或撤销另一轮原任务。 */
+export function isTaskAutomationStarting(taskId: string): boolean { return startingAutomationTasks.has(taskId); }
 
 // 账号启动复检可能仍处于 unknown；队列遇到这种软阻断时不能永久停在那里。
 // 只对已满足依赖的 queued 任务做有界退避复检，ready 后由现有调度继续。
@@ -112,6 +114,7 @@ interface TaskState {
   startAutomation: (taskId: string, beforeDispatch?: (task: Task) => Promise<void>, verificationRecovery?: UnsubmittedVerificationRecovery) => Promise<boolean>;
   setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage, taskId?: string) => void;
   updateTaskRuntime: (taskId: string, patch: {
+    expectedRunId?: string;
     status?: TaskStatus;
     runtime?: Partial<TaskRunSnapshot>;
     errorInfo?: TaskErrorInfo | null;
@@ -145,7 +148,21 @@ interface TaskState {
   getNextTaskForAccount: (accountId: string) => Task | null;
 }
 
-const runtimePersistState = new Map<string, { stage?: TaskStage; savedAt: number }>();
+type TaskRuntimeWriteResult = Awaited<ReturnType<typeof window.electronAPI.tasks.updateRuntime>>;
+
+/** 阶段上报只更新已有运行的阶段字段，提交与平台证据由各自正式入口负责。 */
+function automationStageRuntimePatch(runtime: TaskRunSnapshot, state: AutomationState, stage?: TaskStage): Partial<TaskRunSnapshot> {
+  return {
+    stage: runtime.stage,
+    message: runtime.message,
+    stageStartedAt: runtime.stageStartedAt,
+    lastHeartbeatAt: runtime.lastHeartbeatAt,
+    ...(state === 'submitting' && stage === 'submitting' && runtime.submittedAt ? { submittedAt: runtime.submittedAt } : {}),
+    ...(state === 'generating' && runtime.acceptanceObservation?.outcome === 'observing' ? { acceptanceObservation: runtime.acceptanceObservation } : {}),
+  };
+}
+
+const runtimePersistState = new Map<string, { runId: string; stage?: TaskStage; savedAt: number }>();
 let queueProcessing = false;
 
 function verificationRecoveryDispatchBlocked(state: TaskState, accountId: string): boolean {
@@ -1001,7 +1018,6 @@ export const useTaskStore = create<TaskState>((set, get) => ({
               message: message ?? task.runtime.message,
               stageStartedAt: stage && stage !== task.runtime.stage ? now : task.runtime.stageStartedAt,
               lastHeartbeatAt: now,
-              submittedAt: stage === 'submitting' ? (task.runtime.submittedAt || now) : task.runtime.submittedAt,
               acceptanceObservation: state === 'generating' && task.runtime.acceptanceObservation?.outcome === 'observing'
                 ? renewObservationLease(task.runtime.acceptanceObservation, now)
                 : task.runtime.acceptanceObservation,
@@ -1021,16 +1037,32 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       const task = tasks.find((item) => item.id === taskId);
       const previousPersist = runtimePersistState.get(taskId);
       const shouldPersist = !!task?.runtime && (
+        previousPersist?.runId !== task.runtime.runId ||
         previousPersist?.stage !== task.runtime.stage ||
         Date.now() - (previousPersist?.savedAt || 0) >= 15_000 ||
         state === 'failed' ||
         state === 'completed'
       );
       if (task?.runtime && shouldPersist) {
-        runtimePersistState.set(taskId, { stage: task.runtime.stage, savedAt: Date.now() });
+        const runId = task.runtime.runId;
+        // 阶段投影只能写自己的字段；归一化快照含有专用保护与证据，不能整体回传。
+        const runtime = automationStageRuntimePatch(task.runtime, state, stage);
         void window.electronAPI.tasks.updateRuntime(taskId, {
+          expectedRunId: runId,
           status,
-          runtime: task.runtime,
+          runtime,
+        }).then((result: TaskRuntimeWriteResult): void => {
+          const current = get().tasks.find((item): boolean => item.id === taskId)?.runtime;
+          if (current?.runId !== runId || current.stage !== runtime.stage) return;
+          if (!result.success || result.task?.runtime?.runId !== runId || result.task.runtime.stage !== runtime.stage) {
+            set({ error: result.error || '任务阶段写入回读不一致，未确认保存' });
+            return;
+          }
+          // 失败不占用节流记录；仅确认原运行真实落盘后才抑制同阶段心跳。
+          runtimePersistState.set(taskId, { runId, stage: runtime.stage, savedAt: Date.now() });
+        }).catch((error: unknown): void => {
+          const current = get().tasks.find((item): boolean => item.id === taskId)?.runtime;
+          if (current?.runId === runId && current.stage === runtime.stage) set({ error: error instanceof Error ? error.message : '任务阶段保存失败' });
         });
       }
     }

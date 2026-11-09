@@ -52,12 +52,13 @@ async function stoppedSubmittedImage(): Promise<{ media: Task; op: PetStoryImage
   await usePetStoryStore.getState().modifyImage({ materialId: project.materials![0].id }, 'TEST-old-adopted', '调整表情');
   const media = tasks.at(-1)!; const op = project.imageOperations!.at(-1)!;
   const stepId = 'TEST-stopped-image-step';
-  media.status = 'paused'; media.runtime!.submittedAt = now; media.petstory = { projectId: project.id, stepId };
+  media.status = 'paused'; media.runtime!.submittedAt = now; media.petstory = { projectId: project.id, stepId, imageOperationId: op.id };
   const entry = { state: 'unknown' as const, reason: 'TEST 只读原运行，不要求预检查' };
   project.production = { phase: 'materials', imageOperationId: op.id, state: 'paused', planHash: 'TEST', approvedAt: now,
     capability: { accountId: project.accountId, image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, durations: [] },
     fallbacks: {}, shots: {}, message: 'TEST 原提交结果尚未确认', steps: [{ id: stepId, kind: 'character', materialId: op.target.materialId,
       taskId: media.id, runId: media.runtime!.runId, inputHash: 'TEST', attachmentAssetIds: [], status: 'bound' }] };
+  project.imageProductions = { ...project.imageProductions, [op.id]: project.production };
   usePetStoryStore.setState({ project }); return { media, op };
 }
 type ImageReconcileDetail = { taskId: string; accountId: string; runId: string; submittedAt: string; useCurrentPage: boolean; automatic: boolean; onSettled: () => Promise<void> };
@@ -95,6 +96,14 @@ beforeEach((): void => {
     }
     if (!op.taskId) { op.taskId = `TEST-image-task-${op.id}`; tasks.push(task(op.taskId, 'image')); }
     const media = tasks.find((item): boolean => item.id === op.taskId)!;
+    if (!media.petstory) media.petstory = { projectId: project.id, stepId: `TEST-step-${op.id}`, imageOperationId: op.id, materialId: op.target.materialId };
+    const entry = { state: 'unknown' as const, reason: 'TEST 当前操作' };
+    const priorProduction = project.imageProductions?.[op.id];
+    if (!priorProduction || priorProduction.steps[0]?.taskId !== media.id) project.imageProductions = { ...project.imageProductions, [op.id]: {
+      imageOperationId: op.id, phase: 'materials', state: 'running', planHash: 'TEST', approvedAt: now, fallbacks: {}, shots: {}, message: 'TEST 本次图片',
+      capability: { accountId: project.accountId, image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, durations: [] },
+      steps: [{ id: media.petstory.stepId, kind: 'character', materialId: op.target.materialId, shotId: op.target.shotId, taskId: media.id, status: 'bound', inputHash: 'TEST', attachmentAssetIds: [] }],
+    } };
     if (media.status === 'done') {
       if (!op.outputAssetId) {
         op.outputAssetId = `TEST-output-${op.id}`;
@@ -109,10 +118,13 @@ beforeEach((): void => {
   collect.mockImplementation(async (_id: string, jobId: string): Promise<PetStoryResult> => { save(); const job = project.jobs.find((item): boolean => item.id === jobId)!; job.status = 'applied'; job.resultStatus = 'candidate'; return { success: true, project }; });
   start.mockImplementation(async (id: string, beforeDispatch?: (started: Task) => Promise<void>): Promise<boolean> => {
     const started = tasks.find((item): boolean => item.id === id)!;
-    started.status = 'executing'; started.runtime = { runId: `TEST-run-${id}`, attempt: 1, stage: 'preparing_account', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { mode: started.mode, prompt: started.prompt, attachments: [] } };
+    started.status = 'executing'; started.runtime = { runId: `TEST-run-${id}`, attempt: 1, stage: 'preparing_account', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { mode: started.mode, prompt: started.prompt, attachments: [], petstory: started.petstory } };
     await beforeDispatch?.(started); return true;
   });
-  bindProduction.mockImplementation(async (): Promise<PetStoryResult> => ({ success: true, project }));
+  bindProduction.mockImplementation(async (_id: string, taskId: string, runId: string): Promise<PetStoryResult> => {
+    const media = tasks.find((item): boolean => item.id === taskId)!; const production = project.imageProductions![media.petstory!.imageOperationId!];
+    production.steps[0].runId = runId; save(); return { success: true, project };
+  });
   pauseProduction.mockImplementation(async (): Promise<PetStoryResult> => {
     save(); if (project.production) project.production.state = 'paused'; return { success: true, project };
   });
@@ -556,6 +568,8 @@ describe('候选进度及精确来源投影', (): void => {
   it('显式查看来源才展开浏览器；另一张图正在生成时不导航到旧会话', async (): Promise<void> => {
     await usePetStoryStore.getState().modifyImage({ materialId: project.materials![0].id }, 'TEST-old-adopted', '调整表情');
     const media = tasks.at(-1)!; media.runtime!.conversationUrl = 'https://www.doubao.com/chat/TEST-output-session'; await finishMedia();
+    // 本用例覆盖没有独立任务页的旧图片会话；独立图片操作按自己的页面隔离规则处理。
+    delete media.petstory!.imageOperationId;
     const candidate = project.assets.at(-1)!; const target = candidate.imageReview!.target;
     await usePetStoryStore.getState().openImageConversation(target, candidate.id);
     expect(dispatch.mock.calls.map((call): string => call[0].type)).toEqual(['reveal-workspace-browser', 'open-task-conversation']);

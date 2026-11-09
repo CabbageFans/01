@@ -7,7 +7,7 @@ import { useTaskStore } from '../store/useTaskStore';
 import { PetStoryImageReview } from './PetStoryImageReview';
 import { needsPetStoryReferenceAdaptation } from '../utils/petstoryVisualBasis';
 import { pendingImageCandidates } from '../utils/petstoryImageCandidates';
-import { canvasJobLabel, isCanvasPlanLocked, isPetStoryPromptPreparationMessage, petStoryVideoRecoveryMessage } from './petStoryCanvasShared';
+import { canvasJobLabel, isCanvasPlanEditLocked, isPetStoryPromptPreparationMessage, petStoryVideoRecoveryMessage } from './petStoryCanvasShared';
 import { usePetStoryGenerationEligibility } from './usePetStoryGenerationEligibility';
 import type { PetStoryGenerationEligibility } from './usePetStoryGenerationEligibility';
 import { locatePetStoryDraft, usePetStoryDraft } from './PetStoryDrafts';
@@ -19,6 +19,7 @@ import { openPetStoryOriginalTask, PetStoryResubmissionActions } from './PetStor
 import { useAccountStore } from '../store/useAccountStore';
 import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
 import { revealBrowser } from '../utils/workspace';
+import { PetStoryConversationButton } from './PetStoryConversationButton';
 
 const petStoryModeNames = { auto: '自动选择', first_frame: '首帧', first_last_frame: '首尾帧', reference: '多参考' };
 
@@ -115,7 +116,7 @@ export const CanvasVideoSettings: React.FC<{ project: PetStoryProject; shot: Pet
   const [editing, setEditing] = useState(false);
   const base = useRef<PetStoryPlan>();
   const [message, setMessage] = useState('');
-  const locked = state.busy || isCanvasPlanLocked(project);
+  const locked = state.busy || isCanvasPlanEditLocked(project);
   const baseShot = base.current?.shots.find((item): boolean => item.id === shot.id);
   const dirty = editing && (mode !== baseShot?.requestedMode || duration !== baseShot?.durationSeconds);
   const fieldId = `shot-video-settings-${shot.id}`;
@@ -227,6 +228,35 @@ function mediaNodeFacts(project: PetStoryProject, shot: PetStoryShot, kind: PetS
   return { asset, step, pendingTask, waiting, video, buttonText };
 }
 
+function videoConversationTask(project: PetStoryProject, asset: PetStoryAsset | undefined, step: PetStoryProductionStep | undefined, tasks: Task[]): Task | undefined {
+  const source = step && step.status !== 'complete' ? step : asset || step;
+  if (!source?.taskId || !source.runId) return undefined;
+  return tasks.find((item: Task): boolean => item.id === source.taskId && item.mode === 'video'
+    && item.projectId === project.studioProjectId && item.assignedAccountId === project.accountId && item.runtime?.runId === source.runId
+    && (!item.petstory || item.petstory.projectId === project.id && (source !== step || item.petstory.stepId === step?.id)));
+}
+
+/** 明确重发后，原请求是独立记录；只有步骤历史和任务双向授权链一致时显示它的入口。 */
+function videoTaskBelongsToStep(project: PetStoryProject, step: PetStoryProductionStep, task: Task | undefined): task is Task {
+  return !!task && task.mode === 'video' && task.projectId === project.studioProjectId && task.assignedAccountId === project.accountId
+    && task.petstory?.projectId === project.id && task.petstory.stepId === step.id;
+}
+function originalVideoConversationTask(project: PetStoryProject, step: PetStoryProductionStep | undefined, tasks: Task[]): Task | undefined {
+  const current = tasks.find((item: Task): boolean => item.id === step?.taskId);
+  const origin = current?.resubmissionOf;
+  if (!step || step.kind !== 'video' || !videoTaskBelongsToStep(project, step, current) || !origin || current.id === origin.taskId
+    || current.runtime?.runId !== step.runId) return;
+  const source = tasks.find((item: Task): boolean => item.id === origin.taskId);
+  if (!videoTaskBelongsToStep(project, step, source)
+    || !origin.runId || source.runtime?.runId !== origin.runId || !origin.submittedAt || source.runtime.submittedAt !== origin.submittedAt
+    || !origin.authorizationId || !Number.isFinite(Date.parse(origin.authorizedAt))) return;
+  const auditMatches = (record: NonNullable<Task['resubmittedAs']>[number]): boolean => record.runId === origin.runId
+    && record.submittedAt === origin.submittedAt && record.authorizationId === origin.authorizationId && record.authorizedAt === origin.authorizedAt;
+  if (source.resubmittedAs?.filter((record: NonNullable<Task['resubmittedAs']>[number]): boolean => record.taskId === current.id && auditMatches(record)).length !== 1
+    || !step.resubmissionHistory?.some((record: NonNullable<PetStoryProductionStep['resubmissionHistory']>[number]): boolean => record.taskId === source.id && auditMatches(record))) return;
+  return source;
+}
+
 export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStoryShot; kind: PetStoryPromptKind; disabled: boolean }> = ({ project, shot, kind, disabled }): React.ReactElement => {
   const state = usePetStoryStore(); const taskState = useTaskStore(); const tasks = taskState.tasks;
   const [settingsDirty, setSettingsDirty] = useState(false);
@@ -234,6 +264,15 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
   const [generationError, setGenerationError] = useState('');
   const readiness = usePetStoryGenerationEligibility(project, { shotId: shot.id, promptKind: kind });
   const { asset, step, pendingTask, waiting, video, buttonText } = mediaNodeFacts(project, shot, kind, tasks);
+  const conversationTask = video ? videoConversationTask(project, asset, step, tasks) : undefined;
+  const originalConversationTask = video ? originalVideoConversationTask(project, step, tasks) : undefined;
+  const originalSourceIsCurrent = (): boolean => {
+    const latest = usePetStoryStore.getState().project; const currentTasks = useTaskStore.getState().tasks;
+    const latestStep = latest ? productionSteps(latest).reverse().find((item: PetStoryProductionStep): boolean => item.shotId === shot.id && item.kind === 'video') : undefined;
+    const original = latest?.id === project.id ? originalVideoConversationTask(latest, latestStep, currentTasks) : undefined;
+    return !!original && original.id === originalConversationTask?.id && original.runtime?.runId === originalConversationTask.runtime?.runId
+      && original.runtime?.submittedAt === originalConversationTask.runtime?.submittedAt;
+  };
   const recoverableTask = video ? petStoryUnsubmittedVideoTask(project, shot.id, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]) : undefined;
   const readOnlyRecovery = video ? petStoryVideoReadOnlyRecovery(project, shot.id, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]) : undefined;
   const recoverySnapshot = readOnlyRecovery?.task.runtime ? { taskId: readOnlyRecovery.task.id, runId: readOnlyRecovery.task.runtime.runId, submittedAt: readOnlyRecovery.task.runtime.submittedAt, accountId: readOnlyRecovery.task.assignedAccountId } : undefined;
@@ -329,7 +368,11 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
     {video && <CanvasVideoResolution project={project} shot={shot} eligibility={readiness.eligibility} />}
     {video && !asset && !recoverableTask && !readOnlyRecovery && promptNotice && <p className={promptPreparing || isPetStoryPromptPreparationMessage(promptNotice) ? 'canvas-hint' : 'canvas-error'} role={promptPreparing || isPetStoryPromptPreparationMessage(promptNotice) ? 'status' : 'alert'}>{promptNotice}</p>}
     {settingsDirty && <Alert type="warning" message="本镜视频设置有未保存修改，请先保存或放弃后再生成。" />}
-    {video && !readOnlyRecovery && <div className="canvas-media-actions">{recoverableTask ? <Button type="primary" size="small" loading={starting} icon={<PlayCircleOutlined />} disabled={state.busy || settingsDirty || starting} onClick={(): void => { void continueVideo(); }}>继续生成视频</Button> : !asset && <Button type="primary" size="small" loading={starting} icon={<PlayCircleOutlined />} disabled={disabled || waiting || settingsDirty || starting} onClick={(): void => { void generateVideo(); }}>{buttonText}</Button>}{asset && <Button size="small" onClick={(): void => { void playVideo(); }}>查看视频</Button>}</div>}
+    {video && <div className="canvas-media-actions">{!readOnlyRecovery && <>{recoverableTask ? <Button type="primary" size="small" loading={starting} icon={<PlayCircleOutlined />} disabled={state.busy || settingsDirty || starting} onClick={(): void => { void continueVideo(); }}>继续生成视频</Button> : !asset && <Button type="primary" size="small" loading={starting} icon={<PlayCircleOutlined />} disabled={disabled || waiting || settingsDirty || starting} onClick={(): void => { void generateVideo(); }}>{buttonText}</Button>}{asset && <Button size="small" onClick={(): void => { void playVideo(); }}>查看视频</Button>}</>}
+      <PetStoryConversationButton projectId={project.id} task={conversationTask} unavailableHint="本镜尚无可定位的视频生成任务" />
+      {originalConversationTask && <PetStoryConversationButton projectId={project.id} task={originalConversationTask} label="原请求豆包对话" sourceIsCurrent={originalSourceIsCurrent} />}
+    </div>}
+    {originalConversationTask && !conversationTask?.runtime?.submittedAt && <p className="canvas-hint">本次重发请求尚未发送；原请求对话单独保留。</p>}
     {recoverableTask && <p className="canvas-hint">生成前准备已停止，点击后沿用原任务继续，不会重新生成首尾帧。</p>}
     {video && generationError && <p className="canvas-error" role="alert">{petStoryVideoRecoveryMessage(generationError)}</p>}
     {step?.error && <p className="canvas-error">{petStoryVideoRecoveryMessage(step.error)}</p>}

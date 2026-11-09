@@ -22,6 +22,9 @@ import type { UploadReadinessDiagnostic, UploadReadinessSnapshot } from './uploa
 import { classifyGenerationConfirmationText } from './generationConfirmation';
 import type { GenerationConfirmationEvidence } from './generationConfirmation';
 import { VideoControlReadinessError, waitForVideoControlReadiness } from './videoControlReadiness';
+import { selectCreationModeFromPage } from './creationModeEntry';
+import type { CreationModeEntryDiagnostic } from './creationModeEntry';
+export type { CreationModeEntryDiagnostic } from './creationModeEntry';
 import type { VideoControlReadinessResult } from './videoControlReadiness';
 import { diagnoseVideoMessageChain, inspectChatReadback, inspectCreationReadback, readChatPage } from './chatReadback';
 import { readVideoConversationPage, relatedVideoCards } from './videoConversationReadback';
@@ -34,6 +37,7 @@ import { uploadChatImages } from './chatAttachments';
 import { appendExactComposerText, insertExactComposerText, readExactComposerText } from './exactComposer';
 import { petStoryComposerProbe } from './petstoryControls';
 import { requiresNativePetStoryFrames, usesSharedPetStoryFrames } from './petstoryVideoUpload';
+import { readEmptyCreationComposer } from './creationConversation';
 import { pageSubmissionProbe } from './submissionControls';
 import { setVideoDurationFromPage } from './videoDurationControl';
 import type { VideoDurationControlResult } from './videoDurationControl';
@@ -2048,7 +2052,7 @@ export async function getCurrentCreationConversation(webview: WebviewHandle, opt
   signal?: AbortSignal; ensureCurrent?: () => void; timeoutMs?: number;
 } = {}): Promise<CurrentCreationConversationReadback> {
   const assertCurrent = (): void => {
-    if (options.signal?.aborted) throw new DOMException('原图片会话读取已暂停', 'AbortError');
+    if (options.signal?.aborted) throw new DOMException('原媒体会话读取已暂停', 'AbortError');
     options.ensureCurrent?.();
   };
   assertCurrent();
@@ -2056,7 +2060,7 @@ export async function getCurrentCreationConversation(webview: WebviewHandle, opt
     `(${readCurrentCreationConversation.toString()})(document, ${readChatPage.toString()})`, options.timeoutMs ?? 5000, 'getCurrentCreationConversation');
   assertCurrent();
   const route = normalizeDoubaoConversationUrl(webview.getURL());
-  if (route && page.conversationUrl && !isSameDoubaoConversation(route, page.conversationUrl)) throw new Error('页面路由与真实图片会话不一致，未绑定其他结果');
+  if (route && page.conversationUrl && !isSameDoubaoConversation(route, page.conversationUrl)) throw new Error('页面路由与真实媒体会话不一致，未绑定其他结果');
   return page;
 }
 
@@ -2702,360 +2706,22 @@ export function switchMode(webview: WebviewHandle, mode: string): void {
   webview.loadURL(targetUrl);
 }
 
-export interface CreationModeEntryDiagnostic {
-  ready: boolean;
-  elapsedMs: number;
-  reason?: string;
-  method?: string;
-}
-
-/**
- * 在 AI 创作页面点击 Tab 切换模式（图像/视频）
- * 豆包统一页面底部输入框下方有「图像」「视频」Tab
- * 注意：必须排除左侧边栏菜单中的同名元素
- */
+/** 只完成目标技能选择；模型、比例和时长由后续各自的就绪阶段读取。 */
 export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video', onDiagnostic?: (diagnostic: CreationModeEntryDiagnostic) => void): Promise<boolean> {
   const startedAt = Date.now();
-  const report = (diagnostic: Omit<CreationModeEntryDiagnostic, 'elapsedMs'>): void => {
-    try { onDiagnostic?.({ ...diagnostic, elapsedMs: Math.max(0, Date.now() - startedAt) }); }
+  const report = (diagnostic: CreationModeEntryDiagnostic): void => {
+    try { onDiagnostic?.(diagnostic); }
     catch { /* 诊断记录不能改变真实控件动作及回读结果。 */ }
   };
-  const tabLabel = mode === 'image' ? '图像生成' : '视频生成';
-  const code = `
-    (async function() {
-      try {
-        function sleep(ms) {
-          return new Promise(function(resolve) { setTimeout(resolve, ms); });
-        }
-        function isVisible(el) {
-          if (!el) return false;
-          var r = el.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0) return false;
-          for (var node = el; node; node = node.parentElement) {
-            var style = window.getComputedStyle(node);
-            if (style.display === 'none' || style.visibility === 'hidden' ||
-                (node.getAttribute && node.getAttribute('aria-hidden') === 'true')) return false;
-          }
-          return true;
-        }
-        function activate(el) {
-          if (!isVisible(el)) return false;
-          var r = el.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0) return false;
-          var x = Math.round(r.left + r.width / 2);
-          var y = Math.round(r.top + r.height / 2);
-          var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
-          try { el.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
-          el.dispatchEvent(new MouseEvent('mousedown', opts));
-          try { el.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
-          el.dispatchEvent(new MouseEvent('mouseup', opts));
-          el.dispatchEvent(new MouseEvent('click', opts));
-          return true;
-        }
-        function readControlText(el) {
-          return String(el && (el.innerText || el.textContent) || '').replace(/\\s+/g, ' ').trim();
-        }
-        function findCurrentComposer() {
-          var editors = Array.from(document.querySelectorAll('textarea,[contenteditable="true"]')).filter(isVisible);
-          var roots = editors.map(function(editor) {
-            if (!editor.closest) return null;
-            // 已观测 DOM：engine 与 skill-bar/skill-exit 分属同一 surface 的兄弟节点。
-            return editor.closest('[data-testid="guidance-input-surface"],.guidance-input-surface') || editor.closest('#input-engine-container');
-          }).filter(function(root) { return root && isVisible(root); });
-          roots = roots.filter(function(root, index) { return roots.indexOf(root) === index; });
-          if (roots.length === 1) return roots[0];
-          if (roots.length > 1) return null;
-          var surfaces = Array.from(document.querySelectorAll('[data-testid="guidance-input-surface"],.guidance-input-surface')).filter(isVisible);
-          if (surfaces.length === 1) return surfaces[0];
-          if (surfaces.length > 1) return null;
-          var engines = Array.from(document.querySelectorAll('#input-engine-container')).filter(isVisible);
-          return engines.length === 1 ? engines[0] : null;
-        }
-        var composerRoot = findCurrentComposer();
-        // 窄 Webview 的正文按钮可能位于 x<200；只按当前输入区及其已展开菜单归属定位。
-        function inCurrentComposer(el) {
-          composerRoot = findCurrentComposer();
-          if (!composerRoot) return false;
-          if (composerRoot.contains(el)) return true;
-          return Array.from(composerRoot.querySelectorAll('[aria-expanded="true"][aria-controls]')).some(function(trigger) {
-            var menu = document.getElementById(trigger.getAttribute('aria-controls'));
-            return menu && menu.contains(el) && menu.getBoundingClientRect().width > 0;
-          });
-        }
-        function videoControlsReady() {
-          composerRoot = findCurrentComposer();
-          if (!composerRoot) return false;
-          function currentControls(selector) {
-            var controls = Array.from(composerRoot.querySelectorAll(selector)).filter(function(el) {
-              return isVisible(el) && (!el.closest || !el.closest('[role="menu"],[role="listbox"],[role="dialog"],[role="option"],[role="menuitem"]'));
-            });
-            return controls.filter(function(el) { return !controls.some(function(other) { return other !== el && el.contains && el.contains(other); }); });
-          }
-          var models = currentControls('[data-input-engine-actionbar-control-key="video-model"]');
-          var composites = currentControls('[data-creation-params-panel-id],[data-input-engine-actionbar-render-entry-key="video-generation-params-panel"]');
-          return models.length === 1 && composites.length === 1 && models[0].getBoundingClientRect().width > 20 && composites[0].getBoundingClientRect().width > 20;
-        }
-        async function waitForVideoControls(timeoutMs) {
-          var deadline = Date.now() + timeoutMs;
-          while (Date.now() < deadline) {
-            if (videoControlsReady()) return true;
-            await sleep(250);
-          }
-          return videoControlsReady();
-        }
-        async function waitForSelectedImageSkill(timeoutMs) {
-          var deadline = Date.now() + timeoutMs;
-          var stable = 0;
-          while (Date.now() < deadline) {
-            var selected = findSelectedSkill();
-            stable = selected && readControlText(selected) === '图像生成' ? stable + 1 : 0;
-            if (stable >= 2) return true;
-            await sleep(Math.min(250, Math.max(0, deadline - Date.now())));
-          }
-          return false;
-        }
-        async function waitForModeEntry(timeoutMs) {
-          var deadline = Date.now() + timeoutMs;
-          while (Date.now() < deadline) {
-            var entries = Array.from(document.querySelectorAll('button, [role="tab"], div, span, a'));
-            var ready = entries.some(function(el) {
-              var text = readControlText(el);
-              return isVisible(el) && inCurrentComposer(el) && el !== composerRoot && text.length < 20 && text.indexOf('${tabLabel}') >= 0;
-            });
-            if (ready) return true;
-            await sleep(250);
-          }
-          return false;
-        }
-        async function waitForImageModeEntry(timeoutMs) {
-          var deadline = Date.now() + timeoutMs;
-          var openedMore = false;
-          while (Date.now() < deadline) {
-            var selected = findSelectedSkill();
-            if (selected && readControlText(selected) === '${tabLabel}') return true;
-            if ('${mode}' === 'video' && videoControlsReady()) return true;
-            // 新对话编辑器会先于技能栏挂载；只轮询真实入口，不能在 1.5 秒后把正常重建判为失败。
-            if (await waitForModeEntry(Math.min(250, deadline - Date.now()))) return true;
-            composerRoot = findCurrentComposer();
-            if (!openedMore) {
-              var more = composerRoot && Array.from(composerRoot.querySelectorAll('button,[role="button"]')).find(function(el) {
-                return isVisible(el) && readControlText(el) === '更多';
-              });
-              // 菜单只展开一次；后续仅回读，绝不反复点击关闭菜单或触发生成。
-              if (activate(more)) openedMore = true;
-            }
-          }
-          return false;
-        }
-        async function findVisibleModeMenuOption(timeoutMs, initialElement) {
-          var deadline = Date.now() + timeoutMs;
-          while (Date.now() < deadline) {
-            var options = Array.from(document.querySelectorAll('button,[role="option"],[role="menuitem"]')).filter(function(el) {
-              if (el === initialElement || el.matches('[data-valid-btn="mode-select-action-btn"]') || el.closest('[data-testid="skill_input_exit_button"]')) return false;
-              return isVisible(el) && inCurrentComposer(el) && readControlText(el) === '${tabLabel}';
-            });
-            if (options.length > 0) return options[options.length - 1];
-            await sleep(250);
-          }
-          return null;
-        }
-        async function finishVideoModeSelection(initialMethod, initialTag, initialRect, initialElement) {
-          if ('${mode}' !== 'video') {
-            var imageModeTrigger = initialElement && initialElement.closest && initialElement.closest('[data-valid-btn="mode-select-action-btn"]');
-            // 真实 skill-bar 入口直接切换技能，冷启动可异步重建数秒；期间只能回读。
-            // 只有本次实际点击模式触发器才读取菜单，不能因短暂缺失再点新挂载的触发器。
-            if (!imageModeTrigger) return await waitForSelectedImageSkill(15000)
-              ? { ok: true, method: initialMethod + '-image-verified', tag: initialTag }
-              : { ok: false, error: '图像入口已点击，但目标技能尚未连续稳定选中' };
-            var imageMenuDeadline = Date.now() + 5000;
-            var imageOption = null;
-            while (Date.now() < imageMenuDeadline) {
-              var selectedImage = findSelectedSkill();
-              // 某些控件带有模式触发器标记，但点击后直接选中技能，不会再挂载菜单。
-              if (selectedImage && readControlText(selectedImage) === '图像生成') return await waitForSelectedImageSkill(15000)
-                ? { ok: true, method: initialMethod + '-image-direct-verified', tag: initialTag }
-                : { ok: false, error: '图像模式已切换但技能未连续稳定选中' };
-              imageOption = await findVisibleModeMenuOption(Math.min(250, Math.max(0, imageMenuDeadline - Date.now())), initialElement);
-              if (imageOption) break;
-            }
-            if (!activate(imageOption)) return { ok: false, error: '图像模式尚未真实选中，未找到可见模式选项' };
-            return await waitForSelectedImageSkill(15000)
-              ? { ok: true, method: initialMethod + '-image-menu-verified', tag: imageOption.tagName }
-              : { ok: false, error: '图像模式已点击但技能未连续稳定选中' };
-          }
-          if (await waitForVideoControls(1500)) {
-            return { ok: true, method: initialMethod + '-verified', tag: initialTag, pos: Math.round(initialRect.left) + ',' + Math.round(initialRect.top) };
-          }
-          // 技能已选中而参数异步挂载时只继续回读，不能再次点击模式触发器把它退出。
-          var chosenSkill = findSelectedSkill();
-          if (chosenSkill && readControlText(chosenSkill) === '视频生成') {
-            return await waitForVideoControls(15000)
-              ? { ok: true, method: initialMethod + '-skill-verified', tag: initialTag }
-              : { ok: false, error: '视频技能已选中但参数控件未挂载' };
-          }
-
-          // 2026-08 新版首击只展开“模式”菜单，并不会真正选中视频模式。
-          // 必须从当前模式触发器再次打开菜单，再点击菜单内的精确“视频生成”，
-          // 并以模型/组合控件实际挂载作为唯一成功证据。
-          var option = await findVisibleModeMenuOption(250, initialElement);
-          if (!option) {
-            composerRoot = findCurrentComposer();
-            var modeTrigger = composerRoot && composerRoot.querySelector('[data-valid-btn="mode-select-action-btn"]');
-            if (modeTrigger && modeTrigger.getBoundingClientRect().width > 0) activate(modeTrigger);
-            option = await findVisibleModeMenuOption(5000, initialElement);
-          }
-          if (!activate(option)) {
-            return { ok: false, error: '视频模式菜单选项不可见' };
-          }
-          if (!await waitForVideoControls(15000)) {
-            return { ok: false, error: '视频模式已点击但参数控件未挂载' };
-          }
-          var optionRect = option.getBoundingClientRect();
-          return { ok: true, method: initialMethod + '-menu-confirmed', tag: option.tagName, pos: Math.round(optionRect.left) + ',' + Math.round(optionRect.top) };
-        }
-        function findSelectedSkill() {
-          composerRoot = findCurrentComposer();
-          var selected = composerRoot && Array.from(composerRoot.querySelectorAll('[data-testid="skill_input_exit_button"]')).filter(function(el) {
-            var parentSkill = el.parentElement && el.parentElement.closest('[data-testid="skill_input_exit_button"]');
-            return !parentSkill && isVisible(el) && /^(图像生成|视频生成)$/.test(readControlText(el));
-          });
-          return selected && selected.length === 1 ? selected[0] : null;
-        }
-        // 两种创作技能共用输入区。已选目标技能时保持原位，切换时只退出一次，避免把目标标签当入口再次关闭。
-        var selectedSkill = findSelectedSkill();
-        if (selectedSkill && readControlText(selectedSkill) === '${tabLabel}') {
-          if ('${mode}' === 'video' && !await waitForVideoControls(15000)) return { ok: false, error: '已选视频技能的参数控件未就绪' };
-          if ('${mode}' === 'image' && !await waitForSelectedImageSkill(15000)) return { ok: false, error: '图像技能未连续稳定选中' };
-          return { ok: true, method: 'already-selected-skill', tag: selectedSkill.tagName };
-        }
-        if (selectedSkill) {
-          activate(selectedSkill);
-          await sleep(250);
-          composerRoot = findCurrentComposer();
-        }
-        if (!await waitForImageModeEntry(10000)) {
-          return { ok: false, error: '${tabLabel}模式入口未在等待窗口内挂载' };
-        }
-        {
-          // 重建期间可能恢复上次已选技能；等待后重新确认，不能把退出按钮当作入口点击。
-          var readyImageSkill = findSelectedSkill();
-          if (readyImageSkill && readControlText(readyImageSkill) === '${tabLabel}') {
-            if ('${mode}' === 'video' && !await waitForVideoControls(15000)) return { ok: false, error: '已选视频技能的参数控件未就绪' };
-            if ('${mode}' === 'image' && !await waitForSelectedImageSkill(15000)) return { ok: false, error: '图像技能未连续稳定选中' };
-            return { ok: true, method: 'image-skill-ready-after-wait', tag: readyImageSkill.tagName };
-          }
-        }
-        if ('${mode}' === 'video' && videoControlsReady()) return { ok: true, method: 'video-controls-ready-after-wait' };
-        var allEls = document.querySelectorAll('button, [role="tab"], div, span, a');
-
-        // 只读取当前输入区的可见编辑器，兼容新版 contenteditable 与隐藏测量 textarea。
-        var textarea = composerRoot && Array.from(composerRoot.querySelectorAll('textarea,[contenteditable="true"]')).find(isVisible);
-        var textareaRect = textarea ? textarea.getBoundingClientRect() : null;
-        var viewportHeight = window.innerHeight;
-
-        // 收集所有文本匹配的元素（宽松匹配：innerText 包含目标文本）
-        var candidates = [];
-        for (var i = 0; i < allEls.length; i++) {
-          var el = allEls[i];
-          if (el === composerRoot || el.querySelector && el.querySelector('textarea,[contenteditable="true"]') || el.closest && el.closest('[data-testid="skill_input_exit_button"]')) continue;
-          var innerText = readControlText(el);
-          var directText = '';
-          for (var j = 0; j < el.childNodes.length; j++) {
-            if (el.childNodes[j].nodeType === 3) directText += el.childNodes[j].textContent || '';
-          }
-          directText = directText.trim();
-
-          // 匹配条件：直接文本等于目标 或 innerText 等于目标 或短文本 includes 匹配
-          // includes 匹配限制 innerText 长度 < 20，避免匹配到包含目标文本的大容器
-          var exactMatch = directText === '${tabLabel}' || innerText === '${tabLabel}';
-          var includesMatch = !exactMatch && innerText.length < 20 && innerText.indexOf('${tabLabel}') >= 0;
-          if (!exactMatch && !includesMatch) continue;
-          if (!isVisible(el)) continue;
-
-          var rect = el.getBoundingClientRect();
-          if (rect.width === 0 || rect.height === 0) continue;
-
-          candidates.push({
-            el: el,
-            rect: rect,
-            tag: el.tagName,
-            isButton: el.tagName === 'BUTTON' || el.getAttribute('role') === 'tab' || el.getAttribute('role') === 'button',
-            nearTextarea: textareaRect && rect.top > textareaRect.bottom - 10 && rect.top < viewportHeight,
-            inBottomHalf: rect.top > viewportHeight * 0.5,
-            notInSidebar: inCurrentComposer(el),
-            isSmall: rect.width < 150 && rect.height < 60,
-            directTextMatch: directText === '${tabLabel}',
-          });
-        }
-
-        // 优先：button/tab role + textarea 附近 + 不在侧边栏
-        for (var i = 0; i < candidates.length; i++) {
-          var c = candidates[i];
-          if (c.isButton && c.nearTextarea && c.notInSidebar) {
-            activate(c.el);
-            return await finishVideoModeSelection('button-near-textarea', c.tag, c.rect, c.el);
-          }
-        }
-
-        // 次优先：button/tab role + 页面下半 + 不在侧边栏
-        for (var i = 0; i < candidates.length; i++) {
-          var c = candidates[i];
-          if (c.isButton && c.inBottomHalf && c.notInSidebar) {
-            activate(c.el);
-            return await finishVideoModeSelection('button-bottom', c.tag, c.rect, c.el);
-          }
-        }
-
-        // 兜底1：任何匹配 + textarea 附近 + 不在侧边栏 + 小元素
-        for (var i = 0; i < candidates.length; i++) {
-          var c = candidates[i];
-          if (c.nearTextarea && c.notInSidebar && c.isSmall) {
-            activate(c.el);
-            return await finishVideoModeSelection('near-textarea', c.tag, c.rect, c.el);
-          }
-        }
-
-        // 兜底2：任何匹配 + 不在侧边栏
-        for (var i = 0; i < candidates.length; i++) {
-          var c = candidates[i];
-          if (c.notInSidebar) {
-            activate(c.el);
-            return await finishVideoModeSelection('not-sidebar', c.tag, c.rect, c.el);
-          }
-        }
-
-        // 全部失败，输出诊断信息
-        var diag = [];
-        for (var i = 0; i < allEls.length; i++) {
-          var el = allEls[i];
-          var t = readControlText(el);
-          if (t.indexOf('${tabLabel}') >= 0 && t.length < 50) {
-            var r = el.getBoundingClientRect();
-            diag.push(el.tagName + '|${tabLabel}|' + Math.round(r.left) + ',' + Math.round(r.top) + '|' + Math.round(r.width) + 'x' + Math.round(r.height));
-          }
-        }
-        return { ok: false, error: '未找到${tabLabel}Tab, candidates=' + candidates.length + ', diag=' + diag.join('; ') };
-      } catch (e) {
-        return { ok: false, error: e.message };
-      }
-    })();
-  `;
-
   try {
-    const result = await safeExecuteJS<{ ok: boolean; error?: string; method?: string; tag?: string; pos?: string }>(
-      webview, code, 40000, 'clickAITab'
+    const diagnostic = await safeExecuteJS<CreationModeEntryDiagnostic>(
+      webview, `(${selectCreationModeFromPage.toString()})(${JSON.stringify(mode)})`, 20_000, 'clickAITab',
     );
-    if (result.ok) {
-      console.log(`[doubaoBridge] 已点击${tabLabel}Tab, 方法: ${result.method}, tag: ${result.tag}, pos: ${result.pos}`);
-    } else {
-      console.warn(`[doubaoBridge] 点击${tabLabel}Tab 失败:`, result.error);
-    }
-    report({ ready: result.ok, ...(result.error ? { reason: result.error } : {}), ...(result.method ? { method: result.method } : {}) });
-    return result.ok;
-  } catch (err: unknown) {
-    const reason = getErrorMessage(err);
-    console.error('[doubaoBridge] clickAITab 异常:', reason);
-    report({ ready: false, reason });
+    report(diagnostic);
+    return diagnostic.ready;
+  } catch {
+    report({ ready: false, elapsedMs: Math.max(0, Date.now() - startedAt), attempts: 0, stableSamples: 0,
+      controlOperation: 'mode_selection', failureReason: 'page_unavailable', missingControl: 'conversation_editor' });
     return false;
   }
 }
@@ -4256,6 +3922,22 @@ async function inspectRepairNavigationInput(webview: WebviewHandle, ownedRepairD
   return { ok: true };
 }
 
+async function inspectCreationNavigationInput(webview: WebviewHandle, deadline: number, ownedRepairDraft?: string): Promise<NewConversationResult & { ownedDraft?: boolean }> {
+  const current = await getChatPageSnapshot(webview);
+  if (current.generating) return { ok: false, reason: 'GENERATION_IN_PROGRESS' };
+  const empty = await safeExecuteJS<import('./creationConversation').EmptyCreationComposer>(webview,
+    `(${readEmptyCreationComposer.toString()})(${JSON.stringify(ownedRepairDraft)})`, Math.max(1, Math.min(3000, deadline - Date.now())), 'emptyCreationComposer');
+  return { ok: empty.ok, reason: empty.reason, ...(empty.ownedDraft ? { ownedDraft: true } : {}) };
+}
+
+async function inspectReusableEmptyRoot(webview: WebviewHandle, deadline: number, creation: boolean): Promise<NewConversationResult> {
+  const snapshot = await getChatPageSnapshot(webview);
+  if (snapshot.messages.length || snapshot.generating) return { ok: false, reason: 'SESSION_NOT_EMPTY' };
+  if (creation) return inspectCreationNavigationInput(webview, deadline);
+  if (!snapshot.editorPresent) return { ok: false, reason: 'EDITOR_NOT_FOUND' };
+  return snapshot.editorText.trim() ? { ok: false, reason: 'SESSION_NOT_EMPTY' } : { ok: true };
+}
+
 /** loadURL 不会同步替换旧 DOM；有导航时必须先看到另一个真正加载到根页的文档。 */
 async function waitForFreshChatDocument(webview: WebviewHandle, chatRoot: string, previousTimeOrigin: number | undefined, deadline: number): Promise<ChatDocumentState | null> {
   while (Date.now() < deadline) {
@@ -4284,6 +3966,7 @@ export async function startNewConversation(
   reuseEmptyChatRoot: boolean = false,
   preserveCurrentInput: boolean = false,
   ownedRepairDraft?: string,
+  creationMode?: 'image' | 'video',
 ): Promise<NewConversationResult> {
   try {
     const deadline = Date.now() + Math.max(0, readinessTimeoutMs);
@@ -4295,23 +3978,20 @@ export async function startNewConversation(
     // 不使用“应用”按钮点击时的旧快照覆盖用户后来输入的草稿或正在进行的交流。
     let hasOwnedDraft = false;
     if (preserveCurrentInput) {
-      const current = await inspectRepairNavigationInput(webview, ownedRepairDraft);
+      const current: NewConversationResult & { ownedDraft?: boolean } = creationMode
+        ? await inspectCreationNavigationInput(webview, deadline, ownedRepairDraft) : await inspectRepairNavigationInput(webview, ownedRepairDraft);
       if (!current.ok) return current;
       hasOwnedDraft = current.ownedDraft === true;
     }
-    // 普通 Chat 已在官方空根页时，重复导航会重新等待慢子资源，反而失去已就绪状态。
-    // 只在精确根地址、可见编辑器、零消息且零草稿全部回读通过时复用。
+    // 已在官方空根页时复用完整空态；不为切换技能销毁已就绪的创作栏。
     const sameRoot = matchesChatRoot(webview.getURL(), chatRoot) && matchesChatRoot(before.href, chatRoot);
     // 自有草稿也不在原页直接发送；回到正常新文档与空消息基线验证。
-    const reuseCurrentDocument = reuseEmptyChatRoot && sameRoot && !hasOwnedDraft;
+    const reuseCurrentDocument = (reuseEmptyChatRoot || !!creationMode) && sameRoot && !hasOwnedDraft;
     let documentState = before;
     if (reuseCurrentDocument) {
       if (before.readyState === 'loading' || webview.isLoadingMainFrame?.()) return { ok: false, reason: 'PAGE_NOT_READY' };
-      const snapshot = await getChatPageSnapshot(webview);
-      if (!snapshot.editorPresent) return { ok: false, reason: 'EDITOR_NOT_FOUND' };
-      if (snapshot.messages.length > 0 || snapshot.editorText.trim().length > 0) {
-        return { ok: false, reason: 'SESSION_NOT_EMPTY' };
-      }
+      const empty = await inspectReusableEmptyRoot(webview, deadline, !!creationMode);
+      if (!empty.ok) return empty;
     } else {
       webview.loadURL(chatRoot);
       const fresh = await waitForFreshChatDocument(webview, chatRoot, before.timeOrigin, deadline);
@@ -4339,16 +4019,33 @@ export async function startNewConversation(
         var expectedRoot = ${JSON.stringify(chatRoot)};
         var matchesRoot = ${matchesChatRoot.toString()};
         var readChat = ${readChatPage.toString()};
+        var creationMode = ${JSON.stringify(creationMode || '')};
+        var readEmptyCreation = ${readEmptyCreationComposer.toString()};
         var inspect = function() {
           if (Date.now() >= deadline || performance.timeOrigin !== newConversationDocument || document.readyState === 'loading'
             || !matchesRoot(location.href, expectedRoot)) return { ok: false, reason: 'PAGE_NOT_READY' };
           var snapshot = readChat(document);
-          if (snapshot.messages.length || snapshot.editorText.trim() || snapshot.generating) return { ok: false, reason: 'SESSION_NOT_EMPTY' };
-          if (!snapshot.editorPresent) return { ok: false, reason: 'EDITOR_NOT_FOUND' };
+          if (snapshot.messages.length || snapshot.generating || !creationMode && snapshot.editorText.trim()) return { ok: false, reason: 'SESSION_NOT_EMPTY' };
+          if (!creationMode && !snapshot.editorPresent) return { ok: false, reason: 'EDITOR_NOT_FOUND' };
           return { ok: true, reason: 'READY' };
         };
         var initial = inspect();
         if (!initial.ok) return initial;
+        // 旧页面的气泡也必须排除；保持原消息保护，但不把聚焦普通Chat作为创作前提。
+        var userBubbles = document.querySelectorAll('[class*="user"], [class*="User"], [data-role="user"]');
+        for (var u = 0; u < userBubbles.length; u++) {
+          var bubble = userBubbles[u];
+          if (bubble.offsetParent === null) continue;
+          var bubbleRect = bubble.getBoundingClientRect();
+          if (bubbleRect.width < 40 || bubbleRect.height < 20) continue;
+          if (String(bubble.innerText || '').replace(/\\s+/g, ' ').trim().length > 2) return { ok: false, reason: 'SESSION_NOT_EMPTY' };
+        }
+        if (creationMode) {
+          var creation = readEmptyCreation();
+          if (!creation.ok) return creation;
+          // 创作技能选择前只确认真实空态；旧普通Chat的focus会重建输入区，不属于此阶段。
+          return { ok: true, reason: 'READY', stabilityKey: JSON.stringify([newConversationDocument, creation.geometry]) };
+        }
         var editor = null;
         var textareas = document.querySelectorAll('textarea');
         for (var i = 0; i < textareas.length; i++) {
@@ -4364,18 +4061,6 @@ export async function startNewConversation(
         editor.focus();
         var focusable = document.activeElement === editor || editor.contains(document.activeElement);
         if (!focusable) return { ok: false, reason: 'EDITOR_NOT_FOCUSABLE' };
-        // 兼容旧页面气泡；当前平台消息已由 readChat 的 send/receive_message 完整检查。
-        var userBubbles = document.querySelectorAll('[class*="user"], [class*="User"], [data-role="user"]');
-        var hasUserContent = false;
-        for (var u = 0; u < userBubbles.length; u++) {
-          var b = userBubbles[u];
-          if (b.offsetParent === null) continue;
-          var r = b.getBoundingClientRect();
-          if (r.width < 40 || r.height < 20) continue;
-          var bt = String(b.innerText || '').replace(/\\s+/g, ' ').trim();
-          if (bt.length > 2) { hasUserContent = true; break; }
-        }
-        if (hasUserContent) return { ok: false, reason: 'SESSION_NOT_EMPTY' };
         var current = inspect();
         if (!current.ok) return current;
         var rect = editor.getBoundingClientRect();
@@ -4412,12 +4097,7 @@ export async function startNewConversation(
       console.warn('[doubaoBridge] 新对话未就绪:', reason);
       return { ok: false, reason };
     }
-    if (result.reason === 'SESSION_NOT_EMPTY') {
-      // 导航后页面恢复了旧会话：不点击任何按钮，按失败处理并提示。
-      console.warn('[doubaoBridge] 新对话页面包含已有用户内容，拒绝继续');
-      return { ok: false, reason: 'SESSION_NOT_EMPTY' };
-    }
-    if (reuseEmptyChatRoot) {
+    if (reuseEmptyChatRoot && !creationMode) {
       if (Date.now() >= deadline) return { ok: false, reason: 'PAGE_NOT_READY' };
       const plainChat = await ensurePlainChatComposer(webview, true, Math.max(1, Math.min(3000, deadline - Date.now())));
       if (!plainChat.ok) return plainChat;
@@ -5690,14 +5370,15 @@ export async function waitForPetStoryImageComposer(webview: WebviewHandle, signa
   }
   throw new PetStoryControlError('图片输入区尚未就绪，请稍后继续本次任务');
 }
-/** 视频输入区与专用槽位可在参数切换后异步重建；只尝试一次请求模式，之后连续回读真实控件。 */
+/** 视频输入区在参数切换后会异步重建；按实际上传能力连续回读，不混淆逻辑首尾用途与原生槽。 */
 export async function waitForPetStoryVideoComposer(webview: WebviewHandle, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, signal: AbortSignal, timeoutMs: number = 6_000): Promise<import('./petstoryControls').PetStoryComposerSnapshot> {
   const deadline = Date.now() + Math.max(0, timeoutMs);
   let latest: import('./petstoryControls').PetStoryComposerSnapshot | undefined;
   let selectedMode = false; let stableSamples = 0; let stableKey = '';
   const requireActive = (): void => { if (signal.aborted) throw new DOMException('视频任务已暂停', 'AbortError'); };
-  const modeMatches = (snapshot: import('./petstoryControls').PetStoryComposerSnapshot): boolean => snapshot.present && (guard.mode === 'first_last_frame'
-    ? snapshot.first && snapshot.last || usesSharedPetStoryFrames(snapshot, guard.mode) : guard.mode === 'first_frame' ? snapshot.first && !snapshot.last : snapshot.generic);
+  const isVideoComposer = (snapshot: import('./petstoryControls').PetStoryComposerSnapshot | undefined): snapshot is import('./petstoryControls').PetStoryComposerSnapshot => !!snapshot?.present && snapshot.selectedSkill === 'video';
+  const modeMatches = (snapshot: import('./petstoryControls').PetStoryComposerSnapshot): boolean => isVideoComposer(snapshot) && (usesSharedPetStoryFrames(snapshot, guard.mode)
+    || (guard.mode === 'first_last_frame' ? snapshot.first && snapshot.last : guard.mode === 'first_frame' ? snapshot.first && !snapshot.last : snapshot.generic));
   const read = async (operation: import('./petstoryControls').PetStoryComposerOperation = {}): Promise<import('./petstoryControls').PetStoryComposerSnapshot | undefined> => {
     requireActive();
     const remaining = deadline - Date.now();
@@ -5713,7 +5394,7 @@ export async function waitForPetStoryVideoComposer(webview: WebviewHandle, guard
     catch (error: unknown) { if (signal.aborted) throw error; }
     if (snapshot) {
       latest = snapshot;
-      if (snapshot.present && !modeMatches(snapshot) && guard.mode && !selectedMode) {
+      if (isVideoComposer(snapshot) && !modeMatches(snapshot) && guard.mode && !selectedMode) {
         // 同模式控件可能是 toggle，不能因等待重试反复点击，更不能自动降级为其他模式。
         selectedMode = true; stableSamples = 0; stableKey = '';
         try {
@@ -5725,7 +5406,7 @@ export async function waitForPetStoryVideoComposer(webview: WebviewHandle, guard
       } else {
         try {
           checkPetStoryPageGuard(snapshot, guard, true);
-          const key = JSON.stringify([snapshot.present, snapshot.generic, snapshot.first, snapshot.last, snapshot.model, snapshot.duration, snapshot.aspectRatio]);
+          const key = JSON.stringify([snapshot.present, snapshot.selectedSkill, snapshot.generic, snapshot.referenceMultiple, snapshot.first, snapshot.last, snapshot.model, snapshot.duration, snapshot.aspectRatio]);
           stableSamples = key === stableKey ? stableSamples + 1 : 1; stableKey = key;
           if (stableSamples >= 2 && Date.now() < deadline) { requireActive(); return snapshot; }
         } catch (error: unknown) {
@@ -5739,7 +5420,7 @@ export async function waitForPetStoryVideoComposer(webview: WebviewHandle, guard
     await raceWithAbort(sleep(Math.min(250, remaining)), signal, undefined);
   }
   requireActive();
-  if (latest?.present && latest.generic && (guard.mode === 'first_last_frame' || guard.mode === 'first_frame')) {
+  if (isVideoComposer(latest) && latest.generic && !modeMatches(latest) && (guard.mode === 'first_last_frame' || guard.mode === 'first_frame')) {
     const slots = guard.mode === 'first_last_frame' ? '独立首尾帧' : '独立首帧';
     throw new PetStoryControlError(`已选图片已保留；当前豆包入口的${slots}或对应图片上传控件尚未就绪，本次尚未上传或提交。请稍后继续原视频任务。`);
   }
@@ -5749,10 +5430,11 @@ export async function waitForPetStoryVideoComposer(webview: WebviewHandle, guard
 export function checkPetStoryPageGuard(snapshot: import('./petstoryControls').PetStoryComposerSnapshot, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, video: boolean): void {
   if (!snapshot.present) throw new PetStoryControlError(video ? '当前页面没有找到视频生成输入区' : '当前页面没有找到图片生成输入区');
   if (!video) { if (!snapshot.generic) throw new PetStoryControlError('图片参考输入区尚未适配'); return; }
+  if (snapshot.selectedSkill !== 'video') throw new PetStoryControlError('当前输入区未确认处于视频生成模式，未上传或提交');
   const mode = guard.mode;
   const sharedFrames = usesSharedPetStoryFrames(snapshot, mode);
-  if (mode === 'first_last_frame' ? (!snapshot.first || !snapshot.last) && !sharedFrames : mode === 'first_frame' ? !snapshot.first || snapshot.last : !snapshot.generic) throw new PetStoryControlError('当前实际模式槽位与批准模式不符，未上传或提交');
-  if (sharedFrames && (guard.attachmentAssetIds.length !== 2 || requiresNativePetStoryFrames(guard.compiledPrompt?.final || ''))) throw new PetStoryControlError('本镜要求原生首尾槽或首尾图数量不符，当前统一上传方式不能满足；未改变正文或提交');
+  if (!sharedFrames && (mode === 'first_last_frame' ? !snapshot.first || !snapshot.last : mode === 'first_frame' ? !snapshot.first || snapshot.last : !snapshot.generic)) throw new PetStoryControlError('当前实际模式槽位与批准模式不符，未上传或提交');
+  if (sharedFrames && (guard.attachmentAssetIds.length !== (mode === 'first_frame' ? 1 : 2) || requiresNativePetStoryFrames(guard.compiledPrompt?.final || ''))) throw new PetStoryControlError('本镜要求原生首尾槽或首尾图数量不符，当前统一上传方式不能满足；未改变正文或提交');
   const config = guard.capability.videoConfig;
   if (snapshot.duration !== guard.durationSeconds || !config || snapshot.aspectRatio !== config.aspectRatio || snapshot.model !== getVideoModelUiLabel(config.model)) throw new PetStoryControlError('当前模型／时长／比例回读与计划不一致，零提交');
 }
@@ -5770,7 +5452,7 @@ function petStoryUploadSlot(mode: import('@doubao-studio/contracts').PetStoryRes
 }
 /** 仅决定当前页面的上传通道，镜头首尾用途和合同模式保持原值。 */
 async function petStoryImageUploadMode(webview: WebviewHandle, mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image'): Promise<import('@doubao-studio/contracts').PetStoryResolvedMode | 'image'> {
-  if (mode !== 'first_last_frame') return mode;
+  if (mode !== 'first_frame' && mode !== 'first_last_frame') return mode;
   return usesSharedPetStoryFrames(await readPetStoryComposer(webview), mode) ? 'reference' : mode;
 }
 async function checkedUploadFiles(files: Array<{ name: string; base64: string; mime: string }>, mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image', expectedSha256s?: string[]): Promise<{ fileBytes: Uint8Array<ArrayBuffer>[]; fileDigests: string[] }> {
@@ -5836,8 +5518,9 @@ async function resolvePetStoryReferenceMenu(webview: WebviewHandle, receipts: Pe
 }
 
 function validatePetStoryUploadReceipts(compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt, receipts: PetStoryUploadReceipt[]): void {
-  const sharedFrames = compiled.kind === 'video' && compiled.resolvedMode === 'first_last_frame' && compiled.references.length === 2
-    && compiled.references[0].slot === 'first' && compiled.references[1].slot === 'last' && receipts.length === 2
+  const frameReferences = compiled.resolvedMode === 'first_frame' ? compiled.references.length === 1 && compiled.references[0].slot === 'first'
+    : compiled.resolvedMode === 'first_last_frame' && compiled.references.length === 2 && compiled.references[0].slot === 'first' && compiled.references[1].slot === 'last';
+  const sharedFrames = compiled.kind === 'video' && frameReferences && receipts.length === compiled.references.length
     && receipts.every((receipt): boolean => receipt.slot === 'reference' && receipt.reference !== 'slot') && !requiresNativePetStoryFrames(compiled.final);
   if (receipts.length !== compiled.references.length || receipts.some((r, i): boolean => r.fileIndex !== i || !sharedFrames && r.slot !== (compiled.references[i].slot === 'first' ? 'first_frame' : compiled.references[i].slot === 'last' ? 'last_frame' : 'reference'))
     || new Set(receipts.map((r): string => `${r.slot}:${r.key}`)).size !== receipts.length) throw new PetStoryControlError('上传回执的文件次序／槽位与逻辑引用不符');
@@ -5909,7 +5592,8 @@ export class PetStoryControlError extends Error {}
 export async function verifyPetStoryUploads(webview: WebviewHandle, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, video: boolean): Promise<void> {
   const composer = await readPetStoryComposer(webview);
   checkPetStoryPageGuard(composer, guard, video);
-  const slots: Array<'reference' | 'first_frame' | 'last_frame'> = video && guard.mode === 'first_last_frame' && !usesSharedPetStoryFrames(composer, guard.mode) ? ['first_frame', 'last_frame'] : [video && guard.mode === 'first_frame' ? 'first_frame' : 'reference'];
+  const sharedFrames = video && usesSharedPetStoryFrames(composer, guard.mode);
+  const slots: Array<'reference' | 'first_frame' | 'last_frame'> = video && guard.mode === 'first_last_frame' && !sharedFrames ? ['first_frame', 'last_frame'] : [video && guard.mode === 'first_frame' && !sharedFrames ? 'first_frame' : 'reference'];
   for (const slot of slots) {
     const snapshot = await readPetStoryComposer(webview, { slot });
     checkPetStoryPageGuard(snapshot, guard, video);

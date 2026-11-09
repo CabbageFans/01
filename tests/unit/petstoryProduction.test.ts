@@ -267,6 +267,73 @@ describe('P4 实际入口和请求模式', (): void => {
     }));
     return { task, bindings, original, source };
   }
+  async function resumeFirstFrameIntent(): Promise<{ task: Task; bindings: PetStoryPageBinding[]; original: Task; source: PetStoryProject['plan'] }> {
+    const shotId = p.plan!.shots[0].id;
+    p = await projects.addShotImage(p.id, p.revision, shotId, 'firstFrame', picture);
+    p = await projects.adoptImage(p.id, p.revision, { shotId, kind: 'firstFrame' }, p.assets.at(-1)!.id);
+    p.promptCapability = capability(); seedOfflinePromptContracts(p, { shotId, promptKind: 'video' }, { completeVideoBody: true }); p = await projects.write(p);
+    const source = structuredClone(p.plan);
+    expect((await service.generateShotMedia(p.id, p.revision, shotId, 'video', capability())).success).toBe(true);
+    const pending = await service.advance(p.id); const running = await start(pending.taskId!);
+    expect(core.updateRuntime({ taskId: running.id, status: 'paused', errorInfo: { code: 'petstory_controls_unconfirmed', message: 'TEST 统一首帧上传入口，尚未上传或提交', recoverable: true, detectedAt: new Date().toISOString() } }).success).toBe(true);
+    expect((await service.advance(p.id)).success).toBe(false); p = await projects.read(p.id);
+    const original = list()[0]; await service.resume(p.id);
+    const task = await start(original.id); p = await projects.read(p.id);
+    const reference = p.production!.steps[0].compiledPrompt!.references[0];
+    const bindings: PetStoryPageBinding[] = [{ assetId: reference.assetId, order: 1, slot: 'reference', label: '@图片1', reference: 'mention',
+      previewHash: '1'.repeat(64), fileSha256: p.assets.find((asset): boolean => asset.id === reference.assetId)!.validation!.sha256,
+      targetId: 'TEST-first-target', nodeId: 'TEST-first-node', nodeIds: ['TEST-first-node'], occurrenceCount: 1 }];
+    return { task, bindings, original, source };
+  }
+  it.each(['mention', 'plain'] as const)('单张首帧经统一上传按真实%s绑定，原task继续并在重开后保持首帧用途', async (reference): Promise<void> => {
+    const { task, bindings, original, source } = await resumeFirstFrameIntent();
+    const originalReferences = structuredClone(p.production!.steps[0].compiledPrompt!.references);
+    if (reference === 'plain') { const binding = bindings[0]; binding.reference = 'plain'; binding.label = '第 1 张图'; delete binding.nodeId; delete binding.targetId; delete binding.nodeIds; delete binding.occurrenceCount; }
+    const result = await service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings);
+    const saved = await projects.read(p.id); const step = saved.production!.steps[0];
+    expect(result.success).toBe(true); expect(saved.plan).toEqual(source);
+    expect(saved.production!.shots[p.plan!.shots[0].id].resolvedMode).toBe('first_frame');
+    expect(step.compiledPrompt!.resolvedMode).toBe('first_frame'); expect(step.compiledPrompt!.references).toEqual(originalReferences);
+    expect(step.compiledPrompt!.references.map((item): string | undefined => item.slot)).toEqual(['first']);
+    expect(step.compiledPrompt!.final).toBe(source!.shots[0].prompts.video.final); expect(step.pageBindings).toEqual(bindings);
+    expect(step.compiledPrompt!.text).toContain(reference === 'mention' ? '@图片1' : '第 1 张图');
+    const actual = list()[0]; expect(actual.id).toBe(original.id); expect(actual.videoConfig).toEqual(original.videoConfig);
+    expect(actual.attachments).toEqual(original.attachments); expect(actual.runtime!.input.prompt).toBe(step.compiledPrompt!.text);
+    expect(actual.runtime!.submittedAt).toBeUndefined(); expect(saved.production!.referenceContinuations).toBeUndefined();
+    const reopened = new PetStoryProjects(); await reopened.open(projects.directory(p.id)); const recovered = makeService(reopened);
+    await expect(recovered.guard(task.id)).rejects.toThrow('尚未显式继续');
+    expect((await recovered.resume(p.id)).success).toBe(true);
+    const guarded = (await recovered.guard(task.id)).guard!;
+    expect(guarded.mode).toBe('first_frame'); expect(guarded.compiledPrompt).toEqual(step.compiledPrompt);
+    expect(guarded.attachmentAssetIds).toEqual([bindings[0].assetId]);
+    expect(tasks).toHaveLength(1); expect(createdInputs).toHaveLength(1);
+  });
+  it.each(['count', 'order', 'asset', 'file-hash', 'preview', 'fake-slot', 'mention-nodes'] as const)('单张首帧统一上传拒绝%s错绑，保留原任务和正文', async (change): Promise<void> => {
+    const { task, bindings } = await resumeFirstFrameIntent();
+    if (change === 'count') bindings.push({ ...bindings[0], order: 2 });
+    if (change === 'order') bindings[0].order = 2;
+    if (change === 'asset') bindings[0].assetId = p.assets[0].id;
+    if (change === 'file-hash') bindings[0].fileSha256 = '0'.repeat(64);
+    if (change === 'preview') bindings[0].previewHash = 'TEST-not-a-preview-hash';
+    if (change === 'fake-slot') bindings[0].reference = 'slot';
+    if (change === 'mention-nodes') bindings[0].nodeIds = [];
+    const before = await projects.read(p.id); const beforeTasks = list();
+    await expect(service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings)).rejects.toThrow();
+    expect(await projects.read(p.id)).toEqual(before); expect(list()).toEqual(beforeTasks);
+  });
+  it('单张首帧统一上传不能满足已保存正文明确要求的原生首帧槽', async (): Promise<void> => {
+    const { task, bindings } = await resumeFirstFrameIntent();
+    const declared = await projects.read(p.id); declared.production!.steps[0].compiledPrompt!.final = `原生首帧。${declared.production!.steps[0].compiledPrompt!.final}`;
+    await projects.write(declared); const before = await projects.read(p.id); const beforeTasks = list();
+    await expect(service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings)).rejects.toThrow('当前统一上传方式无法满足');
+    expect(await projects.read(p.id)).toEqual(before); expect(list()).toEqual(beforeTasks);
+  });
+  it('提交守卫重新校验已保存的统一单首帧文件摘要，拒绝篡改且不提交', async (): Promise<void> => {
+    const { task, bindings } = await resumeFirstFrameIntent();
+    await service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings);
+    const changed = await projects.read(p.id); changed.production!.steps[0].pageBindings![0].fileSha256 = '0'.repeat(64); await projects.write(changed);
+    await expect(service.guard(task.id)).rejects.toThrow('文件摘要'); expect(list()[0].runtime!.submittedAt).toBeUndefined();
+  });
   it.each(['mention', 'plain'] as const)('首尾两图经统一上传按真实%s绑定，继续同一原任务并保留本镜首尾用途', async (reference): Promise<void> => {
     const { task, bindings, original, source } = await resumeFrameIntent();
     if (reference === 'plain') for (const binding of bindings) { binding.reference = 'plain'; binding.label = `第 ${binding.order} 张图`; delete binding.nodeId; delete binding.targetId; delete binding.nodeIds; delete binding.occurrenceCount; }

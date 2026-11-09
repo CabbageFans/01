@@ -1,9 +1,10 @@
 import type { PetStoryResolvedMode } from '@doubao-studio/contracts';
 import type { PetStoryComposerSnapshot } from './petstoryControls';
 
-/** 首尾是镜头选图用途；网页统一上传与原生槽分别回读、分别保存真实绑定。 */
+/** 首尾是镜头选图用途；统一入口按实际图数判断能力，并保存真实物理绑定。 */
 export function usesSharedPetStoryFrames(snapshot: PetStoryComposerSnapshot, mode: PetStoryResolvedMode | 'image' | undefined): boolean {
-  return mode === 'first_last_frame' && snapshot.generic && snapshot.referenceMultiple === true && !snapshot.first && !snapshot.last;
+  const supportsFrameCount = mode === 'first_frame' || mode === 'first_last_frame' && snapshot.referenceMultiple === true;
+  return supportsFrameCount && snapshot.generic && !snapshot.first && !snapshot.last;
 }
 
 /** 仅明确的原生控件要求必须有原生槽；普通起止状态描述不能被误当成控件要求。 */

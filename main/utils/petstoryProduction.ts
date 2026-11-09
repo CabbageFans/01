@@ -44,12 +44,15 @@ function validateBindingEvidence(p: PetStoryProject, step: PetStoryProductionSte
           || b.occurrenceCount !== source?.segments?.filter((s): boolean => 'referenceOrder' in s && s.referenceOrder === b.order).length || b.nodeIds.length !== b.occurrenceCount)) throw new Error('每次原生引用的节点／素材目标证据不全');
       }}
 
-/** 首尾用途与页面上传方式分别保存；统一上传只接受完整、有序的两张端图，不混入半组槽位。 */
+/** 帧用途与页面上传方式分别保存；统一上传只接受完整的单张首帧或有序首尾两图，不混入半组槽位。 */
 function usesUnifiedFrameBindings(step: PetStoryProductionStep, bindings: PetStoryPageBinding[]): boolean {
   const source = step.compiledPrompt;
-  const unified = step.kind === 'video' && source?.resolvedMode === 'first_last_frame' && source.references.length === 2
-    && source.references[0].slot === 'first' && source.references[1].slot === 'last'
-    && bindings.length === 2 && bindings.every((binding): boolean => binding.slot === 'reference' && ['mention', 'plain'].includes(binding.reference));
+  if (step.kind !== 'video' || !source) return false;
+  const firstFrame = source.resolvedMode === 'first_frame' && source.references.length === 1 && source.references[0].slot === 'first';
+  const firstLastFrame = source.resolvedMode === 'first_last_frame' && source.references.length === 2
+    && source.references[0].slot === 'first' && source.references[1].slot === 'last';
+  const unified = (firstFrame || firstLastFrame) && bindings.length === source.references.length
+    && bindings.every((binding): boolean => binding.slot === 'reference' && ['mention', 'plain'].includes(binding.reference));
   if (unified && requiresNativeFirstLastSlots(source.final)) throw new Error('最终正文明确要求原生首尾帧槽，当前统一上传方式无法满足；原文和模式已保留，未提交');
   return unified;
 }
@@ -80,7 +83,8 @@ interface ProductionPort {
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function requireValue<T>(value: T | undefined, message = '原制作引用缺失'): T { if (value === undefined) throw new Error(message); return value; }
 function safePreparationFailure(code: string): boolean {
-  return ['cancelled', 'chat_assets_not_ready', 'page_unrecognized', 'page_loading', 'page_changed', 'authentication_unconfirmed', 'petstory_controls_unconfirmed',
+  // 正式派发守卫在发布页面执行权前拒绝；恢复仍须核对零提交证据，并重新绑定本次运行。
+  return ['cancelled', 'dispatch_not_ready', 'chat_assets_not_ready', 'page_unrecognized', 'page_loading', 'page_changed', 'authentication_unconfirmed', 'petstory_controls_unconfirmed',
     'quota_exhausted', 'membership_required', 'login_required', 'verification', 'verification_required', 'verification_detected'].includes(code)
     || /^video_(?:[a-z_]+)_not_ready$/.test(code);
 }

@@ -145,6 +145,7 @@ export interface ElectronAPI {
       outputs?: string[]
     ) => Promise<TaskOperationResult>;
     updateRuntime: (taskId: string, patch: {
+      expectedRunId?: string;
       status?: TaskStatus;
       runtime?: Partial<TaskRunSnapshot>;
       errorInfo?: TaskErrorInfo | null;

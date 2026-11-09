@@ -1,10 +1,12 @@
 import type { PetStoryProject, PetStoryPromptKind } from '@doubao-studio/contracts';
+import { VIDEO_CONTROL_FAILURE_LABELS } from '../utils/videoControlReadiness';
 
 export type CanvasDirtyChanged = (key: string, dirty: boolean) => void;
 export const canvasPromptNames: Record<PetStoryPromptKind, string> = {
   firstFrame: '首帧生图提示词', lastFrame: '尾帧编辑提示词', video: '视频提示词 / 运镜',
 };
-export const isCanvasPlanLocked = (project: PetStoryProject): boolean => {
+/** 仅保护原任务使用的方案／设置输入，暂停后仍保留；不代表新媒体入口的执行占用。 */
+export const isCanvasPlanEditLocked = (project: PetStoryProject): boolean => {
   if (project.imageOperations?.some((operation): boolean => !['complete', 'failed'].includes(operation.stage))
     || Object.values(project.imageProductions || {}).some((run): boolean => run.state === 'running' || run.steps.some((step): boolean => step.status !== 'complete'))) return true;
   const production = project.production;
@@ -35,7 +37,11 @@ export function petStoryVideoRecoveryMessage(message: string): string {
     video_assets_not_ready: '视频素材上传', video_prompt_not_ready: '视频提示词输入区', video_submission_controls_not_ready: '视频提交控件',
     video_stable_readback_not_ready: '视频参数回读', video_final_readback_not_ready: '视频提交前回读',
   };
-  if (readiness && readinessLabels[readiness[1]] && message.includes('已在提交前停止')) return `${readinessLabels[readiness[1]]}尚未准备好，本次尚未提交。已选图片已保留，请继续原视频任务。`;
+  if (readiness && readinessLabels[readiness[1]] && message.includes('已在提交前停止')) {
+    // 仅展示构造器固定的中文原因，未知历史文本不投影为当前页面事实。
+    const detail = Object.values(VIDEO_CONTROL_FAILURE_LABELS).find((label: string): boolean => message.includes(`：${label}（`));
+    return `${readinessLabels[readiness[1]]}尚未准备好${detail ? `：${detail}` : ''}，本次尚未提交。已选图片已保留，请继续原视频任务。`;
+  }
   if (!message.includes('改用两张参考图继续') && !message.includes('可在本镜制作设置选择“多参考”')) return message;
   return '当前入口的首尾帧准备尚未完成，已选图片已保留；本次尚未上传或提交。请继续原视频任务，重新读取当前入口。';
 }

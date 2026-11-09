@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Task } from '../../src/types';
 import {
+  canLocateSubmittedMediaConversation,
   isSameDoubaoConversation,
   isTaskConversationMissing,
   normalizeDoubaoConversationUrl,
@@ -23,6 +24,54 @@ const task = (runtimeUrl?: string, artifacts: Task['artifacts'] = [], bindingUrl
     } : undefined,
   } as Task['runtime'],
   artifacts,
+});
+
+describe('已提交媒体缺失会话时的只读定位资格', (): void => {
+  function originalMedia(mode: 'image' | 'video' = 'video'): Task {
+    const now = '2026-11-09T12:00:00.000Z';
+    const value: Task = { id: 'TEST-locate-media', projectId: 'TEST-studio', assignedAccountId: 'TEST-account', mode,
+      prompt: 'TEST 原媒体完整请求', attachments: ['TEST-first.png'], petstory: { projectId: 'TEST-petstory', stepId: 'TEST-step' },
+      ...(mode === 'video' ? { videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '16:9' } } : {}),
+      status: 'paused', outputs: [], result: null, createdAt: now, updatedAt: now };
+    value.runtime = { runId: 'TEST-original-run', attempt: 1, startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
+      submittedAt: now, stage: 'paused', message: '', input: { mode, prompt: value.prompt, attachments: [...value.attachments!],
+        ...(value.videoConfig ? { videoConfig: structuredClone(value.videoConfig) } : {}), petstory: structuredClone(value.petstory) } };
+    return value;
+  }
+  it.each(['image', 'video'] as const)('%s原已提交运行缺URL可请求正式定位，不改变任务', (mode): void => {
+    const value = originalMedia(mode); const before = structuredClone(value);
+    expect(canLocateSubmittedMediaConversation(value)).toBe(true); expect(value).toEqual(before);
+  });
+  it.each(['runtime', 'account', 'run', 'submitted', 'date', 'mode', 'prompt', 'attachments', 'audio', 'config', 'binding', 'cancelled', 'done'] as const)('%s缺失或不符不授予定位资格', (change): void => {
+    const value = originalMedia();
+    if (change === 'runtime') value.runtime = undefined;
+    if (change === 'account') value.assignedAccountId = '';
+    if (change === 'run') value.runtime!.runId = '';
+    if (change === 'submitted') value.runtime!.submittedAt = undefined;
+    if (change === 'date') value.runtime!.submittedAt = 'TEST-invalid';
+    if (change === 'mode') value.mode = 'chat';
+    if (change === 'prompt') value.prompt += ' TEST changed';
+    if (change === 'attachments') value.attachments = ['TEST-other.png'];
+    if (change === 'audio') value.audioAttachment = 'TEST-other.wav';
+    if (change === 'config') value.videoConfig!.duration = '8s';
+    if (change === 'binding') value.petstory!.stepId = 'TEST-other-step';
+    if (change === 'cancelled' || change === 'done') value.status = change;
+    expect(canLocateSubmittedMediaConversation(value)).toBe(false);
+  });
+  it('已有唯一具体会话直接走既有导航，不请求缺定位读取', (): void => {
+    const value = originalMedia(); value.runtime!.conversationUrl = 'https://www.doubao.com/chat/TEST-original';
+    expect(canLocateSubmittedMediaConversation(value)).toBe(false);
+  });
+  it.each(['ambiguous', 'binding'] as const)('既有%s定位冲突不能使用当前页替代', (change): void => {
+    const value = originalMedia();
+    if (change === 'ambiguous') value.artifacts = ['A', 'B'].map((id: string): NonNullable<Task['artifacts']>[number] => ({ id, kind: 'video', source: 'page',
+      url: `https://example.invalid/TEST-${id}.mp4`, runId: value.runtime!.runId, conversationUrl: `https://www.doubao.com/chat/TEST-${id}`, discoveredAt: value.updatedAt }));
+    else value.runtime!.acceptanceObservation = { schemaVersion: 1, runId: value.runtime!.runId, accountId: value.assignedAccountId!,
+      conversationUrl: 'https://www.doubao.com/chat/TEST-other', acceptedAt: value.updatedAt, evidence: { kind: 'prompt_published' },
+      cursor: { messageCount: 1, pollCount: 0 }, expectedArtifact: { kind: 'video', runId: value.runtime!.runId },
+      lease: { ownerId: 'TEST', acquiredAt: value.updatedAt, expiresAt: value.updatedAt, lastHeartbeatAt: value.updatedAt }, outcome: 'manual_review' };
+    expect(canLocateSubmittedMediaConversation(value)).toBe(false);
+  });
 });
 function taskWithReceipt(runtimeUrl?: string, bindingUrl?: string): ReturnType<typeof task> & Partial<Pick<Task, 'assignedAccountId' | 'mode'>> {
   const value = { ...task(runtimeUrl, [], bindingUrl), assignedAccountId: 'account-1', mode: 'image' as const };

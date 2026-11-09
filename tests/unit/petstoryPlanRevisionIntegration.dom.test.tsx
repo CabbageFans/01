@@ -55,11 +55,12 @@ async function completeReply(plan: PetStoryPlan, expectedStatus: 'applied' | 'in
   if (!saved.success) throw new Error(saved.error);
   await automationEngine.release(task.id);
   await act(async (): Promise<void> => { useTaskStore.setState({ tasks: listedTasks(), accountBusy: {}, executingTasks: {}, accountAutomationState: {}, activeTaskId: null }); });
+  // 正式 observer 每秒检查一次；真实磁盘收取必须允许跨过一次轮询，不能使用同为一秒的默认等待。
   await waitFor((): void => {
     expect(usePetStoryStore.getState().busy).toBe(false);
     const collected = currentProject().jobs.find((item: PetStoryChatJob): boolean => item.id === job.id);
     expect(collected?.status, collected?.error || usePetStoryStore.getState().error).toBe(expectedStatus);
-  });
+  }, { timeout: 3_000 });
   if (expectedStatus === 'applied') expect(await screen.findByText('新方案已准备好，请查看。满意后采用，也可以继续提出修改。')).toBeDefined();
 }
 

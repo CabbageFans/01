@@ -80,6 +80,8 @@ export interface TaskUpdateStatusParams {
 
 export interface TaskUpdateRuntimeParams {
   taskId: string;
+  /** 只更新当前原运行；不匹配时零写入，不能把迟到的阶段上报写入新运行。 */
+  expectedRunId?: string;
   status?: TaskStatus;
   runtime?: Partial<TaskRunSnapshot>;
   errorInfo?: TaskErrorInfo | null;

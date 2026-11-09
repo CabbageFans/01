@@ -6,6 +6,7 @@ import type { PetStoryPlan, PetStoryProject, PetStoryPromptBatch, Task } from '@
 import { PetStoryCanvas } from '../../src/components/PetStoryCanvas';
 import { usePetStoryStore } from '../../src/store/usePetStoryStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
+import { createVideoModeEntryCheckpoint, VideoControlReadinessError } from '../../src/utils/videoControlReadiness';
 import snapshot from '../fixtures/storyboard-five-shots.json';
 
 vi.mock('../../src/components/PetStoryCanvasMedia', (): object => ({
@@ -102,6 +103,18 @@ describe('画布唯一工具栏入口', (): void => {
     expect(notice?.textContent).toContain('请继续原视频任务');
     expect(notice?.getAttribute('title')).not.toContain('video_entry');
     expect(usePetStoryStore.getState().error).toBe(error);
+  });
+
+  it('模式归属歧义的具体原因显示在顶部，保留原错误与采样诊断', (): void => {
+    const diagnostic = createVideoModeEntryCheckpoint({ ready: false, elapsedMs: 13058, attempts: 17, stableSamples: 0,
+      controlOperation: 'mode_option', failureReason: 'ambiguous', missingControl: 'video_entry' }, 13058);
+    const failure = new VideoControlReadinessError('mode_entry', diagnostic);
+    usePetStoryStore.setState({ error: failure.message });
+    const { container } = render(canvas()); const notice = container.querySelector('.canvas-toolbar [role="alert"]');
+    expect(notice?.textContent).toContain('存在多个目标，无法确认');
+    expect(notice?.getAttribute('title')).toContain('视频生成入口尚未准备好：存在多个目标，无法确认');
+    expect(notice?.getAttribute('title')).not.toContain('video_entry');
+    expect(usePetStoryStore.getState().error).toBe(failure.message); expect(failure.diagnostic.attempts).toBe(17);
   });
 
   it.each(['fail', 'paused', 'cancelled'] as const)('bound旧job对应%s任务时工具栏不显示假进度', (status): void => {

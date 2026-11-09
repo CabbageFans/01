@@ -17,7 +17,7 @@ import { useTaskStore } from '../store/useTaskStore';
 import { usePetStoryStore } from '../store/usePetStoryStore';
 import { isBackgroundPetStoryTask } from '../utils/petstoryBackground';
 import { readBackReleasedPetStoryTask } from '../utils/petstoryTaskReadback';
-import type { BackgroundPageSubmission, CreationModeEntryDiagnostic, VideoArtifactReadbackDiagnostic } from '../utils/doubaoBridge';
+import type { BackgroundPageSubmission, CreationModeEntryDiagnostic, VideoArtifactReadbackDiagnostic, WebviewHandle } from '../utils/doubaoBridge';
 import { readPetStoryConversationReplies } from '../utils/petstoryConversationReplies';
 import type { PetStoryConversationReply } from '@doubao-studio/contracts';
 import type { AutomationState } from '../store/useTaskStore';
@@ -87,6 +87,7 @@ import { SubmittedCreationReadbackContextError, SubmittedCreationReadbackTimeout
 import type { SubmittedCreationReadbackSample } from '../utils/submittedCreationReadback';
 import type { CurrentCreationConversationReadback } from '../utils/creationConversationIdentity';
 import { mediaSubmissionReceiptFor } from '../utils/mediaSubmissionReceipt';
+import { revealBrowser } from '../utils/workspace';
 import type { ImageArtifactObservationProgress } from '../utils/imageArtifactReadback';
 import { createWebviewResourceScope } from '../utils/webviewLifecycle';
 import type { WebviewResourceScope } from '../utils/webviewLifecycle';
@@ -98,12 +99,13 @@ import { isExperimentalNoWatermarkEnabled, setExperimentalNoWatermarkEnabled } f
 import { decideMaterialAuthorizationProgress } from '../utils/materialAuthorization';
 import type { GenerationConfirmationEvidence } from '../utils/generationConfirmation';
 import { createAcceptedObservationBinding, renewObservationLease } from '../utils/acceptedObservation';
-import { createVideoReadinessCheckpoint, VideoControlReadinessError } from '../utils/videoControlReadiness';
+import { createVideoModeEntryCheckpoint, createVideoReadinessCheckpoint, VideoControlReadinessError } from '../utils/videoControlReadiness';
 import { ChatAttachmentUploadError } from '../utils/chatAttachments';
 import type { VideoControlReadinessResult, VideoPageReadinessStage } from '../utils/videoControlReadiness';
 import { initializationGate } from '../utils/initializationGate';
 import type { InitializationLease } from '../utils/initializationGate';
 import {
+  canLocateSubmittedMediaConversation,
   isSameDoubaoConversation,
   normalizeDoubaoConversationUrl,
   openTaskConversation,
@@ -112,6 +114,7 @@ import {
   waitForConcreteConversationUrl,
   waitForConversationNavigator,
 } from '../utils/taskConversationLocator';
+import type { TaskConversationTarget } from '../utils/taskConversationLocator';
 import {
   applyWebviewActivationStyle,
   forceWebviewLayoutRepaint,
@@ -120,11 +123,67 @@ import {
 } from '../utils/webviewHydration';
 
 /** 页面仅提供轮次事实；账号、运行和完整任务输入必须来自正式任务记录。 */
-const taskChatReadbackContext = (task: Task, accountId: string, conversationUrl: string, currentUrl: string): ChatReadbackContext => ({
-  taskId: task.id, runId: task.runtime?.runId || '', currentRunId: useTaskStore.getState().tasks.find((item): boolean => item.id === task.id)?.runtime?.runId || '',
-  accountId: task.assignedAccountId || '', currentAccountId: accountId, conversationUrl, currentConversationUrl: currentUrl,
-  ...(task.runtime?.chatReadback?.runId === task.runtime?.runId ? { userTurnId: task.runtime?.chatReadback?.userTurnId, userMessageId: task.runtime?.chatReadback?.userMessageId } : {}),
-});
+const taskChatReadbackContext = (task: Task, accountId: string, conversationUrl: string, currentUrl: string): ChatReadbackContext => {
+  const mediaReceipt = ['image', 'video'].includes(task.mode || '') ? task.runtime?.mediaSubmissionReceipt : undefined;
+  const receiptMatches = !mediaReceipt || resolveTaskConversationTarget(task).ok && mediaReceipt.accountId === accountId;
+  const identity = mediaReceipt && receiptMatches ? { userTurnId: mediaReceipt.userTurnId, userMessageId: mediaReceipt.userMessageId }
+    : task.runtime?.chatReadback?.runId === task.runtime?.runId ? { userTurnId: task.runtime?.chatReadback?.userTurnId, userMessageId: task.runtime?.chatReadback?.userMessageId } : {};
+  return { taskId: task.id, runId: task.runtime?.runId || '',
+    currentRunId: receiptMatches ? useTaskStore.getState().tasks.find((item): boolean => item.id === task.id)?.runtime?.runId || '' : '',
+    accountId: task.assignedAccountId || '', currentAccountId: accountId, conversationUrl, currentConversationUrl: currentUrl, ...identity };
+};
+
+/** 仅保护当前具体会话中的未终结原媒体提交，其他 Chat 保留被动同步。 */
+function hasUnresolvedMediaConversation(tasks: readonly Task[], accountId: string, currentUrl: string): boolean {
+  return tasks.some((task: Task): boolean => {
+    if (task.assignedAccountId !== accountId || !['image', 'video'].includes(task.mode || '')
+      || ['done', 'cancelled'].includes(task.status) || !task.runtime?.submittedAt) return false;
+    const target = resolveTaskConversationTarget(task);
+    return target.ok && isSameDoubaoConversation(target.url, currentUrl);
+  });
+}
+
+/** 导航事件只能读取点击时的原运行，异步等待不允许换成同 taskId 的后续请求。 */
+function sameTaskConversationRun(original: Task, current: Task | undefined): boolean {
+  return !!original.runtime?.runId && !!current && current.id === original.id && current.projectId === original.projectId
+    && current.mode === original.mode && current.assignedAccountId === original.assignedAccountId && current.prompt === original.prompt
+    && current.runtime?.runId === original.runtime.runId && current.runtime.submittedAt === original.runtime.submittedAt
+    && JSON.stringify(current.runtime.input) === JSON.stringify(original.runtime.input)
+    && JSON.stringify(current.attachments || []) === JSON.stringify(original.attachments || [])
+    && current.audioAttachment === original.audioAttachment && JSON.stringify(current.videoConfig) === JSON.stringify(original.videoConfig)
+    && JSON.stringify(current.petstory) === JSON.stringify(original.petstory) && JSON.stringify(current.petstoryChat) === JSON.stringify(original.petstoryChat);
+}
+
+/** 只读确认当前媒体原消息并耐久保存；页面显示和导航在核验完成后由调用方处理。 */
+async function locateSubmittedMediaConversation(task: Task, accountId: string, webview: WebviewHandle, assertCurrent: () => void): Promise<{
+  target: TaskConversationTarget; providerIdentityMatches: boolean;
+}> {
+  let target = resolveTaskConversationTarget(task);
+  if (!['image', 'video'].includes(task.mode || '') || !task.runtime?.submittedAt) return { target, providerIdentityMatches: false };
+  // 已保存的原服务器收据不会因消息虚拟卸载失效；同一具体路由直接显示，不刷新重建。
+  if (target.ok && task.runtime.mediaSubmissionReceipt && isSameDoubaoConversation(webview.getURL(), target.url)) {
+    assertCurrent(); return { target, providerIdentityMatches: true };
+  }
+  const page = await getCurrentCreationConversation(webview, { ensureCurrent: assertCurrent });
+  assertCurrent();
+  const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === task.id);
+  const receipt = mediaSubmissionReceiptFor(task, latest, accountId, page, new Date().toISOString());
+  if (!target.ok) {
+    if (!receipt) throw new Error('尚未从原账号当前页面核实这次已提交请求的服务器消息；未绑定其他对话，请先在原账号历史中打开原请求');
+    const saved = await useTaskStore.getState().updateTaskRuntime(task.id, { expectedRunId: task.runtime.runId,
+      runtime: { conversationUrl: receipt.conversationUrl, mediaSubmissionReceipt: receipt } });
+    assertCurrent();
+    const persisted = useTaskStore.getState().tasks.find((item): boolean => item.id === task.id);
+    target = resolveTaskConversationTarget(persisted);
+    if (!saved || !target.ok || persisted?.runtime?.mediaSubmissionReceipt?.userMessageId !== receipt.userMessageId) {
+      throw new Error('原媒体会话定位保存未确认，未打开其他对话');
+    }
+  }
+  const knownReceipt = receipt || latest?.runtime?.mediaSubmissionReceipt;
+  return { target, providerIdentityMatches: target.ok && page.source === 'published_message' && page.snapshot.historyComplete === true
+    && isSameDoubaoConversation(page.conversationUrl, target.url)
+    && !!knownReceipt?.userMessageId && !!page.messageIds?.includes(knownReceipt.userMessageId) };
+}
 
 /** 跨端消息同步必须证明新文档已加载，且不丢弃用户当前输入或交互现场。 */
 const conversationSynchronizations = new WeakMap<HTMLWebViewElement, Promise<ConversationSyncResult>>();
@@ -706,13 +765,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         // 恢复按原全文与消息身份定位，不要求整个会话只有一条用户消息。
         const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
         const receipt = latest?.runtime?.mediaSubmissionReceipt;
-        const evidence = concreteUrl && pinnedImageUrl ? inspectSubmittedImageReadback(snapshot, task.runtime?.input.prompt || task.prompt, {
+        const context: ChatReadbackContext = {
           taskId, runId: task.runtime?.runId || '', currentRunId: latest?.runtime?.runId || '',
           accountId, currentAccountId: latest?.assignedAccountId || '',
           conversationUrl: pinnedImageUrl || '', currentConversationUrl: concreteUrl || '',
           userMessageId: receipt?.userMessageId, userTurnId: receipt?.userTurnId,
-        }) : inspectCreationReadback(snapshot, task.runtime?.input.prompt || task.prompt, 'image', 0);
-        const diagnostic = JSON.stringify({ ...diagnoseCreationReadback(snapshot, task.prompt, 'image'),
+        };
+        const evidence = task.mode === 'video'
+          ? inspectCreationReadback(snapshot, task.runtime?.input.prompt || task.prompt, 'video', 0, task.videoConfig, !!task.runtime?.generationConfirmation, context)
+          : concreteUrl && pinnedImageUrl ? inspectSubmittedImageReadback(snapshot, task.runtime?.input.prompt || task.prompt, context)
+          : inspectCreationReadback(snapshot, task.runtime?.input.prompt || task.prompt, 'image', 0);
+        const diagnostic = JSON.stringify({ ...diagnoseCreationReadback(snapshot, task.prompt, task.mode === 'video' ? 'video' : 'image', task.videoConfig),
           promptPublished: evidence.promptPublished, reason: evidence.reason,
           originalMessageIndex: evidence.originalMessageIndex, originalAssistantMessageIndices: evidence.originalAssistantMessageIndices });
         if (diagnostic !== lastImageDiagnostic) {
@@ -744,7 +807,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       try {
         // 缺少定位时持续核对同一原页面；只在唯一全文及原运行均证明后保存，不导航或重发。
         if (confirmCurrentSubmission) {
-          if (task.mode === 'image') {
+          if (task.mode === 'image' || task.mode === 'video') {
             const located = await waitForSubmittedCreationReadback({
               stopOnStableAmbiguity: true,
               signal: observationController?.signal, ensureCurrent: assertOriginalContext,
@@ -757,37 +820,22 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             const receipt = lastImagePage ? mediaSubmissionReceiptFor(task, latest, accountId, lastImagePage, new Date().toISOString()) : undefined;
             const verifiedUrl = receipt?.conversationUrl || verifiedSubmissionConversationUrl(task, latest,
               accountId, located.url, webview.getURL(), located.evidence);
-            if (!verifiedUrl) throw new Error('原图片任务输入或会话身份不符，未绑定其他结果');
-            const saved = await useTaskStore.getState().updateTaskRuntime(taskId, { runtime: { conversationUrl: verifiedUrl, ...(receipt ? { mediaSubmissionReceipt: receipt } : {}) } });
+            if (!verifiedUrl) throw new Error('原媒体任务输入或会话身份不符，未绑定其他结果');
+            const saved = await useTaskStore.getState().updateTaskRuntime(taskId, { expectedRunId: task.runtime?.runId,
+              runtime: { conversationUrl: verifiedUrl, ...(receipt ? { mediaSubmissionReceipt: receipt } : {}) } });
             assertOriginalContext();
             conversationTarget = resolveTaskConversationTarget(useTaskStore.getState().tasks.find((item): boolean => item.id === taskId));
-            if (!saved || !conversationTarget.ok) throw new Error('原图片会话地址保存未确认，未重新发送');
+            if (!saved || !conversationTarget.ok) throw new Error('原媒体会话地址保存未确认，未重新发送');
             imageIdentityVerified = true;
           } else {
             const currentUrl = normalizeDoubaoConversationUrl(webview.getURL());
             if (!currentUrl) throw new Error('当前页面尚无具体原会话，保持暂停且不重发');
-            const snapshot = task.mode === 'video' ? await getCreationReadbackSnapshot(webview, {
-              conversationUrl: currentUrl, signal: observationController?.signal,
-              ensureCurrent: (): void => {
-                const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
-                if (latest?.assignedAccountId !== accountId || latest.runtime?.runId !== task.runtime?.runId || latest.runtime?.submittedAt !== task.runtime?.submittedAt) throw new Error('原视频运行已变化');
-              },
-            }) : await getChatPageSnapshot(webview);
-            const evidence = task.mode === 'chat' ? inspectChatReadback(snapshot, task.prompt, 0)
-              : inspectCreationReadback(snapshot, task.prompt, 'video', 0, task.videoConfig, !!task.runtime?.generationConfirmation,
-                task.mode === 'video' ? taskChatReadbackContext(task, accountId, currentUrl, webview.getURL()) : undefined);
+            const snapshot = await getChatPageSnapshot(webview);
+            const evidence = inspectChatReadback(snapshot, task.prompt, 0);
             const latest = useTaskStore.getState().tasks.find((item) => item.id === taskId);
             const verifiedUrl = verifiedSubmissionConversationUrl(task, latest, accountId, currentUrl, webview.getURL(), evidence);
             if (observationController?.signal.aborted || !verifiedUrl) {
               if (!evidence.promptPublished && task.mode === 'chat') console.warn('[ChatReadbackMismatch]', JSON.stringify(diagnoseChatReadback(snapshot, task.prompt)));
-              if (task.mode === 'video') await window.electronAPI.logs.append({ level: 'warn', scope: 'automation', taskId, accountId,
-                message: '创作只读定位诊断 ' + JSON.stringify({ readback: diagnoseCreationReadback(snapshot, task.prompt, task.mode, task.videoConfig,
-                  task.mode === 'video' ? taskChatReadbackContext(task, accountId, currentUrl, webview.getURL()) : undefined),
-                  verifiedUrl: !!verifiedUrl, inputSame: JSON.stringify(task.runtime?.input) === JSON.stringify(latest?.runtime?.input),
-                  promptInputMatches: latest?.runtime?.input.prompt === latest?.prompt, attachmentsMatch: JSON.stringify(latest?.runtime?.input.attachments || []) === JSON.stringify(latest?.attachments || []),
-                  configMatches: JSON.stringify(latest?.runtime?.input.videoConfig) === JSON.stringify(latest?.videoConfig),
-                  bindingMatches: JSON.stringify(latest?.runtime?.input.petstory) === JSON.stringify(latest?.petstory), runMatches: latest?.runtime?.runId === task.runtime?.runId,
-                  submittedMatches: latest?.runtime?.submittedAt === task.runtime?.submittedAt }) });
               submissionReconcileRef.current.delete(taskId);
               throw new Error('当前 Chat 不唯一匹配原任务或运行已变化；未绑定、未重发');
             }
@@ -807,13 +855,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       assertOriginalContext();
       const syncStartedAt = new Date().toISOString();
       await useTaskStore.getState().updateTaskRuntime(taskId, { runtime: { message: '正在核对原豆包会话结果，不会重新发送', lastHeartbeatAt: syncStartedAt } });
-      if (task.mode === 'image' && task.runtime?.mediaSubmissionReceipt && !isSameDoubaoConversation(webview.getURL(), conversationTarget.url)) {
+      if (['image', 'video'].includes(task.mode || '') && task.runtime?.mediaSubmissionReceipt && !isSameDoubaoConversation(webview.getURL(), conversationTarget.url)) {
         const page = await getCurrentCreationConversation(webview, { signal: observationController?.signal, ensureCurrent: assertOriginalContext });
         assertOriginalContext();
         if (page.conversationUrl && isSameDoubaoConversation(page.conversationUrl, conversationTarget.url)) imageIdentityVerified = true;
       }
-      // 图片正在生成时直接观察已定位的原页；刷新会打断现场并被 GENERATING 保护拒绝。
-      if (task.mode !== 'image' || !imageIdentityVerified && !isSameDoubaoConversation(webview.getURL(), conversationTarget.url)) {
+      // 已核实媒体服务器消息时原位观察，不能因地址栏尚未更新而刷新生成现场。
+      if (!['image', 'video'].includes(task.mode || '') || !imageIdentityVerified && !isSameDoubaoConversation(webview.getURL(), conversationTarget.url)) {
         const navigation = await synchronizeConversation(webview, conversationTarget.url, originalContextIsCurrent, 'explicit', observationController?.signal);
         if (!navigation.ok) {
           submissionReconcileRef.current.delete(taskId);
@@ -1852,12 +1900,20 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   }, [ensureTaskWebview, getTaskWebview, taskWebviewReady]);
 
   useEffect(() => {
-    const handleOpenConversation = async (event: Event) => {
-      const task = (event as CustomEvent<{ task: Task }>).detail?.task;
+    const handleOpenConversation = async (event: Event): Promise<void> => {
+      const detail = (event as CustomEvent<{ task: Task; locateSubmittedMedia?: boolean; isCurrentSource?: () => boolean }>).detail;
+      const sourceIsCurrent = (): boolean => {
+        try { return detail?.isCurrentSource ? detail.isCurrentSource() : true; }
+        catch { return false; }
+      };
+      const task = detail?.task;
       const accountId = task?.assignedAccountId;
       const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
-      const conversationTarget = resolveTaskConversationTarget(task);
-      if (!accountId || !account || !supportsDoubaoConversationLocator(account.platform) || !conversationTarget.ok) {
+      let conversationTarget = resolveTaskConversationTarget(task);
+      const locateSubmittedMedia = detail?.locateSubmittedMedia === true && canLocateSubmittedMediaConversation(task);
+      if (!task || !accountId || !account || !sourceIsCurrent() || !supportsDoubaoConversationLocator(account.platform)
+        || !sameTaskConversationRun(task, useTaskStore.getState().tasks.find((item): boolean => item.id === task.id))
+        || !conversationTarget.ok && !locateSubmittedMedia) {
         message.warning('该任务没有可验证的原会话地址');
         return;
       }
@@ -1865,8 +1921,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (!canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))) { message.info('另一个账号正在提交，请稍后打开原会话'); return; }
       useAccountStore.getState().selectAccount(accountId);
       ensureTaskWebview(task);
-      if (materialPagesRef.current.uses(task)) setViewedTaskPageId(task.id);
-      else setViewedTaskPageId(null);
       const webview = await waitForConversationNavigator(
         () => getTaskWebview(task),
         { timeoutMs: 20_000, isReady: () => taskWebviewReady(task) },
@@ -1875,22 +1929,42 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         message.warning('账号页面未能及时就绪，未跳转到其它会话');
         return;
       }
-      const taskState = useTaskStore.getState();
-      const accountBusy = taskState.tasks.some((item): boolean => tasksExecutionConflict(item, task)
-        && ['executing', 'generating', 'manual_submission_observing'].includes(item.status));
-      if (accountBusy || submissionReconcileRef.current.has(task.id)) {
-        if (isSameDoubaoConversation(webview.getURL(), conversationTarget.url)) message.info('原会话正在观察中，已保留当前现场');
-        else message.warning('原账号正在处理任务，请稍后打开原会话');
-        return;
+      const currentContext = (): boolean => {
+        const state = useTaskStore.getState();
+        return sourceIsCurrent() && sameTaskConversationRun(task, state.tasks.find((item): boolean => item.id === task.id))
+          && ownsTaskWebview(task.id, webview) && !hasAccountChatAdjustment(accountId)
+          && canSelectAccount(accountId, findInteractiveAccountId(state.accountAutomationState))
+          && !state.tasks.some((item): boolean => item.id !== task.id && tasksExecutionConflict(item, task)
+            && ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(item.status));
+      };
+      const assertCurrent = (): void => { if (!currentContext()) throw new Error('原任务、账号或执行现场已变化，请重新打开对应任务'); };
+      const showOriginalPage = (): void => {
+        assertCurrent();
+        setViewedTaskPageId(materialPagesRef.current.uses(task) ? task.id : null);
+        revealBrowser();
+      };
+      try {
+        assertCurrent();
+        const located = await locateSubmittedMediaConversation(task, accountId, webview, assertCurrent);
+        conversationTarget = located.target;
+        if (!conversationTarget.ok) throw new Error('该任务尚无可验证的原会话地址');
+        if (located.providerIdentityMatches) {
+          showOriginalPage(); message.success('已打开任务对应的原豆包对话'); return;
+        }
+        const accountBusy = useTaskStore.getState().tasks.some((item): boolean => tasksExecutionConflict(item, task)
+          && ['executing', 'generating', 'manual_submission_observing'].includes(item.status));
+        if (accountBusy || submissionReconcileRef.current.has(task.id)) {
+          if (isSameDoubaoConversation(webview.getURL(), conversationTarget.url)) { showOriginalPage(); message.info('原会话正在观察中，已保留当前现场'); }
+          else message.warning('原账号正在处理任务，请稍后打开原会话');
+          return;
+        }
+        const navigation = await synchronizeConversation(webview, conversationTarget.url, currentContext);
+        assertCurrent();
+        if (navigation.ok) { showOriginalPage(); message.success('已同步并打开任务对应的原会话'); }
+        else message.warning(conversationSyncMessage(navigation));
+      } catch (error: unknown) {
+        message.warning(error instanceof Error ? error.message : '原会话核对未完成，未打开其他对话');
       }
-      const navigation = await synchronizeConversation(webview, conversationTarget.url, (): boolean => {
-        const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === task.id);
-        return latest?.runtime?.runId === task.runtime?.runId && latest?.assignedAccountId === accountId
-          && ownsTaskWebview(task.id, webview) && canSelectAccount(accountId, findInteractiveAccountId(useTaskStore.getState().accountAutomationState))
-          && !useTaskStore.getState().tasks.some((item): boolean => tasksExecutionConflict(item, task) && ['executing', 'generating', 'manual_submission_observing'].includes(item.status));
-      });
-      if (navigation.ok) message.success('已同步并打开任务对应的原会话');
-      else message.warning(conversationSyncMessage(navigation));
     };
     window.addEventListener('open-task-conversation', handleOpenConversation);
     return () => window.removeEventListener('open-task-conversation', handleOpenConversation);
@@ -1911,10 +1985,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (syncing || !current() || loadingMapRef.current.get(accountId)
         || Date.now() - (passiveConversationSyncRef.current.get(accountId) || 0) < 25_000) return;
       const webview = registryRef.current.get(accountId); const target = webview && normalizeDoubaoConversationUrl(webview.getURL());
-      if (!webview || !target) return;
+      if (!webview || !target || hasUnresolvedMediaConversation(useTaskStore.getState().tasks, accountId, target)) return;
       syncing = true;
       passiveConversationSyncRef.current.set(accountId, Date.now());
-      try { await synchronizeConversation(webview, target, (): boolean => current() && registryRef.current.get(accountId) === webview, 'visibility', controller.signal); }
+      try { await synchronizeConversation(webview, target, (): boolean => current() && registryRef.current.get(accountId) === webview
+        && !hasUnresolvedMediaConversation(useTaskStore.getState().tasks, accountId, webview.getURL()), 'visibility', controller.signal); }
       catch { /* 账号页面在退出或重建，下一次显示／聚焦时重新核对。 */ }
       finally { syncing = false; }
     };
@@ -2226,7 +2301,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       await checkHumanVerification();
       if (!independentPage && backgroundTask && visibleRef.current) throw new AccountAvailabilityPauseError('豆包对话正在打开，请收起后继续生成；本次尚未发送', 'page_unrecognized');
       if (selectedReplyRepair && !useTaskStore.getState().tasks.some((item): boolean => item.runtime?.chatAdjustmentGuard?.active === true && item.runtime.chatAdjustmentGuard.allowedTaskId === taskId)) throw new SubmissionSafetyPauseError('本次豆包调整已结束或移交已收回；修订未导航、未发送');
-      const newConversationResult = await startNewConversation(webview, 20_000, mode === 'chat', selectedReplyRepair || backgroundTask, ownedRepairDraft);
+      const newConversationResult = await startNewConversation(webview, 20_000, mode === 'chat', selectedReplyRepair || backgroundTask, ownedRepairDraft, mode === 'image' || mode === 'video' ? mode : undefined);
       if (!newConversationResult.ok) {
         if (backgroundTask) throw new AccountAvailabilityPauseError('豆包当前有未发送内容、正在回复或输入区尚未就绪，请处理后继续本次制作；本次未发送', 'page_unrecognized');
         if (selectedReplyRepair) throw new AccountAvailabilityPauseError(`修订已暂停，当前豆包输入尚未就绪（${newConversationResult.reason || 'PAGE_UNKNOWN'}）；请处理未发送草稿或等待回复结束后继续原修订，未发送`, 'page_unrecognized');
@@ -2323,15 +2398,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           const switched = await clickAITab(webview, mode, (diagnostic: CreationModeEntryDiagnostic): void => { modeDiagnostics.push(diagnostic); });
           const modeDiagnostic = modeDiagnostics[modeDiagnostics.length - 1];
           modeEntryElapsedMs = Date.now() - modeEntryStartedAt;
+          const modeCheckpoint = createVideoModeEntryCheckpoint(modeDiagnostic, modeEntryElapsedMs);
           if (mode === 'image' && modeDiagnostic) {
             void window.electronAPI.logs.append({ level: switched ? 'info' : 'warn', scope: 'automation', taskId, accountId,
               message: '图片模式回读 ' + JSON.stringify(modeDiagnostic) }).catch((): void => undefined);
           }
           if (!switched) {
             if (mode === 'video') {
-              throw new VideoControlReadinessError('mode_entry', {
-                ready: false, failureStage: 'mode_entry', attempts: 1, elapsedMs: modeEntryElapsedMs,
-              });
+              throw new VideoControlReadinessError('mode_entry', modeCheckpoint);
             }
             // 此时尚未上传或写入提交意图；使用可恢复的控件错误，不能归为未知提交失败。
             const reason = modeDiagnostic?.reason || '';
@@ -2339,8 +2413,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               : /未找到|等待窗口内挂载/.test(reason) ? '当前输入区未读到图像生成入口' : '当前图像生成控件无法确认';
             throw new PetStoryControlError(`${detail}，本次尚未发送`);
           }
-          if (mode === 'video') await persistVideoReadiness('video_entry');
-          await pause(1500); // 等待 Tab 切换动画
+          if (mode === 'video') await persistVideoReadiness('video_entry', modeCheckpoint);
         }
 
         // 视频模式：只使用页面可见控件配置，禁止请求改写绕过会员门槛。
@@ -2477,10 +2550,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         if (!original?.runtime?.submittedAt || original.runtime.runId !== expectedRunId
           || !automationEngine.ownsController(taskId, controller) || !ownsTaskWebview(taskId, webview)
           || (!['chat', 'image'].includes(mode) && !petstoryGuard && !strictPrompt)) return;
-        const preserveImageReceipt = async (): Promise<boolean> => {
+        const preserveMediaReceipt = async (): Promise<boolean> => {
           const currentPage = page || await getCurrentCreationConversation(webview, {
             signal: controller.signal, ensureCurrent: (): void => {
-              if (!automationEngine.ownsController(taskId, controller)) throw new SubmissionSafetyPauseError('原图片执行权已变化，未保存其他结果');
+              const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+              if (!automationEngine.ownsAccountController(taskId, accountId, controller) || !ownsTaskWebview(taskId, webview)
+                || latest?.runtime?.runId !== expectedRunId || latest.runtime.submittedAt !== original.runtime?.submittedAt
+                || latest.assignedAccountId !== accountId || JSON.stringify(latest.runtime.input) !== JSON.stringify(original.runtime?.input)) {
+                throw new SubmissionSafetyPauseError('原媒体运行、输入或执行权已变化，未保存其他结果');
+              }
             },
           });
           const latest = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
@@ -2490,13 +2568,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             const saved = await updateTaskRuntime(taskId, { runtime: { conversationUrl: receipt.conversationUrl, mediaSubmissionReceipt: receipt } });
             const persisted = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
             if (!saved || persisted?.runtime?.runId !== expectedRunId || persisted.runtime.mediaSubmissionReceipt?.userMessageId !== receipt.userMessageId
-              || !isSameDoubaoConversation(persisted.runtime.conversationUrl, receipt.conversationUrl)) throw new SubmissionSafetyPauseError('原图片消息定位保存未确认，保留提交且不重发');
+              || !isSameDoubaoConversation(persisted.runtime.conversationUrl, receipt.conversationUrl)) throw new SubmissionSafetyPauseError('原媒体消息定位保存未确认，保留提交且不重发');
             taskConversationUrl = receipt.conversationUrl;
             return true;
           }
           return false;
         };
-        if (mode === 'image' && !original.runtime.mediaSubmissionReceipt && await preserveImageReceipt()) return;
+        if (['image', 'video'].includes(mode) && !original.runtime.mediaSubmissionReceipt && await preserveMediaReceipt()) return;
         if (normalizeDoubaoConversationUrl(original.runtime.conversationUrl)) return;
         const currentUrl = normalizeDoubaoConversationUrl(observedUrl || webview.getURL());
         if (!currentUrl) return;
@@ -2529,14 +2607,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       };
       const readSubmissionEvidence = async (): Promise<SubmissionReadback> => {
         const assertOriginalMediaSubmission = (): void => {
-          if (mode !== 'image') return;
+          if (!['image', 'video'].includes(mode)) return;
           const current = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
           if (controller.signal.aborted || current?.status !== 'executing' || current.assignedAccountId !== accountId || !current.runtime
             || current.runtime.runId !== expectedRunId || current.runtime.submittedAt !== submissionMarkedAt
             || current.runtime.input.prompt !== prompt || current.runtime.input.mode !== mode || current.prompt !== prompt
             || JSON.stringify(current.runtime.input.attachments || []) !== JSON.stringify(current.attachments || [])
+            || JSON.stringify(current.runtime.input.videoConfig) !== JSON.stringify(current.videoConfig)
+            || current.runtime.input.audioAttachment !== current.audioAttachment
+            || JSON.stringify(current.runtime.input.petstory) !== JSON.stringify(current.petstory)
             || !automationEngine.ownsAccountController(taskId, accountId, controller) || !ownsTaskWebview(taskId, webview)) {
-            throw new SubmissionSafetyPauseError('原图片运行、输入或执行权已变化，停止回读且未重新发送');
+            throw new SubmissionSafetyPauseError('原媒体运行、输入或执行权已变化，停止回读且未重新发送');
           }
         };
         assertOriginalMediaSubmission();
@@ -2554,9 +2635,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           return latestChatReadback;
         }
         if (mode === 'image' || (petstoryGuard || strictPrompt) && mode === 'video') {
-          const page = mode === 'image' ? await getCurrentCreationConversation(webview, { signal: controller.signal, ensureCurrent: assertOriginalMediaSubmission }) : undefined;
+          const page = await getCurrentCreationConversation(webview, { signal: controller.signal, ensureCurrent: assertOriginalMediaSubmission });
           assertOriginalMediaSubmission();
-          const evidence = inspectCreationReadback(page?.snapshot || await getChatPageSnapshot(webview), prompt, mode, initialMsgCount, videoConfig);
+          const originalTask = useTaskStore.getState().tasks.find((item): boolean => item.id === taskId);
+          const currentUrl = page.conversationUrl || normalizeDoubaoConversationUrl(webview.getURL());
+          const evidence = inspectCreationReadback(page.snapshot, prompt, mode, initialMsgCount, videoConfig, !!originalTask?.runtime?.generationConfirmation,
+            mode === 'video' && originalTask && currentUrl ? taskChatReadbackContext(originalTask, accountId, currentUrl, currentUrl) : undefined);
           trackSubmittedImageUrl(webview.getURL());
           if (page?.conversationUrl) trackSubmittedImageUrl(page.conversationUrl);
           await preserveSubmittedConversation?.(evidence, observedUrl, page);
@@ -2738,7 +2822,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (!authorizationTriggeredSubmission) {
         const preparation = await preparePageSubmission(webview, undefined, backgroundInput);
         if (preparation.humanVerification) await pauseForHumanVerification(accountId);
-        if (!preparation.ok) throw new AccountAvailabilityPauseError('当前页面输入区或发送控件尚未稳定；未记录提交意图、未发送，可继续原任务重新核对', 'page_unrecognized');
+        if (!preparation.ok) {
+          // 取消会撤回后台准备权限；保留原控制器的取消事实，不能误报页面失稳。
+          if (controller.signal.aborted) throw new DOMException('任务已取消', 'AbortError');
+          throw new AccountAvailabilityPauseError('当前页面输入区或发送控件尚未稳定；未记录提交意图、未发送，可继续原任务重新核对', 'page_unrecognized');
+        }
       }
 
       // P0：真实发送是不可重复副作用。先从当前任务快照核对 runId/submittedAt，
@@ -2759,7 +2847,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       );
       // 必须和提交回读使用同一个 DOM 选择器；综合生成检测可能因为网络状态
       // 提前返回而没有消息计数，不能把旧会话消息误当成本次发送回执。
-      let submitted = authorizationTriggeredSubmission;
       // 所有模式仅激活一次真实发送控件；平台不受理时保留原意图，不换策略重发。
       if (!authorizationTriggeredSubmission) {
         const dispatchController = new AbortController();
@@ -2769,7 +2856,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         let dispatchTimeout: ReturnType<typeof setTimeout> | undefined;
         const dispatchDeadline = Date.now() + 10_000;
         try {
-          submitted = await Promise.race([
+          await Promise.race([
             submitPromptOnce(webview, {
               signal: dispatchController.signal,
               deadlineAt: dispatchDeadline,
@@ -2792,18 +2879,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         } catch (error: unknown) {
           await checkHumanVerification();
           if (error instanceof HumanVerificationRequiredError) await pauseForHumanVerification(accountId);
-          throw new SubmissionSafetyPauseError('发送动作结果不确定，请人工核对豆包会话；系统未自动重发');
+          if (controller.signal.aborted || error instanceof DOMException && error.name === 'AbortError') throw new DOMException('任务已暂停', 'AbortError');
+          // 页内控件激活的 ACK 不证明平台是否受理；即使 ACK 丢失，也只进入下方
+          // 同一次原消息回读阶段。这里既不宣称已发送，也不再次激活发送控件。
         } finally {
           abortDispatch();
           if (dispatchTimeout) clearTimeout(dispatchTimeout);
           controller.signal.removeEventListener('abort', abortDispatch);
         }
       }
-      if (!submitted) {
-        await checkHumanVerification();
-        throw new SubmissionSafetyPauseError('发送按钮不可用或点击结果不确定；系统已停止且未自动重发');
-      }
-
       // 媒体消息与输入框可异步重绘，统一给原次发送 15 秒只读受理窗口。
       let confirmedEvidence = await waitForConfirmedSubmission({
         read: readSubmissionEvidence, wait: pause, onUnconfirmed: checkHumanVerification, signal: controller.signal,
@@ -2880,7 +2964,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const acceptedAt = new Date().toISOString();
       const acceptedTask = useTaskStore.getState().tasks.find((item) => item.id === taskId);
       const acceptedRunId = acceptedTask?.runtime?.runId;
-      const acceptedTarget = mode === 'image' ? resolveTaskConversationTarget(acceptedTask) : undefined;
+      const acceptedTarget = ['image', 'video'].includes(mode) ? resolveTaskConversationTarget(acceptedTask) : undefined;
       const conversationUrl = acceptedTarget?.ok ? acceptedTarget.url : await waitForConcreteConversationUrl(webview, { timeoutMs: 15_000 });
       if (!confirmedEvidence || !acceptedRunId || !conversationUrl) {
         throw new SubmissionSafetyPauseError('平台已受理，但未取得具体原会话地址；已安全暂停且不会自动重发');

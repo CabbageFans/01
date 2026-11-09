@@ -66,6 +66,33 @@ beforeEach((): void => {
 afterEach(async (): Promise<void> => { unobserve?.(); unobserve = undefined; await Promise.all(settlements.map((settle): Promise<void> => settle())); usePetStoryStore.setState(original.petstory); useTaskStore.setState(original.tasks); useAccountStore.setState(original.accounts); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('平台视频参数确认保留真实原因并仅按显式操作回读', (): void => {
+  it('发送不确定且缺URL的原视频可显式请求只读定位，原提交与输入不变', async (): Promise<void> => {
+    persisted[0].status = 'paused'; persisted[0].runtime!.stage = 'paused';
+    persisted[0].runtime!.conversationUrl = undefined; persisted[0].runtime!.acceptanceObservation = undefined;
+    persisted[0].errorInfo = { code: 'submission_uncertain', message: 'TEST 原发送待核对', recoverable: true, detectedAt: now };
+    useTaskStore.setState({ tasks: structuredClone(persisted) }); const before = structuredClone(persisted[0].runtime!);
+    const events = vi.spyOn(window, 'dispatchEvent'); await usePetStoryStore.getState().resumeProduction();
+    expect(observed).toEqual([video.id]); expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'reconcile-task-submission',
+      detail: expect.objectContaining({ taskId: video.id, useCurrentPage: true }) }));
+    expect(persisted[0].runtime!.runId).toBe(before.runId); expect(persisted[0].runtime!.submittedAt).toBe(before.submittedAt);
+    expect(persisted[0].runtime!.input).toEqual(before.input); expect(start).not.toHaveBeenCalled();
+  });
+  it.each(['account', 'project', 'step', 'step_run', 'prompt', 'attachments', 'config', 'input_binding', 'binding_conflict'] as const)('缺URL原视频%s失配时不读账号当前页', async (change): Promise<void> => {
+    persisted[0].status = 'paused'; persisted[0].runtime!.stage = 'paused'; persisted[0].runtime!.conversationUrl = undefined;
+    persisted[0].runtime!.acceptanceObservation = undefined;
+    if (change === 'account') persisted[0].assignedAccountId = 'TEST-other-account';
+    if (change === 'project') persisted[0].projectId = 'TEST-other-project';
+    if (change === 'step') persisted[0].petstory!.stepId = 'TEST-other-step';
+    if (change === 'step_run') project.production!.steps[0].runId = 'TEST-other-run';
+    if (change === 'prompt') persisted[0].prompt += ' TEST changed';
+    if (change === 'attachments') persisted[0].attachments = ['TEST-other.png'];
+    if (change === 'config') persisted[0].videoConfig = { ...persisted[0].videoConfig!, duration: '9s' };
+    if (change === 'input_binding') persisted[0].runtime!.input.petstory = { projectId: project.id, stepId: 'TEST-other-step' };
+    if (change === 'binding_conflict') persisted[0].runtime!.acceptanceObservation = structuredClone(video.runtime!.acceptanceObservation);
+    useTaskStore.setState({ tasks: structuredClone(persisted) }); usePetStoryStore.setState({ project: structuredClone(project) });
+    await usePetStoryStore.getState().resumeProduction();
+    expect(observed).toEqual([]); expect(updateRuntime).not.toHaveBeenCalled(); expect(start).not.toHaveBeenCalled(); expect(pause).toHaveBeenCalled();
+  });
   it('验证后缺会话的原提交可显式核对当前页，保持原run并仅派发一次只读观察', async (): Promise<void> => {
     persisted[0].status = 'waiting_verification'; persisted[0].runtime!.stage = 'waiting_verification';
     persisted[0].runtime!.conversationUrl = undefined; persisted[0].runtime!.acceptanceObservation = undefined;

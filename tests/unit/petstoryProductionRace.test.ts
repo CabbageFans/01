@@ -25,7 +25,8 @@ beforeEach((): void => {
       capability: { accountId: 'TEST-account', image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, durations: [] },
       steps: [{ id: 'TEST-step', shotId: 'TEST-shot', kind: 'video', taskId: 'TEST-task', status: 'bound', inputHash: 'TEST', attachmentAssetIds: [] }] } };
   task = { id: 'TEST-task', projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'video', status: 'queued', prompt: 'TEST', outputs: [], result: null, createdAt: now, updatedAt: now,
-    runtime: { runId: 'TEST-run', attempt: 1, stage: 'preparing_account', message: '', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { mode: 'video', prompt: 'TEST', attachments: [] } } };
+    petstory: { projectId: project.id, stepId: 'TEST-step' },
+    runtime: { runId: 'TEST-run', attempt: 1, stage: 'preparing_account', message: '', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { mode: 'video', prompt: 'TEST', attachments: [], petstory: { projectId: project.id, stepId: 'TEST-step' } } } };
   vi.stubGlobal('window', { dispatchEvent: vi.fn(), electronAPI: { petstory: {
     resumeProduction: vi.fn(async (): Promise<PetStoryProductionResult> => ({ success: true, project: snapshot('running', 2) })),
     pauseProduction: vi.fn(async (): Promise<PetStoryProductionResult> => ({ success: true, project: snapshot('paused', 4) })),
@@ -41,6 +42,32 @@ afterEach(async (): Promise<void> => {
 });
 
 describe('视频制作接力保持暂停和项目归属', (): void => {
+  it('同项目明确恢复后旧start迟到false不能暂停新一轮运行', async (): Promise<void> => {
+    const oldStart = deferred<boolean>(); let oldDispatch: ((task: Task) => Promise<void>) | undefined;
+    const start = vi.fn((_taskId: string, beforeDispatch?: (task: Task) => Promise<void>): Promise<boolean> => { oldDispatch = beforeDispatch; return oldStart.promise; });
+    useTaskStore.setState({ startAutomation: start });
+    window.electronAPI.petstory.resumeProduction = vi.fn(async (): Promise<PetStoryProductionResult> => ({ success: true, project: snapshot('running', usePetStoryStore.getState().project!.revision + 1) }));
+    window.electronAPI.petstory.advanceProduction = vi.fn(async (): Promise<PetStoryProductionResult> => start.mock.calls.length
+      ? { success: true, project: snapshot('running', 6) } : { success: true, project: snapshot('running', 3), taskId: task.id, action: 'start' });
+    const first = initial.pet.resumeProduction(); await vi.waitFor((): void => expect(start).toHaveBeenCalledOnce());
+    await initial.pet.resumeProduction();
+    if (!oldDispatch) throw new Error('TEST 原轮次尚未进入启动');
+    await expect(oldDispatch(task)).rejects.toThrow('制作已暂停');
+    oldStart.resolve(false); await first;
+    await vi.waitFor((): void => expect(usePetStoryStore.getState().project?.revision).toBe(6));
+    expect(window.electronAPI.petstory.pauseProduction).not.toHaveBeenCalled();
+    expect(usePetStoryStore.getState().project?.production?.state).toBe('running'); expect(usePetStoryStore.getState().error).toBe('');
+  });
+
+  it('同项目恢复后旧推进失败不能撤回新轮次或覆盖新错误状态', async (): Promise<void> => {
+    const oldAdvance = deferred<PetStoryProductionResult>();
+    window.electronAPI.petstory.advanceProduction = vi.fn(async (): Promise<PetStoryProductionResult> => ({ success: true, project: snapshot('running', 6) })).mockImplementationOnce((): Promise<PetStoryProductionResult> => oldAdvance.promise);
+    window.electronAPI.petstory.resumeProduction = vi.fn(async (): Promise<PetStoryProductionResult> => ({ success: true, project: snapshot('running', usePetStoryStore.getState().project!.revision + 1) }));
+    const first = initial.pet.resumeProduction(); await vi.waitFor((): void => expect(window.electronAPI.petstory.advanceProduction).toHaveBeenCalledOnce());
+    await initial.pet.resumeProduction(); oldAdvance.reject(new Error('TEST obsolete advance failed')); await first;
+    await vi.waitFor((): void => expect(usePetStoryStore.getState().project?.revision).toBe(6));
+    expect(usePetStoryStore.getState().project?.production?.state).toBe('running'); expect(usePetStoryStore.getState().error).toBe('');
+  });
   it('暂停后迟到的推进快照不能把制作重新显示为运行或启动页面', async (): Promise<void> => {
     const advance = deferred<PetStoryProductionResult>();
     const read = vi.fn((): Promise<PetStoryProductionResult> => advance.promise); window.electronAPI.petstory.advanceProduction = read;

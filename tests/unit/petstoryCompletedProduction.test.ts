@@ -9,7 +9,7 @@ import { PetStoryProjects } from '../../main/utils/petstoryProject';
 import { PetStoryChatService } from '../../main/utils/petstoryChat';
 import { TaskService } from '../../main/core/TaskService';
 import { productionPlanHash } from '../../main/utils/petstoryProduction';
-import { isCanvasPlanLocked } from '../../src/components/petStoryCanvasShared';
+import { isCanvasPlanEditLocked } from '../../src/components/petStoryCanvasShared';
 import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 
 let directory: string; let projects: PetStoryProjects; let p: PetStoryProject; let chat: PetStoryChatService; let stored: Task[];
@@ -38,13 +38,13 @@ describe('完整P4完成后的明确文字操作', (): void => {
   it('独立图片仍在制作时保护方案输入，全部结束后解除方案锁', (): void => {
     const imageRun: PetStoryProduction = { ...production(), phase: 'materials', state: 'running', steps: [] };
     const project = { ...p, production: undefined, imageProductions: { 'TEST-image-operation': imageRun } };
-    expect(isCanvasPlanLocked(project)).toBe(true);
+    expect(isCanvasPlanEditLocked(project)).toBe(true);
     project.imageProductions['TEST-image-operation'] = { ...imageRun, state: 'complete' };
-    expect(isCanvasPlanLocked(project)).toBe(false);
+    expect(isCanvasPlanEditLocked(project)).toBe(false);
   });
   it('打开与读盘保留原完成批次且不创建任务，画布允许新的明确文字操作', async (): Promise<void> => {
     const before = structuredClone(p); const reopened = await new PetStoryProjects().open(directory);
-    expect(reopened).toEqual(before); expect(reopened.productionHistory).toBeUndefined(); expect(isCanvasPlanLocked(reopened)).toBe(false); expect(stored).toEqual([]);
+    expect(reopened).toEqual(before); expect(reopened.productionHistory).toBeUndefined(); expect(isCanvasPlanEditLocked(reopened)).toBe(false); expect(stored).toEqual([]);
   });
   it('专用Chat只在明确请求时归档原完成批次，保留素材与原任务归属且只创建文字hold', async (): Promise<void> => {
     const before = structuredClone(p); const result = await chat.prepareRuntime(p.id, p.revision, 'optimize', { shotId: p.plan!.shots[0].id, promptKind: 'firstFrame' });
@@ -63,7 +63,7 @@ describe('完整P4完成后的明确文字操作', (): void => {
   it.each(['running', 'paused', 'unfinished'] as const)('真实%s制作仍保护输入，不归档、不释放或新建Chat', async (variant): Promise<void> => {
     p.production!.state = variant === 'unfinished' ? 'complete' : variant;
     if (variant === 'unfinished') p.production!.steps[0].status = 'bound'; p = await projects.write(p); const before = structuredClone(p);
-    expect(isCanvasPlanLocked(p)).toBe(true);
+    expect(isCanvasPlanEditLocked(p)).toBe(true);
     await expect(chat.prepareRuntime(p.id, p.revision, 'optimize', { shotId: p.plan!.shots[0].id, promptKind: 'firstFrame' })).rejects.toThrow('原制作方案仍在使用');
     await expect(projects.savePromptModel(p.id, p.revision, 'seedance-2.5')).rejects.toThrow('原制作仍在使用');
     expect(await projects.read(p.id)).toEqual(before); expect(stored).toEqual([]);

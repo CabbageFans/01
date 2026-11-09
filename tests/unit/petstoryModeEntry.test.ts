@@ -1,7 +1,10 @@
 /** 序列化真实入口脚本的离线 DOM 行为测试，不访问平台、不发送生成。 */
 import { runInNewContext } from 'node:vm';
-import { describe, expect, it, vi } from 'vitest';
+import { Window } from 'happy-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clickAITab } from '../../src/utils/doubaoBridge';
+
+const pages: Window[] = [];
 
 function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolean = false, hiddenMeasurement: boolean = false, options: {
   imageEntryDelayMs?: number;
@@ -13,172 +16,114 @@ function fixture(initial: 'plain' | 'image-skill' | 'video', imageInMore: boolea
   view: { executeJavaScript: (code: string) => Promise<unknown>; getURL: () => string; loadURL: ReturnType<typeof vi.fn> };
   actions: string[];
 } {
-  let state = initial as string;
-  let menu = false;
-  const startedAt = Date.now();
+  const page = new Window(); pages.push(page);
+  const document = page.document;
+  page.HTMLElement.prototype.getBoundingClientRect = function (): InstanceType<typeof page.DOMRect> {
+    return new page.DOMRect(167, this.tagName === 'TEXTAREA' ? 550 : 672, 600, this.tagName === 'TEXTAREA' ? 100 : 32);
+  };
   const actions: string[] = [];
-  const synchronizeState = (): void => {
-    if (options.selectedImageDelayMs !== undefined && Date.now() - startedAt >= options.selectedImageDelayMs) state = 'image-skill';
+  let state = initial;
+  let moreOpened = false;
+  let surface = document.createElement('div');
+  let engine = document.createElement('div');
+  let bar = document.createElement('div');
+  const image = document.createElement('button'); image.dataset.testid = 'skill_bar_button_image'; image.textContent = '图像生成';
+  const video = document.createElement('button'); video.dataset.testid = 'skill_bar_button_video'; video.textContent = '视频生成';
+  const more = document.createElement('button'); more.dataset.testid = 'skill_bar_button_more'; more.textContent = '更多';
+  image.style.display = options.imageMissing || options.imageEntryDelayMs || imageInMore ? 'none' : '';
+  more.style.display = options.moreDelayMs ? 'none' : '';
+  const plainSurface = (): void => {
+    const previous = surface;
+    surface = document.createElement('div'); surface.className = 'guidance-input-surface';
+    engine = document.createElement('div'); engine.id = 'input-engine-container'; engine.append(document.createElement('textarea'));
+    bar = document.createElement('div'); bar.dataset.testid = 'guidance-skill-bar'; bar.append(image, video, more); surface.append(engine, bar);
+    if (previous.isConnected) previous.replaceWith(surface); else document.body.append(surface);
   };
-  class Element {
-    parentElement: Element | null = null;
-    visibility = 'visible';
-    constructor(readonly tagName: string, readonly label: string, readonly owned = true) {}
-    get innerText(): string { return this === skill ? state === 'video' ? '视频生成' : '图像生成' : this.label; }
-    get childNodes(): Array<{ nodeType: number; textContent: string }> { return [{ nodeType: 3, textContent: this.innerText }]; }
-    get offsetParent(): object | null { return this.shown() ? {} : null; }
-    shown(): boolean {
-      if (this === image) return !options.imageMissing && Date.now() - startedAt >= (options.imageEntryDelayMs || 0) && (!imageInMore || menu);
-      if (this === more) return Date.now() - startedAt >= (options.moreDelayMs || 0);
-      return true;
+  const mountSkill = (mode: 'image' | 'video'): void => {
+    state = mode === 'image' ? 'image-skill' : 'video'; bar.remove();
+    surface.querySelector('[data-testid="skill_input_exit_button"]')?.remove();
+    const selected = document.createElement('div'); selected.dataset.testid = 'skill_input_exit_button'; selected.textContent = mode === 'image' ? '图像生成' : '视频生成'; surface.append(selected);
+    selected.addEventListener('click', (): void => { actions.push(selected.textContent || ''); state = 'plain'; plainSurface(); });
+  };
+  plainSurface();
+  if (initial !== 'plain') mountSkill(initial === 'video' ? 'video' : 'image');
+  image.addEventListener('click', (): void => { actions.push('图像生成'); if (!options.ignoreImageSelection) mountSkill('image'); });
+  video.addEventListener('click', (): void => { actions.push('视频生成'); mountSkill('video'); });
+  more.addEventListener('click', (): void => {
+    actions.push('更多'); moreOpened = true;
+    if (!options.imageMissing && !options.imageEntryDelayMs) image.style.display = '';
+  });
+  if (options.imageEntryDelayMs) setTimeout((): void => { if (!options.imageMissing && (!imageInMore || moreOpened)) image.style.display = ''; }, options.imageEntryDelayMs);
+  if (options.moreDelayMs) setTimeout((): void => { more.style.display = ''; }, options.moreDelayMs);
+  if (options.selectedImageDelayMs !== undefined) setTimeout((): void => { if (state === 'plain') mountSkill('image'); }, options.selectedImageDelayMs);
+  const aside = document.createElement('aside');
+  for (const label of ['图像生成', '视频生成']) { const button = document.createElement('button'); button.textContent = label; button.addEventListener('click', (): void => { actions.push(`错误侧栏:${label}`); }); aside.append(button); }
+  document.body.prepend(aside);
+  if (hiddenMeasurement) {
+    const hidden = document.createElement('div'); hidden.className = 'guidance-input-surface'; hidden.style.display = 'none'; hidden.append(document.createElement('textarea'));
+    const skill = document.createElement('div'); skill.dataset.testid = 'skill_input_exit_button'; skill.textContent = '视频生成'; hidden.append(skill);
+    for (const marker of ['video-model', 'video-generation-params-panel']) {
+      const control = document.createElement('button'); control.dataset.inputEngineActionbarControlKey = marker; hidden.append(control);
     }
-    getBoundingClientRect(): { left: number; top: number; bottom: number; width: number; height: number } {
-      return { left: this.owned ? 167 : 8, top: 672, bottom: 704, width: this.shown() ? 92 : 0, height: this.shown() ? 32 : 0 };
-    }
-    getAttribute(key: string): string | null { return key === 'role' ? 'button' : null; }
-    closest(): null { return null; }
-    matches(): boolean { return false; }
-    querySelector(): null { return null; }
-    contains(node: Element): boolean { return this === root && node.owned; }
-    querySelectorAll(selector: string): Element[] {
-      synchronizeState();
-      if (selector.includes('video-model') || selector.includes('data-creation-params-panel-id')) return state === 'video' || hiddenMeasurement ? [model as unknown as Element] : [];
-      if (selector.includes('skill_input_exit_button')) return hiddenMeasurement || state === 'image-skill' || state === 'video' ? [skill] : [];
-      if (selector.includes('aria-expanded')) return [];
-      return [more, image, video].filter((n): boolean => n.shown());
-    }
-    dispatchEvent(event: { type: string }): boolean {
-      if (event.type !== 'click') return true;
-      actions.push(this.innerText);
-      if (this === more) menu = true;
-      if (this === skill) { state = 'plain'; root = new Element('DIV', 'TEST remounted composer'); }
-      if (this === video) state = 'video';
-      if (this === image && !options.ignoreImageSelection) state = 'image-skill';
-      return true;
-    }
+    document.body.prepend(hidden);
   }
-  const image = new Element('BUTTON', '图像生成');
-  const video = new Element('BUTTON', '视频生成');
-  const sidebarImage = new Element('BUTTON', '图像生成', false);
-  const sidebarVideo = new Element('BUTTON', '视频生成', false);
-  const more = new Element('BUTTON', '更多');
-  const skill = new Element('DIV', initial === 'video' || hiddenMeasurement ? '视频生成' : '图像生成');
-  if (hiddenMeasurement) skill.visibility = 'hidden';
-  let root = new Element('DIV', 'TEST composer');
-  const editor = { getBoundingClientRect: (): object => ({ top: 550, bottom: 650, width: 480, height: 100 }) };
-  const model = { getBoundingClientRect: (): object => ({ width: 100, height: 32 }) };
-  const document = {
-    querySelector: (selector: string): unknown => {
-      synchronizeState();
-      if (selector === 'textarea') return editor;
-      if (selector.includes('input-engine-container') || selector === '.guidance-input-surface') return root;
-      if (selector.includes('video-model') || selector.includes('data-creation-params-panel-id')) return state === 'video' ? model : null;
-      return null;
-    },
-    querySelectorAll: (selector: string): object[] => {
-      synchronizeState();
-      if (selector === '[data-testid="guidance-input-surface"],.guidance-input-surface') return [root];
-      if (selector === '#input-engine-container') return [];
-      if (selector.includes('video-model') || selector.includes('data-creation-params-panel-id')) return state === 'video' || hiddenMeasurement ? [model] : [];
-      return state === 'image-skill' || state === 'video' ? [sidebarImage, sidebarVideo, skill] : [sidebarImage, sidebarVideo, more, image, video].filter((n): boolean => n.shown());
-    },
-    getElementById: (): null => null,
-  };
-  class InputEvent { constructor(readonly type: string) {} }
-  return { actions, view: { executeJavaScript: async (code: string): Promise<unknown> => runInNewContext(code, { document, window: { innerHeight: 732, getComputedStyle: (node: Element): object => ({ display: 'block', visibility: node === (model as unknown) && state !== 'video' ? 'hidden' : node.visibility || 'visible' }) }, setTimeout, Date, PointerEvent: InputEvent, MouseEvent: InputEvent }), getURL: (): string => 'https://www.doubao.com/chat/', loadURL: vi.fn() } };
+  return { actions, view: {
+    executeJavaScript: async (code: string): Promise<unknown> => runInNewContext(code, { document, window: page, HTMLElement: page.HTMLElement,
+      PointerEvent: page.PointerEvent, MouseEvent: page.MouseEvent, setTimeout, Date }),
+    getURL: (): string => 'https://www.doubao.com/chat/', loadURL: vi.fn(),
+  } };
 }
+
+async function settled(work: Promise<boolean>): Promise<boolean> {
+  let result: { value: boolean } | { error: unknown } | undefined;
+  void work.then((value: boolean): void => { result = { value }; }, (error: unknown): void => { result = { error }; });
+  for (let sample = 0; sample < 100 && !result; sample++) await vi.advanceTimersByTimeAsync(250);
+  if (!result) throw new Error('TEST 模式入口超出正式有界期限');
+  if ('error' in result) throw result.error;
+  return result.value;
+}
+
+beforeEach((): void => { vi.useFakeTimers(); });
+afterEach(async (): Promise<void> => { for (const page of pages.splice(0)) await page.happyDOM.abort(); vi.clearAllTimers(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('P4 narrow composer mode entry', (): void => {
   it('ignores the hidden measuring skill and parameter controls, then clicks the real visible video entry', async (): Promise<void> => {
     const test = fixture('plain', false, true);
-    expect(await clickAITab(test.view, 'video')).toBe(true);
-    expect(test.actions).toEqual(['视频生成']);
+    expect(await settled(clickAITab(test.view, 'video'))).toBe(true); expect(test.actions).toEqual(['视频生成']);
   });
-  it('keeps an already selected video skill and its verified controls without toggling it off', async (): Promise<void> => {
-    const test = fixture('video');
-    expect(await clickAITab(test.view, 'video')).toBe(true);
-    expect(test.actions).toEqual([]);
+  it('keeps an already selected video skill without toggling it off', async (): Promise<void> => {
+    const test = fixture('video'); expect(await settled(clickAITab(test.view, 'video'))).toBe(true); expect(test.actions).toEqual([]);
   });
   it('exits the video skill before selecting image generation', async (): Promise<void> => {
-    const test = fixture('video');
-    expect(await clickAITab(test.view, 'image')).toBe(true);
-    expect(test.actions).toEqual(['视频生成', '图像生成']);
+    const test = fixture('video'); expect(await settled(clickAITab(test.view, 'image'))).toBe(true); expect(test.actions).toEqual(['视频生成', '图像生成']);
   });
   it('selects the current composer entry at x=167 and excludes the identically named sidebar', async (): Promise<void> => {
-    const test = fixture('plain');
-    expect(await clickAITab(test.view, 'image')).toBe(true);
-    expect(test.actions).toEqual(['图像生成']);
-    expect(test.view.loadURL).not.toHaveBeenCalled();
+    const test = fixture('plain'); expect(await settled(clickAITab(test.view, 'image'))).toBe(true); expect(test.actions).toEqual(['图像生成']); expect(test.view.loadURL).not.toHaveBeenCalled();
   });
-  it('opens the visible More menu once to reveal the image entry', async (): Promise<void> => {
-    vi.useFakeTimers();
-    try {
-      const test = fixture('plain', true);
-      const pending = clickAITab(test.view, 'image');
-      await vi.advanceTimersByTimeAsync(2500);
-      expect(await pending).toBe(true);
-      expect(test.actions).toEqual(['更多', '图像生成']);
-    } finally { vi.useRealTimers(); }
+  it('opens the visible More control once to reveal the image skill entry', async (): Promise<void> => {
+    const test = fixture('plain', true); expect(await settled(clickAITab(test.view, 'image'))).toBe(true); expect(test.actions).toEqual(['更多', '图像生成']);
   });
   it('waits for an image entry that mounts after the editor without repeated clicks', async (): Promise<void> => {
-    vi.useFakeTimers();
-    try {
-      const test = fixture('plain', false, false, { imageEntryDelayMs: 4000, moreDelayMs: 20_000 });
-      const pending = clickAITab(test.view, 'image');
-      await vi.advanceTimersByTimeAsync(4500);
-      expect(await pending).toBe(true);
-      expect(test.actions).toEqual(['图像生成']);
-    } finally { vi.useRealTimers(); }
+    const test = fixture('plain', false, false, { imageEntryDelayMs: 4000, moreDelayMs: 20_000 });
+    expect(await settled(clickAITab(test.view, 'image'))).toBe(true); expect(test.actions).toEqual(['图像生成']);
   });
-  it('waits for a delayed More button and expands it only once', async (): Promise<void> => {
-    vi.useFakeTimers();
-    try {
-      const test = fixture('plain', true, false, { moreDelayMs: 3000 });
-      const pending = clickAITab(test.view, 'image');
-      await vi.advanceTimersByTimeAsync(3500);
-      expect(await pending).toBe(true);
-      expect(test.actions).toEqual(['更多', '图像生成']);
-    } finally { vi.useRealTimers(); }
+  it('waits for a delayed More control and expands it only once', async (): Promise<void> => {
+    const test = fixture('plain', true, false, { moreDelayMs: 3000 });
+    expect(await settled(clickAITab(test.view, 'image'))).toBe(true); expect(test.actions).toEqual(['更多', '图像生成']);
   });
   it('keeps a selected image skill restored during asynchronous composer rebuilding', async (): Promise<void> => {
-    vi.useFakeTimers();
-    try {
-      const test = fixture('plain', false, false, { imageEntryDelayMs: 20_000, moreDelayMs: 20_000, selectedImageDelayMs: 3000 });
-      const pending = clickAITab(test.view, 'image');
-      await vi.advanceTimersByTimeAsync(3500);
-      expect(await pending).toBe(true);
-      expect(test.actions).toEqual([]);
-    } finally { vi.useRealTimers(); }
+    const test = fixture('plain', false, false, { imageEntryDelayMs: 20_000, moreDelayMs: 20_000, selectedImageDelayMs: 3000 });
+    expect(await settled(clickAITab(test.view, 'image'))).toBe(true); expect(test.actions).toEqual([]);
   });
-  it('stops after a bounded wait when the image entry never mounts and never retries menu clicks', async (): Promise<void> => {
-    vi.useFakeTimers();
-    try {
-      const test = fixture('plain', true, false, { imageMissing: true });
-      const pending = clickAITab(test.view, 'image');
-      await vi.advanceTimersByTimeAsync(10_500);
-      expect(await pending).toBe(false);
-      expect(test.actions).toEqual(['更多']);
-      expect(test.view.loadURL).not.toHaveBeenCalled();
-    } finally { vi.useRealTimers(); }
+  it('stops after a bounded wait when the image entry never mounts and never retries More clicks', async (): Promise<void> => {
+    const test = fixture('plain', true, false, { imageMissing: true });
+    expect(await settled(clickAITab(test.view, 'image'))).toBe(false); expect(test.actions).toEqual(['更多']); expect(test.view.loadURL).not.toHaveBeenCalled();
   });
   it('点击图像入口但技能未真实选中时拒绝，不把单次点击视作成功', async (): Promise<void> => {
-    vi.useFakeTimers();
-    try {
-      const test = fixture('plain', false, false, { ignoreImageSelection: true });
-      const pending = clickAITab(test.view, 'image');
-      await vi.advanceTimersByTimeAsync(15_000);
-      expect(await pending).toBe(false); expect(test.actions).toEqual(['图像生成']);
-      expect(test.view.loadURL).not.toHaveBeenCalled();
-    } finally { vi.useRealTimers(); }
+    const test = fixture('plain', false, false, { ignoreImageSelection: true });
+    expect(await settled(clickAITab(test.view, 'image'))).toBe(false); expect(test.actions).toEqual(['图像生成']); expect(test.view.loadURL).not.toHaveBeenCalled();
   });
-  it('exits the selected image skill, locates the remounted composer and waits for video controls', async (): Promise<void> => {
-    vi.useFakeTimers();
-    try {
-      const test = fixture('image-skill');
-      const pending = clickAITab(test.view, 'video');
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(await pending).toBe(true);
-      expect(test.actions).toEqual(['图像生成', '视频生成']);
-    } finally { vi.useRealTimers(); }
+  it('exits the selected image skill, locates the remounted composer and selects video', async (): Promise<void> => {
+    const test = fixture('image-skill'); expect(await settled(clickAITab(test.view, 'video'))).toBe(true); expect(test.actions).toEqual(['图像生成', '视频生成']);
   });
 });

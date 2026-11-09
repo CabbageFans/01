@@ -34,6 +34,7 @@ class Node {
     if (selector.includes('aria-busy')) return nodes.filter((n): boolean => n.pending);
     if (selector.includes('data-creation-params-panel-id')) return nodes.filter((n): boolean => 'data-creation-params-panel-id' in n.attributes);
     if (selector.includes('video-model')) return nodes.filter((n): boolean => n.attributes['data-input-engine-actionbar-control-key'] === 'video-model');
+    if (selector === '[data-testid="skill_input_exit_button"]') return nodes.filter((n): boolean => n.attributes['data-testid'] === 'skill_input_exit_button');
     if (selector.includes('role="dialog"')) return nodes.filter((n): boolean => n.attributes.role === 'dialog' || n.attributes.role === 'alert');
     if (selector.includes('data-type="mention"')) return nodes.filter((n): boolean => n.attributes['data-type'] === 'mention');
     if (selector.includes('data-reference-option')) return nodes.filter((n): boolean => n.attributes.role === 'option' || 'data-reference-option' in n.attributes);
@@ -62,6 +63,7 @@ function fixture(native: boolean): { view: { executeJavaScript: ReturnType<typeo
   const portal = menu.add(new Node('input')); portal.display = 'none';
   const config = surface.add(new Node('button', { 'data-creation-params-panel-id': 'TEST' })); config.text = '9:16 · 5s';
   const model = surface.add(new Node('button', { 'data-input-engine-actionbar-control-key': 'video-model' })); model.text = '模型 Seedance 2.0';
+  const selectedSkill = surface.add(new Node('div', { 'data-testid': 'skill_input_exit_button' })); selectedSkill.text = '视频生成';
   const document = { body, querySelectorAll: (selector: string): Node[] => body.querySelectorAll(selector), querySelector: (selector: string): Node | null => body.querySelector(selector) };
   class Transfer { files: File[] = []; items = { add: (file: File): void => { this.files.push(file); } }; }
   const executeJavaScript = vi.fn(async (code: string): Promise<unknown> => runInNewContext(code, { document, window: { getComputedStyle: (node: Node): object => ({ display: node.display, visibility: 'visible' }) }, DataTransfer: Transfer, Event, File, Uint8Array, atob }));
@@ -97,7 +99,7 @@ describe('P4 current composer and actual slot readback', (): void => {
   it('two generic images never become native first/last slots', async (): Promise<void> => {
     const test = fixture(false);
     const snapshot = await readPetStoryComposer(test.view);
-    expect(snapshot).toMatchObject({ generic: true, first: false, last: false, duration: 5, model: 'Seedance 2.0' });
+    expect(snapshot).toMatchObject({ generic: true, selectedSkill: 'video', first: false, last: false, duration: 5, model: 'Seedance 2.0' });
     expect((): void => checkPetStoryPageGuard(snapshot, guard('first_last_frame', 2), true)).toThrow('槽位');
     expect(test.first.received).toEqual([]); expect(test.portal.received).toEqual([]);
   });

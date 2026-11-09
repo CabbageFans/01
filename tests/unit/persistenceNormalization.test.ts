@@ -677,7 +677,7 @@ describe('normalizeTasks', () => {
       startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW,
       input: { prompt: task.prompt, mode: 'video', attachments: [] },
       controlReadiness: {
-        schemaVersion: 999, currentStage: 'invented', failureStage: 'invented', missingControl: 'cookie',
+        schemaVersion: 999, currentStage: 'invented', failureStage: 'invented', missingControl: 'cookie', controlOperation: 'invented', failureReason: 'raw-page-text',
         attempts: -1, elapsedMs: -1, pageStructureVersion: `doubao-video-v2:${'x'.repeat(200)}`,
       },
     };
@@ -687,7 +687,20 @@ describe('normalizeTasks', () => {
     expect(readiness?.currentStage).toBeUndefined();
     expect(readiness?.failureStage).toBeUndefined();
     expect(readiness?.missingControl).toBeUndefined();
+    expect(readiness?.controlOperation).toBeUndefined(); expect(readiness?.failureReason).toBeUndefined();
     expect(readiness?.pageStructureVersion?.length).toBe(96);
+  });
+
+  it.each(['mode_trigger', 'mode_option', 'mode_selection'] as const)('模式入口操作%s与真实失败细因跨重启保留', (operation: 'mode_trigger' | 'mode_option' | 'mode_selection'): void => {
+    const task = makeValidTask(); task.mode = 'video'; task.status = 'fail';
+    task.runtime = { runId: 'run-mode-entry', attempt: 1, stage: 'failed', message: '视频入口未选中',
+      startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW, input: { prompt: task.prompt, mode: 'video', attachments: [] },
+      controlReadiness: { schemaVersion: 1, ready: false, currentStage: 'video_entry', failureStage: 'video_entry',
+        controlOperation: operation, failureReason: 'ambiguous', missingControl: 'video_entry', attempts: 17, elapsedMs: 13058, stableSamples: 0 } };
+    const normalized = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW).data[0];
+    expect(normalized.runtime?.controlReadiness).toMatchObject({ controlOperation: operation, failureReason: 'ambiguous',
+      missingControl: 'video_entry', currentStage: 'video_entry', attempts: 17, elapsedMs: 13058, stableSamples: 0 });
+    expect(normalized.runtime?.submittedAt).toBeUndefined();
   });
 
   it('人工提交观察与最小化执行诊断跨重启保留，不引入页面文本或素材路径', () => {

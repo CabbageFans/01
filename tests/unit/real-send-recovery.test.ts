@@ -342,7 +342,8 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     expect(guardedCall).toContain('current.runtime?.submittedAt === submissionMarkedAt');
     expect(guardedCall).toContain('automationEngine.confirmSubmissionOwnership(taskId, accountId, controller)');
     expect(panelSource).not.toContain('prepareNativeSubmission');
-    expect(panelSource).toContain('发送动作结果不确定，请人工核对豆包会话；系统未自动重发');
+    // 点击 ACK 丢失后的单次只读受理由 submissionAcknowledgementReadback.test.ts
+    // 执行真实分支验证，不以旧版立即退出文案锁死受理状态流转。
   });
 
   it('素材安全确认只读识别；人工确认前持久化 submittedAt，确认后禁止二次提交', () => {

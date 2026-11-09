@@ -44,7 +44,7 @@ export interface VideoControlReadinessResult {
   ready: boolean;
   currentStage?: VideoPageReadinessStage;
   failureStage?: VideoControlReadinessStage;
-  controlOperation?: 'model_trigger' | 'parameters_trigger' | 'model_option' | 'ratio_option' | 'duration_slider' | 'readback';
+  controlOperation?: 'mode_trigger' | 'mode_option' | 'mode_selection' | 'model_trigger' | 'parameters_trigger' | 'model_option' | 'ratio_option' | 'duration_slider' | 'readback';
   failureReason?: 'not_found' | 'ambiguous' | 'covered' | 'disabled' | 'changed' | 'menu_not_open' | 'value_not_applied' | 'page_unavailable';
   missingControl?: VideoReadinessMissingControl;
   pageStructureVersion?: string;
@@ -66,6 +66,44 @@ const FAILURE_CONTROL: Partial<Record<VideoControlReadinessStage, VideoReadiness
   assets: 'asset_upload', prompt: 'prompt_editor', submission_controls: 'send_control', composite_control: 'aspect_ratio_control',
 };
 
+export const VIDEO_CONTROL_STAGE_LABELS: Readonly<Record<VideoControlReadinessStage, string>> = {
+  account: '账号页面', new_conversation: '新会话输入区', video_entry: '视频生成入口',
+  model: '视频模型', aspect_ratio: '画面比例', duration: '视频时长', assets: '素材上传', prompt: '提示词输入区',
+  submission_controls: '提交控件', mode_entry: '视频生成入口', model_control: '视频模型',
+  composite_control: '视频参数', stable_readback: '参数回读', final_readback: '提交前回读',
+};
+
+/** 只使用固定语义描述错误，不把页面文本或执行异常原文放进持久化诊断。 */
+export const VIDEO_CONTROL_FAILURE_LABELS: Readonly<Record<NonNullable<VideoControlReadinessResult['failureReason']>, string>> = {
+  not_found: '未找到对应选项', ambiguous: '存在多个目标，无法确认', covered: '目标被遮挡', disabled: '控件不可用',
+  changed: '控件已变化', menu_not_open: '选项菜单未展开', value_not_applied: '设置后回读不一致', page_unavailable: '页面暂时无法读取',
+};
+
+interface VideoModeEntryDiagnostic {
+  ready: boolean;
+  elapsedMs: number;
+  attempts?: number;
+  stableSamples?: number;
+  controlOperation?: 'mode_trigger' | 'mode_option' | 'mode_selection';
+  failureReason?: VideoControlReadinessResult['failureReason'];
+  missingControl?: VideoReadinessMissingControl;
+}
+
+/** 模式选中与后续参数配置分段记录；只选中技能不能提前宣称视频已可提交。 */
+export function createVideoModeEntryCheckpoint(diagnostic: VideoModeEntryDiagnostic | undefined, elapsedMs: number): VideoControlReadinessResult {
+  const entered = diagnostic?.ready === true;
+  const observedElapsedMs = Math.max(0, diagnostic?.elapsedMs ?? elapsedMs);
+  return {
+    schemaVersion: VIDEO_PAGE_READINESS_SCHEMA_VERSION, ready: false, currentStage: 'video_entry',
+    failureStage: entered ? undefined : 'video_entry',
+    // 旧诊断没有采样计数时明确记为未记录，不能捏造一次尝试或一次稳定回读。
+    attempts: diagnostic?.attempts ?? 0, stableSamples: diagnostic?.stableSamples,
+    elapsedMs: observedElapsedMs, modeEntryElapsedMs: observedElapsedMs,
+    controlOperation: diagnostic?.controlOperation, failureReason: entered ? undefined : diagnostic?.failureReason,
+    missingControl: entered ? undefined : diagnostic?.missingControl ?? 'video_entry',
+  };
+}
+
 export class VideoControlReadinessError extends Error {
   readonly code: string;
   readonly diagnostic: VideoControlReadinessResult;
@@ -84,10 +122,8 @@ export class VideoControlReadinessError extends Error {
       stable_readback: 'video_stable_readback_not_ready', final_readback: 'video_final_readback_not_ready',
     };
     const code = codeByStage[normalizedStage] ?? `video_${normalizedStage}_not_ready`;
-    const stageLabels: Record<string, string> = { model: '视频模型', aspect_ratio: '画面比例', duration: '视频时长' };
-    const reasonLabels: Record<string, string> = { not_found: '未找到对应选项', ambiguous: '存在多个目标，无法确认', covered: '目标被遮挡', disabled: '控件不可用', changed: '控件已变化', menu_not_open: '参数菜单未展开', value_not_applied: '设置后回读不一致', page_unavailable: '页面暂时无法读取' };
-    const detail = diagnostic.failureReason ? `：${reasonLabels[diagnostic.failureReason]}` : '未在有界等待内就绪';
-    super(`${code}: ${stageLabels[normalizedStage] || normalizedStage}${detail}（${diagnostic.elapsedMs}ms/${diagnostic.attempts}次），已在提交前停止`);
+    const detail = diagnostic.failureReason ? `：${VIDEO_CONTROL_FAILURE_LABELS[diagnostic.failureReason]}` : '未在有界等待内就绪';
+    super(`${code}: ${VIDEO_CONTROL_STAGE_LABELS[normalizedStage]}${detail}（${diagnostic.elapsedMs}ms/${diagnostic.attempts}次），已在提交前停止`);
     this.name = 'VideoControlReadinessError';
     this.code = code;
     this.diagnostic = {

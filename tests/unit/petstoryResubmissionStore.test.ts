@@ -15,8 +15,9 @@ beforeEach((): void => {
   account = { id: 'TEST-account', name: 'TEST离线账号', avatar: '', partition: 'TEST', status: 'idle', pinned: false, createdAt: now, updatedAt: now };
   const entry = { state: 'unknown' as const, reason: 'TEST离线' };
   const capability: PetStoryCapability = { accountId: account.id, checkedAt: now, durations: [5], image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry } };
-  tasks = [{ id: 'TEST-original', assignedAccountId: account.id, status: 'paused', mode: 'image', prompt: 'TEST离线请求', result: null, outputs: [], createdAt: now, updatedAt: now,
-    runtime: { runId: 'TEST-original-run', submittedAt: now, attempt: 1, stage: 'paused', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { mode: 'image', prompt: 'TEST离线请求', attachments: [] } } }];
+  tasks = [{ id: 'TEST-original', projectId: 'TEST-studio', assignedAccountId: account.id, status: 'paused', mode: 'image', prompt: 'TEST离线请求', result: null, outputs: [], createdAt: now, updatedAt: now,
+    petstory: { projectId: 'TEST-project', stepId: 'TEST-step' },
+    runtime: { runId: 'TEST-original-run', submittedAt: now, attempt: 1, stage: 'paused', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { mode: 'image', prompt: 'TEST离线请求', attachments: [], petstory: { projectId: 'TEST-project', stepId: 'TEST-step' } } } }];
   project = { schemaVersion: 1, id: 'TEST-project', studioProjectId: 'TEST-studio', accountId: account.id, revision: 5, source: { kind: 'script', url: '', status: 'review_required' }, assets: [], jobs: [], updatedAt: now,
     production: { state: 'paused', planHash: 'TEST', approvedAt: now, capability, fallbacks: {}, shots: {}, steps: [{ id: 'TEST-step', kind: 'firstFrame', taskId: tasks[0].id, runId: tasks[0].runtime!.runId, status: 'bound', inputHash: 'TEST', attachmentAssetIds: [] }], message: 'TEST不明提交' } };
   request = { taskId: tasks[0].id, runId: tasks[0].runtime!.runId, submittedAt: now, authorizationId: 'TEST-authorization', acceptDuplicateRisk: true };
@@ -28,7 +29,7 @@ beforeEach((): void => {
     return { success: true, project, taskId: 'TEST-replacement' };
   });
   advance.mockImplementation(async (): Promise<PetStoryProductionResult> => ({ success: true, project, taskId: 'TEST-replacement', action: 'start' }));
-  bind.mockImplementation(async (): Promise<PetStoryProductionResult> => ({ success: true, project }));
+  bind.mockImplementation(async (_id: string, _taskId: string, runId: string): Promise<PetStoryProductionResult> => { project.production!.steps[0].runId = runId; project.revision++; return { success: true, project }; });
   start.mockImplementation(async (taskId: string, beforeDispatch: (task: Task) => Promise<void>): Promise<boolean> => { await beforeDispatch(tasks.find((item): boolean => item.id === taskId)!); return true; });
   vi.stubGlobal('window', { dispatchEvent: vi.fn(), electronAPI: { petstory: { resubmitProduction: resubmit, advanceProduction: advance, bindProductionRun: bind, pauseProduction: async (): Promise<PetStoryProductionResult> => ({ success: true, project }) }, tasks: { list } } });
   useTaskStore.setState({ ...initial.tasks, tasks, activeTaskId: null, executingTasks: {}, accountBusy: {}, startAutomation: start });

@@ -2,7 +2,7 @@
 export interface PetStoryComposerSnapshot {
   present: boolean;
   generic: boolean;
-  /** 当前输入区已选中的真实创作技能；通用上传入口本身不能证明图片模式。 */
+  /** 当前输入区已选中的真实创作技能；上传入口和残留参数本身不能证明图片／视频模式。 */
   selectedSkill?: 'image' | 'video' | 'none' | 'ambiguous';
   /** 统一上传入口是否明确允许多图；不把它冒充平台原生首尾槽。 */
   referenceMultiple?: boolean;

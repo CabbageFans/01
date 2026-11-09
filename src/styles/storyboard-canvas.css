@@ -33,8 +33,6 @@
 .canvas-node .ant-tag { font-size:11px; line-height:20px; padding:0 6px; margin-right:4px; }
 .canvas-story label { display:flex; align-items:center; justify-content:space-between; font-size:13px; font-weight:650; margin:4px 0 10px; }
 .canvas-story label span { font-size:12px; color:#89969d; font-weight:400; }
-.canvas-story .ant-btn { margin:9px 0 22px; }
-.canvas-story .ant-btn:last-child { margin-bottom:0; }
 .canvas-story-summary { max-height:180px; overflow-y:auto; overscroll-behavior:contain; overflow-wrap:anywhere; }
 .canvas-story-assets { color:#61737f; }
 .canvas-asset-counts { display:flex; gap:8px; margin:14px 0; }

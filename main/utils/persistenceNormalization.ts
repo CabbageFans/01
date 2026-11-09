@@ -565,7 +565,8 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string, a
       modeEntryElapsedMs: asNonNegativeNumber(r.controlReadiness.modeEntryElapsedMs, 0) || undefined,
       attempts: asNonNegativeNumber(r.controlReadiness.attempts, 0),
       elapsedMs: asNonNegativeNumber(r.controlReadiness.elapsedMs, 0),
-      stableSamples: asNonNegativeNumber(r.controlReadiness.stableSamples, 0) || undefined,
+      stableSamples: typeof r.controlReadiness.stableSamples === 'number' && Number.isFinite(r.controlReadiness.stableSamples)
+        && r.controlReadiness.stableSamples >= 0 ? r.controlReadiness.stableSamples : undefined,
       recoveryAttempts: asNonNegativeNumber(r.controlReadiness.recoveryAttempts, 0) || undefined,
       pageStructureVersion: asNonEmptyString(r.controlReadiness.pageStructureVersion)?.slice(0, 96),
       missingControl: optionalOneOf(r.controlReadiness.missingControl, ['account_page', 'conversation_editor', 'video_entry', 'model_control', 'aspect_ratio_control', 'duration_control', 'asset_upload', 'prompt_editor', 'send_control']) as NonNullable<TaskRunSnapshot['controlReadiness']>['missingControl'],
@@ -575,7 +576,7 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string, a
       compositeVisibleAtMs: asNonNegativeNumber(r.controlReadiness.compositeVisibleAtMs, 0) || undefined,
       stableAtMs: asNonNegativeNumber(r.controlReadiness.stableAtMs, 0) || undefined,
       failureStage: optionalOneOf(r.controlReadiness.failureStage, ['account', 'new_conversation', 'video_entry', 'model', 'aspect_ratio', 'duration', 'assets', 'prompt', 'submission_controls', 'mode_entry', 'model_control', 'composite_control', 'stable_readback', 'final_readback']) as NonNullable<TaskRunSnapshot['controlReadiness']>['failureStage'],
-      controlOperation: optionalOneOf(r.controlReadiness.controlOperation, ['model_trigger', 'parameters_trigger', 'model_option', 'ratio_option', 'duration_slider', 'readback']) as NonNullable<TaskRunSnapshot['controlReadiness']>['controlOperation'],
+      controlOperation: optionalOneOf(r.controlReadiness.controlOperation, ['mode_trigger', 'mode_option', 'mode_selection', 'model_trigger', 'parameters_trigger', 'model_option', 'ratio_option', 'duration_slider', 'readback']) as NonNullable<TaskRunSnapshot['controlReadiness']>['controlOperation'],
       failureReason: optionalOneOf(r.controlReadiness.failureReason, ['not_found', 'ambiguous', 'covered', 'disabled', 'changed', 'menu_not_open', 'value_not_applied', 'page_unavailable']) as NonNullable<TaskRunSnapshot['controlReadiness']>['failureReason'],
     } : undefined,
     generationConfirmation: isObject(r.generationConfirmation) &&

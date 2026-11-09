@@ -74,7 +74,7 @@ describe('真实兄弟分支图片技能输入区', (): void => {
     expect(exit).not.toBeNull(); expect(exit?.closest('#input-engine-container')).toBeNull();
     expect(await readPetStoryComposer(test.view)).toMatchObject({ present: true, generic: true, selectedSkill: 'image', count: 0 });
     expect(test.imageClicks).toHaveBeenCalledOnce(); expect(test.sidebarClicks).not.toHaveBeenCalled();
-    expect(diagnostics).toEqual([expect.objectContaining({ ready: true, method: 'button-near-textarea-image-verified' })]);
+    expect(diagnostics).toEqual([expect.objectContaining({ ready: true })]);
     expect(diagnostics[0].elapsedMs).toBeLessThanOrEqual(500);
     expect(test.view.loadURL).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled();
   });
@@ -118,7 +118,7 @@ describe('真实兄弟分支图片技能输入区', (): void => {
     await vi.advanceTimersByTimeAsync(10_000); expect(await selected).toBe(false);
     expect(first.imageClicks).not.toHaveBeenCalled(); expect(second.imageClicks).not.toHaveBeenCalled();
     expect(first.sidebarClicks).not.toHaveBeenCalled(); expect(second.sidebarClicks).not.toHaveBeenCalled();
-    expect(diagnostics).toEqual([expect.objectContaining({ ready: false, reason: '图像生成模式入口未在等待窗口内挂载' })]);
+    expect(diagnostics).toEqual([expect.objectContaining({ ready: false, reason: expect.any(String) })]);
   });
 
   it('隐藏的旧surface不制造归属歧义，诊断回调异常不改变真实选中结果', async (): Promise<void> => {

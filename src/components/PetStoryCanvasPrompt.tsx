@@ -13,6 +13,7 @@ import { canSelectAccount, findInteractiveAccountId } from '../utils/interactive
 import { resolveTaskConversationTarget } from '../utils/taskConversationLocator';
 import { revealBrowser } from '../utils/workspace';
 import { usePetStoryDraft } from './PetStoryDrafts';
+import { PetStoryConversationButton } from './PetStoryConversationButton';
 
 const ReadbackFacts: React.FC<{ task?: Task }> = ({ task }): React.ReactElement | null => {
   const review = task?.runtime?.chatReadbackReview;
@@ -54,6 +55,14 @@ function targetPromptJob(job: PetStoryChatJob, shotId: string, kind: PetStoryPro
   return job.shotId === shotId && job.promptKind === kind && ['optimize', 'revise', 'repair'].includes(job.kind);
 }
 
+function promptConversationTask(project: PetStoryProject, job: PetStoryChatJob | undefined, tasks: Task[]): Task | undefined {
+  if (!job || job.materialId) return undefined;
+  return tasks.find((item: Task): boolean => item.id === job.taskId && item.mode === 'chat'
+    && item.projectId === project.studioProjectId && item.assignedAccountId === project.accountId
+    && (!job.runId || item.runtime?.runId === job.runId)
+    && (!item.petstoryChat || item.petstoryChat.projectId === project.id && item.petstoryChat.jobId === job.id));
+}
+
 function needsOriginalPromptReadback(job: PetStoryChatJob, task: Task | undefined): boolean {
   // 已收取的校验失败由后台修订，不能被原任务的暂停状态误当成结果未明。
   if (job.status === 'invalid' && job.rawText) return false;
@@ -93,7 +102,7 @@ const CanvasPromptProgress: React.FC<{ project: PetStoryProject; job?: PetStoryC
 };
 
 interface PromptFacts {
-  job?: PetStoryChatJob; task?: Task; candidateJob?: PetStoryChatJob; invalidJob?: PetStoryChatJob; sourceTask?: Task;
+  job?: PetStoryChatJob; task?: Task; candidateJob?: PetStoryChatJob; invalidJob?: PetStoryChatJob; sourceTask?: Task; conversationTask?: Task;
   candidate: string; displayed: string; pending: boolean; retainedCandidate: boolean;
 }
 /** 新创作请求发出后，旧结果仍可查看或作为明确修改基准，不能继续假装可直接采用。 */
@@ -119,10 +128,12 @@ function promptFacts(project: PetStoryProject, shot: PetStoryShot, kind: PetStor
   const candidate = visibleCandidate?.parsedResult?.optimized || (visibleCandidate ? prompt.optimized : '');
   const displayed = invalidJob?.parsedResult?.optimized || candidate || prompt.final;
   const sourceJobId = invalidJob?.id || visibleCandidate?.id || (prompt.edited ? prompt.basisJobId : prompt.sourceJobId);
-  const sourceJob = project.jobs.find((item): boolean => item.id === sourceJobId);
+  const sourceJob = project.jobs.find((item): boolean => item.id === sourceJobId && targetPromptJob(item, shot.id, kind));
   const sourceTask = tasks.find((item): boolean => item.id === sourceJob?.taskId);
+  // 新入口跟随当前展示的正文；不能把后续失败请求当作已采用正文的来源。
+  const conversationTask = promptConversationTask(project, displayed ? sourceJob : job, tasks);
   const pending = !!job && !!task && !job.endedWaitingAt && ['bound', 'captured'].includes(job.status) && !task?.errorInfo && !['fail', 'paused', 'cancelled', 'waiting_verification'].includes(task?.status || '');
-  return { job, task, candidateJob: visibleCandidate, invalidJob, sourceTask, candidate, displayed, pending, retainedCandidate: supersededPromptCandidate(project, visibleCandidate) };
+  return { job, task, candidateJob: visibleCandidate, invalidJob, sourceTask, conversationTask, candidate, displayed, pending, retainedCandidate: supersededPromptCandidate(project, visibleCandidate) };
 }
 function promptDisplayLabel(prompt: PetStoryPrompt, candidate: string, invalid: boolean, retained: boolean): string {
   if (invalid) return '上次结果 · 校验未通过';
@@ -203,7 +214,7 @@ export const CanvasPromptEditor: React.FC<{
   const [feedback, setFeedback] = useState(''); const [submitting, setSubmitting] = useState(false);
   const prompt = shot.prompts[kind];
   if (!prompt) return null;
-  const { job, task, candidateJob, invalidJob, sourceTask, candidate, displayed, pending, retainedCandidate } = promptFacts(project, shot, kind, prompt, tasks);
+  const { job, task, candidateJob, invalidJob, sourceTask, conversationTask, candidate, displayed, pending, retainedCandidate } = promptFacts(project, shot, kind, prompt, tasks);
   const repairing = !!job && state.promptRepairJobIds.includes(job.id);
   const actionDisabled = disabled || generationBlocked || pending || repairing || submitting;
   const title = `镜头 ${shot.order} · ${canvasPromptNames[kind]}`;
@@ -235,6 +246,7 @@ export const CanvasPromptEditor: React.FC<{
     {candidateJob && !retainedCandidate && <Button size="small" type="primary" disabled={actionDisabled || state.busy} onClick={(): void => { void adopt(); }}>确认使用</Button>}
     <Button size="small" disabled={actionDisabled || !manualBody} onClick={openManual}>{manualBody && manualBody !== displayed ? '手动修改当前正文' : '手动修改'}</Button>
     <Button size="small" disabled={actionDisabled || !displayed} onClick={openFeedback}>修改要求</Button>
+    {kind === 'video' && <PetStoryConversationButton projectId={project.id} task={conversationTask} unavailableHint="当前提示词尚无可定位的原豆包任务" />}
   </div>;
   return <div className="canvas-prompt" id={`prompt-${shot.id}-${kind}`} data-prompt-kind={kind} data-candidate={candidateJob ? 'true' : undefined}>
     <div className="canvas-field-label"><strong>{canvasPromptNames[kind]}</strong><button type="button" disabled={!displayed} aria-label={`放大镜头${shot.order}${canvasPromptNames[kind]}`} onClick={(): void => setExpanded(true)}><ExpandOutlined /> 全文</button></div>

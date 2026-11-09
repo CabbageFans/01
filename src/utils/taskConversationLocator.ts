@@ -131,6 +131,18 @@ export function isTaskConversationMissing(task: ConversationTask | null | undefi
   return !target.ok && target.reason === 'CONVERSATION_URL_MISSING';
 }
 
+/** 缺URL的原媒体只能请求只读定位；原输入与提交身份完整一致不代表已经找到具体会话。 */
+export function canLocateSubmittedMediaConversation(task: Task | null | undefined): boolean {
+  const runtime = task?.runtime; const input = runtime?.input;
+  return !!task && ['image', 'video'].includes(task.mode || '') && !['done', 'cancelled'].includes(task.status)
+    && !!task.assignedAccountId?.trim() && !!runtime?.runId?.trim() && !!runtime.submittedAt
+    && Number.isFinite(Date.parse(runtime.submittedAt)) && !!input && !!task.prompt.trim()
+    && input.mode === task.mode && input.prompt === task.prompt
+    && JSON.stringify(input.attachments || []) === JSON.stringify(task.attachments || [])
+    && input.audioAttachment === task.audioAttachment && JSON.stringify(input.videoConfig) === JSON.stringify(task.videoConfig)
+    && JSON.stringify(input.petstory) === JSON.stringify(task.petstory) && isTaskConversationMissing(task);
+}
+
 /** 切换账号后有界等待该账号的常驻 WebView 完成注册和就绪。 */
 export async function waitForConversationNavigator<T extends ConversationNavigator>(
   getNavigator: () => T | null | undefined,

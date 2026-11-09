@@ -142,6 +142,7 @@ const electronAPI = {
     ): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('tasks:updateStatus', { taskId, status, result, outputs }),
     updateRuntime: (taskId: string, patch: {
+      expectedRunId?: string;
       executionIntent?: TaskExecutionIntent;
       status?: string;
       runtime?: Record<string, any>;

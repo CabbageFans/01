@@ -95,7 +95,8 @@ export function petStoryJobStatus(job: PetStoryChatJob, task?: Task, repairPrepa
   return queuedRepairStatus(job, task) || { title: '原任务尚未发送', instruction: '先处理豆包登录、验证或页面阻断，再从这里继续原任务；它会复用原请求。' };
 }
 
-export function openPetStoryOriginalTask(task: Task): void {
+export function openPetStoryOriginalTask(task: Task, options: { isCurrentSource?: () => boolean } = {}): void {
+  if (options.isCurrentSource?.() === false) { message.warning('对应任务的来源已变化，请重新查看当前节点。'); return; }
   const accountId = task.assignedAccountId;
   if (!accountId || !useAccountStore.getState().accounts.some((account): boolean => account.id === accountId)) { message.warning('原执行账号不存在，请先在账号与浏览器中处理。'); return; }
   const interactiveId = findInteractiveAccountId(useTaskStore.getState().accountAutomationState);
@@ -103,7 +104,9 @@ export function openPetStoryOriginalTask(task: Task): void {
   useAccountStore.getState().selectAccount(accountId);
   revealBrowser();
   // 没有原会话地址时只打开原账号，让用户从历史对话查找；不猜测或绑定当前页面。
-  if (resolveTaskConversationTarget(task).ok) window.dispatchEvent(new CustomEvent('open-task-conversation', { detail: { task } }));
+  if (resolveTaskConversationTarget(task).ok) window.dispatchEvent(new CustomEvent('open-task-conversation', {
+    detail: { task, ...(options.isCurrentSource ? { isCurrentSource: options.isCurrentSource } : {}) },
+  }));
 }
 const openOriginalTask = openPetStoryOriginalTask;
 

@@ -17,6 +17,7 @@ const files = ['first', 'last'].map((role: string): { name: string; base64: stri
   name: `TEST-${role}.png`, base64: Buffer.from(`TEST-${role}-bytes`).toString('base64'), mime: 'image/png',
 }));
 const hashes = files.map((file): string => createHash('sha256').update(Buffer.from(file.base64, 'base64')).digest('hex'));
+const digestWork: Promise<ArrayBuffer>[] = [];
 
 function compiledPrompt(final = '首帧从已采用起始画面出发，尾帧作为目标结尾；固定机位完成动作。'): PetStoryCompiledPrompt {
   return {
@@ -30,11 +31,17 @@ function compiledPrompt(final = '首帧从已采用起始画面出发，尾帧�
   };
 }
 
+function firstFramePrompt(final = '首帧以已采用图片作为起始构图，镜头持续缓慢推进。'): PetStoryCompiledPrompt {
+  const source = compiledPrompt(final);
+  return { ...source, requestedMode: 'first_frame', resolvedMode: 'first_frame', references: source.references.slice(0, 1),
+    text: `第 1 张图作为首帧画面。\n${final}`, segments: [{ referenceOrder: 1 }, { text: `作为首帧画面。\n${final}` }] };
+}
+
 function guard(compiled = compiledPrompt()): PetStoryExecutionGuard {
   const entry = { state: 'supported' as const, reason: 'TEST 真实控件执行时读取' };
   return {
-    mode: 'first_last_frame', durationSeconds: 5, attachmentAssetIds: ['TEST-first-asset', 'TEST-last-asset'],
-    references: compiled.references, compiledPrompt: compiled, fileSha256s: hashes,
+    mode: compiled.resolvedMode, durationSeconds: 5, attachmentAssetIds: compiled.references.map((reference): string => reference.assetId),
+    references: compiled.references, compiledPrompt: compiled, fileSha256s: hashes.slice(0, compiled.references.length),
     capability: { accountId: 'TEST-account', checkedAt: '2026-11-01T00:00:00.000Z', image: entry,
       modes: { first_frame: entry, first_last_frame: entry, reference: entry }, durations: [5],
       videoConfig: { model: 'seedance-2.0-fast', aspectRatio: '9:16', duration: '5s' } },
@@ -59,6 +66,7 @@ interface SharedComposerFixture {
 
 function fixture(): SharedComposerFixture {
   const root = sized(document.createElement('div')); root.className = 'guidance-input-surface'; document.body.append(root);
+  const skill = sized(document.createElement('button')); skill.setAttribute('data-testid', 'skill_input_exit_button'); skill.textContent = '视频生成'; root.append(skill);
   const editor = sized(document.createElement('textarea')); root.append(editor);
   Object.defineProperty(editor, 'offsetParent', { configurable: true, get: (): HTMLElement => root });
   const input = document.createElement('input'); input.type = 'file'; input.multiple = true;
@@ -107,8 +115,11 @@ function fixture(): SharedComposerFixture {
 async function settled<T>(work: Promise<T>): Promise<T> {
   let outcome: { value: T } | { error: unknown } | undefined;
   void work.then((value: T): void => { outcome = { value }; }, (error: unknown): void => { outcome = { error }; });
-  // 直接推进假时钟并让真实摘要 Promise 完成，避免每个上传样本等待真实 500ms。
-  for (let sample = 0; sample < 200 && !outcome; sample++) await vi.advanceTimersByTimeAsync(100);
+  // 原生摘要由真实线程池完成，先等待它，不能以假时钟抢跑其回执（全套并行时尤甚）。
+  for (let sample = 0; sample < 200 && !outcome; sample++) {
+    await Promise.all(digestWork.splice(0));
+    await vi.advanceTimersByTimeAsync(100);
+  }
   if (!outcome) throw new Error('TEST operation did not settle');
   if ('error' in outcome) throw outcome.error;
   return outcome.value;
@@ -123,10 +134,71 @@ async function bind(test: SharedComposerFixture): Promise<{ compiled: PetStoryCo
   return settled(bindPetStoryReferences(test.view, compiledPrompt(), receipts, new AbortController().signal));
 }
 
-beforeEach((): void => { vi.useFakeTimers(); vi.stubGlobal('crypto', webcrypto); });
+beforeEach((): void => {
+  vi.useFakeTimers(); vi.stubGlobal('crypto', webcrypto); digestWork.length = 0;
+  const nativeDigest = webcrypto.subtle.digest.bind(webcrypto.subtle);
+  vi.spyOn(webcrypto.subtle, 'digest').mockImplementation((algorithm: Parameters<typeof nativeDigest>[0], data: Parameters<typeof nativeDigest>[1]): Promise<ArrayBuffer> => {
+    const work = nativeDigest(algorithm, data); digestWork.push(work); return work;
+  });
+});
 afterEach((): void => { document.body.replaceChildren(); Reflect.deleteProperty(document, 'execCommand'); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('逻辑首尾帧直接使用现场统一上传入口', (): void => {
+  it.each(['none', 'image', 'ambiguous'] as const)('视频技能已变为%s时不以残留模型参数和统一入口放行', async (selectedSkill): Promise<void> => {
+    const test = fixture(); const currentGuard = guard(firstFramePrompt());
+    const skill = test.root.querySelector<HTMLElement>('[data-testid="skill_input_exit_button"]')!;
+    if (selectedSkill === 'none') skill.remove();
+    if (selectedSkill === 'image') skill.textContent = '图像生成';
+    if (selectedSkill === 'ambiguous') test.root.append(sized(skill.cloneNode(true) as HTMLElement));
+    const snapshot = await readPetStoryComposer(test.view);
+    expect(snapshot).toMatchObject({ selectedSkill, present: true, generic: true, model: 'Seedance 2.0 Fast', duration: 5, aspectRatio: '9:16' });
+    expect((): void => checkPetStoryPageGuard(snapshot, currentGuard, true)).toThrow('视频生成模式');
+    await expect(settled(waitForPetStoryVideoComposer(test.view, currentGuard, new AbortController().signal, 1_000))).rejects.toThrow('视频生成模式');
+    await expect(verifyPetStoryUploads(test.view, currentGuard, true)).rejects.toThrow('视频生成模式');
+    expect(test.changed).toEqual([]); expect(test.controlClick).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled();
+    expect(test.view.executeJavaScript.mock.calls.every((call: unknown[]): boolean => !String(call[0]).includes('"selectMode"'))).toBe(true);
+  });
+
+  it.each([true, false])('单首帧使用统一上传入口（multiple=%s），完整回读真实文件与引用且保留原逻辑模式', async (multiple: boolean): Promise<void> => {
+    const test = fixture(); test.input.multiple = multiple;
+    const source = firstFramePrompt(); const currentGuard = guard(source);
+    const ready = await settled(waitForPetStoryVideoComposer(test.view, currentGuard, new AbortController().signal));
+    expect(ready).toMatchObject({ present: true, generic: true, referenceMultiple: multiple, first: false, last: false });
+    const receipts = await settled(uploadPetStoryImages(test.view, files.slice(0, 1), 'first_frame', new AbortController().signal, hashes.slice(0, 1)));
+    expect(test.changed).toEqual([[files[0].name]]);
+    expect(test.changeReadbacks).toEqual([{ count: 0, decodedCount: 0, pending: false }]);
+    expect(receipts).toMatchObject([{ fileIndex: 0, slot: 'reference', reference: 'plain', fileSha256: hashes[0] }]);
+    const bound = await settled(bindPetStoryReferences(test.view, source, receipts, new AbortController().signal));
+    expect(bound.compiled).toMatchObject({ requestedMode: 'first_frame', resolvedMode: 'first_frame', final: source.final, references: source.references });
+    expect(bound.bindings).toMatchObject([{ assetId: source.references[0].assetId, order: 1, slot: 'reference', reference: 'plain', fileSha256: hashes[0] }]);
+    expect(test.editor.value).toBe(bound.compiled.text);
+    await expect(verifyPetStoryUploads(test.view, currentGuard, true)).resolves.toBeUndefined();
+    await expect(verifyPetStoryReferenceBindings(test.view, bound.bindings)).resolves.toBeUndefined();
+    expect(test.view.executeJavaScript.mock.calls.every((call: unknown[]): boolean => !String(call[0]).includes('"selectMode"'))).toBe(true);
+    expect(test.controlClick).not.toHaveBeenCalled(); expect(test.view.sendInputEvent).not.toHaveBeenCalled(); expect(test.view.loadURL).not.toHaveBeenCalled();
+  });
+
+  it('单首帧统一上传仍拒绝原生槽要求、额外附件与错误文件摘要', async (): Promise<void> => {
+    const test = fixture(); const snapshot = await readPetStoryComposer(test.view);
+    expect((): void => checkPetStoryPageGuard(snapshot, guard(firstFramePrompt('必须使用原生独立首帧槽。')), true)).toThrow();
+    expect((): void => checkPetStoryPageGuard(snapshot, { ...guard(firstFramePrompt()), attachmentAssetIds: ['TEST-first-asset', 'TEST-extra'] }, true)).toThrow();
+    await expect(uploadPetStoryImages(test.view, files.slice(1), 'first_frame', new AbortController().signal, hashes.slice(0, 1))).rejects.toThrow('摘要不符');
+    expect(test.changed).toEqual([]);
+  });
+
+  it.each(['missing', 'extra', 'replacement'] as const)('单首帧提交前拒绝 %s 实际素材变化', async (change): Promise<void> => {
+    const test = fixture(); const source = firstFramePrompt();
+    const receipts = await settled(uploadPetStoryImages(test.view, files.slice(0, 1), 'first_frame', new AbortController().signal, hashes.slice(0, 1)));
+    const bound = await settled(bindPetStoryReferences(test.view, source, receipts, new AbortController().signal));
+    const card = test.root.querySelector<HTMLElement>('[data-testid="attachment-image-card"]')!;
+    if (change === 'missing') card.remove();
+    if (change === 'extra') { test.addCard('TEST-foreign.png'); await vi.advanceTimersByTimeAsync(200); }
+    if (change === 'replacement') (card.querySelectorAll('img')[1] as HTMLImageElement).src = 'blob:TEST-foreign-file';
+    if (change !== 'replacement') await expect(verifyPetStoryUploads(test.view, guard(source), true)).rejects.toThrow();
+    await expect(verifyPetStoryReferenceBindings(test.view, bound.bindings)).rejects.toThrow();
+    expect(test.view.sendInputEvent).not.toHaveBeenCalled();
+  });
+
   it('连续回读 multiple 通用入口即放行原首尾帧请求，不查找或点击额外模式按钮', async (): Promise<void> => {
     const test = fixture(); const currentGuard = guard();
     const snapshot = await settled(waitForPetStoryVideoComposer(test.view, currentGuard, new AbortController().signal));

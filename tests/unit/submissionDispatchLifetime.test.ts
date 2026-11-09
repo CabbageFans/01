@@ -9,7 +9,7 @@ import type { SubmissionDispatchSafety } from '../../src/utils/doubaoBridge';
 import { HumanVerificationRequiredError } from '../../src/utils/humanVerification';
 import original from '../fixtures/storyboard-five-shots.json';
 
-function actualDispatchBlock(bindings: Record<string, unknown>): () => Promise<boolean> {
+function actualDispatchBlock(bindings: Record<string, unknown>): () => Promise<void> {
   const file = ts.createSourceFile('BrowserPanel.tsx', fs.readFileSync(path.resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
   let statement: ts.Node | undefined;
   const visit = (node: ts.Node): void => {
@@ -24,9 +24,9 @@ function actualDispatchBlock(bindings: Record<string, unknown>): () => Promise<b
   };
   visit(file);
   if (!statement) throw new Error('OFFLINE: actual single submission dispatch branch missing');
-  const expression = `(async () => { let submitted = false; ${(statement as ts.Node).getText(file)}; return submitted; })`;
+  const expression = `(async () => { ${(statement as ts.Node).getText(file)}; })`;
   const script = ts.transpileModule(expression, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
-  return vm.runInNewContext(script, { ...bindings, Date, AbortController, setTimeout, clearTimeout }) as () => Promise<boolean>;
+  return vm.runInNewContext(script, { ...bindings, Date, AbortController, DOMException, setTimeout, clearTimeout }) as () => Promise<void>;
 }
 
 function fixture(): Task {
@@ -52,7 +52,7 @@ describe('单次发送分支的超时与控制权（离线）', (): void => {
       expect(guard.dispatchKey).toBeTruthy(); expect(guard.expectedPrompt).toBe(current.prompt); expect(guard.strictParagraphs).toBe(true);
       expect(guard.isCurrent()).toBe(true); expect(await guard.verifyLease()).toBe(true); return true;
     });
-    expect(await actualDispatchBlock(bindings(current, submit))()).toBe(true); expect(submit).toHaveBeenCalledOnce();
+    await expect(actualDispatchBlock(bindings(current, submit))()).resolves.toBeUndefined(); expect(submit).toHaveBeenCalledOnce();
   });
 
   it.each(['chat', 'image', 'video'] as const)('%s 的首次提交异常后不会切换方式或再次发送', async (mode): Promise<void> => {
@@ -60,7 +60,7 @@ describe('单次发送分支的超时与控制权（离线）', (): void => {
     if (current.runtime) current.runtime.input.mode = mode;
     const submittedAt = current.runtime?.submittedAt;
     const submit = vi.fn(async (_webview: unknown, guard: SubmissionDispatchSafety): Promise<boolean> => { expect(guard.dispatchKey).toBeTruthy(); throw new Error('OFFLINE page dispatch uncertain'); });
-    await expect(actualDispatchBlock(bindings(current, submit))()).rejects.toThrow('系统未自动重发');
+    await expect(actualDispatchBlock(bindings(current, submit))()).resolves.toBeUndefined();
     expect(submit).toHaveBeenCalledOnce(); expect(current.runtime?.submittedAt).toBe(submittedAt);
   });
 
@@ -73,7 +73,7 @@ describe('单次发送分支的超时与控制权（离线）', (): void => {
     const pending = actualDispatchBlock(bindings(current, submit))().catch((error: unknown): unknown => error);
     expect(guard?.signal.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(await pending).toBeInstanceOf(Error); expect(guard?.signal.aborted).toBe(true);
+    expect(await pending).toBeUndefined(); expect(guard?.signal.aborted).toBe(true);
     expect(guard?.deadlineAt).toBeLessThanOrEqual(Date.now());
     finish(false); await Promise.resolve();
     expect(submit).toHaveBeenCalledOnce(); expect(current.runtime?.submittedAt).toBe(submittedAt); expect(current.status).toBe('executing');
@@ -112,7 +112,7 @@ describe('单次发送分支的超时与控制权（离线）', (): void => {
       return false;
     });
     scope.submitPromptOnce = submit;
-    expect(await actualDispatchBlock(scope)()).toBe(false); expect(submit).toHaveBeenCalledOnce();
+    await expect(actualDispatchBlock(scope)()).resolves.toBeUndefined(); expect(submit).toHaveBeenCalledOnce();
     expect(engine.confirmSubmissionOwnership).toHaveBeenCalledWith(current.id, 'OFFLINE-account', scope.controller);
   });
 
@@ -121,7 +121,7 @@ describe('单次发送分支的超时与控制权（离线）', (): void => {
     const submit = vi.fn(async (_webview: unknown, value: SubmissionDispatchSafety): Promise<boolean> => {
       guard = value; controller.abort(); expect(value.signal.aborted).toBe(true); return false;
     });
-    expect(await actualDispatchBlock(bindings(current, submit, controller))()).toBe(false);
+    await expect(actualDispatchBlock(bindings(current, submit, controller))()).resolves.toBeUndefined();
     expect(guard?.signal.aborted).toBe(true); expect(submit).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
   });
 });
