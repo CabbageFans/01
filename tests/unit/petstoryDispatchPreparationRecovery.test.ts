@@ -1,3 +1,4 @@
+import { currentRunId, localMediaPort } from '../fixtures/taskRunIdentity';
 /** 派发前中止通过真实制作/任务服务恢复；全部文件均属于临时离线测试项目。 */
 import fs from 'node:fs/promises';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -48,7 +49,7 @@ function create(input: TaskAddParams, accountId: string): Task {
 }
 function beginRun(runId: string, attempt: number): Task {
   const task = currentTask(); const now = new Date().toISOString();
-  const result = core.updateRuntime({ taskId, status: 'executing', runtime: {
+  const result = core.updateRuntime({ taskId, expectedRunId: currentRunId(core, taskId), status: 'executing', runtime: {
     runId, attempt, stage: 'preparing_account', message: 'TEST 准备派发', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
     input: { prompt: task.prompt, mode: task.mode, attachments: task.attachments || [], videoConfig: task.videoConfig,
       petstory: task.petstory, promptReadback: task.promptReadback },
@@ -58,7 +59,7 @@ function beginRun(runId: string, attempt: number): Task {
 }
 async function stopBeforeBinding(code: string = 'dispatch_not_ready'): Promise<Task> {
   beginRun('TEST-unbound-run', 1);
-  const stopped = core.updateRuntime({ taskId, status: 'paused', executionIntent: 'hold', errorInfo: {
+  const stopped = core.updateRuntime({ taskId, expectedRunId: currentRunId(core, taskId), status: 'paused', executionIntent: 'hold', errorInfo: {
     code, message: 'TEST 正式派发守卫在页面执行前拒绝', recoverable: true, detectedAt: new Date().toISOString(),
   } });
   if (!stopped.success) throw new Error(stopped.error);
@@ -92,7 +93,7 @@ beforeEach(async (): Promise<void> => {
   core = new TaskService({ store: { read: listed, replace: stored }, defaultProjectId: (): string => project.studioProjectId,
     id: (): string => `TEST-recovery-task-${++sequence}` });
   retry = vi.fn((id: string): Task => { const result = core.retry(id, 'hold'); if (!result.success) throw new Error(result.error); return result.data; });
-  service = new PetStoryProductionService(projects, { list: listed, create, retryUnsubmitted: retry,
+  service = new PetStoryProductionService(projects, { updateLocalMedia: localMediaPort(core), list: listed, create, retryUnsubmitted: retry,
     adopt: (id: string, binding: NonNullable<Task['petstory']>, text?: string): Task => {
       const result = core.bindPetStory(id, binding, text); if (!result.success) throw new Error(result.error); return result.data;
     },
@@ -131,11 +132,11 @@ describe('确定派发前停止的原视频运行恢复', (): void => {
 
   it('步骤真实绑定另一run时仍拒绝，不把派发失败当成跨运行授权', async (): Promise<void> => {
     beginRun('TEST-bound-run', 1); await service.bindRun(project.id, taskId, 'TEST-bound-run');
-    const stopped = core.updateRuntime({ taskId, status: 'paused', errorInfo: {
+    const stopped = core.updateRuntime({ taskId, expectedRunId: currentRunId(core, taskId), status: 'paused', errorInfo: {
       code: 'dispatch_not_ready', message: 'TEST 派发前停止', recoverable: true, detectedAt: new Date().toISOString(),
     } }); expect(stopped.success).toBe(true);
     beginRun('TEST-other-run', 2);
-    expect(core.updateRuntime({ taskId, status: 'paused' }).success).toBe(true);
+    expect(core.updateRuntime({ taskId, expectedRunId: currentRunId(core, taskId), status: 'paused' }).success).toBe(true);
     await service.pause(project.id); const before = listed();
     await expect(service.resume(project.id, capability())).rejects.toThrow('原运行已变化');
     expect(listed()).toEqual(before); expect(retry).not.toHaveBeenCalled();
@@ -170,7 +171,7 @@ describe('确定派发前停止的原视频运行恢复', (): void => {
 
   it('已持久化提交意图时只观察同一运行，不走准备重试', async (): Promise<void> => {
     await stopBeforeBinding(); const submittedAt = new Date().toISOString();
-    expect(core.updateRuntime({ taskId, runtime: { submittedAt } }).success).toBe(true);
+    expect(core.updateRuntime({ taskId, expectedRunId: currentRunId(core, taskId), runtime: { submittedAt } }).success).toBe(true);
     const before = listed();
     expect((await service.resume(project.id, capability())).success).toBe(true);
     expect(await service.advance(project.id)).toMatchObject({ success: true, action: 'observe', taskId });

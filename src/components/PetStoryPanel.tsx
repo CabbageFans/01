@@ -179,7 +179,7 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
   // 相同版本的图片轮询会返回新的 plan 对象；仅版本、项目或方案有无变化才重查。
   useEffect((): (() => void) => {
     let active = true;
-    // 同项目刷新保留上次有效范围，避免等待 IPC 时反复移除并重建工具栏入口。
+    // 同项目刷新保留上次有效范围，避免等待 IPC 时丢失当前阶段的资格信息。
     setPromptInspection((current: PromptStageInspection): PromptStageInspection => {
       if (current.projectId !== promptProjectId || !hasPromptPlan) return { projectId: promptProjectId, targets: [], candidates: [], error: '' };
       return current.error ? { ...current, error: '' } : current;
@@ -281,7 +281,7 @@ const PetStoryJourneyContent: React.FC<{ drafts: import('./PetStoryDrafts').PetS
         <PetStoryRuntime project={p} disabled={state.busy || dirty || sourceDirty || planLocked(p)} showPlanCandidates={false} />
       </div>
       <div id="petstory-materials" hidden={stage !== 2} className={stage === 2 ? 'stage-content':'page-hidden'}><PetStoryMaterials project={p} disabled={state.busy || dirty} generationBlocked={sourceDirty} onNavigate={(target,objectId): void => navigate(target==='plan'?'plan':'keyframes',objectId)} /></div>
-      <div hidden={![3,4,6].includes(stage)} className={canvasMode?'stage-content canvas-stage-content':'page-hidden'}><PetStoryCanvas key={p.id} project={p} promptTargets={promptTargets} legacyDirty={dirty || sourceDirty} onDirtyChange={setCanvasDirty} materials={null} controls={null} view={stage===3?'keyframes':stage===4?'videos':'panorama'} activeShotId={selectedShotId} onNavigate={navigate} /></div>
+      <div hidden={![3,4,6].includes(stage)} className={canvasMode?'stage-content canvas-stage-content':'page-hidden'}><PetStoryCanvas key={p.id} project={p} legacyDirty={dirty || sourceDirty} onDirtyChange={setCanvasDirty} materials={null} controls={null} view={stage===3?'keyframes':stage===4?'videos':'panorama'} activeShotId={selectedShotId} onNavigate={navigate} /></div>
       {stage === 5 && <PetStoryResults project={p} onNavigate={navigate} />}
       <div id="petstory-advanced" tabIndex={-1} className={stage === 7 ? 'stage-content space-y-4' : 'page-hidden'}>
       {!plan && <Empty description="保存完整剧本并生成制作方案后，在这里整理角色与分镜" />}

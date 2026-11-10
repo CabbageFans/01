@@ -10,6 +10,25 @@ export interface VideoConversationPage {
   cards: VideoConversationCard[];
 }
 
+/** 原消息归属已由readback核对；这里只识别明确未执行的回复，并给稳定观察提供无正文摘要。 */
+export function readVideoGenerationAdvice(page: VideoConversationPage, readback: CreationReadbackResult): { reason: string; evidenceKey: string } | undefined {
+  if (!readback.promptPublished || page.snapshot.generating || relatedVideoCards(page, readback).length) return;
+  const indices = new Set([...(readback.originalAssistantMessageIndices || []), ...(readback.generationContinuationMessageIndices || [])]);
+  const replies = page.snapshot.messages.flatMap((message: ChatPageSnapshot['messages'][number], index: number): ChatPageSnapshot['messages'][number][] =>
+    indices.has(index) && message.role === 'assistant' ? [message] : []);
+  if (!replies.length || replies.some((message: ChatPageSnapshot['messages'][number]): boolean => message.videoReady === true)) return;
+  const texts = replies.map((message: ChatPageSnapshot['messages'][number]): string => (message.rawText ?? message.text).normalize('NFKC').replace(/\s+/g, ' ').trim());
+  if (texts.some((text: string): boolean => /正在(?:为你)?生成|视频生成中|已(?:经)?开始生成/u.test(text))) return;
+  const copyPrompt = texts.some((text: string): boolean => /^(?:[\s#*_✅☑✔✓]+)?(?:视频生成提示词|视频提示词)\s*[（(]\s*(?:可直接复制使用|可复制使用|复制即用|可直接使用)\s*[）)]/u.test(text));
+  const instructions = texts.some((text: string): boolean => /^(?:你(?:现在)?可以|请)(?:直接)?在(?:视频生成|生视频)(?:面板|入口)(?:中)?(?:选择|粘贴|复制|上传)[^。！？]{0,160}(?:点击)?生成(?:即可)?(?:[。！! ]|$)/u.test(text));
+  if (!copyPrompt && !instructions) return;
+  // 非安全摘要只比较同一原消息的文字是否连续不变；运行/消息身份仍由上游严格回读负责。
+  const source = JSON.stringify([readback.originalMessageIndex, replies.map((message: ChatPageSnapshot['messages'][number]): string | undefined => message.messageId), texts]);
+  let first = 2166136261; let second = 5381;
+  for (let index = 0; index < source.length; index++) { first = Math.imul(first ^ source.charCodeAt(index), 16777619); second = Math.imul(second, 33) ^ source.charCodeAt(index); }
+  return { reason: copyPrompt ? '平台仅返回可复制的视频提示词，未执行视频生成' : '平台仅提供视频生成操作建议，未执行视频生成', evidenceKey: `${first >>> 0}-${second >>> 0}` };
+}
+
 /** 消息顺序只用于本次快照；整会话共用的 union ID 不构成单轮身份。 */
 export function relatedVideoCards(page: VideoConversationPage, readback: CreationReadbackResult): VideoConversationCard[] {
   if (!readback.promptPublished || readback.originalMessageIndex === undefined) return [];

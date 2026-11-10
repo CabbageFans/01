@@ -23,7 +23,7 @@ type RuntimePatch = { status?: Task['status']; runtime?: Partial<NonNullable<Tas
 type ReconcileHandler = (event: Event) => Promise<void>;
 class OfflineAccountPause extends Error { constructor(message: string, readonly code: string) { super(message); } }
 function actualFunction<T>(name: string, bindings: Record<string, unknown>): T {
-  const file = ts.createSourceFile('BrowserPanel.tsx', fs.readFileSync(path.resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const file = ts.createSourceFile('execution.tsx', ['src/components/BrowserPanel.tsx', 'src/automation/TaskRecoveryCoordinator.ts', 'src/automation/TaskExecutionCoordinator.ts', 'src/automation/taskExecutionSupport.ts'].map((file): string => fs.readFileSync(path.resolve(file), 'utf8').replace(/^export /gm, '')).join('\n'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
   let expression = '';
   const visit = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && node.name.getText(file) === name) expression = node.initializer!.getText(file);
@@ -97,7 +97,7 @@ function fixture(): {
       return readback.outputs;
     }),
     message: { error: errors, warning: vi.fn(), info: vi.fn(), success: vi.fn() },
-    submissionReconcileRef: guard, submissionReconcilePromisesRef: promises, abortControllersRef: controllers, submittedImagePagesRef: { current: new Map<string, object>() },
+    submissionReconcileRef: guard, submissionReconcilePromisesRef: promises, abortControllersRef: controllers, pendingCancellationStatusRef: { current: new Map<string, 'paused' | 'cancelled'>() }, submittedImagePagesRef: { current: new Map<string, object>() },
     automationEngine: { hasController: (): boolean => false }, canSelectAccount, findInteractiveAccountId,
     sleepWithAbort: actualFunction<(ms: number, signal: AbortSignal) => Promise<void>>('sleepWithAbort', { window: { setTimeout, clearTimeout } }),
     registryRef: { current: new Map([['TEST-account', view]]) }, loadingMapRef: { current: new Map([['TEST-account', false]]) },

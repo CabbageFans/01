@@ -48,7 +48,7 @@ function fixture(task: Task): {
     jobs: [{ id: 'TEST-job', taskId: task.id, kind: 'optimize', promptKind: 'firstFrame', shotId: 'TEST-shot', status: 'bound', inputHash: 'TEST', sourceUrl: '', createdAt: now }],
     imageOperations: [{ id: 'TEST-operation', requestId: 'TEST-request', target: { shotId: 'TEST-shot', kind: 'firstFrame' },
       mode: 'generate', stage: 'preparing', basisHash: 'TEST', createdAt: now, chatJobId: 'TEST-job', taskId: task.id }] };
-  const execute = vi.fn(async (): Promise<void> => undefined); const pause = vi.fn(async (): Promise<void> => undefined);
+  const execute = vi.fn(async (...args: unknown[]): Promise<void> => { expect(args).toHaveLength(8); }); const pause = vi.fn(async (): Promise<void> => undefined);
   const bindings: Record<string, unknown> = {
     useCallback: <T>(callback: T): T => callback,
     materialPagesRef: { current: pages }, registryRef: { current: new Map([[account.id, shared]]) },
@@ -58,7 +58,10 @@ function fixture(task: Task): {
     usePetStoryStore: { getState: (): object => ({ project }) },
     visibleRef: { current: true }, runningRef: { current: new Set<string>() },
     accountBusy: { [account.id]: true }, executingTasks: { [account.id]: task.id }, tasks: [task],
-    executeAutomation: execute, pauseFailedTaskPage: vi.fn(), isBackgroundPetStoryTask,
+    executeTaskAutomation: (_host: object, ...args: unknown[]): Promise<void> => execute(...args),
+    abortControllersRef: { current: new Map() }, pendingRestartTasksRef: { current: new Map() }, pendingCancellationStatusRef: { current: new Map() },
+    submittedImagePagesRef: { current: new Map() }, setInteractiveTaskPageId: vi.fn(), ownsTaskWebview: vi.fn(), assertNoHumanVerification: vi.fn(),
+    pauseForHumanVerification: vi.fn(), performAvailabilityCheck: vi.fn(), conversationSynchronizations: new WeakMap(), pauseFailedTaskPage: vi.fn(), isBackgroundPetStoryTask,
     automationEngine: { release: vi.fn(async (): Promise<void> => undefined) },
     message: { error: vi.fn() }, readBackReleasedPetStoryTask: vi.fn(async (): Promise<void> => undefined),
   };

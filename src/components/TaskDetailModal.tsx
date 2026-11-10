@@ -273,7 +273,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
               danger
               icon={<StopOutlined />}
               onClick={() => {
-                window.dispatchEvent(new CustomEvent('cancel-task-automation', { detail: { taskId: task.id } }));
+                window.dispatchEvent(new CustomEvent('cancel-task-automation', { detail: { taskId: task.id, expectedRunId: task.runtime?.runId } }));
                 onClose();
               }}
             >

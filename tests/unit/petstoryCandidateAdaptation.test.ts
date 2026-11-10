@@ -1,3 +1,4 @@
+import { localMediaPort } from '../fixtures/taskRunIdentity';
 /** 原五镜头派生的离线合同回归；TEST回复和本地色块仅模拟技术状态，不代表豆包业务产出。 */
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -63,7 +64,7 @@ async function importConfirmedImage(color: string = 'red', materialId: string = 
   p = await projects.approveMaterials(p.id, p.revision, [{ materialId, assetId: p.assets.at(-1)!.id }]);
 }
 function productionService(): PetStoryProductionService {
-  return new PetStoryProductionService(projects, { list: (): Task[] => structuredClone(stored), create: (params: TaskAddParams, accountId: string): Task => {
+  return new PetStoryProductionService(projects, { updateLocalMedia: localMediaPort(core), list: (): Task[] => structuredClone(stored), create: (params: TaskAddParams, accountId: string): Task => {
     const created = core.create(params); if (!created.success) throw new Error(created.error);
     const assigned = core.assign({ taskId: created.data[0].id, accountId }); if (!assigned.success) throw new Error(assigned.error); return assigned.data;
   }, adopt: (): never => { throw new Error('TEST不应采用旧草稿'); }, retryUnsubmitted: (): never => { throw new Error('TEST不应自动重试'); }, downloads: (): [] => [], download: async (): Promise<never> => { throw new Error('TEST不应下载媒体'); } });

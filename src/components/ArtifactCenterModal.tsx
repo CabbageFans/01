@@ -1,3 +1,5 @@
+import { DownloadedVideoPreview } from './DownloadedVideoPreview';
+import { findLocalDownload } from '../utils/localDownloads';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Empty, Input, message, Modal, Select, Space, Table, Tag, Dropdown } from 'antd';
 import { CloudDownloadOutlined, LinkOutlined, ReloadOutlined, MoreOutlined } from '@ant-design/icons';
@@ -49,7 +51,7 @@ export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, 
     for (const task of tasks) {
       if ((task.projectId || 'default-project') !== activeProjectId) continue;
       for (const artifact of task.artifacts || []) {
-        const localJob = [...downloads].reverse().find((job) => job.taskId === task.id && job.url === artifact.url && job.status === 'done');
+        const localJob = findLocalDownload(downloads, { taskId: task.id, runId: artifact.runId, artifactId: artifact.id, accountId: task.assignedAccountId, mode: task.mode, url: artifact.url, startedAt: task.runtime?.startedAt });
         result.push({ key: `${task.id}:${artifact.id}`, task, artifact, localJob });
       }
     }
@@ -76,13 +78,15 @@ export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, 
   const download = async (record: ArtifactRecord): Promise<void> => {
     const settings = await window.electronAPI.settings.get();
     const result = await window.electronAPI.tasks.downloadOutputs([{
-      taskId: record.task.id,
+      taskId: record.task.id, runId: record.artifact.runId, artifactIds: [record.artifact.id],
       prompt: record.task.prompt,
       outputs: [record.artifact.url],
       accountId: record.task.assignedAccountId,
       mode: record.task.mode,
     }], settings.downloadDir || undefined);
-    await refreshDownloads();
+    const jobs = await window.electronAPI.tasks.listDownloads(); setDownloads(jobs);
+    const localJob = findLocalDownload(jobs, { taskId: record.task.id, runId: record.artifact.runId, artifactId: record.artifact.id, accountId: record.task.assignedAccountId, mode: record.task.mode, url: record.artifact.url, startedAt: record.task.runtime?.startedAt });
+    setPreview((current): ArtifactRecord | null => current?.key === record.key ? { ...current, localJob } : current);
     if (result.success) message.success('产物下载完成');
     else message.error(result.error || '下载失败');
   };
@@ -138,7 +142,7 @@ export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, 
         {records.length === 0 ? <Empty description="没有符合条件的产物" /> : <Table columns={columns} dataSource={records} size="small" pagination={{ pageSize: 12, showSizeChanger: false }} scroll={{ x: 980 }} />}
       </ArtifactSurface>
       <Modal title="产物详情" open={!!preview} onCancel={(): void => setPreview(null)} footer={null} width={preview?.artifact.kind === 'video' ? 820 : 680}>
-        {preview?.artifact.kind === 'video' ? <video src={preview.artifact.url} controls style={{ width: '100%', maxHeight: '65vh', background: '#202A35' }} /> : preview?.artifact.kind === 'image' ? <img src={preview.artifact.url} alt="任务产物图片" style={{ width: '100%', maxHeight: '65vh', objectFit: 'contain' }} /> : <p className="muted-text">此文件暂不支持直接预览，可下载后查看。</p>}
+        {preview?.artifact.kind === 'video' ? preview.localJob ? <DownloadedVideoPreview key={preview.localJob.id} jobId={preview.localJob.id} /> : <p role="status">请先下载原视频，下载完成后可在这里本地播放。</p> : preview?.artifact.kind === 'image' ? <img src={preview.artifact.url} alt="任务产物图片" style={{ width: '100%', maxHeight: '65vh', objectFit: 'contain' }} /> : <p className="muted-text">此文件暂不支持直接预览，可下载后查看。</p>}
         {preview && <><p className="muted-text" style={{ marginTop: 14 }}>该产物来自任务记录；图片是否采用、文件校验和人工质量分别确认。</p><Space style={{ marginTop: 12 }}><Button icon={<CloudDownloadOutlined />} onClick={(): void => { void download(preview); }}>{preview.localJob ? '重新下载' : '下载文件'}</Button><Button onClick={(): void => setPreview(null)}>关闭</Button></Space><details className="download-file-details" style={{ marginTop: 18 }}><summary>诊断详情</summary><dl><dt>任务</dt><dd>{preview.task.id}</dd><dt>产物来源</dt><dd>{preview.artifact.url}</dd><dt>本地文件</dt><dd>{preview.localJob?.filePath || '尚未下载'}</dd><dt>记录时间</dt><dd>{preview.artifact.discoveredAt}</dd></dl></details></>}
       </Modal>
     </>

@@ -39,6 +39,7 @@
     "check:project": "node scripts/fixtures/run-fixture-tests.mjs && node scripts/fixtures/run-contracts-fixtures.mjs && node scripts/check-project.mjs && node scripts/check-contracts-boundary.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "verify:video-local": "pnpm run build:main && node scripts/fixtures/verify-local-video-playback.mjs",
     "test:coverage": "vitest run --coverage",
     "validate": "pnpm run ts-check && pnpm run lint && pnpm run check:project && pnpm run test && pnpm run build",
     "cli:list": "node dist/main/cli/doubaoCliEntry.js list",

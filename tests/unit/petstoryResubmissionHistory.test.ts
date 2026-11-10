@@ -52,7 +52,7 @@ beforeEach(async (): Promise<void> => {
       attachmentAssetIds: ['TEST-reference'], compiledPrompt: { ...compiled, text: adopted.data.prompt }, resubmissionHistory: [history] }], message: 'TEST 新请求完成' };
   project = await projects.write(project);
   // 原运行在新任务建立后才收到产物；仍通过正式 Core 保存原任务的结果。
-  core.updateStatus({ taskId: source.id, status: 'done', outputs: ['https://example.test/TEST-late-original.png'] }); sourceId = source.id;
+  expect(core.updateStatus({ taskId: source.id, expectedRunId: source.runtime!.runId, status: 'done', outputs: ['https://example.test/TEST-late-original.png'] }).success).toBe(true); sourceId = source.id;
   const original = tasks.find((task): boolean => task.id === sourceId)!; artifactId = original.artifacts![0].id;
   const job: DownloadJob = { id: 'TEST-original-download', taskId: source.id, accountId: project.accountId, mode: 'image', url: original.outputs[0], status: 'done', attempts: 1,
     saveDir: root, filePath: picture, createdAt: now, updatedAt: now };

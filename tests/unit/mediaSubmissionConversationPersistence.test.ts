@@ -19,7 +19,7 @@ const ACCOUNT = 'TEST-media-account';
 const URL = 'https://www.doubao.com/chat/TEST-provider-conversation';
 
 function actualClosure<T>(name: string, bindings: Record<string, unknown>): T {
-  const source = ts.createSourceFile('BrowserPanel.tsx', fs.readFileSync(path.resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const source = ts.createSourceFile('execution.tsx', ['src/components/BrowserPanel.tsx', 'src/automation/TaskRecoveryCoordinator.ts', 'src/automation/TaskExecutionCoordinator.ts', 'src/automation/taskExecutionSupport.ts'].map((file): string => fs.readFileSync(path.resolve(file), 'utf8').replace(/^export /gm, '')).join('\n'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
   let expression: string | undefined;
   const visit = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === name) expression = node.initializer?.getText(source);
@@ -50,7 +50,7 @@ function fixture(mode: 'image' | 'video' = 'video', route: string = 'https://www
   const read = (): Task => normalizeTasks(JSON.parse(persisted), 'TEST-studio', OBSERVED).data[0];
   const service = new TaskService({ store: { read: (): Task[] => [read()], replace: (tasks: Task[]): boolean => { persisted = JSON.stringify(tasks); return true; } },
     defaultProjectId: (): string => 'TEST-studio', now: (): string => OBSERVED });
-  const writes = vi.fn(async (taskId: string, patch: Omit<TaskUpdateRuntimeParams, 'taskId'>): Promise<boolean> => service.updateRuntime({ taskId, ...patch }).success);
+  const writes = vi.fn(async (taskId: string, patch: Omit<TaskUpdateRuntimeParams, 'taskId'>): Promise<boolean> => service.updateRuntime({ taskId, expectedRunId: initial.runtime?.runId, ...patch }).success);
   const providerText = mode === 'video' ? `生成视频：${prompt}，16:9，5s` : `生成图片：${prompt}`;
   const page: CurrentCreationConversationReadback = { source: 'published_message', conversationId: 'TEST-provider-conversation', conversationUrl: URL,
     messageIds: ['TEST-original-user', 'TEST-original-assistant'], snapshot: { conversationId: 'TEST-provider-conversation', historyComplete: true,
@@ -137,9 +137,9 @@ describe('媒体发送后真实回读与耐久会话归属接线', (): void => {
       if (change === 'ownership') test.setOwned(false);
       else {
         const task = test.read(); const runtime = task.runtime!;
-        if (change === 'run') expect(test.service.updateRuntime({ taskId: task.id, runtime: { runId: 'TEST-new-run', attempt: 2, stage: 'queued', message: 'TEST 新运行', startedAt: OBSERVED, stageStartedAt: OBSERVED, lastHeartbeatAt: OBSERVED, input: runtime.input } }).success).toBe(true);
+        if (change === 'run') test.replace({ ...task, runtime: { ...runtime, runId: 'TEST-new-run', attempt: 2 } });
         if (change === 'account') test.replace({ ...task, assignedAccountId: 'TEST-other-account' });
-        if (change === 'input') expect(test.service.updateRuntime({ taskId: task.id, runtime: { input: { ...runtime.input, prompt: 'TEST changed input' } } }).success).toBe(true);
+        if (change === 'input') test.replace({ ...task, runtime: { ...runtime, input: { ...runtime.input, prompt: 'TEST changed input' } } });
       }
       return structuredClone(test.page);
     });
@@ -205,8 +205,7 @@ describe('进入豆包对话先保存原媒体身份再显示', (): void => {
     if (condition === 'no-message') { delete test.page.source; test.page.snapshot.messages = []; }
     if (condition === 'wrong-message') test.page.snapshot.messages[0].text = test.page.snapshot.messages[0].rawText = 'TEST 其他用户请求';
     if (condition === 'new-run') test.provider.mockImplementationOnce(async (): Promise<CurrentCreationConversationReadback> => {
-      const task = test.read(); test.service.updateRuntime({ taskId: task.id, runtime: { runId: 'TEST-replaced-run', attempt: 2, stage: 'queued', message: 'TEST 新请求',
-        startedAt: OBSERVED, stageStartedAt: OBSERVED, lastHeartbeatAt: OBSERVED, input: task.runtime!.input } });
+      const task = test.read(); test.replace({ ...task, runtime: { ...task.runtime!, runId: 'TEST-replaced-run', attempt: 2 } });
       return structuredClone(test.page);
     });
     const nav = navigation(test); await nav.open();

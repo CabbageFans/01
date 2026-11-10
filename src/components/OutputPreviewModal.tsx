@@ -2,9 +2,11 @@
  * src/components/OutputPreviewModal.tsx
  * 产物预览 Modal：显示已完成任务的产物图片，支持全选/下载
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Modal, Checkbox, Button, message, Empty } from 'antd';
 import { DownloadOutlined, VideoCameraOutlined } from '@ant-design/icons';
+import { DownloadedVideoPreview } from './DownloadedVideoPreview';
+import { findLocalDownload } from '../utils/localDownloads';
 import type { GenerationMode } from '../types';
 import { buildBatchDownloadRequest, createDownloadIntent, createInitialOutputSelection, readDownloadSelection } from '../utils/downloadSelection';
 import type { BatchDownloadOutput } from '../utils/downloadSelection';
@@ -37,13 +39,14 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
   onDownload,
 }) => {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [previewMedia, setPreviewMedia] = useState<{ url: string; mode: GenerationMode } | null>(null);
+  const [previewMedia, setPreviewMedia] = useState<{ url: string; mode: GenerationMode; item?: OutputItem; jobId?: string; loading?: boolean; error?: string } | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const previewRequest = useRef(0);
 
   useEffect(() => {
     if (open) {
       setSelectedIds(createInitialOutputSelection());
-    }
+    } else { previewRequest.current++; setPreviewMedia(null); }
   }, [open, outputs]);
 
   const toggleSelect = (taskId: string) => {
@@ -93,6 +96,21 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
       return;
     }
     await runDownload(intent.outputs);
+  };
+
+  const openVideo = async (item: OutputItem, url: string): Promise<void> => {
+    const request = ++previewRequest.current;
+    setPreviewMedia({ url, mode: 'video', item, loading: true });
+    try {
+      const jobs = await window.electronAPI.tasks.listDownloads();
+      if (previewRequest.current !== request) return;
+      const local = findLocalDownload(jobs, { taskId: item.taskId, runId: item.runId, artifactId: item.outputs.length === 1 ? item.artifactIds?.[0] : undefined, accountId: item.accountId, mode: item.mode, url });
+      setPreviewMedia({ url, mode: 'video', item, jobId: local?.id });
+    } catch (error: unknown) { if (previewRequest.current === request) setPreviewMedia({ url, mode: 'video', item, error: error instanceof Error ? error.message : '下载记录读取失败，可重试读取' }); }
+  };
+  const downloadPreview = async (item: OutputItem, url: string): Promise<void> => {
+    await runDownload([{ ...item, outputs: [url] }]);
+    await openVideo(item, url);
   };
 
   const allSelected = selectedIds.size === outputs.length;
@@ -171,7 +189,7 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
                         title="播放视频"
                         onClick={(event) => {
                           event.stopPropagation();
-                          setPreviewMedia({ url, mode: item.mode });
+                          void openVideo(item, url);
                         }}
                         style={{
                           width: 80, height: 80, border: '1px solid #c7d2fe', borderRadius: 4,
@@ -225,12 +243,12 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
         <Modal
           open={!!previewMedia}
           footer={null}
-          onCancel={() => setPreviewMedia(null)}
+          onCancel={(): void => { previewRequest.current++; setPreviewMedia(null); }}
           width={previewMedia.mode === 'video' ? 820 : 600}
           styles={{ body: { padding: 0 } }}
         >
           {previewMedia.mode === 'video' ? (
-            <video src={previewMedia.url} controls autoPlay style={{ width: '100%', maxHeight: '75vh', display: 'block', background: '#000' }} />
+            previewMedia.jobId ? <DownloadedVideoPreview key={previewMedia.jobId} jobId={previewMedia.jobId} /> : <div>{previewMedia.loading ? <p role="status">正在读取下载记录…</p> : <><p role="status">请先下载原视频，下载完成后即可本地播放。</p>{previewMedia.error && <p role="alert">{previewMedia.error}</p>}{previewMedia.item && <Button loading={downloading} onClick={(): void => { if (previewMedia.item) void downloadPreview(previewMedia.item, previewMedia.url); }}>下载此视频</Button>}<Button onClick={(): void => { if (previewMedia.item) void openVideo(previewMedia.item, previewMedia.url); }}>重新读取下载记录</Button></>}</div>
           ) : (
             <img src={previewMedia.url} alt="预览" style={{ width: '100%', display: 'block' }} />
           )}

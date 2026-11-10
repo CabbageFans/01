@@ -142,3 +142,6 @@ data/
 
 # 分镜节奏专项：真实剧本、请求回复、项目副本与截图只留本机。
 /artifacts/storyboard-pacing-20261105/
+
+# 视频链路现场验收：原项目、账号关联和平台请求证据只留本机。
+/artifacts/video-workflow-platform-20261110/

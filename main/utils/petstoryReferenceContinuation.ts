@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { PetStoryAsset, PetStoryProduction, PetStoryProductionStep, PetStoryProject, PetStoryPrompt, PetStoryVideoReferenceContinuation } from '@doubao-studio/contracts';
-import { characterVisualBasis } from './petstoryMaterials';
+import { characterVisualBasis } from './petstoryMaterialFacts';
 import { selectedShotImageId } from './petstoryImageReview';
 import { renderReferenceSegments } from './petstoryReferenceText';
 

@@ -46,7 +46,7 @@ describe('源任务持久对话保护', (): void => {
     expect(f.service.retry('source').success).toBe(false);
     expect(f.service.updateRuntime({ taskId: 'source', runtime: { chatAdjustmentGuard: undefined } }).success).toBe(false);
     for (const runId of ['TEST-other-run', '', undefined]) expect(f.service.updateRuntime({ taskId: 'source', runtime: { runId } }).success).toBe(false);
-    expect(f.service.updateRuntime({ taskId: 'source', runtime: { message: 'TEST passive update', stage: 'paused' } }).success).toBe(true);
+    expect(f.service.updateRuntime({ taskId: 'source', expectedRunId: f.read()[0].runtime!.runId, runtime: { message: 'TEST passive update' } }).success).toBe(true);
     expect(f.reopen().acquireLock({ taskId: 'queued', ownerId: 'TEST-owner' }).success).toBe(false);
   });
   it('同账号不同源任务不能抢已存在保护，调用无保护的任务也不能解除它', (): void => {
@@ -73,10 +73,10 @@ describe('源任务持久对话保护', (): void => {
     const f = fixture([task('source'), uncertain]);
     expect((): void => f.service.setConversationGuard('source', 'TEST-project', 'TEST-adjustment', true)).toThrow('请先处理');
     const preserved = f.read()[1];
-    expect(f.service.updateStatus({ taskId: uncertain.id, status: 'cancelled', result: 'TEST 本人明确结束旧等待' }).success).toBe(true);
+    expect(f.service.updateStatus({ taskId: uncertain.id, expectedRunId: uncertain.runtime!.runId, status: 'cancelled', result: 'TEST 本人明确结束旧等待' }).success).toBe(true);
     f.service.setConversationGuard('source', 'TEST-project', 'TEST-adjustment', true);
     expect(f.read()[0].runtime?.chatAdjustmentGuard?.active).toBe(true);
-    expect(f.read()[1]).toEqual({ ...preserved, status: 'cancelled', result: 'TEST 本人明确结束旧等待' });
+    expect(f.read()[1]).toEqual({ ...preserved, revision: (preserved.revision || 0) + 1, status: 'cancelled', result: 'TEST 本人明确结束旧等待' });
     expect(f.service.retry(uncertain.id)).toMatchObject({ success: false, error: expect.stringContaining('禁止重新发送') });
     expect(f.read()[1].runtime).toEqual(preserved.runtime); expect(f.read()[1].errorInfo).toEqual(preserved.errorInfo);
   });

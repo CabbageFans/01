@@ -18,6 +18,7 @@ import { TaskService } from '../../main/core/TaskService';
 import { normalizeTasks } from '../../main/utils/persistenceNormalization';
 import { mediaCommand } from '../../main/utils/petstoryMedia';
 import { optimizationPrompt } from '../../src/utils/petstoryPrompts';
+import { currentRunId, localMediaPort } from '../fixtures/taskRunIdentity';
 import { seedOfflinePromptContracts } from '../fixtures/petstoryPromptContracts';
 
 let root: string; let projects: PetStoryProjects; let p: PetStoryProject; let core: TaskService; let tasks: Task[]; let chats: PetStoryChatService;
@@ -36,7 +37,7 @@ function capability(imageOnly = false): PetStoryCapability {
 }
 async function runtime(task: Task, chatText?: string): Promise<void> {
   const now = new Date().toISOString();
-  const result = core.updateRuntime({ taskId: task.id, status: chatText ? 'done' : 'executing', runtime: { runId: `TEST-run-${task.id}`, attempt: 1, stage: chatText ? 'completed' : 'injecting_prompt', message: 'TEST 离线运行', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
+  const result = core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: chatText ? 'done' : 'executing', runtime: { runId: `TEST-run-${task.id}`, attempt: 1, stage: chatText ? 'completed' : 'injecting_prompt', message: 'TEST 离线运行', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
     input: { prompt: task.prompt, mode: task.mode, attachments: task.attachments || [], videoConfig: task.videoConfig, petstory: task.petstory, promptReadback: task.promptReadback }, submittedAt: chatText ? now : undefined,
     chatResponse: chatText ? { text: chatText, capturedAt: now } : undefined } });
   if (!result.success) throw new Error(result.error);
@@ -173,7 +174,7 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     const prompt = `生成一张静态首帧，呈现已确认的开始时刻，不拼贴多个动作阶段。\n${lines.join('\n')}\n\n${body}`;
     const attachments = await Promise.all(references.map((a): Promise<string> => projects.referenceFile(p.id, a.id)));
     const image = create({ prompts: [prompt], mode: 'image', promptReadback: 'exact', executionIntent: 'hold', projectId: p.studioProjectId, attachments }, p.accountId);
-    await runtime(image); core.updateRuntime({ taskId: image.id, runtime: { submittedAt: new Date().toISOString() } }); core.updateStatus({ taskId: image.id, status: 'done', outputs: ['https://TEST.invalid/historical-five.png'] });
+    await runtime(image); core.updateRuntime({ taskId: image.id, expectedRunId: currentRunId(core, image.id), runtime: { submittedAt: new Date().toISOString() } }); core.updateStatus({ taskId: image.id, expectedRunId: currentRunId(core, image.id), status: 'done', outputs: ['https://TEST.invalid/historical-five.png'] });
     const completed = list().find((t): boolean => t.id === image.id)!; const artifact = completed.artifacts![0]; const now = new Date().toISOString();
     const download: DownloadJob = { id: 'TEST-historical-download', taskId: image.id, accountId: p.accountId, mode: 'image', url: artifact.url, status: 'done', attempts: 1, saveDir: root, filePath: picture, createdAt: now, updatedAt: now };
     const media = new PetStoryExistingMediaService(projects, { list, downloads: (): DownloadJob[] => [download] });
@@ -193,7 +194,7 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     expect(await media.candidates(p.id, shot.id, 'firstFrame')).toEqual([]);
   });
   it('rejects node generation against the unconfirmed legacy inventory without creating tasks', async (): Promise<void> => {
-    const production = new PetStoryProductionService(projects, { list, create, adopt: (): Task => { throw new Error('TEST unexpected adoption'); }, retryUnsubmitted: (): Task => { throw new Error('TEST unexpected retry'); }, downloads: (): DownloadJob[] => [], download: async (): Promise<TaskDownloadOutputsResult> => ({ success: true, count: 0, failed: 0 }) });
+    const production = new PetStoryProductionService(projects, { updateLocalMedia: localMediaPort(core), list, create, adopt: (): Task => { throw new Error('TEST unexpected adoption'); }, retryUnsubmitted: (): Task => { throw new Error('TEST unexpected retry'); }, downloads: (): DownloadJob[] => [], download: async (): Promise<TaskDownloadOutputsResult> => ({ success: true, count: 0, failed: 0 }) });
     await expect(production.generateShotMedia(p.id, p.revision, p.plan!.shots[0].id, 'firstFrame', capability(true), {})).rejects.toThrow('确认');
     expect(tasks).toEqual([]); expect((await projects.read(p.id)).production).toBeUndefined();
   });
@@ -212,7 +213,7 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     p = await projects.addMaterialImage(p.id, p.revision, 'scene:original-village-road', picture);
     p = await projects.approveMaterials(p.id, p.revision, [{ materialId: 'scene:original-village-road', assetId: p.assets.at(-1)!.id }]);
     const downloads: DownloadJob[] = [];
-    const production = new PetStoryProductionService(projects, { list, create, adopt: (): Task => { throw new Error('TEST unexpected adoption'); }, retryUnsubmitted: (): Task => { throw new Error('TEST unexpected retry'); }, downloads: (): DownloadJob[] => downloads,
+    const production = new PetStoryProductionService(projects, { updateLocalMedia: localMediaPort(core), list, create, adopt: (): Task => { throw new Error('TEST unexpected adoption'); }, retryUnsubmitted: (): Task => { throw new Error('TEST unexpected retry'); }, downloads: (): DownloadJob[] => downloads,
       download: async (params: TaskDownloadOutputsParams): Promise<TaskDownloadOutputsResult> => { const output = params.outputs[0]; const now = new Date().toISOString(); const job: DownloadJob = { id: 'TEST-five-download', taskId: output.taskId, accountId: p.accountId, mode: output.mode, url: output.outputs[0], status: 'done', attempts: 1, saveDir: root, filePath: picture, createdAt: now, updatedAt: now }; downloads.push(job); return { success: true, count: 1, failed: 0, jobIds: [job.id] }; } });
     const continuousShotId = p.plan!.shots[1].id;
     await expect(production.generateShotMedia(p.id, p.revision, continuousShotId, 'video', capability(), {})).rejects.toThrow('首帧');
@@ -228,8 +229,8 @@ describe('原五镜头画布持久化与操作边界', (): void => {
     const task = list()[0]; expect(task.mode).toBe('image'); expect(task.petstory?.stepId).toBeTruthy();
     expect(task.prompt).toContain(p.plan!.shots[0].prompts.firstFrame.final);
     await runtime(task); await production.bindRun(p.id, task.id, `TEST-run-${task.id}`);
-    expect(core.updateRuntime({ taskId: task.id, runtime: { submittedAt: new Date().toISOString() } }).success).toBe(true);
-    expect(core.updateStatus({ taskId: task.id, status: 'done', outputs: ['https://TEST.invalid/five-node.png'] }).success).toBe(true);
+    expect(core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), runtime: { submittedAt: new Date().toISOString() } }).success).toBe(true);
+    expect(core.updateStatus({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'done', outputs: ['https://TEST.invalid/five-node.png'] }).success).toBe(true);
     expect((await production.advance(p.id)).success).toBe(true);
     const completed = await production.advance(p.id);
     expect(completed.project!.production).toMatchObject({ state: 'complete', target: { shotId, kind: 'firstFrame' } });

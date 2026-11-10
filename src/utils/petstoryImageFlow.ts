@@ -109,6 +109,7 @@ export function petStoryImageProgress(project: PetStoryProject, target: PetStory
   const operation = imageOperationForTarget(project, target);
   if (!operation) return { busy: false, stage: 'idle', message: '', error: '', resumable: false, conversationMissing: false };
   const task = imageOperationTask(project, operation, tasks);
+  if (operation.endedAt) return { operation, task, busy: false, stage: 'failed', message: '本次图片等待已结束，原请求和图片保留', error: '', resumable: false, conversationMissing: false };
   const failedTask = task && ['fail', 'paused', 'cancelled', 'waiting_verification', 'waiting_generation_confirmation'].includes(task.status);
   const locator = resolveTaskConversationTarget(task);
   const conversationMissing = !!failedTask && task.mode === 'image' && !!task.runtime?.submittedAt && !task.outputs.length

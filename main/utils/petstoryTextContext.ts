@@ -1,4 +1,4 @@
-import { characterVisualBasis } from './petstoryMaterials';
+import { characterVisualBasis } from './petstoryMaterialFacts';
 import type { PetStoryChatJob, PetStoryProject, PetStoryPrompt } from '@doubao-studio/contracts';
 
 function targetPrompt(project: PetStoryProject, job: PetStoryChatJob): PetStoryPrompt | undefined {

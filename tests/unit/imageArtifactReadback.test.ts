@@ -258,6 +258,27 @@ describe('原图片请求关联的严格产物证据', (): void => {
 });
 
 describe('图片产物稳定观察的异步边界', (): void => {
+  it('原助手稳定只给生图面板操作建议且没有生成卡时，500ms内结束本地等待并保留原请求', async (): Promise<void> => {
+    let now = 0;
+    const snapshot = page(); snapshot.messages[1] = { role: 'assistant', messageId: 'TEST-reply', replyId: 'TEST-user',
+      text: '这是图生图修改任务。你现在可以直接在生图面板选择【参考图编辑 / 图生图】，上传参考图后生成即可。' };
+    const read = vi.fn(async (): Promise<ChatPageSnapshot> => snapshot);
+    expect(inspectImageArtifactReadback(snapshot, context)).toMatchObject({ reason: 'generation_not_started', outputs: [], originalMessageId: 'TEST-user', blocker: '平台仅提供生图操作建议，未执行图片生成' });
+    await expect(waitForImageArtifactReadback({ context, ensureCurrent: (): void => undefined, read, now: (): number => now,
+      wait: async (milliseconds: number): Promise<void> => { now += milliseconds; } }))
+      .rejects.toMatchObject({ reason: 'generation_not_started', message: expect.stringContaining('已保留原任务，未重新发送') });
+    expect(read).toHaveBeenCalledTimes(2); expect(now).toBe(500);
+  });
+  it('生图面板普通说明、仍在生成和已有真实图卡不会被操作建议误判', (): void => {
+    const text = '你现在可以直接在生图面板选择【参考图编辑 / 图生图】，上传参考图后生成即可。';
+    const active = page({ generating: true }); active.messages[1] = { role: 'assistant', text, messageId: 'TEST-reply', replyId: 'TEST-user' };
+    expect(inspectImageArtifactReadback(active, context).blocker).toBeUndefined();
+    const ready = page(); ready.messages[1].text = text;
+    expect(inspectImageArtifactReadback(ready, context)).toMatchObject({ reason: 'ready', outputs: [originalUrl] });
+    expect(imageGenerationBlocker('故事里的角色说：你现在可以直接在生图面板选择参考图编辑，生成即可。')).toBeUndefined();
+    expect(imageGenerationBlocker('生图面板支持参考图编辑和图生图，我正在为你生成。')).toBeUndefined();
+    expect(imageGenerationBlocker('这是图生图修改任务，你可以在生图面板选择参考图编辑生成。')).toBe('平台仅提供生图操作建议，未执行图片生成');
+  });
   it('“要”之后已经生成的原图只需稳定采样，进度只输出肯定与询问布尔而不暴露正文', async (): Promise<void> => {
     let now = 0; const progress: ImageArtifactObservationProgress[] = [];
     const read = vi.fn(async (): Promise<ChatPageSnapshot> => imageConfirmationContinuation());

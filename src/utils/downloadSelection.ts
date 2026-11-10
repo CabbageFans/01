@@ -2,6 +2,9 @@ import type { GenerationMode, Task } from '../types';
 
 export interface BatchDownloadOutput {
   taskId: string;
+  runId?: string;
+  artifactIds?: string[];
+  inputVersion?: number;
   prompt: string;
   outputs: string[];
   accountId: string | null;
@@ -195,6 +198,9 @@ export function buildBatchDownloadPayload(
       if (artifacts.length === 0) return [];
       return [{
         taskId: task.id,
+        ...(task.runtime?.runId ? { runId: task.runtime.runId } : {}),
+        ...(task.artifacts?.length ? { artifactIds: task.artifacts.filter((artifact): boolean => artifact.runId === task.runtime?.runId && artifacts.includes(artifact.url)).map((artifact): string => artifact.id) } : {}),
+        ...(task.runtime?.input.videoInputSnapshot ? { inputVersion: task.runtime.input.videoInputSnapshot.inputVersion } : {}),
         prompt: task.prompt,
         outputs: artifacts,
         accountId: task.assignedAccountId,

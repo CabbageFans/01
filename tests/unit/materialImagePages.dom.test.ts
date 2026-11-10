@@ -82,6 +82,18 @@ describe('基础素材独立豆包任务页面', (): void => {
     pages.dispose();
   });
 
+  it('组件重挂载复用同一任务页，迟到dom-ready唤醒当前展示而非已卸载回调', (): void => {
+    const pages = new MaterialImagePages(); const original = frameTask('TEST-remount-video'); original.mode = 'video'; original.runtime!.input.mode = 'video';
+    const previousCallback = vi.fn(); const nextCallback = vi.fn();
+    const page = pages.ensure(original, account, host(), previousCallback);
+    pages.park();
+    expect(pages.ensure(original, account, host(), nextCallback)).toBe(page);
+    page.dispatchEvent(new Event('dom-ready'));
+    expect(previousCallback).not.toHaveBeenCalled(); expect(nextCallback).toHaveBeenCalledOnce();
+    expect(pages.ready(original)).toBe(true); expect(pages.get(original)).toBe(page); expect(original.runtime!.runId).toBe('TEST-remount-video-run');
+    pages.dispose();
+  });
+
   it('原task的新run不继承旧页面，迟到dom事件不认领新运行', (): void => {
     const pages = new MaterialImagePages(); const container = host(); const ready = vi.fn();
     const original = task('TEST-a', 'character:a'); const old = pages.ensure(original, account, container, ready);

@@ -8,7 +8,7 @@ import { usePetStoryStore } from '../../src/store/usePetStoryStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
 import snapshot from '../fixtures/storyboard-five-shots.json';
 
-// 保留实际父页面和画布工具栏；媒体节点不参与本次只读范围刷新。
+// 保留实际父页面和提示词节点；媒体节点不参与本次只读资格刷新。
 vi.mock('../../src/components/PetStoryCanvasMedia', (): object => ({
   CanvasMediaNode: (): React.ReactElement => <div />,
   CanvasReferenceStrip: (): React.ReactElement => <div />,
@@ -36,11 +36,8 @@ async function openCanvas(): Promise<void> {
   render(<PetStoryPanel />); showCanvas();
   await resolveInspection({ success: true, promptTargets: promptTargets(project) });
 }
-function targetButton(): HTMLElement {
-  return screen.getByRole('button', { name: '补齐提示词（1项）' });
-}
-function scopeLabel(): HTMLElement {
-  return screen.getByText('提示词：镜头 1 · 视频提示词');
+function savedPrompt(): HTMLElement {
+  return screen.getByLabelText('镜头 1 · 首帧生图提示词当前正文');
 }
 
 beforeEach((): void => {
@@ -66,72 +63,71 @@ beforeEach((): void => {
 });
 afterEach((): void => { usePetStoryStore.setState(originals.pet); useTaskStore.setState(originals.tasks); vi.restoreAllMocks(); });
 
-describe('画布工具栏的提示词范围刷新', (): void => {
-  it('图片轮询的同版本新对象不重复查询，保留同一按钮和说明节点', async (): Promise<void> => {
-    await openCanvas(); const button = targetButton(); const label = scopeLabel();
+describe('移除工具栏后的画布资格刷新', (): void => {
+  it('图片轮询的同版本新对象不重复查询，保留同一提示词节点', async (): Promise<void> => {
+    await openCanvas(); const prompt = savedPrompt();
     for (let round = 0; round < 3; round++) {
       await act(async (): Promise<void> => { usePetStoryStore.setState({ project: structuredClone(project) }); });
-      expect(targetButton()).toBe(button); expect(scopeLabel()).toBe(label);
+      expect(savedPrompt()).toBe(prompt);
     }
     expect(inspect).toHaveBeenCalledTimes(1); expect(pending).toHaveLength(0);
+    expect(document.querySelector('.canvas-toolbar')).toBeNull();
   });
 
-  it('新版查询等待及失败期间保留已知范围，成功的空结果才移除入口', async (): Promise<void> => {
-    await openCanvas(); const button = targetButton(); const label = scopeLabel();
+  it('新版查询等待、失败和空目标均保留已有正文，不触发文字生成', async (): Promise<void> => {
+    const generate = vi.fn(async (): Promise<void> => undefined); usePetStoryStore.setState({ generateCanvasPrompts: generate });
+    await openCanvas(); const prompt = savedPrompt();
     const next = structuredClone(project); next.revision++;
     await act(async (): Promise<void> => { usePetStoryStore.setState({ project: next }); });
     expect(inspect).toHaveBeenCalledTimes(2); expect(pending[0].revision).toBe(next.revision);
-    expect(targetButton()).toBe(button); expect(scopeLabel()).toBe(label);
+    expect(savedPrompt()).toBe(prompt);
     await resolveInspection({ success: false, error: 'TEST 瞬时读取失败' });
-    expect(targetButton()).toBe(button); expect(scopeLabel()).toBe(label);
+    expect(savedPrompt()).toBe(prompt); expect(prompt.textContent).toBe('TEST 已保存首帧正文');
     const latest = structuredClone(next); latest.revision++;
     await act(async (): Promise<void> => { usePetStoryStore.setState({ project: latest }); });
-    expect(targetButton()).toBe(button); expect(scopeLabel()).toBe(label);
     await resolveInspection({ success: true, promptTargets: [] });
-    expect(screen.queryByRole('button', { name: '补齐提示词（1项）' })).toBeNull();
-    expect(screen.queryByText('提示词：镜头 1 · 视频提示词')).toBeNull();
+    expect(savedPrompt()).toBe(prompt); expect(prompt.textContent).toBe('TEST 已保存首帧正文');
+    expect(generate).not.toHaveBeenCalled(); expect(document.querySelector('.canvas-toolbar')).toBeNull();
   });
 
-  it('较旧版本的迟到查询不覆盖当前范围，也不让刷新中的按钮闪动', async (): Promise<void> => {
-    await openCanvas(); const button = targetButton();
+  it('较旧版本的迟到查询不覆盖当前镜头正文', async (): Promise<void> => {
+    await openCanvas();
     const next = structuredClone(project); next.revision++;
     await act(async (): Promise<void> => { usePetStoryStore.setState({ project: next }); });
-    const latest = structuredClone(next); latest.revision++;
+    const latest = structuredClone(next); latest.revision++; latest.plan!.shots[0].prompts.firstFrame.final = 'TEST 当前新版正文';
     await act(async (): Promise<void> => { usePetStoryStore.setState({ project: latest }); });
-    expect(targetButton()).toBe(button);
-    await resolveInspection({ success: true, promptTargets: [] });
-    expect(targetButton()).toBe(button);
-    await resolveInspection({ success: true, promptTargets: promptTargets(latest) });
-    expect(targetButton()).toBe(button); expect(inspect).toHaveBeenCalledTimes(3);
+    await resolveInspection({ success: true, project: next, promptTargets: [] });
+    expect(savedPrompt().textContent).toBe('TEST 当前新版正文'); expect(usePetStoryStore.getState().project?.revision).toBe(latest.revision);
+    await resolveInspection({ success: true, project: latest, promptTargets: promptTargets(latest) });
+    expect(savedPrompt().textContent).toBe('TEST 当前新版正文'); expect(inspect).toHaveBeenCalledTimes(3);
   });
 
-  it('切换项目清空旧范围，旧项目迟到查询不能串到新项目', async (): Promise<void> => {
+  it('切换项目后旧项目迟到查询不能覆盖新项目正文', async (): Promise<void> => {
     await openCanvas();
     const old = structuredClone(project); old.revision++;
     await act(async (): Promise<void> => { usePetStoryStore.setState({ project: old }); });
-    const next = structuredClone(project); next.id = 'TEST-toolbar-B';
+    const next = structuredClone(project); next.id = 'TEST-toolbar-B'; next.plan!.shots[0].prompts.firstFrame.final = 'TEST 新项目正文';
     await act(async (): Promise<void> => { usePetStoryStore.setState({ project: next }); });
     showCanvas();
-    expect(screen.queryByRole('button', { name: '补齐提示词（1项）' })).toBeNull();
-    await resolveInspection({ success: true, promptTargets: promptTargets(project) });
-    expect(screen.queryByRole('button', { name: '补齐提示词（1项）' })).toBeNull();
+    expect(savedPrompt().textContent).toBe('TEST 新项目正文');
+    await resolveInspection({ success: true, project: old, promptTargets: promptTargets(project) });
+    expect(savedPrompt().textContent).toBe('TEST 新项目正文'); expect(usePetStoryStore.getState().project?.id).toBe(next.id);
     await resolveInspection({ success: true, promptTargets: [] });
-    expect(screen.queryByRole('button', { name: '补齐提示词（1项）' })).toBeNull();
+    expect(savedPrompt().textContent).toBe('TEST 新项目正文');
     expect(inspect.mock.calls.map((call: [string, number]): string => call[0])).toEqual([project.id, project.id, next.id]);
   });
 
-  it('移除方案使待返回的旧查询失效，恢复方案前不显示旧范围', async (): Promise<void> => {
+  it('移除方案后旧查询不恢复镜头，重新采用方案后正常刷新', async (): Promise<void> => {
     await openCanvas();
     const next = structuredClone(project); next.revision++;
     await act(async (): Promise<void> => { usePetStoryStore.setState({ project: next }); });
     const withoutPlan = structuredClone(next); delete withoutPlan.plan;
     await act(async (): Promise<void> => { usePetStoryStore.setState({ project: withoutPlan }); });
-    expect(screen.queryByRole('button', { name: '补齐提示词（1项）' })).toBeNull();
+    expect(document.querySelector('.canvas-shot-row')).toBeNull();
     await resolveInspection({ success: true, promptTargets: promptTargets(project) });
-    expect(screen.queryByRole('button', { name: '补齐提示词（1项）' })).toBeNull();
+    expect(document.querySelector('.canvas-shot-row')).toBeNull();
     await act(async (): Promise<void> => { usePetStoryStore.setState({ project: next }); });
-    expect(screen.queryByRole('button', { name: '补齐提示词（1项）' })).toBeNull();
     await resolveInspection({ success: true, promptTargets: promptTargets(project) });
-    expect(targetButton()).toBeDefined(); expect(inspect).toHaveBeenCalledTimes(3);
+    expect(savedPrompt().textContent).toBe('TEST 已保存首帧正文'); expect(inspect).toHaveBeenCalledTimes(3);
   });
 });

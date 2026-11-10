@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Task } from '../../src/types';
+import type { Task, TaskUpdateRuntimeParams } from '@doubao-studio/contracts';
 import { useTaskStore } from '../../src/store/useTaskStore';
+import { TaskService } from '../../main/core/TaskService';
 
 const originalQueue = useTaskStore.getState().processQueue;
 const now = '2026-10-23T00:00:00.000Z';
@@ -28,9 +29,10 @@ describe('resume does not grant a new submission intent', (): void => {
         : task);
       return { success: true, task: stored[0] };
     });
-    patch.mockReset().mockImplementation(async (id: string, update: Partial<Task>): Promise<unknown> => {
-      stored = stored.map((task: Task): Task => task.id === id ? { ...task, ...update } : task);
-      return { success: true, task: stored[0] };
+    const service = new TaskService({ store: { read: (): Task[] => structuredClone(stored), replace: (tasks: Task[]): boolean => { stored = structuredClone(tasks); return true; } }, defaultProjectId: (): string => 'default-project' });
+    patch.mockReset().mockImplementation(async (id: string, update: Omit<TaskUpdateRuntimeParams, 'taskId'>): Promise<unknown> => {
+      const result = service.updateRuntime({ taskId: id, ...update });
+      return result.success ? { success: true, task: result.data } : result;
     });
     vi.stubGlobal('window', { electronAPI: { tasks: {
       list: async (): Promise<Task[]> => structuredClone(stored),

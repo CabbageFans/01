@@ -15,6 +15,7 @@ const electronAPI = {
     advanceImageOperation: (id: string, operationId: string): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => ipcRenderer.invoke('petstory:advanceImageOperation', { id, operationId }),
     resumeImageOperation: (id: string, operationId: string, capability?: import('@doubao-studio/contracts').PetStoryCapability): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => ipcRenderer.invoke('petstory:resumeImageOperation', { id, operationId, capability }),
     pauseImageOperation: (id: string, operationId: string): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => ipcRenderer.invoke('petstory:pauseImageOperation', { id, operationId }),
+    endImageOperation: (id: string, operationId: string): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => ipcRenderer.invoke('petstory:endImageOperation', { id, operationId }),
     previewAdjustmentReply: (id: string, revision: number, adjustmentId: string, replyKey: string): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentPreviewResult> => ipcRenderer.invoke('petstory:previewAdjustmentReply', { id, revision, adjustmentId, replyKey }),
     beginAdjustment: (id: string, revision: number, target: import('@doubao-studio/contracts').PetStoryRuntimeTarget): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentResult> => ipcRenderer.invoke('petstory:beginAdjustment', { id, revision, target }),
     captureAdjustmentReplies: (id: string, adjustmentId: string, conversationUrl: string, replies: import('@doubao-studio/contracts').PetStoryConversationReply[]): Promise<import('@doubao-studio/contracts').PetStoryAdjustmentResult> => ipcRenderer.invoke('petstory:captureAdjustmentReplies', { id, adjustmentId, conversationUrl, replies }),
@@ -53,6 +54,8 @@ const electronAPI = {
     approveProduction: (id: string, revision: number, capability?: import('@doubao-studio/contracts').PetStoryCapability, fallbacks?: Record<string, 'first_frame' | 'reference'>): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:approveProduction', { id, revision, capability, fallbacks }),
     advanceProduction: (id: string): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:advanceProduction', { id }),
     pauseProduction: (id: string): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:pauseProduction', { id }),
+    endProduction: (id: string): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:endProduction', { id }),
+    detachProduction: (id: string): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:detachProduction', { id }),
     resumeProduction: (id: string, capability?: import('@doubao-studio/contracts').PetStoryCapability): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:resumeProduction', { id, capability }),
     resumeReferenceVideo: (id: string, revision: number, request: import('@doubao-studio/contracts').PetStoryVideoReferenceRequest): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:resumeReferenceVideo', { id, revision, request }),
     resubmitProduction: (id: string, revision: number, request: import('@doubao-studio/contracts').TaskResubmitUncertainParams, capability?: import('@doubao-studio/contracts').PetStoryCapability): Promise<import('@doubao-studio/contracts').PetStoryProductionResult> => ipcRenderer.invoke('petstory:resubmitProduction', { id, revision, request, capability }),
@@ -138,11 +141,13 @@ const electronAPI = {
       taskId: string,
       status: string,
       result?: string,
-      outputs?: string[]
-    ): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke('tasks:updateStatus', { taskId, status, result, outputs }),
+      outputs?: string[],
+      identity?: { expectedRunId?: string; expectedRevision?: number }
+    ): Promise<{ success: boolean; task?: Task; error?: string }> =>
+      ipcRenderer.invoke('tasks:updateStatus', { taskId, status, result, outputs, ...identity }),
     updateRuntime: (taskId: string, patch: {
       expectedRunId?: string;
+      expectedRevision?: number;
       executionIntent?: TaskExecutionIntent;
       status?: string;
       runtime?: Record<string, any>;
@@ -173,7 +178,7 @@ const electronAPI = {
       ipcRenderer.invoke('tasks:delete', { taskId }),
     retry: (taskId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>
       ipcRenderer.invoke('tasks:retry', { taskId }),
-    batchPause: (): Promise<{ success: boolean }> =>
+    batchPause: (): Promise<import('@doubao-studio/contracts').TaskBatchPauseResult> =>
       ipcRenderer.invoke('tasks:batchPause'),
     getCompletedOutputs: (): Promise<Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: GenerationMode }>> =>
       ipcRenderer.invoke('tasks:getCompletedOutputs'),
@@ -191,12 +196,13 @@ const electronAPI = {
     downloadPublicShareMedia: (shareUrl: string, saveDir?: string): Promise<any> =>
       ipcRenderer.invoke('tasks:downloadPublicShareMedia', { shareUrl, saveDir }),
     listDownloads: (): Promise<any[]> => ipcRenderer.invoke('tasks:listDownloads'),
+    readDownloadedMedia: (jobId: string): Promise<import('@doubao-studio/contracts').TaskReadDownloadedMediaResult> => ipcRenderer.invoke('tasks:readDownloadedMedia', { jobId }),
     exportDiagnostics: (): Promise<{ success: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke('tasks:exportDiagnostics'),
     validateArtifact: (taskId: string, artifactId: string): Promise<any> =>
       ipcRenderer.invoke('tasks:validateArtifact', { taskId, artifactId }),
-    saveAdapterReport: (accountId: string, report: Record<string, any>): Promise<{ success: boolean }> =>
-      ipcRenderer.invoke('tasks:saveAdapterReport', { accountId, report }),
+    saveAdapterReport: (accountId: string, report: Record<string, any>, identity?: { taskId?: string; runId?: string; projectId?: string; shotId?: string; stepId?: string }): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke('tasks:saveAdapterReport', { accountId, report, ...identity }),
     selectAdapterRules: (): Promise<any> => ipcRenderer.invoke('tasks:selectAdapterRules'),
     selectSaveDir: (): Promise<{ success: boolean; dirPath?: string; error?: string }> =>
       ipcRenderer.invoke('tasks:selectSaveDir'),

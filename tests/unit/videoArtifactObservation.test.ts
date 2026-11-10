@@ -18,6 +18,14 @@ beforeEach((): void => { vi.useFakeTimers(); });
 afterEach((): void => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('已提交视频的持续只读观察', (): void => {
+  it('未执行生成的文字建议只在连续同证据时结束，变化或读取中断会重置稳定采样', async (): Promise<void> => {
+    const test = options();
+    const first: VideoArtifactResolution = { status: 'generation_not_started', reason: 'TEST仅返回可复制提示词', evidenceKey: 'TEST-first', attempts: [] };
+    const second: VideoArtifactResolution = { ...first, evidenceKey: 'TEST-second' };
+    test.resolve.mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValueOnce(pending).mockResolvedValueOnce(second).mockResolvedValueOnce(second);
+    const work = observeVideoArtifact(test); await vi.advanceTimersByTimeAsync(14_000);
+    await expect(work).resolves.toEqual(second); expect(test.resolve).toHaveBeenCalledTimes(5); expect(test.onProgress).toHaveBeenCalledTimes(4);
+  });
   it('多次快速无产物读取不会提前暂停，延迟产生的视频仍由同一轮观察取得', async (): Promise<void> => {
     const test = options(); test.resolve.mockResolvedValueOnce(pending).mockResolvedValueOnce(pending).mockResolvedValueOnce(pending).mockResolvedValueOnce(resolved);
     const work = observeVideoArtifact(test); await vi.advanceTimersByTimeAsync(9000);

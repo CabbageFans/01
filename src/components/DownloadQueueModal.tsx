@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { DownloadedVideoPreview } from './DownloadedVideoPreview';
 import { Button, Empty, List, Modal, Space, Tag } from 'antd';
 import { ReloadOutlined, SyncOutlined } from '@ant-design/icons';
 import type { DownloadJob } from '../types';
@@ -30,7 +31,9 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
   onClose,
   onRefresh,
   onRetry,
-}) => (
+}) => {
+  const [preview, setPreview] = useState<DownloadJob | null>(null);
+  return <>
   <DownloadSurface
     embedded={embedded}
     scopeLabel={scopeLabel}
@@ -57,7 +60,7 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
                 <Button key="retry" size="small" aria-label="重新下载" icon={<ReloadOutlined />} onClick={() => onRetry(job)}>
                   重新下载
                 </Button>,
-              ] : undefined}
+              ] : job.status === 'done' && job.mode === 'video' ? [<Button key="preview" size="small" aria-label="查看本地视频" onClick={(): void => setPreview(job)}>查看本地视频</Button>] : undefined}
             >
               <List.Item.Meta
                 title={(
@@ -81,6 +84,8 @@ export const DownloadQueueModal: React.FC<DownloadQueueModalProps> = ({
       />
     )}
   </DownloadSurface>
-);
+  <Modal title="本地视频" open={!!preview} footer={null} onCancel={(): void => setPreview(null)} width={820}>{preview && <DownloadedVideoPreview key={preview.id} jobId={preview.id} />}</Modal>
+  </>;
+};
 
 const DownloadSurface: React.FC<React.ComponentProps<typeof Modal> & { embedded: boolean; scopeLabel: string }> = ({ embedded, scopeLabel, children, footer, ...props }): React.ReactElement => embedded ? <div className="embedded-downloads"><div className="download-tools">{typeof footer === 'function' ? null : footer}<span className="muted-text">{scopeLabel}下载记录 · 下载完成后仍需检查文件</span></div>{children}</div> : <Modal {...props} footer={footer}>{children}</Modal>;

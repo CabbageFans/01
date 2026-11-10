@@ -31,6 +31,24 @@ function fixture(initial: Task[]): { service: TaskService; stored: () => Task[];
 }
 
 describe('显式授权未知提交只建立关联 hold 任务', (): void => {
+  it('关联重发完整克隆原运行视频快照，新runtime仍沿原版本和素材摘要且不改stepId', (): void => {
+    const source = original(); source.mode = 'video';
+    const snapshot: NonNullable<Task['videoInputSnapshot']> = { schemaVersion: 1, inputVersion: 12, projectId: 'TEST-story', shotId: 'TEST-shot', stepId: 'TEST-step', accountId: 'TEST-account',
+      sourceText: 'TEST 原文', dialogue: 'TEST 逐字对白', prompt: source.prompt, mode: 'first_frame', videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' },
+      references: [{ assetId: 'TEST-source-asset', order: 0, sha256: 'a'.repeat(64), purpose: 'firstFrame', slot: 'first' }], digest: 'b'.repeat(64) };
+    source.videoConfig = snapshot.videoConfig; source.videoInputSnapshot = { ...snapshot, inputVersion: 99, digest: 'c'.repeat(64) };
+    source.runtime!.input = { ...source.runtime!.input, mode: 'video', videoConfig: snapshot.videoConfig, videoInputSnapshot: snapshot };
+    const before = structuredClone(source.runtime); const state = fixture([source]);
+    const replacement = state.service.resubmitUncertain(request(source)); expect(replacement.success).toBe(true); if (!replacement.success) throw new Error(replacement.error);
+    expect(replacement.data).toMatchObject({ executionIntent: 'hold', status: 'queued', videoInputSnapshot: snapshot });
+    expect(replacement.data.videoInputSnapshot).not.toBe(snapshot); expect(state.stored()[0].runtime).toEqual(before);
+    expect(state.service.resubmitUncertain(request(source)).success).toBe(true); expect(state.ids).toHaveBeenCalledOnce();
+    expect(state.service.updateRuntime({ taskId: replacement.data.id, status: 'executing', runtime: { runId: 'TEST-resubmission-run', attempt: 1, stage: 'preparing_account', message: '',
+      startedAt: authorizedAt, stageStartedAt: authorizedAt, lastHeartbeatAt: authorizedAt, input: { mode: replacement.data.mode, prompt: replacement.data.prompt,
+        attachments: replacement.data.attachments || [], videoConfig: replacement.data.videoConfig, petstory: replacement.data.petstory, videoInputSnapshot: replacement.data.videoInputSnapshot } } }).success).toBe(true);
+    expect(state.stored()[1].runtime?.input.videoInputSnapshot).toEqual(snapshot); expect(state.stored()[0].runtime).toEqual(before);
+  });
+
   it('复制原运行输入，保留原意图、会话、状态与历史，替代任务没有发送权限', (): void => {
     const source = original(); const state = fixture([source]); const result = state.service.resubmitUncertain(request(source));
     expect(result.success).toBe(true); if (!result.success) return;

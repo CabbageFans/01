@@ -69,6 +69,12 @@ export function classifyDownloadException(
 ): { type: DownloadFailureType; message: string } {
   const msg = error.message || '';
   const lower = msg.toLowerCase();
+  if (lower.includes('eacces') || lower.includes('eperm') || lower.includes('erofs') || lower.includes('enoent')) {
+    return { type: 'disk_error', message: '下载目录不存在、无权限或无法写入，请修复目录后重试下载' };
+  }
+  if (msg === 'DOWNLOAD_LEDGER_WRITE_FAILED') {
+    return { type: 'disk_error', message: '下载记录保存失败，原文件保留，请检查磁盘后重试下载' };
+  }
   if (lower.includes('abort') || lower.includes('超时') || lower.includes('timeout')) {
     return { type: 'network_error', message: '下载超时' };
   }

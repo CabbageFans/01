@@ -33,6 +33,8 @@ export type {
   AccountScheduling,
   Account,
   TaskErrorInfo,
+  TaskLocalMediaUpdate,
+  TaskLocalMediaSnapshot,
   TaskRunSnapshot,
   TaskRunRecord,
   TaskLock,
@@ -62,6 +64,7 @@ export type {
 
 export type {
   TaskOperationResult,
+  TaskBatchPauseResult,
   TaskResult,
   TaskAddResult,
   TaskAddParams,
@@ -81,6 +84,7 @@ export type {
   CompletedOutput,
   TaskDownloadOutputsParams,
   TaskDownloadOutputsResult,
+  TaskReadDownloadedMediaResult,
   PublicShareMediaDownloadResult,
   FileSelectResult,
   AudioSelectResult,
@@ -121,7 +125,7 @@ export type {
 export type { ElectronAPI } from './dto/electron-api';
 export type { PetStoryGenerationBlocker, PetStoryGenerationEligibility, PetStoryGenerationEligibilityResult } from './dto/petstory';
 
-export type { PetStoryValidationIssue, PetStoryPromptBatch, PetStoryMaterialEditIntent, PetStoryRuntimeTarget, PetStoryReviewIssue, PetStoryAssetBindings, PetStoryMediaCandidate, PetStoryMaterial, PetStoryProp, PetStoryScene, PetStoryPageBinding, PetStoryPromptProfile, PetStoryPromptReference, PetStoryPromptTaskContract, PetStoryCompiledPrompt, PetStoryCapability, PetStoryEntryCapability, PetStoryResolvedMode, PetStoryModeResolution, PetStoryMediaValidation, PetStoryTaskBinding, PetStoryProductionStep, PetStoryShotMedia, PetStoryProduction, PetStoryProductionCounts, PetStoryVideoReferenceRequest, PetStoryVideoReferenceContinuation, PetStoryExecutionGuard, PetStoryProductionResult, PetStoryMode, PetStoryPromptKind, PetStoryPrompt, PetStoryCharacter, PetStoryShot, PetStoryPlan, PetStoryAsset, PetStoryChatJob, PetStoryProject, PetStoryResult, PetStoryAPI } from './dto/petstory';
+export type { PetStoryValidationIssue, PetStoryPromptBatch, PetStoryMaterialEditIntent, PetStoryRuntimeTarget, PetStoryReviewIssue, PetStoryAssetBindings, PetStoryMediaCandidate, PetStoryMaterial, PetStoryProp, PetStoryScene, PetStoryPageBinding, PetStoryPromptProfile, PetStoryPromptReference, PetStoryPromptTaskContract, PetStoryCompiledPrompt, PetStoryCapability, PetStoryEntryCapability, PetStoryResolvedMode, PetStoryModeResolution, PetStoryMediaValidation, PetStoryMediaSourceSnapshot, VideoInputSnapshot, PetStoryTaskIntent, PetStoryTaskBinding, PetStoryProductionStep, PetStoryShotMedia, PetStoryProduction, PetStoryProductionCounts, PetStoryVideoReferenceRequest, PetStoryVideoReferenceContinuation, PetStoryExecutionGuard, PetStoryProductionResult, PetStoryMode, PetStoryPromptKind, PetStoryPrompt, PetStoryCharacter, PetStoryShot, PetStoryPlan, PetStoryAsset, PetStoryChatJob, PetStoryProject, PetStoryResult, PetStoryAPI } from './dto/petstory';
 
 export type { PetStoryChatAdjustment, PetStoryConversationReply, PetStoryAdjustmentResult } from './dto/petstoryAdjustment';
 

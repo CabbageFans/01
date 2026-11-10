@@ -14,11 +14,13 @@ import { locatePetStoryDraft, usePetStoryDraft } from './PetStoryDrafts';
 import { mergePetStoryPlanDraft } from '../utils/petstoryPlanDraft';
 import { journeyMaterialImageApproved, journeyShotAsset } from '../utils/petstoryJourney';
 import { petStoryVideoReadOnlyRecovery } from '../utils/petstoryRecovery';
+import { originalVideoResultAction, selectVideoWorkflowActions, videoLocalPhaseLabel } from '../utils/videoWorkflowActions';
+import type { VideoWorkflowAction } from '../utils/videoWorkflowActions';
 import type { PetStoryVideoReadOnlyRecovery } from '../utils/petstoryRecovery';
 import { openPetStoryOriginalTask, PetStoryResubmissionActions } from './PetStoryTaskRecovery';
 import { useAccountStore } from '../store/useAccountStore';
 import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
-import { revealBrowser } from '../utils/workspace';
+import { navigateWorkspace, revealBrowser } from '../utils/workspace';
 import { PetStoryConversationButton } from './PetStoryConversationButton';
 
 const petStoryModeNames = { auto: '自动选择', first_frame: '首帧', first_last_frame: '首尾帧', reference: '多参考' };
@@ -64,7 +66,7 @@ function videoPlayError(error: unknown): string {
 }
 
 export const CanvasMediaPreview: React.FC<{ project: PetStoryProject; asset: PetStoryAsset; name: string }> = ({ project, asset, name }): React.ReactElement => {
-  const [source, setSource] = useState(''); const [error, setError] = useState('');
+  const [source, setSource] = useState(''); const [error, setError] = useState(''); const [readAttempt, setReadAttempt] = useState(0);
   const originalTask = useTaskStore((store) => store.tasks.find((task): boolean => task.id === asset.taskId && task.mode === 'video'
     && task.projectId === project.studioProjectId && task.assignedAccountId === project.accountId && !!asset.runId && task.runtime?.runId === asset.runId));
   const requestedDuration = Number.parseFloat(originalTask?.runtime?.input.videoConfig?.duration || originalTask?.videoConfig?.duration || '');
@@ -76,12 +78,12 @@ export const CanvasMediaPreview: React.FC<{ project: PetStoryProject; asset: Pet
     const read = asset.kind === 'video' ? window.electronAPI.petstory.readMedia(project.id, asset.id) : window.electronAPI.petstory.readReference(project.id, asset.id);
     void read.then((result): void => { if (active) { setSource(result.data || ''); setError(result.error || ''); } }).catch((): void => { if (active) setError('本地媒体读取失败'); });
     return (): void => { active = false; };
-  }, [project.id, asset.id, asset.kind]);
+  }, [project.id, asset.id, asset.kind, readAttempt]);
   let content: React.ReactNode = error ? <p role="alert">{error}</p> : <p>正在读取本地文件…</p>;
   if (source) content = asset.kind === 'video' ? <video src={source} controls playsInline preload="metadata" aria-label={name}
     onError={(event: React.SyntheticEvent<HTMLVideoElement>): void => setError(videoMediaError(event.currentTarget.error))}
     onLoadedData={(): void => setError('')} /> : <Image src={source} alt={name} />;
-  return <><div className="canvas-media-preview">{content}</div>{durationReview && <p className="canvas-error" role="note">{durationReview}</p>}{source && error && <p className="canvas-error" role="alert">{error}</p>}</>;
+  return <><div className="canvas-media-preview">{content}</div>{error && <Button size="small" onClick={(): void => setReadAttempt((attempt): number => attempt + 1)}>重新读取</Button>}{durationReview && <p className="canvas-error" role="note">{durationReview}</p>}{source && error && <p className="canvas-error" role="alert">{error}</p>}</>;
 };
 
 const mediaNames: Record<PetStoryPromptKind, string> = { firstFrame: '首帧图片', lastFrame: '尾帧图片', video: '镜头视频' };
@@ -116,7 +118,7 @@ export const CanvasVideoSettings: React.FC<{ project: PetStoryProject; shot: Pet
   const [editing, setEditing] = useState(false);
   const base = useRef<PetStoryPlan>();
   const [message, setMessage] = useState('');
-  const locked = state.busy || isCanvasPlanEditLocked(project);
+  const locked = state.busy || isCanvasPlanEditLocked(project, shot.id);
   const baseShot = base.current?.shots.find((item): boolean => item.id === shot.id);
   const dirty = editing && (mode !== baseShot?.requestedMode || duration !== baseShot?.durationSeconds);
   const fieldId = `shot-video-settings-${shot.id}`;
@@ -206,14 +208,15 @@ const CanvasVideoRecovery: React.FC<{ recovery: PetStoryVideoReadOnlyRecovery; b
   const confirmation = recovery.task.runtime?.generationConfirmation;
   const parameters = [confirmation?.model, confirmation?.duration, confirmation?.aspectRatio].filter(Boolean).join(' · ');
   const needsConfirmation = recovery.action === 'confirm_parameters';
-  const needsVerification = recovery.action === 'verify_account';
+  const originalAction = originalVideoResultAction(recovery.task);
+  const needsVerification = recovery.action === 'verify_account' || originalAction.kind === 'verify_account';
   return <section className="canvas-video-recovery" aria-label={needsConfirmation ? '视频参数确认' : needsVerification ? '原账号验证恢复' : '原视频结果检查'}>
     {needsConfirmation && parameters && <strong className="canvas-video-parameters">{parameters}</strong>}
     <p role="status">{needsConfirmation ? '在豆包原会话回复“确认”。确认后回到这里，点击“我已确认，检查结果”。' : recovery.reason}</p>
     <div className="canvas-media-actions">
       {needsConfirmation && <Button type="primary" size="small" disabled={busy || starting} onClick={(): void => onAction('confirm_parameters')}>去豆包确认参数</Button>}
       {needsVerification && <Button size="small" disabled={busy || starting} onClick={(): void => onAction('open_verification')}>去豆包处理验证</Button>}
-      <Button type={needsConfirmation ? 'default' : 'primary'} size="small" loading={starting} disabled={busy || starting} onClick={(): void => onAction(needsVerification ? 'verify_account' : 'check_result')}>{needsConfirmation ? '我已确认，检查结果' : recovery.label}</Button>
+      <Button type={needsConfirmation ? 'default' : 'primary'} size="small" loading={starting} disabled={busy || starting} onClick={(): void => onAction(needsVerification ? 'verify_account' : 'check_result')}>{needsConfirmation ? '我已确认，检查结果' : needsVerification ? '已完成验证，继续' : originalAction.label}</Button>
       {resubmissionAction}
     </div>
   </section>;
@@ -223,7 +226,7 @@ function mediaNodeFacts(project: PetStoryProject, shot: PetStoryShot, kind: PetS
   const asset = selectedPetStoryMedia(project, shot, kind);
   const step = productionSteps(project).reverse().find((item): boolean => item.shotId === shot.id && item.kind === kind);
   const pendingTask = tasks.find((item): boolean => item.id === step?.taskId);
-  const waiting = !!step && step.status !== 'complete'; const video = kind === 'video';
+  const waiting = !!step && step.status !== 'complete' && !!project.production?.steps.some((item): boolean => item.id === step.id); const video = kind === 'video';
   const buttonText = asset ? `重新生成${video ? '视频' : '图片'}` : video ? '生成视频' : '生成图片';
   return { asset, step, pendingTask, waiting, video, buttonText };
 }
@@ -257,6 +260,30 @@ function originalVideoConversationTask(project: PetStoryProject, step: PetStoryP
   return source;
 }
 
+function ownsActiveVideoStep(project: PetStoryProject, step: PetStoryProductionStep | undefined): boolean {
+  const production = project.production;
+  const active = production?.steps.find((item): boolean => item.status !== 'complete');
+  return !!production && ['running', 'paused'].includes(production.state) && !!step && step.kind === 'video'
+    && active?.id === step.id && active.shotId === step.shotId && active.taskId === step.taskId && active.runId === step.runId;
+}
+/** 停止动作属于当前镜头的本次运行，不能从历史或其他镜头结束整个制作。 */
+const CanvasVideoProductionActions: React.FC<{ project: PetStoryProject; step?: PetStoryProductionStep; actions: VideoWorkflowAction[] }> = ({ project, step, actions }): React.ReactElement | null => {
+  const state = usePetStoryStore(); const [pending, setPending] = useState(false); const [error, setError] = useState('');
+  if (!ownsActiveVideoStep(project, step)) return null;
+  const stop = async (action: 'pause' | 'end'): Promise<void> => {
+    const latest = usePetStoryStore.getState().project;
+    if (state.busy || pending) return;
+    if (latest?.id !== project.id || latest.production?.approvedAt !== project.production?.approvedAt || !ownsActiveVideoStep(latest, step)) { setError('当前制作已变化，请重新查看本镜任务。'); return; }
+    setPending(true); setError('');
+    try {
+      if (action === 'pause') await state.pauseProduction(); else await state.endProduction();
+      setError(usePetStoryStore.getState().error);
+    } catch (cause: unknown) { setError(cause instanceof Error ? cause.message : '本次制作尚未停止，请重试。'); }
+    finally { setPending(false); }
+  };
+  return <>{actions.filter((action): boolean => action.kind === 'pause' || action.kind === 'end').map((action): React.ReactElement => <Button key={action.kind} size="small" disabled={state.busy || pending} loading={pending} onClick={(): void => { void stop(action.kind === 'pause' ? 'pause' : 'end'); }}>{action.label}</Button>)}{error && <span className="canvas-error" role="alert">{error}</span>}</>;
+};
+
 export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStoryShot; kind: PetStoryPromptKind; disabled: boolean }> = ({ project, shot, kind, disabled }): React.ReactElement => {
   const state = usePetStoryStore(); const taskState = useTaskStore(); const tasks = taskState.tasks;
   const [settingsDirty, setSettingsDirty] = useState(false);
@@ -275,9 +302,12 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
   };
   const recoverableTask = video ? petStoryUnsubmittedVideoTask(project, shot.id, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]) : undefined;
   const readOnlyRecovery = video ? petStoryVideoReadOnlyRecovery(project, shot.id, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]) : undefined;
+  const workflowActions = selectVideoWorkflowActions({ task: pendingTask, step, production: project.production, asset, canPrepare: !!recoverableTask, canCheckOriginal: !!readOnlyRecovery });
+  const localRecoveryAction = workflowActions.find((action): boolean => ['retry_download', 'revalidate', 'retry_library'].includes(action.kind));
   const recoverySnapshot = readOnlyRecovery?.task.runtime ? { taskId: readOnlyRecovery.task.id, runId: readOnlyRecovery.task.runtime.runId, submittedAt: readOnlyRecovery.task.runtime.submittedAt, accountId: readOnlyRecovery.task.assignedAccountId } : undefined;
-  // 正式只读核对仍然受理不明时，接回已有的单次风险确认出口；其他暂停只保留检查操作。
-  const resubmissionTask = readOnlyRecovery?.action === 'check_result' && readOnlyRecovery.task.errorInfo?.code === 'submission_uncertain'
+  // 已提交但未启动媒体同样保留原请求；只有独立风险确认才能创建唯一关联尝试。
+  const resubmissionTask = readOnlyRecovery?.action === 'check_result'
+    && ['submission_uncertain', 'video_generation_not_started'].includes(readOnlyRecovery.task.errorInfo?.code || '')
     ? petStoryResubmissionTask(project, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]) : undefined;
   const nodeResubmissionTask = recoverySnapshot && sameSubmittedVideoRecovery(resubmissionTask, recoverySnapshot) ? resubmissionTask : undefined;
   const hasCandidate = !video && pendingImageCandidates(project, { shotId: shot.id, kind: kind as 'firstFrame' | 'lastFrame' }, asset?.id).length > 0;
@@ -310,6 +340,14 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
     } catch (error: unknown) { setGenerationError(error instanceof Error ? error.message : '原视频任务尚未恢复，请查看当前任务。'); }
     finally { setStarting(false); }
   };
+  const retryLocalVideo = async (): Promise<void> => {
+    const latestProject = usePetStoryStore.getState().project;
+    const latestTask = useTaskStore.getState().tasks.find((item): boolean => item.id === pendingTask?.id);
+    if (!localRecoveryAction || state.busy || starting || latestProject?.id !== project.id || !step?.runId || latestTask?.runtime?.runId !== step.runId || latestTask.status !== 'done') return;
+    setStarting(true); setGenerationError('');
+    try { await state.resumeProduction(); setGenerationError(usePetStoryStore.getState().error); }
+    finally { setStarting(false); }
+  };
   const recoverSubmittedVideo = async (action: VideoRecoveryAction): Promise<void> => {
     if (!readOnlyRecovery || !recoverySnapshot || state.busy || starting) return;
     const current = usePetStoryStore.getState().project; const currentTasks = useTaskStore.getState();
@@ -319,6 +357,7 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
     const account = useAccountStore.getState().accounts.find((item: Account): boolean => item.id === accountId);
     if (!accountId || !account || account.platform === 'dola') { setGenerationError('原执行账号已不存在或不支持此恢复，请重新核对任务。'); return; }
     setGenerationError('');
+    if (originalVideoResultAction(recovery.task).kind === 'select_original') { navigateWorkspace('tasks'); window.dispatchEvent(new CustomEvent('show-workspace-task', { detail: { taskId: recovery.task.id } })); return; }
     if (action === 'confirm_parameters') { openPetStoryOriginalTask(recovery.task); return; }
     if (action === 'open_verification') {
       if (!canSelectAccount(accountId, findInteractiveAccountId(currentTasks.accountAutomationState))) { setGenerationError('其他账号正在提交，请待提交结束后再处理原账号验证。'); return; }
@@ -352,7 +391,7 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
     catch (error: unknown) { setGenerationError(videoPlayError(error)); }
   };
 
-  return <div id={`shot-media-${shot.id}-${kind}`} tabIndex={-1} className="canvas-media-node" data-media-kind={kind}><div className="canvas-field-label"><strong>{mediaNames[kind]}</strong><span className={`canvas-state ${asset?.validation ? 'ready' : ''}`}>{readOnlyRecovery?.status || (recoverableTask ? '生成前准备未完成' : !asset && promptPreparing ? '提示词后台准备中' : !asset && promptNotice?.includes('已有待采用候选') ? '提示词待确认' : mediaStatus(asset, waiting, pendingTask, hasCandidate))}</span></div>
+  return <div id={`shot-media-${shot.id}-${kind}`} tabIndex={-1} className="canvas-media-node" data-media-kind={kind}><div className="canvas-field-label"><strong>{mediaNames[kind]}</strong><span className={`canvas-state ${asset?.validation ? 'ready' : ''}`}>{(video && videoLocalPhaseLabel(pendingTask)) || readOnlyRecovery?.status || (recoverableTask ? '生成前准备未完成' : !asset && promptPreparing ? '提示词后台准备中' : !asset && promptNotice?.includes('已有待采用候选') ? '提示词待确认' : mediaStatus(asset, waiting, pendingTask, hasCandidate))}</span></div>
     {readOnlyRecovery && <CanvasVideoRecovery recovery={readOnlyRecovery} busy={state.busy} starting={starting} onAction={(action: VideoRecoveryAction): void => { void recoverSubmittedVideo(action); }}
       resubmissionAction={nodeResubmissionTask && <PetStoryResubmissionActions projectId={project.id} task={nodeResubmissionTask} disabled={starting} />} />}
     {video && pendingTask?.status === 'manual_submission_observing' && <p className="canvas-hint" role="status">{pendingTask.runtime?.message || '正在同步原会话并检查视频结果，请稍候。'}</p>}
@@ -368,7 +407,8 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
     {video && <CanvasVideoResolution project={project} shot={shot} eligibility={readiness.eligibility} />}
     {video && !asset && !recoverableTask && !readOnlyRecovery && promptNotice && <p className={promptPreparing || isPetStoryPromptPreparationMessage(promptNotice) ? 'canvas-hint' : 'canvas-error'} role={promptPreparing || isPetStoryPromptPreparationMessage(promptNotice) ? 'status' : 'alert'}>{promptNotice}</p>}
     {settingsDirty && <Alert type="warning" message="本镜视频设置有未保存修改，请先保存或放弃后再生成。" />}
-    {video && <div className="canvas-media-actions">{!readOnlyRecovery && <>{recoverableTask ? <Button type="primary" size="small" loading={starting} icon={<PlayCircleOutlined />} disabled={state.busy || settingsDirty || starting} onClick={(): void => { void continueVideo(); }}>继续生成视频</Button> : !asset && <Button type="primary" size="small" loading={starting} icon={<PlayCircleOutlined />} disabled={disabled || waiting || settingsDirty || starting} onClick={(): void => { void generateVideo(); }}>{buttonText}</Button>}{asset && <Button size="small" onClick={(): void => { void playVideo(); }}>查看视频</Button>}</>}
+    {video && <div className="canvas-media-actions">{!readOnlyRecovery && <>{localRecoveryAction ? <Button type="primary" size="small" loading={starting} disabled={state.busy || starting} onClick={(): void => { void retryLocalVideo(); }}>{localRecoveryAction.label}</Button> : recoverableTask ? <Button type="primary" size="small" loading={starting} icon={<PlayCircleOutlined />} disabled={state.busy || settingsDirty || starting} onClick={(): void => { void continueVideo(); }}>继续生成视频</Button> : <Button type="primary" size="small" loading={starting} icon={<PlayCircleOutlined />} disabled={disabled || waiting || settingsDirty || starting} onClick={(): void => { void generateVideo(); }}>{workflowActions.find((action): boolean => action.kind === 'generate_version' || action.kind === 'generate')?.label || buttonText}</Button>}{asset && <Button size="small" onClick={(): void => { void playVideo(); }}>查看视频</Button>}</>}
+      <CanvasVideoProductionActions project={project} step={step} actions={workflowActions} />
       <PetStoryConversationButton projectId={project.id} task={conversationTask} unavailableHint="本镜尚无可定位的视频生成任务" />
       {originalConversationTask && <PetStoryConversationButton projectId={project.id} task={originalConversationTask} label="原请求豆包对话" sourceIsCurrent={originalSourceIsCurrent} />}
     </div>}

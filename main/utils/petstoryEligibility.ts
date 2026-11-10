@@ -4,8 +4,8 @@ import type { PetStoryCapability, PetStoryChatJob, PetStoryProject, PetStoryProm
 import { previousAdoptedBoundary, previousBoundaryHashMatches } from './petstoryBoundary';
 import { promptTextContext } from './petstoryTextContext';
 import { runtimePromptIssues } from './petstoryValidation';
-import { compileReferencedText, materialPromptReferences, plannedReferenceMap, promptReferences } from './petstoryPromptQuality';
-import { characterVisualBasis, materialRequestAfterVisualAdoption, isStoryApproved } from './petstoryMaterials';
+import { compileReferencedText, materialPromptReferences, plannedReferenceMap, promptReferences } from './petstoryPromptReferences';
+import { characterVisualBasis, materialRequestAfterVisualAdoption, isStoryApproved } from './petstoryMaterialFacts';
 import { isPetStoryImageAdopted } from './petstoryImageReview';
 import { plannedPetStoryMode } from './petstoryModes';
 import { hasCurrentPromptReviewError } from './petstoryReview';

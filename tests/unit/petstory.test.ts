@@ -1,3 +1,4 @@
+import { currentRunId } from '../fixtures/taskRunIdentity';
 /** 全部为离线测试数据，不代表真实抖音内容、免费权益或生成验收。 */
 import { withOfflineTimingPlan } from '../fixtures/petstoryTimingPlan';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -79,7 +80,7 @@ function taskPort(): { port: PetStoryTaskPort; core: TaskService; tasks: () => T
 async function complete(core: TaskService, task: Task, raw: string, runId: string = 'test-run'): Promise<void> {
   const runtime: TaskRunSnapshot = { runId, attempt: 1, stage: 'completed', message: '离线测试', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
     input: { prompt: task.prompt, mode: task.mode, attachments: task.attachments || [] }, chatResponse: { text: raw, capturedAt: now } };
-  const written = core.updateRuntime({ taskId: task.id, status: 'done', runtime });
+  const written = core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'done', runtime });
   if (!written.success) throw new Error(written.error);
   const chat = new PetStoryChatService(projects, { list: (): Task[] => { const result = core.getTasks(); return result.success ? result.data : []; }, create: (): Task => { throw new Error('TEST unexpected create'); } });
   const current = await projects.read(project.id);
@@ -265,14 +266,14 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     const task = tasks()[0];
     const runtime: TaskRunSnapshot = { runId: 'TEST-old-run', attempt: 1, stage: 'failed', message: 'TEST attachment failure', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
       input: { prompt: task.prompt, mode: 'chat', attachments: [] } };
-    core.updateRuntime({ taskId: task.id, status: code === 'page_unrecognized' ? 'waiting_verification' : 'fail', runtime, errorInfo: { code, message: 'TEST pre-submit error', recoverable: true, detectedAt: now } });
+    core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: code === 'page_unrecognized' ? 'waiting_verification' : 'fail', runtime, errorInfo: { code, message: 'TEST pre-submit error', recoverable: true, detectedAt: now } });
     await chat.bindRun(project.id, job.id, runtime.runId);
     const retried = await chat.retryUnsubmitted(project.id, job.id);
     expect(retried.project!.jobs[0].runId).toBeUndefined();
     expect(tasks()).toHaveLength(1);
     expect(tasks()[0]).toMatchObject({ id: task.id, status: 'queued', executionIntent: 'hold' });
     expect(tasks()[0].runHistory?.[0]).toMatchObject({ runId: runtime.runId });
-    core.updateRuntime({ taskId: task.id, status: 'executing', runtime: { ...runtime, runId: 'TEST-new-run', attempt: 2, stage: 'uploading_assets' } });
+    core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'executing', runtime: { ...runtime, runId: 'TEST-new-run', attempt: 2, stage: 'uploading_assets' } });
     expect((await chat.bindRun(project.id, job.id, 'TEST-new-run')).project!.jobs[0].runId).toBe('TEST-new-run');
     expect(tasks()[0].runtime?.submittedAt).toBeUndefined();
     expect(tasks()).toHaveLength(1);
@@ -280,7 +281,7 @@ describe('PetStory project and real service wiring — offline tests only', (): 
   it('旧派发前停止无错误码但paused/hold且job从未绑定时，继续同任务并保留旧运行历史', async (): Promise<void> => {
     const { port, core, tasks } = taskPort(); const chat = new PetStoryChatService(projects, port);
     const prepared = await chat.prepareRuntime(project.id, project.revision, 'analysis'); const job = prepared.project!.jobs[0]; const task = tasks()[0];
-    core.updateRuntime({ taskId: task.id, status: 'paused', executionIntent: 'hold', errorInfo: null,
+    core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'paused', executionIntent: 'hold', errorInfo: null,
       runtime: { runId: 'TEST-unbound-dispatch', attempt: 1, stage: 'paused', message: '任意文案不作为恢复依据', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
         input: { prompt: task.prompt, mode: 'chat', attachments: [] } } });
     const resumed = await chat.retryUnsubmitted(project.id, job.id);
@@ -293,7 +294,7 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     const prepared = await chat.prepareRuntime(project.id, project.revision, 'analysis'); const job = prepared.project!.jobs[0]; const task = tasks()[0];
     const runtime: TaskRunSnapshot = { runId: 'TEST-unbound-dispatch', attempt: 1, stage: 'paused', message: '请先打开该文字任务所属的原项目，并核对原步骤后继续；本次未发送', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
       input: { prompt: task.prompt, mode: 'chat', attachments: [] } };
-    core.updateRuntime({ taskId: task.id, status: 'paused', executionIntent: 'hold', errorInfo: null, runtime });
+    core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'paused', executionIntent: 'hold', errorInfo: null, runtime });
     if (reason === 'bound') await chat.bindRun(project.id, job.id, runtime.runId);
     // 仅离线测试变更快照；包含观察等证据时不能靠缺错误码或同文案突破门禁。
     const snapshot = tasks()[0];
@@ -328,11 +329,14 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     const task = tasks()[0]; const job = prepared.project!.jobs[0];
     const runtime: TaskRunSnapshot = { runId: 'TEST-bound', attempt: 1, stage: 'failed', message: 'TEST failed', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
       input: { prompt: task.prompt, mode: 'chat', attachments: [] } };
-    core.updateRuntime({ taskId: task.id, status: 'fail', runtime, errorInfo: { code: reason === 'page-changed-submitted' ? 'page_changed' : 'chat_assets_not_ready', message: 'TEST upload', recoverable: true, detectedAt: now } });
+    core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'fail', runtime, errorInfo: { code: reason === 'page-changed-submitted' ? 'page_changed' : 'chat_assets_not_ready', message: 'TEST upload', recoverable: true, detectedAt: now } });
     await chat.bindRun(project.id, job.id, runtime.runId);
-    core.updateRuntime({ taskId: task.id, runtime: reason === 'wrong-run' ? { ...runtime, runId: 'TEST-other' } : reason === 'submitted' || reason === 'page-changed-submitted' ? { submittedAt: now } : {},
+    core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), runtime: reason === 'wrong-run' ? { ...runtime, runId: 'TEST-other' } : reason === 'submitted' || reason === 'page-changed-submitted' ? { submittedAt: now } : {},
       errorInfo: reason === 'uncertain' ? { code: 'submission_uncertain', message: 'TEST uncertain', recoverable: false, detectedAt: now } : undefined });
-    await expect(chat.retryUnsubmitted(project.id, job.id)).rejects.toThrow();
+    const historical = tasks();
+    if (reason === 'wrong-run') historical[0].runtime!.runId = 'TEST-other';
+    const guarded = reason === 'wrong-run' ? new PetStoryChatService(projects, { ...port, list: (): Task[] => structuredClone(historical) }) : chat;
+    await expect(guarded.retryUnsubmitted(project.id, job.id)).rejects.toThrow();
     expect(tasks()).toHaveLength(1);
     expect(tasks()[0].status).toBe('fail');
     expect((await projects.read(project.id)).jobs[0].runId).toBe('TEST-bound');
@@ -343,7 +347,7 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     const prepared = await chat.prepare(project.id, 'TEST write failure', 'analysis'); const task = tasks()[0];
     const runtime: TaskRunSnapshot = { runId: 'TEST-run', attempt: 1, stage: 'failed', message: 'TEST upload', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
       input: { prompt: task.prompt, mode: 'chat', attachments: [] } };
-    core.updateRuntime({ taskId: task.id, status: 'fail', runtime, errorInfo: { code: 'chat_assets_not_ready', message: 'TEST upload', recoverable: true, detectedAt: now } });
+    core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'fail', runtime, errorInfo: { code: 'chat_assets_not_ready', message: 'TEST upload', recoverable: true, detectedAt: now } });
     await chat.bindRun(project.id, prepared.project!.jobs[0].id, runtime.runId);
     const broken = new PetStoryProjects(async (): Promise<void> => { throw new Error('TEST retry manifest write failed'); });
     const opened = await broken.open(directory);
@@ -479,7 +483,7 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     expect(result.project?.source.status).toBe('pending');
     expect(result.project?.plan).toBeUndefined();
   });
-  it('coalesces duplicate prepares through project serialization and blocks orphan re-creation after uncertain manifest save', async (): Promise<void> => {
+  it('coalesces duplicate prepares and recovers the same stored intention after a manifest failure', async (): Promise<void> => {
     const { port, tasks } = taskPort();
     const chat = new PetStoryChatService(projects, port);
     const results = await Promise.allSettled([1, 2].map((): Promise<PetStoryResult> => projects.serial(project.id, (): Promise<PetStoryResult> => chat.prepare(project.id, 'TEST repeated', 'analysis'))));
@@ -496,7 +500,8 @@ describe('PetStory project and real service wiring — offline tests only', (): 
     const uncertain = new PetStoryChatService(broken, port);
     await expect(uncertain.prepare(withSource.id, 'TEST uncertain write', 'analysis')).rejects.toThrow('TEST disk');
     fail = false;
-    await expect(uncertain.prepare(withSource.id, 'TEST uncertain write', 'analysis')).rejects.toThrow('未绑定任务');
+    const recovered = await uncertain.prepare(withSource.id, 'TEST uncertain write', 'analysis');
+    expect(recovered.success).toBe(true); expect(recovered.project?.jobs[0].taskId).toBe(recovered.taskId);
     expect(tasks()).toHaveLength(2);
     expect(tasks().every((t): boolean => t.executionIntent === 'hold')).toBe(true);
   });

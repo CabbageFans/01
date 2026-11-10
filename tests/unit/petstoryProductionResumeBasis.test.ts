@@ -1,3 +1,4 @@
+import { currentRunId, localMediaPort } from '../fixtures/taskRunIdentity';
 /** 离线项目／TaskService 回归：停止后上传候选不改授权，采用新引用不能清掉旧运行。 */
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -45,11 +46,11 @@ async function pausedTask(kind: 'firstFrame' | 'video' | 'material', submitted =
   const next = scoped ? await service.withImageOperation(p.id, operationId, (current): ReturnType<typeof current.advance> => current.advance(p.id)) : await service.advance(p.id);
   expect(next).toMatchObject({ success: true, action: 'start' });
   const original = list().find((item): boolean => item.id === next.taskId)!; const now = p.updatedAt;
-  expect(core.updateRuntime({ taskId: original.id, status: 'executing', runtime: { runId: 'TEST-original-run', attempt: 1, stage: 'injecting_prompt',
+  expect(core.updateRuntime({ taskId: original.id, expectedRunId: currentRunId(core, original.id), status: 'executing', runtime: { runId: 'TEST-original-run', attempt: 1, stage: 'injecting_prompt',
     message: 'TEST准备', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
     input: { prompt: original.prompt, mode: original.mode, attachments: original.attachments || [], videoConfig: original.videoConfig, petstory: original.petstory } } }).success).toBe(true);
   await service.bindRun(p.id, original.id, 'TEST-original-run');
-  expect(core.updateRuntime({ taskId: original.id, status: 'paused', runtime: submitted ? { submittedAt: now } : undefined,
+  expect(core.updateRuntime({ taskId: original.id, expectedRunId: currentRunId(core, original.id), status: 'paused', runtime: submitted ? { submittedAt: now } : undefined,
     errorInfo: { code: 'cancelled', message: 'TEST用户停止', recoverable: true, detectedAt: now } }).success).toBe(true);
   if (scoped) await service.withImageOperation(p.id, operationId, (current): ReturnType<typeof current.pause> => current.pause(p.id));
   else await service.pause(p.id);
@@ -85,7 +86,7 @@ beforeEach(async (): Promise<void> => {
   });
   retry.mockImplementation((id): Task => { const result = core.retry(id, 'hold'); if (!result.success) throw new Error(result.error); return result.data; });
   bindInput.mockImplementation((id, runId, prompt): Task => { const result = core.bindPetStoryPageInput(id, runId, prompt); if (!result.success) throw new Error(result.error); return result.data; });
-  service = new PetStoryProductionService(projects, { list, create, retryUnsubmitted: retry, bindPageInput: bindInput,
+  service = new PetStoryProductionService(projects, { updateLocalMedia: localMediaPort(core), list, create, retryUnsubmitted: retry, bindPageInput: bindInput,
     adopt: (id, binding, prompt): Task => { const result = core.bindPetStory(id, binding, prompt); if (!result.success) throw new Error(result.error); return result.data; },
     downloads: (): [] => [], download: async (): Promise<{ success: boolean; count: number; failed: number }> => ({ success: false, count: 0, failed: 0 }) });
 });
@@ -100,7 +101,7 @@ describe('停止后明确恢复的原依据边界', (): void => {
     await service.withImageOperation(p.id, operationId, (current): ReturnType<typeof current.resume> => current.resume(p.id));
     const observed = await service.withImageOperation(p.id, operationId, (current): ReturnType<typeof current.advance> => current.advance(p.id));
     expect(observed).toMatchObject({ success: true, action: 'observe', taskId: task.id }); expect(list()).toEqual(before);
-    expect(core.updateStatus({ taskId: task.id, status: 'done', outputs: ['https://TEST.invalid/late-original.png'] }).success).toBe(true);
+    expect(core.updateStatus({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'done', outputs: ['https://TEST.invalid/late-original.png'] }).success).toBe(true);
     await service.withImageOperation(p.id, operationId, (current): ReturnType<typeof current.resume> => current.resume(p.id));
     expect(list()[0]).toMatchObject({ id: task.id, outputs: ['https://TEST.invalid/late-original.png'], runtime: { runId: task.runtime!.runId, submittedAt: task.runtime!.submittedAt, input: task.runtime!.input } });
     expect(retry).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled(); expect(bindInput).not.toHaveBeenCalled();

@@ -1,3 +1,4 @@
+import { projectDownloadJobs } from '../utils/localDownloads';
 /**
  * src/components/Toolbar.tsx
  * 页面工具与低频维护入口
@@ -17,7 +18,6 @@ import type { AdapterSelfCheckReport, DownloadJob, Task } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { ArtifactCenterModal } from './ArtifactCenterModal';
 import { BatchManagerModal } from './BatchManagerModal';
-import { installAdapterBundle, rollbackAdapterBundle } from '../automation/doubaoAdapter';
 import { LogCenterModal } from './LogCenterModal';
 import { ProjectOverviewModal } from './ProjectOverviewModal';
 import { useProjectStore } from '../store/useProjectStore';
@@ -207,7 +207,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ page }): React.ReactElement =>
 
   const handleRetryDownload = async (job: DownloadJob) => {
     const result = await window.electronAPI.tasks.downloadOutputs([{
-      taskId: job.taskId,
+      taskId: job.taskId, runId: job.runId, ...(job.artifactId ? { artifactIds: [job.artifactId] } : {}),
       prompt: '',
       outputs: [job.url],
       accountId: job.accountId,
@@ -289,29 +289,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({ page }): React.ReactElement =>
       },
     },
     {
-      key: 'adapter-import',
-      label: '导入页面适配规则',
-      onClick: async () => {
-        const selected = await window.electronAPI.tasks.selectAdapterRules();
-        if (!selected.success || !selected.bundle) {
-          if (selected.error) message.error(selected.error);
-          return;
-        }
-        const result = await installAdapterBundle(selected.bundle);
-        if (result.ok) message.success(`适配规则 ${selected.bundle.version} 已安装`);
-        else message.error(result.error);
-      },
-    },
-    {
-      key: 'adapter-rollback',
-      label: '回退页面适配规则',
-      onClick: async () => {
-        const result = await rollbackAdapterBundle();
-        if (result.ok) message.success(`已回退到适配规则 ${result.version}`);
-        else message.warning(result.error);
-      },
-    },
-    {
       key: 'metrics',
       label: '运行统计',
       onClick: () => setMetricsOpen(true),
@@ -359,13 +336,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({ page }): React.ReactElement =>
         <p className="muted-text asset-scope">{assetView === 'adopted' || assetView === 'candidates' ? '已采用图片可以用于后续制作；待确认图片请先预览，再决定是否采用。' : '图片下载后仍需在短剧中预览并采用；下载状态与文件校验分别记录。'}</p>
         {(assetView === 'adopted' || assetView === 'candidates') && <StoryImageLibrary view={assetView} />}
         <ArtifactCenterModal open={assetView === 'outputs'} embedded onClose={(): void => setAssetView('outputs')} />
-        {assetView === 'downloads' && <DownloadQueueModal embedded open scopeLabel="当前项目" jobs={downloadJobs.filter((job): boolean => tasks.some((task): boolean => task.id === job.taskId && (task.projectId || 'default-project') === activeProjectId))} loading={downloadJobsLoading} onClose={(): void => setAssetView('outputs')} onRefresh={(): void => { void loadDownloadJobs(); }} onRetry={handleRetryDownload} />}
+        {assetView === 'downloads' && <DownloadQueueModal embedded open scopeLabel="当前项目" jobs={projectDownloadJobs(downloadJobs, tasks, activeProjectId)} loading={downloadJobsLoading} onClose={(): void => setAssetView('outputs')} onRefresh={(): void => { void loadDownloadJobs(); }} onRetry={handleRetryDownload} />}
       </section>}
       {page === 'settings' && <div className="settings-grid">
         <div className="settings-groups"><section className="workspace-card"><div className="section-heading"><div><h2>使用偏好</h2><p>下载目录、素材授权与账号启动设置</p></div>{toolButton('settings', true)}</div><div className="settings-info-row"><div><strong>普通 Chat 发送方式</strong><p>工作室自动发送已授权请求；进入自由对话后暂停后续请求。</p></div><Tag>当前方式</Tag></div><div className="settings-info-row"><div><strong>图片预览与采用</strong><p>生成或上传后先预览，确认采用后用于制作。</p></div></div><div className="settings-info-row"><div><strong>素材替换与历史</strong><p>替换后保留原图与已有成果，相关镜头需要复核。</p></div></div><div className="section-footer">{toolButton('updates')}</div></section>
         <section className="workspace-card"><h2>数据与备份</h2><p className="muted-text settings-description">备份包含工作室记录；外部短剧项目目录和全部媒体需要单独保存。</p><details className="settings-details"><summary>备份与恢复</summary><Space wrap>{toolButton('backup')}{toolButton('restore')}</Space></details><details className="settings-details"><summary>项目记录与导出</summary><Space wrap>{toolButton('project-overview')}{toolButton('batches')}</Space></details></section></div>
         <div className="settings-groups"><section className="workspace-card"><div className="section-heading"><h2>运行检查</h2><Tag color={integrityResult?.success ? 'success' : undefined}>{integrityResult ? integrityResult.success ? '检查通过' : '需要处理' : '尚未检查'}</Tag></div><p className="muted-text settings-description">核对本地账号、任务与数据文件的完整性。</p>{integrityResult && <div className="integrity-summary" role="status">{integrityResult.success ? '本地数据完整性检查通过。' : integrityResult.issues.map((issue: string): React.ReactNode => <p key={issue}>{issue}</p>)}</div>}<Button type="primary" loading={checkingIntegrity} icon={<ToolOutlined />} onClick={(): void => { void moreMenuItems.find((item): boolean => item.key === 'integrity')?.onClick(); }}>{integrityResult ? '重新检查' : '开始检查'}</Button></section>
-        <section className="workspace-card"><h2>诊断详情</h2><details className="settings-details"><summary>日志与问题反馈</summary><Space wrap>{toolButton('logs')}{toolButton('diagnostics')}</Space></details><details className="settings-details"><summary>页面兼容性与适配规则</summary><p className="muted-text">页面操作异常时，检查当前账号的页面或管理适配规则。</p><Space wrap>{toolButton('adapter-check')}{toolButton('adapter-import')}{toolButton('adapter-rollback')}</Space></details><details className="settings-details"><summary>运行统计</summary><Button icon={<BarChartOutlined />} onClick={(): void => { void loadDownloadJobs(); setMetricsOpen(true); }}>查看运行统计</Button></details><details className="settings-details"><summary>关于短剧工作室</summary><p className="muted-text">逐镜图片与视频创作。Dola 尚未完成真实端到端验收。</p></details></section></div>
+        <section className="workspace-card"><h2>诊断详情</h2><details className="settings-details"><summary>日志与问题反馈</summary><Space wrap>{toolButton('logs')}{toolButton('diagnostics')}</Space></details><details className="settings-details"><summary>页面兼容性</summary><p className="muted-text">使用与视频制作相同的页面控件检查当前账号，检查结果会保存在诊断包。</p><Space wrap>{toolButton('adapter-check')}</Space></details><details className="settings-details"><summary>运行统计</summary><Button icon={<BarChartOutlined />} onClick={(): void => { void loadDownloadJobs(); setMetricsOpen(true); }}>查看运行统计</Button></details><details className="settings-details"><summary>关于短剧工作室</summary><p className="muted-text">逐镜图片与视频创作。Dola 尚未完成真实端到端验收。</p></details></section></div>
       </div>}
 
     {/* 设置 Modal */}

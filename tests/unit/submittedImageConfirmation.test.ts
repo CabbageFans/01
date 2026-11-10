@@ -15,7 +15,7 @@ import type { CurrentCreationConversationReadback } from '../../src/utils/creati
 class OfflineSubmissionSafetyPauseError extends Error {}
 
 function actualImageConfirmation(bindings: Record<string, unknown>): () => Promise<SubmissionReadback | undefined> {
-  const file = ts.createSourceFile('BrowserPanel.tsx', fs.readFileSync(path.resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const file = ts.createSourceFile('BrowserPanel.tsx', fs.readFileSync(path.resolve('src/automation/TaskExecutionCoordinator.ts'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
   const initializers: Record<string, string> = {};
   let continuation = '';
   let preservation = '';

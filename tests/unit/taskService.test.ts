@@ -64,7 +64,7 @@ describe('TaskService 核心用例', () => {
       lease: { ownerId: 'o', acquiredAt: 'old', expiresAt: 'old', lastHeartbeatAt: 'old' }, outcome: 'observing',
     };
     const { service, stored } = fixture([item]);
-    expect(service.updateStatus({ taskId: 'accepted', status: 'done', outputs: ['https://video.example/a.mp4'] }).success).toBe(true);
+    expect(service.updateStatus({ taskId: 'accepted', expectedRunId: 'r', status: 'done', outputs: ['https://video.example/a.mp4'] }).success).toBe(true);
     const task = stored()[0];
     expect(task.runtime?.acceptanceObservation).toMatchObject({
       outcome: 'completed', completedAt: 'now', expectedArtifact: { artifactId: task.artifacts?.[0].id },
@@ -281,7 +281,7 @@ describe('TaskService batchPause', () => {
     expect(task.result).toBe('批量暂停');
   });
 
-  it('等待生成确认已释放执行锁，批量暂停保持确认状态与禁止重发证据', () => {
+  it('等待生成确认可停止本地等待，平台确认事实与禁止重发证据保留', () => {
     const item = withRuntime(base('confirm-wait', 'waiting_generation_confirmation'), 'waiting_generation_confirmation');
     item.runtime!.submittedAt = 'submitted';
     item.runtime!.generationConfirmation = { detectedAt: 'detected', marker: 'confirm_before_generation' };
@@ -293,8 +293,13 @@ describe('TaskService batchPause', () => {
     };
     const { service, stored } = fixture([item]);
 
-    expect(service.batchPause()).toEqual({ success: true });
-    expect(stored()[0]).toEqual(item);
+    const stopped = service.batchPause(); expect(stopped.success).toBe(true);
+    expect(stored()[0]).toEqual({ ...item, status: 'paused', result: '批量暂停', updatedAt: 'now',
+      errorInfo: { code: 'cancelled', message: '批量暂停', recoverable: true, detectedAt: 'now' },
+      runtime: { ...item.runtime, stage: 'paused', message: '批量暂停', stageStartedAt: 'now', lastHeartbeatAt: 'now', phaseHistory: [
+        { stage: 'waiting_generation_confirmation', enteredAt: item.runtime!.stageStartedAt, leftAt: 'now' }, { stage: 'paused', enteredAt: 'now' },
+      ] } });
+    if (stopped.success) expect(stopped.data[0]).toEqual(stored()[0]);
     expect(service.retry('confirm-wait')).toEqual({
       success: false,
       error: '任务存在已提交记录，请先核对平台结果；为避免重复扣费，禁止重新发送',
@@ -312,7 +317,7 @@ describe('TaskService batchPause', () => {
     const { service, stored } = fixture([item]);
     service.batchPause();
     const task = stored()[0];
-    expect(task.runHistory).toEqual([{ runId: 'r', attempt: 1, startedAt: 'old' }]);
+    expect(task.runHistory).toEqual([{ runId: 'r', attempt: 1, startedAt: 'old', finishedAt: 'now', outcome: 'paused', finalStage: 'paused', errorCode: 'cancelled' }]);
     expect(task.artifacts).toEqual([{ id: 'a1', url: 'http://x', kind: 'video', source: 'network', discoveredAt: 'old' }]);
     expect(task.outputs).toEqual(['old-output']);
     expect(task.batchId).toBe('batch-1');
@@ -333,7 +338,7 @@ describe('TaskService batchPause', () => {
       replace: (t: Task[]) => { writeCount++; stored = structuredClone(t); return true; },
     };
     const service = new TaskService({ store, defaultProjectId: () => 'default', now: () => 'now' });
-    expect(service.batchPause()).toEqual({ success: true });
+    expect(service.batchPause()).toEqual({ success: true, data: initial });
     expect(writeCount).toBe(0);
   });
 });
@@ -439,7 +444,7 @@ describe('TaskService updateRuntime', () => {
     item.runHistory = [{ runId: 'r1', attempt: 1, startedAt: '2026-08-12T00:00:00.000Z' }];
     const { service, stored } = runtimeFixture([item]);
     expect(service.updateRuntime({
-      taskId: 't1', runtime: { stage: 'generating', message: '生成中' },
+      taskId: 't1', expectedRunId: 'r1', runtime: { stage: 'generating', message: '生成中' },
     }).success).toBe(true);
     const task = stored()[0];
     expect(task.runtime?.stage).toBe('generating');
@@ -448,7 +453,7 @@ describe('TaskService updateRuntime', () => {
     expect(task.runHistory).toHaveLength(1);
   });
 
-  it('新 run 替换旧快照，不继承旧 submittedAt 与 conversationUrl', () => {
+  it('已提交未结束运行禁止原地替换，新尝试必须保留关联来源', () => {
     const item = base('t1', 'paused');
     item.runtime = {
       runId: 'old-run', attempt: 1, stage: 'paused', message: '待核对',
@@ -460,18 +465,15 @@ describe('TaskService updateRuntime', () => {
     const { service, stored } = runtimeFixture([item]);
 
     expect(service.updateRuntime({
-      taskId: 't1', status: 'executing',
+      taskId: 't1', expectedRunId: 'old-run', status: 'executing',
       runtime: {
         runId: 'new-run', attempt: 2, stage: 'preparing_account', message: '准备执行',
         startedAt: '2026-08-12T01:00:00.000Z', stageStartedAt: 'now', lastHeartbeatAt: 'now',
         input: { prompt: 't1', mode: 'video', attachments: [] },
       },
-    }).success).toBe(true);
+    }).success).toBe(false);
 
-    expect(stored()[0].runtime).toMatchObject({ runId: 'new-run', attempt: 2, stage: 'preparing_account' });
-    expect(stored()[0].runtime?.submittedAt).toBeUndefined();
-    expect(stored()[0].runtime?.conversationUrl).toBeUndefined();
-    expect(stored()[0].runHistory?.map((run) => run.runId)).toEqual(['old-run', 'new-run']);
+    expect(stored()[0]).toEqual(item);
   });
 
   it('首次 runtime 创建 runHistory 记录', () => {
@@ -524,7 +526,7 @@ describe('TaskService updateRuntime', () => {
     item.errorInfo = { code: 'timeout', message: '超时', recoverable: true, detectedAt: startedAt };
     const { service, stored } = runtimeFixture([item]);
     service.updateRuntime({
-      taskId: 't1', status,
+      taskId: 't1', expectedRunId: 'r1', status,
       runtime: { stage: status === 'done' ? 'completed' : status === 'fail' ? 'failed' : status },
     });
     const task = stored()[0];

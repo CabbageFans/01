@@ -1,5 +1,7 @@
+import { currentRunId } from '../fixtures/taskRunIdentity';
 /** 新旧分析合同的离线收取测试；仅创建内存hold任务，不连接平台或生成图片。 */
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -30,7 +32,7 @@ beforeEach(async (): Promise<void> => {
   core = new TaskService({ store: { read: (): Task[] => structuredClone(tasks), replace: (items: Task[]): boolean => { tasks = structuredClone(items); return true; } },
     defaultProjectId: (): string => project.studioProjectId, id: (): string => `TEST-auto-analysis-${++sequence}` });
   chat = new PetStoryChatService(projects, { list: (): Task[] => structuredClone(tasks), create: (params: TaskAddParams, accountId: string): Task => {
-    const created = core.create(oldContract ? { ...params, prompts: ['TEST旧版分析请求，尚无逐镜自动模式必填合同'] } : params);
+    const created = core.create(params);
     if (!created.success) throw new Error(created.error);
     const assigned = core.assign({ taskId: created.data[0].id, accountId }); if (!assigned.success) throw new Error(assigned.error);
     return assigned.data;
@@ -40,6 +42,12 @@ afterEach(async (): Promise<void> => { await fs.rm(directory, { recursive: true,
 
 async function collect(incoming: PetStoryPlan): Promise<PetStoryResult> {
   project = (await chat.prepareRuntime(project.id, project.revision, 'analysis')).project!;
+  if (oldContract) {
+    // 导入真实旧格式记录；新生产不能允许create端把已保存意图换成另一正文。
+    const task = tasks[0]; task.prompt = 'TEST旧版分析请求，尚无逐镜自动模式必填合同';
+    const job = project.jobs.at(-1)!; job.requestText = task.prompt; job.planTimingVersion = undefined; job.inputHash = createHash('sha256').update(task.prompt).digest('hex');
+    project.taskIntents = undefined; project = await projects.write(project);
+  }
   return collectPrepared(incoming, project.jobs.at(-1)!);
 }
 async function collectPrepared(incoming: PetStoryPlan, job: PetStoryChatJob): Promise<PetStoryResult> {
@@ -47,7 +55,7 @@ async function collectPrepared(incoming: PetStoryPlan, job: PetStoryChatJob): Pr
   const raw = JSON.stringify({ ...incoming, storyUsable: true, contentBasis: { beginning: 'TEST盒子关闭', middle: 'TEST盒盖打开', ending: 'TEST礼物露出' }, requestId: job.requestId, targetIds: job.expectedIds });
   const runtime: TaskRunSnapshot = { runId: 'TEST-auto-analysis-run', attempt: 1, stage: 'completed', message: 'TEST离线返回', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
     submittedAt: now, conversationUrl: 'https://www.doubao.com/chat/TEST-auto-mode', input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] }, chatResponse: { text: raw, capturedAt: now } };
-  const complete = core.updateRuntime({ taskId: task.id, status: 'done', runtime }); if (!complete.success) throw new Error(complete.error);
+  const complete = core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'done', runtime }); if (!complete.success) throw new Error(complete.error);
   await chat.bindRun(project.id, job.id, runtime.runId);
   return chat.collect(project.id, job.id);
 }

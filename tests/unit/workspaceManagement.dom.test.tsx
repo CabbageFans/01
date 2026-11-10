@@ -48,12 +48,16 @@ describe('管理界面的真实操作边界', (): void => {
     fireEvent.click(screen.getByRole('button', { name: '重新下载' })); expect(retry).toHaveBeenCalledExactlyOnceWith(job);
     expect(screen.queryByRole('button', { name: /重新生成/ })).toBeNull();
   });
-  it('产物列表不用系统请求充当标题，视频查看使用实际产物地址且不自动播放', async (): Promise<void> => {
+  it('产物列表不用系统请求充当标题，视频查看读取原下载job且不自动播放', async (): Promise<void> => {
     const task: Task = { id: 'TEST-task', projectId: 'TEST-project', assignedAccountId: 'TEST-first', prompt: 'TEST-private-system-request', mode: 'video', status: 'done', result: null, outputs: [job.url], artifacts: [{ id: 'TEST-artifact', url: job.url, kind: 'video', source: 'page', discoveredAt: now }], petstory: { projectId: 'TEST-short', stepId: 'TEST-step' }, createdAt: now, updatedAt: now };
+    const localUrl = `doubao-media://asset/${'c'.repeat(64)}`; const read = vi.fn(async (): ReturnType<typeof window.electronAPI.tasks.readDownloadedMedia> => ({ success: true, data: localUrl, mimeType: 'video/mp4' }));
+    window.electronAPI.tasks.readDownloadedMedia = read;
+    vi.mocked(window.electronAPI.tasks.listDownloads).mockResolvedValue([{ ...job, taskId: task.id, artifactId: 'TEST-artifact', status: 'done' }]);
     useTaskStore.setState({ tasks: [task] }); render(<ArtifactCenterModal open embedded onClose={vi.fn()} />);
     await waitFor((): void => expect(window.electronAPI.tasks.listDownloads).toHaveBeenCalled());
     expect(screen.queryByText('TEST-private-system-request')).toBeNull(); expect(screen.getByText('短剧视频产物')).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: '查看产物' }));
-    const video = screen.getByRole('dialog', { name: '产物详情' }).querySelector('video'); expect(video?.getAttribute('src')).toBe(job.url); expect(video?.autoplay).toBe(false);
+    const video = await screen.findByLabelText('本地视频播放器') as HTMLVideoElement; expect(video.getAttribute('src')).toBe(localUrl); expect(video.autoplay).toBe(false);
+    expect(read).toHaveBeenCalledExactlyOnceWith(job.id);
   });
 });

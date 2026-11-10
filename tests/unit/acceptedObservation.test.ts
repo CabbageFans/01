@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { TaskService } from '../../main/core/TaskService';
+import { TaskRepository } from '../../main/core/TaskRepository';
+import { TaskEventStream } from '../../main/core/TaskEventStream';
+import { normalizeTasks } from '../../main/utils/persistenceNormalization';
 import type { Task } from '../../src/types';
 import {
   completeAcceptedObservation,
@@ -95,36 +97,51 @@ describe('accepted observation', () => {
   });
 });
 
-describe('accepted observation pipeline 接线契约', () => {
-  const panel = readFileSync(resolve(__dirname, '../../src/components/BrowserPanel.tsx'), 'utf8');
-  const store = readFileSync(resolve(__dirname, '../../src/store/useTaskStore.ts'), 'utf8');
+function pipelineFixture() {
+  const original = task('executing');
+  original.runtime!.acceptanceObservation = undefined; original.runtime!.submittedAt = acceptedAt;
+  let json = JSON.stringify([original]); let writable = true;
+  const events = new TaskEventStream();
+  const repository = new TaskRepository({ read: (): unknown => JSON.parse(json), write: (_filename: string, value: Task[]): boolean => {
+    if (!writable) return false; json = JSON.stringify(value); return true;
+  }, normalize: (raw: unknown) => normalizeTasks(raw, 'project', acceptedAt), defaultProjectId: (): string => 'project', events });
+  const service = new TaskService({ store: repository, defaultProjectId: (): string => 'project', now: (): string => acceptedAt });
+  repository.read();
+  return { service, repository, events, failWrites: (): void => { writable = false; } };
+}
 
-  it('明确受理后先原子持久化并回读观察绑定，再触发 generating 队列', () => {
-    const start = panel.indexOf('const acceptedAt = new Date().toISOString()');
-    const end = panel.indexOf('let generating = true', start);
-    const body = panel.slice(start, end);
-    expect(start).toBeGreaterThan(0);
-    expect(body.indexOf('createAcceptedObservationBinding')).toBeLessThan(body.indexOf('await updateTaskRuntime'));
-    expect(body.indexOf('await updateTaskRuntime')).toBeLessThan(body.indexOf('persistedObservation'));
-    expect(body.indexOf('persistedObservation')).toBeLessThan(body.indexOf("setAccountAutomationState(accountId, 'generating'"));
-    expect(body).toContain('throw new SubmissionSafetyPauseError');
+describe('accepted observation 正式持久化与恢复组合', (): void => {
+  it('受理状态与原会话观察绑定在同一事务落盘，事件只在落盘后发布', (): void => {
+    const { service, repository, events } = pipelineFixture();
+    const recorded: Task[] = [];
+    events.subscribe((): void => { recorded.push(repository.read()[0]); });
+    const result = service.updateRuntime({ taskId: 'task-1', expectedRunId: 'run-1', status: 'generating',
+      runtime: { stage: 'generating', acceptanceObservation: binding() } });
+    expect(result.success).toBe(true);
+    expect(recorded.length).toBeGreaterThan(0);
+    for (const saved of recorded) expect(saved).toMatchObject({ status: 'generating', revision: 1,
+      runtime: { runId: 'run-1', submittedAt: acceptedAt, conversationUrl: 'https://www.doubao.com/chat/one', acceptanceObservation: { outcome: 'observing', runId: 'run-1' } } });
   });
 
-  it('观察恢复只派发既有只读 reconcile，不调用第二套发送链路', () => {
-    const start = panel.indexOf('应用重启或页面重新挂载后，只沿已持久化的原会话恢复观察');
-    const end = panel.indexOf('// ---- 自动化执行 ----', start);
-    const body = panel.slice(start, end);
-    expect(body).toContain("new CustomEvent('reconcile-task-submission'");
-    expect(body).not.toContain('submitPromptWithNativeClick');
-    expect(body).not.toContain('injectPrompt');
+  it('受理保存失败不会发布运行事件，也不会假造平台完成', (): void => {
+    const { service, repository, events, failWrites } = pipelineFixture(); failWrites();
+    expect(service.updateRuntime({ taskId: 'task-1', expectedRunId: 'run-1', status: 'generating', runtime: { stage: 'generating', acceptanceObservation: binding() } }).success).toBe(false);
+    expect(events.after()).toEqual([]);
+    expect(repository.read()[0]).toMatchObject({ status: 'executing', runtime: { runId: 'run-1', submittedAt: acceptedAt } });
+    expect(repository.read()[0].runtime!.acceptanceObservation).toBeUndefined();
   });
 
-  it('同账号 observing 时主动跳过，Renderer reload 仅恢复观察', () => {
-    // 队列改为按任务逐个读取最新 store 快照后，同账号观察跳过检查使用 get().tasks。
-    expect(store).toContain('const accountHasObservation = get().tasks.some');
-    expect(store).toContain('if (accountHasObservation) continue;');
-    expect(store).toContain('const resumableObservations = tasks.filter(shouldResumeAcceptedObservation)');
-    expect(store).toContain('!shouldResumeAcceptedObservation(task)');
-    expect(panel).toMatch(/acceptedObservationActive\s*\? \{ status: 'manual_submission_observing'/);
+  it('重启只恢复原运行观察，拒绝重发并能按原运行完成产物', (): void => {
+    const { service, repository } = pipelineFixture();
+    expect(service.updateRuntime({ taskId: 'task-1', expectedRunId: 'run-1', status: 'generating', runtime: { stage: 'generating', acceptanceObservation: binding() } }).success).toBe(true);
+    const restarted = new TaskService({ store: repository, defaultProjectId: (): string => 'project', now: (): string => acceptedAt });
+    expect(restarted.recoverInterruptedTasks().success).toBe(true);
+    const restored = repository.read()[0];
+    expect(restored).toMatchObject({ status: 'manual_submission_observing', runtime: { runId: 'run-1', attempt: 1, submittedAt: acceptedAt, acceptanceObservation: { outcome: 'observing' } } });
+    expect(restarted.retry('task-1').success).toBe(false);
+    expect(restarted.updateStatus({ taskId: 'task-1', expectedRunId: 'run-1', status: 'done', outputs: ['https://fixture.invalid/original.mp4'] }).success).toBe(true);
+    const completed = repository.read()[0];
+    expect(completed.artifacts?.[0]).toMatchObject({ runId: 'run-1', url: 'https://fixture.invalid/original.mp4' });
+    expect(completed.runtime!.acceptanceObservation).toMatchObject({ outcome: 'completed', expectedArtifact: { artifactId: completed.artifacts?.[0].id } });
   });
 });

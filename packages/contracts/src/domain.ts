@@ -122,8 +122,40 @@ export interface TaskErrorInfo {
   detectedAt: string;
 }
 
+/** 远端生成完成之后，原运行拥有的本地下载、校验与入库事实。 */
+export interface TaskLocalMediaUpdate {
+  expectedRevision?: number;
+  operationId: string;
+  artifactId: string;
+  inputVersion?: number;
+  inputDigest?: string;
+  phase: 'downloading' | 'downloaded' | 'validating' | 'library' | 'ready';
+  state: 'working' | 'paused' | 'failed' | 'ready';
+  downloadJobId?: string;
+  assetId?: string;
+  sha256?: string;
+  mediaInfo?: import('./dto/petstory').PetStoryMediaValidation;
+  error?: { code: string; message: string };
+}
+export interface TaskLocalMediaSnapshot extends Omit<TaskLocalMediaUpdate, 'expectedRevision'> {
+  updatedAt: string;
+  phaseHistory?: { phase: TaskLocalMediaUpdate['phase']; state: TaskLocalMediaUpdate['state']; enteredAt: string; leftAt?: string }[];
+}
+
 /** 当前或最近一次执行的可恢复快照 */
 export interface TaskRunSnapshot {
+  localMedia?: TaskLocalMediaSnapshot;
+  /** 复用运行快照记录阶段耗时；诊断可串联同一 run，无第二份可写生命周期。 */
+  phaseHistory?: { stage: TaskStage; enteredAt: string; leftAt?: string }[];
+  /** 单次最终派发的耐久事实；意图与远端受理必须分开。 */
+  submission?: {
+    schemaVersion: 1;
+    operationId: string;
+    runId: string;
+    state: 'intent_saved' | 'not_dispatched' | 'dispatch_unknown' | 'accepted';
+    updatedAt: string;
+    reason?: string;
+  };
   /** 自由创作对话的持久账号保护；独立于运行状态，重启后仍阻止同账号自动注入。 */
   chatAdjustmentGuard?: { projectId: string; adjustmentId: string; active: boolean; allowedTaskId?: string };
   runId: string;
@@ -207,6 +239,7 @@ export interface TaskRunSnapshot {
   };
   /** 仅保存计数、耗时与机器码，不保存页面文字、提示词或素材路径。 */
   executionDiagnostics?: {
+    videoObservation?: { status: string; reason?: string; pollCount: number; elapsedMs: number; observedAt: string; source?: string };
     initializationQueueWaitMs?: number;
     initializationLimit?: number;
     upload?: {
@@ -256,6 +289,7 @@ export interface TaskRunSnapshot {
     outcome: 'observing' | 'completed' | 'manual_review';
   };
   input: {
+    videoInputSnapshot?: import('./dto/petstory').VideoInputSnapshot;
     prompt: string;
     mode: GenerationMode;
     videoConfig?: Task['videoConfig'];
@@ -311,6 +345,12 @@ export interface TaskArtifact {
 export interface DownloadJob {
   id: string;
   taskId: string;
+  projectId?: string;
+  batchId?: string;
+  /** 原运行／稳定产物身份；签名 URL 更新不创建另一份媒体身份。 */
+  runId?: string;
+  artifactId?: string;
+  inputVersion?: number;
   accountId: string | null;
   mode: GenerationMode;
   url: string;
@@ -319,6 +359,8 @@ export interface DownloadJob {
   saveDir: string;
   filePath?: string;
   bytes?: number;
+  /** 下载文件的不可变内容摘要；历史记录首次受控读取时补存。 */
+  sha256?: string;
   error?: string;
   createdAt: string;
   updatedAt: string;
@@ -327,6 +369,10 @@ export interface DownloadJob {
 /** 任务数据结构 */
 export interface Task {
   id: string;
+  /** Repository 每次实际写入变化递增；历史数据由读入迁移补为 0。 */
+  revision?: number;
+  /** 正文草稿与本次不可变视频输入分离。 */
+  videoInputSnapshot?: import('./dto/petstory').VideoInputSnapshot;
   /** 提示词文本 */
   prompt: string;
   /** 分配的目标账号 ID */
@@ -404,6 +450,10 @@ export interface LogEntry {
   scope: string;
   message: string;
   taskId?: string;
+  runId?: string;
+  projectId?: string;
+  shotId?: string;
+  stepId?: string;
   accountId?: string;
   createdAt: string;
 }

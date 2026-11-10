@@ -11,7 +11,7 @@ import { useTaskStore } from '../../src/store/useTaskStore';
 import snapshot from '../fixtures/storyboard-five-shots.json';
 
 const initial = { pet: usePetStoryStore.getState(), tasks: useTaskStore.getState() };
-const source = 'data:video/mp4;base64,VEVTVC1vZmZsaW5l';
+const source = `doubao-media://asset/${'a'.repeat(64)}`;
 let project: PetStoryProject;
 let asset: PetStoryAsset;
 
@@ -40,7 +40,7 @@ async function loadedPlayer(node = false): Promise<HTMLVideoElement> {
 }
 
 describe('项目内视频播放', (): void => {
-  it('真实入口 CSP 单独允许 IPC 返回的 data 视频，不放开脚本或远程媒体', (): void => {
+  it('真实入口 CSP 允许受控本地媒体协议，保留旧data兼容且不放开脚本或远程媒体', (): void => {
     const html = fs.readFileSync(path.join(process.cwd(), 'index.html'), 'utf8');
     const document = new DOMParser().parseFromString(html, 'text/html');
     const policy = document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content');
@@ -48,7 +48,7 @@ describe('项目内视频播放', (): void => {
     const directives = new Map(policy!.split(';').map((part): [string, string[]] => {
       const [name, ...sources] = part.trim().split(/\s+/); return [name, sources];
     }));
-    expect(directives.get('media-src')).toEqual(["'self'", 'data:']);
+    expect(directives.get('media-src')).toEqual(["'self'", 'data:', 'doubao-media:']);
     expect(directives.get('default-src')).toEqual(["'self'"]);
     expect(directives.get('script-src')).not.toContain('data:');
   });

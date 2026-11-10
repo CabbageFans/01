@@ -1,5 +1,6 @@
 /** 正式 Service→磁盘→Store→UI 的离线回归；结构夹具不代表真实平台生成验收。 */
 import React from 'react';
+import { currentRunId } from '../fixtures/taskRunIdentity';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -50,7 +51,7 @@ async function completeReply(plan: PetStoryPlan, expectedStatus: 'applied' | 'in
   const answer = { ...plan, requestId: job.requestId, targetIds: job.expectedIds, storyUsable: true,
     contentBasis: { beginning: 'TEST开头', middle: 'TEST变化', ending: 'TEST结局' },
     shots: plan.shots.map(({ prompts: _prompts, ...shot }): object => { void _prompts; return shot; }) };
-  const saved = core.updateRuntime({ taskId: task.id, status: 'done', errorInfo: null,
+  const saved = core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'done', errorInfo: null,
     runtime: { ...task.runtime!, stage: 'completed', submittedAt: now, chatResponse: { text: JSON.stringify(answer), capturedAt: now } } });
   if (!saved.success) throw new Error(saved.error);
   await automationEngine.release(task.id);
@@ -95,7 +96,7 @@ beforeEach(async (): Promise<void> => {
   useTaskStore.setState({ ...initial.tasks, tasks: [], activeTaskId: null, accountBusy: {}, accountAutomationState: {},
     startAutomation: async (taskId: string, beforeDispatch?: (task: Task) => Promise<void>): Promise<boolean> => {
       const task = tasks.find((item: Task): boolean => item.id === taskId)!;
-      const started = core.updateRuntime({ taskId, status: 'executing', runtime: { runId: `TEST-run-${taskId}`, attempt: 1, stage: 'injecting_prompt', message: 'TEST 离线执行替身',
+      const started = core.updateRuntime({ taskId, expectedRunId: currentRunId(core, taskId), status: 'executing', runtime: { runId: `TEST-run-${taskId}`, attempt: 1, stage: 'injecting_prompt', message: 'TEST 离线执行替身',
         startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { mode: 'chat', prompt: task.prompt, attachments: task.attachments || [] } } });
       if (!started.success) throw new Error(started.error);
       if (beforeDispatch) await beforeDispatch(listedTasks().find((item: Task): boolean => item.id === taskId)!);
@@ -116,7 +117,7 @@ afterEach(async (): Promise<void> => {
 function useActualScheduler(): void {
   Object.assign(window.electronAPI.tasks, {
     updateRuntime: async (id: string, patch: Omit<TaskUpdateRuntimeParams, 'taskId'>): Promise<unknown> => {
-      const result = core.updateRuntime({ taskId: id, ...patch }); return result.success ? { success: true, task: result.data } : result;
+      const result = core.updateRuntime({ taskId: id, expectedRunId: currentRunId(core, id), ...patch }); return result.success ? { success: true, task: result.data } : result;
     }, acquireLock: async (): Promise<{ success: true }> => ({ success: true }),
     releaseLock: async (): Promise<{ success: true }> => ({ success: true }), renewLock: async (): Promise<{ success: true }> => ({ success: true }),
   });

@@ -88,14 +88,19 @@ describe('未发送视频任务的画布恢复', (): void => {
   });
   it('已有首尾图时只提供原任务继续入口，不要求额外改模式授权', async (): Promise<void> => {
     withReferenceFrames(); const resume = vi.fn(async (): Promise<void> => undefined); const references = vi.fn(); const generate = vi.fn();
+    const originalTask = structuredClone(task); const originalImages = structuredClone(project.assets);
     usePetStoryStore.setState({ project, resumeUnsubmittedVideo: resume, resumeVideoAsReferences: references, generateShotMedia: generate });
     const view = render(<CanvasMediaNode project={project} shot={project.plan!.shots[0]} kind="video" disabled />);
     expect(screen.queryByRole('button', { name: '改用两张参考图继续' })).toBeNull();
-    expect(view.container.querySelectorAll('.canvas-media-actions button')).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: /继续生成视频/ })).toHaveLength(1);
+    expect(screen.getByRole('button', { name: '结束本次制作' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.queryByRole('button', { name: '暂停后续制作' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^生成视频$/ })).toBeNull();
     expect(view.container.textContent).not.toContain('首尾图作为普通参考上传');
     fireEvent.click(screen.getByRole('button', { name: /继续生成视频/ }));
     await waitFor((): void => expect(resume).toHaveBeenCalledExactlyOnceWith(project.plan!.shots[0].id, task.id, task.runtime!.runId));
     expect(references).not.toHaveBeenCalled(); expect(generate).not.toHaveBeenCalled();
+    expect(task).toEqual(originalTask); expect(project.assets).toEqual(originalImages);
   });
   it.each([
     '当前豆包入口只有参考图上传，不支持独立首尾帧；本次尚未上传或提交。可在本镜制作设置选择“多参考”，经你明确选择后使用已有图片。',
@@ -213,12 +218,15 @@ describe('未发送视频任务的画布恢复', (): void => {
     const listed = vi.fn(async (): Promise<Task[]> => [current]); window.electronAPI.tasks.list = listed;
     const resume = vi.fn(async (): Promise<void> => undefined); const generate = vi.fn(); const references = vi.fn();
     usePetStoryStore.setState({ resumeUnsubmittedVideo: resume, generateShotMedia: generate, resumeVideoAsReferences: references });
-    const view = render(<CanvasMediaNode project={project} shot={project.plan!.shots[0]} kind="video" disabled />);
+    render(<CanvasMediaNode project={project} shot={project.plan!.shots[0]} kind="video" disabled />);
     expect(screen.queryByRole('button', { name: /继续生成视频/ })).toBeNull();
     unobserve = observePetStoryTasks();
     await act(async (): Promise<void> => { await vi.advanceTimersByTimeAsync(1_000); });
     expect(listed).toHaveBeenCalledOnce();
-    expect(view.container.querySelectorAll('.canvas-media-actions button')).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: /继续生成视频/ })).toHaveLength(1);
+    expect(screen.getByRole('button', { name: '结束本次制作' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.queryByRole('button', { name: '暂停后续制作' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^生成视频$/ })).toBeNull();
     const button = screen.getByRole('button', { name: /继续生成视频/ }); expect(button.hasAttribute('disabled')).toBe(false);
     expect(resume).not.toHaveBeenCalled(); expect(generate).not.toHaveBeenCalled(); expect(references).not.toHaveBeenCalled();
     await act(async (): Promise<void> => { fireEvent.click(button); });

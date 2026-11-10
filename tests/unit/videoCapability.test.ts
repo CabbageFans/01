@@ -435,9 +435,9 @@ describe('新版视频控件适配契约', () => {
     };
     expect(await clickAITab(webview, 'video')).toBe(false);
 
-    const panelSource = readFileSync(resolve(__dirname, '../../src/components/BrowserPanel.tsx'), 'utf8');
-    const switchGuard = panelSource.indexOf('const switched = await clickAITab(webview, mode,');
-    const configureCall = panelSource.indexOf('await configureVideoOptions(webview, videoConfig)');
+    const panelSource = readFileSync(resolve(__dirname, '../../src/components/BrowserPanel.tsx'), 'utf8') + '\n' + readFileSync(resolve(__dirname, '../../src/automation/TaskExecutionCoordinator.ts'), 'utf8');
+    const switchGuard = panelSource.indexOf('const switched = await (videoAdapter');
+    const configureCall = panelSource.indexOf('const configure =');
     expect(switchGuard).toBeGreaterThan(-1);
     expect(panelSource.slice(switchGuard, configureCall)).toContain('if (!switched)');
     expect(panelSource.slice(switchGuard, configureCall)).toContain("throw new VideoControlReadinessError('mode_entry'");

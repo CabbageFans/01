@@ -1,3 +1,4 @@
+declare const __doubaoAssertOperation: (() => void) | undefined;
 /** 只由原 doubaoBridge 序列化到 guest。每次重新定位当前输入区，不保存跨会话元素编号。 */
 export interface PetStoryComposerSnapshot {
   present: boolean;
@@ -35,6 +36,7 @@ export interface PetStoryComposerOperation {
   selectMode?: 'first_frame' | 'first_last_frame' | 'reference';
 }
 export function petStoryComposerProbe(operation: PetStoryComposerOperation = {}): PetStoryComposerSnapshot {
+  if (typeof __doubaoAssertOperation === 'function') __doubaoAssertOperation();
   const visible = (el: Element | null): boolean => {
     if (!el) return false;
     for (let current: Element | null = el; current; current = current.parentElement) {
@@ -108,6 +110,7 @@ export function petStoryComposerProbe(operation: PetStoryComposerOperation = {})
     // 页面可能先挂载输入区，再挂载模式按钮。只有实际点击才消耗一次切换机会。
     modeSelection = controls.length === 0 ? 'missing' : controls.length > 1 ? 'ambiguous' : 'disabled';
     if (controls.length === 1 && !controls[0].matches(':disabled,[aria-disabled="true"]')) {
+      if (typeof __doubaoAssertOperation === 'function') __doubaoAssertOperation();
       controls[0].click(); modeSelection = 'selected';
     }
   }

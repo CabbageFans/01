@@ -680,7 +680,7 @@ describe('原五镜头的自动修订与明确入口', (): void => {
     else await usePetStoryStore.getState().stopPromptBatch();
     const cancellation = events.mock.calls.map((call): Event => call[0]).filter((event): boolean => event.type === 'cancel-task-automation');
     if (action === 'batch' && submitted) expect(cancellation).toHaveLength(0);
-    else expect(cancellation).toEqual([expect.objectContaining({ detail: { taskId: repair.taskId, targetStatus: 'paused' } })]);
+    else expect(cancellation).toEqual([expect.objectContaining({ detail: { taskId: repair.taskId, expectedRunId: runtime?.runId, targetStatus: 'paused' } })]);
     expect(task.runtime).toEqual(runtime); expect(project.jobs).toHaveLength(jobsBefore); expect(startAutomation).toHaveBeenCalledTimes(startsBefore); expect(prepareRuntime).toHaveBeenCalledTimes(requestsBefore);
     if (action === 'adjustment') expect(project.chatAdjustment?.status).toBe('ended');
     else if (action === 'waiting') expect(project.jobs.find((job): boolean => job.id === repair.id)?.endedWaitingAt).toBe(now);

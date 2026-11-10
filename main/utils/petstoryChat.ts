@@ -1,3 +1,4 @@
+import { bindPetStoryChatIntent, commitPetStoryTaskIntent, reconcilePetStoryTaskIntents } from './petstoryTaskTransaction';
 import { createHash, randomUUID } from 'node:crypto';
 import { ensurePetStoryAutoModeTargets, plannedPetStoryMode } from './petstoryModes';
 import { isDeepStrictEqual } from 'node:util';
@@ -507,6 +508,7 @@ export class PetStoryChatService {
 
   async promptStageTargets(id: string, revision: number, scope?: 'shots'): Promise<PetStoryResult> {
     let p = await this.projects.read(id);
+    p = await reconcilePetStoryTaskIntents(this.projects, this.tasks, p);
     if (p.revision !== revision || !p.plan) throw new Error('项目已变化或尚无采用镜头设计');
     if (this.reconcilePausedPromptBatch(p)) p = await this.projects.write(p);
     const plan = p.plan; if (!plan) throw new Error('当前镜头设计已不存在');
@@ -573,6 +575,15 @@ export class PetStoryChatService {
 
   private async prepareRuntimeRequest(id: string, revision: number, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget, imageOperationId?: string): Promise<PetStoryResult> {
     let p = await this.projects.read(id);
+    p = await reconcilePetStoryTaskIntents(this.projects, this.tasks, p);
+    const pendingIntent = p.taskIntents?.find((intent): boolean => intent.kind === 'chat' && !intent.taskId && intent.chatJob?.kind === kind
+      && intent.chatJob.shotId === target.shotId && intent.chatJob.promptKind === target.promptKind && intent.chatJob.materialId === target.materialId
+      && intent.chatJob.parentJobId === target.parentJobId && intent.input.petstoryChat?.imageOperationId === imageOperationId);
+    if (pendingIntent) {
+      const recovered = await commitPetStoryTaskIntent(this.projects, this.tasks, p, pendingIntent,
+        (project, task): void => bindPetStoryChatIntent(project, pendingIntent, task));
+      return { success: true, project: recovered.project, taskId: recovered.task.id, attachments: recovered.task.attachments };
+    }
     const imageOperation = this.imagePreparationOperation(p, kind, target, imageOperationId);
     const preparedImage = this.existingImagePreparation(p, imageOperation, kind);
     if (preparedImage) return preparedImage;
@@ -606,15 +617,20 @@ export class PetStoryChatService {
     const attachments = await this.projects.attachments({ ...p, assets: request.assets });
     if (this.tasks.list().some((t): boolean => t.projectId === p.studioProjectId && t.mode === 'chat' && hash(t.prompt) === hash(request.prompt) && !p.jobs.some((j): boolean => j.taskId === t.id))) throw new Error('相同输入已有未绑定任务，请核对原 hold 任务');
     const jobId = randomUUID();
-    const task = this.tasks.create({ prompts: [request.prompt], promptReadback: 'exact', mode: 'chat', executionIntent: 'hold', attachments, projectId: p.studioProjectId,
-      petstoryChat: imageChatBinding(p.id, jobId, imageOperation) }, p.accountId);
-    const job = this.runtimeJob(p, kind, target, effectiveTarget, parent, task, requestId, request, jobId);
-    p.jobs.push(job);
-    // 同一次项目原子保存包含根请求及图片授权关联，避免任务已存但图片操作无法恢复。
-    bindImagePreparation(imageOperation, job);
-    if (adjustmentRepair && p.chatAdjustment) p.chatAdjustment.repairJobId = job.id;
-    if (p.promptBatch?.status === 'running') p.promptBatch.jobId = job.id;
-    p = await this.projects.write(p);
+    const input: TaskAddParams = { prompts: [request.prompt], promptReadback: 'exact', mode: 'chat', executionIntent: 'hold', attachments, projectId: p.studioProjectId,
+      petstoryChat: imageChatBinding(p.id, jobId, imageOperation) };
+    const template = this.runtimeJob(p, kind, target, effectiveTarget, parent, { id: `intent:${jobId}`, prompt: request.prompt }, requestId, request, jobId);
+    const committed = await commitPetStoryTaskIntent(this.projects, this.tasks, p,
+      { operationId: `chat:${jobId}`, kind: 'chat', targetId: jobId, input, accountId: p.accountId, createdAt: new Date().toISOString(), chatJob: template },
+      (project, task): void => {
+        const job = { ...template, taskId: task.id }; project.jobs.push(job);
+        const operation = imageOperation ? project.imageOperations?.find((item): boolean => item.id === imageOperation.id) : undefined;
+        bindImagePreparation(operation, job);
+        if (adjustmentRepair && project.chatAdjustment) project.chatAdjustment.repairJobId = job.id;
+        if (project.promptBatch?.status === 'running') project.promptBatch.jobId = job.id;
+      });
+    p = committed.project; const task = committed.task; const job = p.jobs.find((item): boolean => item.id === jobId);
+    if (!job) throw new Error('原正文任务绑定写入回读缺失');
     this.syncAdjustmentRepairGuard(p, job);
     return { success: true, project: p, taskId: task.id, attachments, ...(kind === 'repair' ? { repairJobId: job.id, repairSourceJobId: parent?.id } : {}) };
   }
@@ -679,7 +695,7 @@ export class PetStoryChatService {
     return { success: true, project: await this.projects.write(candidate), taskId: job.taskId, repairJobId: job.id, repairSourceJobId: job.id };
   }
 
-  private runtimeJob(p: PetStoryProject, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget, effectiveTarget: PetStoryRuntimeTarget, parent: PetStoryChatJob | undefined, task: Task, requestId: string, request: DramaRequest, jobId: string): PetStoryChatJob {
+  private runtimeJob(p: PetStoryProject, kind: PetStoryChatJob['kind'], target: PetStoryRuntimeTarget, effectiveTarget: PetStoryRuntimeTarget, parent: PetStoryChatJob | undefined, task: Pick<Task, 'id' | 'prompt'>, requestId: string, request: DramaRequest, jobId: string): PetStoryChatJob {
     const selected = promptFor(p, effectiveTarget);
     const reviewRepair = kind === 'repair' && parent && isReviewResult(p, parent);
     return { id: jobId, taskId: task.id, kind, status: 'bound', ...effectiveTarget,
@@ -886,6 +902,14 @@ export class PetStoryChatService {
 
   async prepare(id: string, prompt: string, kind: PetStoryChatJob['kind'], parentJobId?: string, shotId?: string, promptKind?: PetStoryPromptKind, materialId?: string): Promise<PetStoryResult> {
     let p = await this.projects.read(id);
+    p = await reconcilePetStoryTaskIntents(this.projects, this.tasks, p);
+    const pendingIntent = p.taskIntents?.find((intent): boolean => intent.kind === 'chat' && !intent.taskId && intent.input.prompts[0] === prompt
+      && intent.chatJob?.kind === kind && intent.chatJob.shotId === shotId && intent.chatJob.promptKind === promptKind && intent.chatJob.materialId === materialId);
+    if (pendingIntent) {
+      const recovered = await commitPetStoryTaskIntent(this.projects, this.tasks, p, pendingIntent,
+        (project, task): void => bindPetStoryChatIntent(project, pendingIntent, task));
+      return { success: true, project: recovered.project, taskId: recovered.task.id, attachments: recovered.task.attachments };
+    }
     const existing = this.existingRuntimeRepair(p, kind, p.jobs.find((job): boolean => job.id === parentJobId)); if (existing) return existing;
     assertChatAvailable(p);
     archiveCompletedPetStoryProduction(p);
@@ -902,14 +926,14 @@ export class PetStoryChatService {
     if (this.tasks.list().some((t): boolean => t.projectId === p.studioProjectId && t.mode === 'chat' && hash(t.prompt) === hash(prompt) && !p.jobs.some((j): boolean => j.taskId === t.id))) {
       throw new Error('相同输入已有未绑定任务；请核对 Studio 中的原 hold 任务，不得重新创建或自动发送');
     }
-    // 先建 hold 任务，再落盘绑定；写盘不确定时调用方不会拿到启动授权。
     const jobId = randomUUID();
-    const task = this.tasks.create({ prompts: [prompt], promptReadback: 'exact', mode: 'chat', executionIntent: 'hold', attachments, projectId: p.studioProjectId, petstoryChat: { projectId: p.id, jobId } }, p.accountId);
-    const job: PetStoryChatJob = { id: jobId, taskId: task.id, kind, status: 'bound', parentJobId: parent?.id,
-      shotId, promptKind, materialId, inputHash: hash(task.prompt), sourceUrl: p.source.url, sourceStoryId: p.mobileStory.id,
-      ...snapshot };
-    p.jobs.push(job);
-    p = await this.projects.write(p);
+    const input: TaskAddParams = { prompts: [prompt], promptReadback: 'exact', mode: 'chat', executionIntent: 'hold', attachments, projectId: p.studioProjectId, petstoryChat: { projectId: p.id, jobId } };
+    const template: PetStoryChatJob = { id: jobId, taskId: `intent:${jobId}`, kind, status: 'bound', parentJobId: parent?.id,
+      shotId, promptKind, materialId, inputHash: hash(prompt), sourceUrl: p.source.url, sourceStoryId: p.mobileStory.id, ...snapshot };
+    const committed = await commitPetStoryTaskIntent(this.projects, this.tasks, p,
+      { operationId: `chat:${jobId}`, kind: 'chat', targetId: jobId, input, accountId: p.accountId, createdAt: new Date().toISOString(), chatJob: template },
+      (project, task): void => { project.jobs.push({ ...template, taskId: task.id }); });
+    p = committed.project; const task = committed.task;
     return { success: true, project: p, taskId: task.id, attachments };
   }
 
@@ -949,6 +973,7 @@ export class PetStoryChatService {
 
   async retryUnsubmitted(id: string, jobId: string): Promise<PetStoryResult> {
     let p = await this.projects.read(id);
+    p = await reconcilePetStoryTaskIntents(this.projects, this.tasks, p);
     const job = p.jobs.find((j): boolean => j.id === jobId);
     const task = this.tasks.list().find((t): boolean => t.id === job?.taskId);
     if (!isWaitingJob(job) || !p.mobileStory || job.sourceStoryId !== p.mobileStory.id || job.status !== 'bound' || job.rawText || job.sourceUrl !== p.source.url || !task || task.mode !== 'chat'
@@ -981,6 +1006,7 @@ export class PetStoryChatService {
 
   async collect(id: string, jobId: string): Promise<PetStoryResult> {
     let p = await this.projects.read(id);
+    p = await reconcilePetStoryTaskIntents(this.projects, this.tasks, p);
     let job = p.jobs.find((j): boolean => j.id === jobId);
     if (!job) throw new Error('任务未绑定到当前项目');
     const repair = p.jobs.find((item): boolean => item.kind === 'repair' && item.parentJobId === jobId);

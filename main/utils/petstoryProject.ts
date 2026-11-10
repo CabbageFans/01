@@ -1,8 +1,10 @@
+import { buildPetStoryDiagnostics } from './petstoryDiagnostics';
 import fs from 'node:fs/promises';
+import { migrateLocalMediaSources } from './localMediaSource';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryPromptEditBasis, PetStoryChatJob, PetStoryPromptBatch, PetStoryImageTarget, PetStoryProductionStep } from '@doubao-studio/contracts';
+import type { PetStoryProject, PetStoryPlan, PetStoryAsset, PetStoryPromptProfile, PetStoryPromptKind, PetStoryPromptEditBasis, PetStoryChatJob, PetStoryPromptBatch, PetStoryImageTarget, PetStoryProduction, PetStoryProductionStep } from '@doubao-studio/contracts';
 import { assetCharacterIds, defaultPromptProfile, PROMPT_RULES_VERSION } from './petstoryPromptQuality';
 import { collectPetStoryDialogueSourceIssues, extractDouyinLink, PetStoryContentValidationError, record, runtimePromptIssues, validatePetStoryPlan, validatePromptTask } from './petstoryValidation';
 import { invalidateMaterialDependents, materialAsset, syncMaterials, storyHash, requireMaterialInventory } from './petstoryMaterials';
@@ -127,8 +129,19 @@ export function validateProject(value: unknown, readHistorical: boolean = false)
   validateImageOperations(result);
   validateAdoptedImages(result);
   validateSelectedVideos(result);
+  validateTaskIntents(result);
   validateProduction(result, ids);
   return result;
+}
+
+/** 视频设置不被无关基础素材暂停锁住；同镜图片的原快照必须先正式结束。 */
+function assertEditableShotVideoSettings(project: PetStoryProject, plan: PetStoryPlan): void {
+  for (const shot of plan.shots) {
+    const previous = project.plan?.shots.find((item): boolean => item.id === shot.id);
+    if (!previous || previous.requestedMode === shot.requestedMode && previous.durationSeconds === shot.durationSeconds) continue;
+    const sameShotImage = Object.values(project.imageProductions || {}).some((run): boolean => run.target?.shotId === shot.id && run.state !== 'complete' && run.state !== 'ended' && run.steps.some((step): boolean => step.status !== 'complete'));
+    if (sameShotImage) throw new Error('本镜还有未结束的图片等待，请先在原图片节点结束本次图片等待后修改视频设置；原图片和任务保留');
+  }
 }
 
 /** 操作台账兼容历史对象；具体执行时再核对当前事实与原文件。 */
@@ -142,6 +155,7 @@ function validateImageOperations(project: PetStoryProject): void {
       || !['generate', 'modify'].includes(operation.mode) || !['preparing', 'generating', 'saving', 'complete', 'failed'].includes(operation.stage)
       || !Number.isFinite(Date.parse(operation.createdAt)) || !/^[a-f0-9]{64}$/.test(operation.basisHash)
       || !validImageOperationTarget(operation.target)) throw new Error('图片操作授权或进度记录无效');
+    if (operation.endedAt !== undefined && !Number.isFinite(Date.parse(operation.endedAt))) throw new Error('图片结束等待记录无效，原文件保留');
     if (operation.mode === 'modify' && (typeof operation.feedback !== 'string' || !operation.feedback.trim() || operation.feedback.length > 4000
       || !/^[a-f0-9]{64}$/.test(operation.baseSha256 || '') || !project.assets.some((asset): boolean => asset.id === operation.baseAssetId && imageTargetMatches(asset, operation.target)))) throw new Error('图片修改基图或反馈记录无效');
     if (operation.chatJobId && !project.jobs.some((job): boolean => job.id === operation.chatJobId && job.materialId === operation.target.materialId)) throw new Error('图片准备原任务记录无效');
@@ -261,6 +275,32 @@ function validateImageProductions(result: PetStoryProject, ids: Set<string>): vo
     validateProduction({ ...result, imageProductions: undefined, production, productionHistory: undefined }, ids);
   }
 }
+/** 新日志和执行快照在读入边界核对；历史无此字段时保持原样读取。 */
+function validateTaskIntents(project: PetStoryProject): void {
+  if (project.taskIntents === undefined) return;
+  if (!Array.isArray(project.taskIntents)) throw new Error('项目任务意图日志无效，原数据保留');
+  const ids = new Set<string>();
+  for (const intent of project.taskIntents) {
+    const binding = intent.kind === 'media' ? intent.input?.petstory : intent.input?.petstoryChat;
+    if (!intent.operationId || ids.has(intent.operationId) || !['media', 'chat'].includes(intent.kind) || !intent.targetId
+      || intent.accountId !== project.accountId || binding?.projectId !== project.id || intent.input.projectId !== project.studioProjectId
+      || !Array.isArray(intent.input.prompts) || intent.input.prompts.length !== 1 || !intent.input.prompts[0]?.trim()
+      || intent.input.executionIntent !== 'hold' || !Number.isFinite(Date.parse(intent.createdAt))
+      || (intent.kind === 'media' ? intent.input.petstory?.stepId : intent.input.petstoryChat?.jobId) !== intent.targetId) throw new Error('项目任务意图身份或输入无效，原数据保留');
+    if (intent.chatJob && (intent.kind !== 'chat' || intent.chatJob.id !== intent.targetId)) throw new Error('正文准备意图与原任务不符');
+    ids.add(intent.operationId);
+  }
+}
+function validateVideoInputSnapshot(project: PetStoryProject, step: PetStoryProductionStep): void {
+  const snapshot = step.videoInputSnapshot; if (!snapshot) return;
+  const { digest, ...input } = snapshot;
+  if (step.kind !== 'video' || snapshot.schemaVersion !== 1 || !Number.isInteger(snapshot.inputVersion) || snapshot.inputVersion < 1
+    || snapshot.projectId !== project.id || snapshot.accountId !== project.accountId || snapshot.shotId !== step.shotId || snapshot.stepId !== step.id
+    || !['first_frame', 'first_last_frame', 'reference'].includes(snapshot.mode) || typeof snapshot.prompt !== 'string' || !snapshot.prompt.trim()
+    || typeof snapshot.sourceText !== 'string' || typeof snapshot.dialogue !== 'string' || !Array.isArray(snapshot.references)
+    || snapshot.references.length !== step.attachmentAssetIds.length || snapshot.references.some((reference, index): boolean => reference.assetId !== step.attachmentAssetIds[index] || reference.order !== index + 1 || !/^[a-f0-9]{64}$/.test(reference.sha256))
+    || digest !== createHash('sha256').update(JSON.stringify(input)).digest('hex')) throw new Error('原视频输入快照校验失败，原数据与媒体保留');
+}
 function validateProduction(result: PetStoryProject, ids: Set<string>): void {
   validateImageProductions(result, ids);
   if (result.production) {
@@ -274,11 +314,15 @@ function validateProduction(result: PetStoryProject, ids: Set<string>): void {
         || !Array.isArray(step.attachmentAssetIds) || step.attachmentAssetIds.some((id: string): boolean => !ids.has(id)) || !/^[a-f0-9]{64}$/.test(step.inputHash)) throw new Error('制作步骤绑定无效');
       stepIds.add(step.id);
     }
-    if (production.phase !== 'materials') validateShotMedia(result);
+    if (production.phase !== 'materials') validateShotMedia(result, production, !production.imageOperationId);
   }
+  validateProductionReferences(result, ids);
+}
+function validateProductionReferences(result: PetStoryProject, ids: Set<string>): void {
   if (result.productionHistory !== undefined && !Array.isArray(result.productionHistory)) throw new Error('历史制作清单无效，原文件已保留');
   for (const production of [result.production, ...(result.productionHistory || [])]) {
-    for (const step of production?.steps || []) validateResubmissionHistory(step, ids);
+    for (const step of production?.steps || []) { validateResubmissionHistory(step, ids); validateVideoInputSnapshot(result, step); }
+    if (production && production !== result.production) validateShotMedia(result, production);
     if (production) validateReferenceContinuationHistory(result.id, production);
   }
 }
@@ -322,23 +366,25 @@ function validateResubmissionPageBindings(history: NonNullable<PetStoryProductio
     || typeof binding.label !== 'string' || !binding.label.trim() || binding.label.length > 40 || !/^[a-f0-9]{64}$/.test(binding.previewHash)
     || binding.fileSha256 !== undefined && !/^[a-f0-9]{64}$/.test(binding.fileSha256))) invalidResubmissionHistory();
 }
-function validateShotMedia(result: PetStoryProject): void {
-  const production = result.production;
-  if (!production || !result.plan) return;
-    for (const shot of result.plan.shots) {
-      const media = production.shots[shot.id];
-      if (!media || media.requestedMode !== shot.requestedMode || !['first_frame', 'first_last_frame', 'reference'].includes(media.resolvedMode)) throw new Error('镜头实际模式无效');
-      for (const [key, kind] of [['firstFrameId', 'firstFrame'], ['plannedEndImageId', 'plannedEndImage'], ['videoId', 'video'], ['actualEndFrameId', 'actualEndFrame']] as const) {
-        const id = media[key];
-        if (id && !result.assets.some((a): boolean => a.id === id && a.shotId === shot.id && (a.kind === kind || (key === 'firstFrameId' && a.kind === 'actualEndFrame')))) throw new Error('镜头选中素材错绑');
-      }
+function validateShotMedia(result: PetStoryProject, production: PetStoryProduction, matchesCurrentPlan: boolean = false): void {
+  if (!production.shots || typeof production.shots !== 'object' || Array.isArray(production.shots)) throw new Error('镜头实际模式无效');
+  // 独立图片和归档制作保存原模式事实；当前草稿的新版本不得改写或使其失效。
+  if (matchesCurrentPlan && result.plan?.shots.some((shot): boolean => production.shots[shot.id]?.requestedMode !== shot.requestedMode)) throw new Error('镜头实际模式无效');
+  for (const [shotId, media] of Object.entries(production.shots)) {
+    if (!shotId || !media || !['auto', 'first_frame', 'first_last_frame', 'reference'].includes(media.requestedMode)
+      || !['first_frame', 'first_last_frame', 'reference'].includes(media.resolvedMode)) throw new Error('镜头实际模式无效');
+    for (const [key, kind] of [['firstFrameId', 'firstFrame'], ['plannedEndImageId', 'plannedEndImage'], ['videoId', 'video'], ['actualEndFrameId', 'actualEndFrame']] as const) {
+      const id = media[key];
+      if (id && !result.assets.some((asset): boolean => asset.id === id && asset.shotId === shotId && (asset.kind === kind || (key === 'firstFrameId' && asset.kind === 'actualEndFrame')))) throw new Error('镜头选中素材错绑');
     }
+  }
 }
 
 /** 每个打开目录一条串行队列；只有主进程选择的目录会登记。 */
 export class PetStoryProjects {
   private directories = new Map<string, string>();
   private queues = new Map<string, Promise<unknown>>();
+  private writeQueues = new Map<string, Promise<unknown>>();
   constructor(private readonly replaceFile: (from: string, to: string) => Promise<void> = fs.rename) {}
 
   async serial<T>(id: string, work: () => Promise<T>): Promise<T> {
@@ -346,6 +392,13 @@ export class PetStoryProjects {
     const next = previous.catch((): void => {}).then(work);
     this.queues.set(id, next);
     try { return await next; } finally { if (this.queues.get(id) === next) this.queues.delete(id); }
+  }
+  /** 只读取当前进程已打开项目；目录本身不进入导出。 */
+  async diagnostics(): Promise<object[]> {
+    return Promise.all([...this.directories.keys()].map(async (id: string): Promise<object> => {
+      try { return buildPetStoryDiagnostics(await this.read(id)); }
+      catch { return { projectId: id, readError: '项目当前不可读取，原文件保留' }; }
+    }));
   }
   directory(id: string): string {
     const directory = this.directories.get(id);
@@ -359,6 +412,7 @@ export class PetStoryProjects {
     const project = validateProject(JSON.parse(await fs.readFile(filename, 'utf8')), true);
     if (project.id !== id) throw new Error('项目身份发生变化，已停止操作');
     prepareEditableAutoModeTargets(project);
+    migrateLocalMediaSources(project);
     return project;
   }
   async open(directory: string): Promise<PetStoryProject> {
@@ -371,6 +425,7 @@ export class PetStoryProjects {
     for (const asset of project.assets) await projectPath(real, asset.relativePath);
     this.directories.set(project.id, real);
     prepareEditableAutoModeTargets(project);
+    migrateLocalMediaSources(project);
     return project;
   }
   async create(directory: string, studioProjectId: string, accountId: string): Promise<PetStoryProject> {
@@ -383,6 +438,12 @@ export class PetStoryProjects {
     return project;
   }
   async write(project: PetStoryProject): Promise<PetStoryProject> {
+    const previous = this.writeQueues.get(project.id) || Promise.resolve();
+    const work = previous.catch((): void => {}).then((): Promise<PetStoryProject> => this.writeCurrent(project));
+    this.writeQueues.set(project.id, work);
+    try { return await work; } finally { if (this.writeQueues.get(project.id) === work) this.writeQueues.delete(project.id); }
+  }
+  private async writeCurrent(project: PetStoryProject): Promise<PetStoryProject> {
     const current = await this.read(project.id);
     // 盘上原有小数方案和历史候选逐值保留；本次新增／改变的方案必须重新严格校验。
     const checked = validateProject(project, true);
@@ -494,6 +555,7 @@ export class PetStoryProjects {
     if (!p.plan) throw new Error('请先取得本次 Chat 分析结果');
     if (p.production && !archiveCompletedPetStoryProduction(p)) throw new Error('原制作尚未结束或镜头方案已锁定，保留已有素材和任务');
     const checked = validatePetStoryPlan(value);
+    assertEditableShotVideoSettings(p, checked);
     ensurePetStoryAutoModeTargets(checked);
     const sourceIssues = collectPetStoryDialogueSourceIssues(checked, p.mobileStory?.text || '');
     if (sourceIssues.length) throw new PetStoryContentValidationError(sourceIssues);

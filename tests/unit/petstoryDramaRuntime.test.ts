@@ -1,3 +1,4 @@
+import { currentRunId, localMediaPort } from '../fixtures/taskRunIdentity';
 /** 离线协议／状态测试：模拟回复仅验证宿主，不代表豆包内容或媒体验收。 */
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -52,7 +53,7 @@ async function finish(job: PetStoryChatJob, result: Record<string, unknown>, bad
   const text = rawOverride ?? JSON.stringify({ requestId: job.requestId, targetIds: badIds ? ['wrong-target'] : job.expectedIds, ...withOfflineTimingPlan(result, p.mobileStory?.text || '') });
   const runtime: TaskRunSnapshot = { runId: `TEST-run-${job.id}`, attempt: 1, stage: 'completed', message: 'TEST离线完成', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
     input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] }, chatResponse: { text, capturedAt: now } };
-  const updated = core.updateRuntime({ taskId: task.id, status: 'done', runtime }); if (!updated.success) throw new Error(updated.error);
+  const updated = core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'done', runtime }); if (!updated.success) throw new Error(updated.error);
   if (!job.runId) await chat.bindRun(p.id, job.id, runtime.runId);
   const collected = await chat.collect(p.id, job.id); p = collected.project!; return p;
 }
@@ -103,7 +104,7 @@ async function pauseUncertain(job: PetStoryChatJob, submitted = true): Promise<T
   const task = tasks().find((item): boolean => item.id === job.taskId)!; const now = new Date().toISOString();
   const runtime: TaskRunSnapshot = { runId: `TEST-paused-${job.id}`, attempt: 1, stage: 'paused', message: 'TEST原提交不确定，禁止重发', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
     ...(submitted ? { submittedAt: now } : {}), input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] } };
-  const updated = core.updateRuntime({ taskId: task.id, status: 'paused', errorInfo: { code: 'submission_uncertain', message: 'TEST保留原任务', recoverable: true, detectedAt: now }, runtime });
+  const updated = core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'paused', errorInfo: { code: 'submission_uncertain', message: 'TEST保留原任务', recoverable: true, detectedAt: now }, runtime });
   if (!updated.success) throw new Error(updated.error);
   p = (await chat.bindRun(p.id, job.id, runtime.runId)).project!;
   return tasks().find((item): boolean => item.id === task.id)!;
@@ -411,7 +412,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(exported.modelPrompt).toBeNull(); expect(exported.final).toBe(''); expect(exported.review).toMatchObject({ eligibility: 'creative_plan', submissionBlocked: true });
     p = await projects.confirmStory(p.id, p.revision);
     const available = capability(); available.checkedAt = new Date().toISOString(); available.image = { state: 'supported', reason: 'TEST图片入口' };
-    const production = new PetStoryProductionService(projects, { list: tasks, create: (): never => { throw new Error('TEST不得自动创建媒体'); }, adopt: (): never => { throw new Error('TEST未授权媒体'); }, retryUnsubmitted: (): never => { throw new Error('TEST未授权重试'); }, downloads: (): [] => [], download: async (): Promise<{ success: boolean; count: number; failed: number }> => ({ success: false, count: 0, failed: 0 }) });
+    const production = new PetStoryProductionService(projects, { updateLocalMedia: localMediaPort(core), list: tasks, create: (): never => { throw new Error('TEST不得自动创建媒体'); }, adopt: (): never => { throw new Error('TEST未授权媒体'); }, retryUnsubmitted: (): never => { throw new Error('TEST未授权重试'); }, downloads: (): [] => [], download: async (): Promise<{ success: boolean; count: number; failed: number }> => ({ success: false, count: 0, failed: 0 }) });
     await expect(production.generateMaterials(p.id, p.revision, [id], available)).rejects.toThrow('尚无最终正文');
     expect((await projects.read(p.id)).production).toBeUndefined(); expect(tasks().every((task): boolean => task.mode === 'chat')).toBe(true);
     const materialJob = await prepare('materialPrompt', { materialId: id }); const body = 'TEST模型完整基础素材正文\n第二段';
@@ -458,9 +459,13 @@ describe('drama runtime 完整正文与候选采用', (): void => {
   it.each(['same-shot', 'analysis', 'assets', 'global-review', 'captured', 'not-submitted', 'active', 'wrong-run', 'saved-reply'] as const)('暂停未决文字的继续入口仍阻断%s，原任务保持原样', async (caseName: 'same-shot' | 'analysis' | 'assets' | 'global-review' | 'captured' | 'not-submitted' | 'active' | 'wrong-run' | 'saved-reply'): Promise<void> => {
     const original = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video' }); await pauseUncertain(original, caseName !== 'not-submitted');
     if (caseName === 'captured') { p.jobs[0].status = 'captured'; p.jobs[0].rawText = 'TEST已捕获原文'; p = await projects.write(p); }
-    if (caseName === 'active') core.updateRuntime({ taskId: original.taskId, status: 'generating', runtime: { stage: 'generating' } });
-    if (caseName === 'wrong-run') core.updateRuntime({ taskId: original.taskId, runtime: { runId: 'TEST-other-run' } });
-    if (caseName === 'saved-reply') core.updateRuntime({ taskId: original.taskId, runtime: { chatResponse: { text: 'TEST原回复已可收取', capturedAt: new Date().toISOString() } } });
+    if (caseName === 'active' || caseName === 'wrong-run') {
+      const historical = tasks();
+      if (caseName === 'active') historical[0].status = 'generating'; else historical[0].runtime!.runId = 'TEST-other-run';
+      // 历史不一致来自导入样本，不能借正式运行命令绕过状态机制造。
+      chat = new PetStoryChatService(projects, { list: (): Task[] => structuredClone(historical), create: (): Task => { throw new Error('TEST禁止创建'); } });
+    }
+    if (caseName === 'saved-reply') core.updateRuntime({ taskId: original.taskId, expectedRunId: currentRunId(core, original.taskId), runtime: { chatResponse: { text: 'TEST原回复已可收取', capturedAt: new Date().toISOString() } } });
     const before = tasks(); const beforeJob = structuredClone(p.jobs[0]);
     const action = caseName === 'same-shot' ? prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame' })
       : caseName === 'analysis' || caseName === 'assets' ? prepare(caseName) : caseName === 'global-review' ? prepare('review') : prepare('optimize', { shotId: 'shot-1', promptKind: 'firstFrame' });
@@ -618,13 +623,12 @@ describe('drama runtime 完整正文与候选采用', (): void => {
     expect(p.jobs.at(-1)).toMatchObject({ status: 'applied', resultStatus: 'candidate' });
     expect(tasks()).toHaveLength(3); expect(p.jobs.every((job): boolean => !!job.rawText)).toBe(true);
   });
-  it.each(['content_rejected', 'verification', 'quota_exhausted'] as const)('确定内容失败后平台出现%s仍停止，不把平台错误当内容改写重试', async (code: 'content_rejected' | 'verification' | 'quota_exhausted'): Promise<void> => {
+  it.each(['content_rejected', 'verification', 'quota_exhausted'] as const)('完成后的迟到%s错误不回退终态，原回复仍按内容缺项恢复', async (code: 'content_rejected' | 'verification' | 'quota_exhausted'): Promise<void> => {
     const original = await prepare('optimize', { shotId: 'shot-0', promptKind: 'video', capability: capability() });
     await finish(original, { optimized: 'TEST缺少引用和声音约束的原正文' });
-    const failure = core.updateRuntime({ taskId: original.taskId, status: 'fail', errorInfo: { code, message: 'TEST实际平台错误', recoverable: true, detectedAt: new Date().toISOString() } });
-    expect(failure.success).toBe(true); const before = tasks();
-    const collected = await chat.collect(p.id, original.id); p = collected.project!; expect(collected.needsRepair).toBe(false);
-    await expect(prepare('repair', { parentJobId: original.id })).rejects.toThrow('平台未完成');
+    const failure = core.updateRuntime({ taskId: original.taskId, expectedRunId: currentRunId(core, original.taskId), status: 'fail', errorInfo: { code, message: 'TEST实际平台错误', recoverable: true, detectedAt: new Date().toISOString() } });
+    expect(failure.success).toBe(false); const before = tasks(); expect(before[0].status).toBe('done');
+    const collected = await chat.collect(p.id, original.id); p = collected.project!; expect(collected.needsRepair).toBe(true);
     expect(tasks()).toEqual(before); expect(p.jobs).toHaveLength(1); expect(p.jobs[0].rawText).toContain('TEST缺少引用');
   });
   it('已选 Seedance 方言检查原台词声音花括号，修订原回复自身携带语法且无程序补写', async (): Promise<void> => {
@@ -908,7 +912,7 @@ describe('drama runtime 完整正文与候选采用', (): void => {
   it('用户更换原文后晚到回复只保存过期候选，不覆盖optimized或final', async (): Promise<void> => {
     const job = await prepare('optimize', { shotId: 'shot-0', promptKind: 'firstFrame' });
     const bound = tasks()[0]; const now = new Date().toISOString();
-    core.updateRuntime({ taskId: bound.id, runtime: { runId: `TEST-run-${job.id}`, attempt: 1, stage: 'generating', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
+    core.updateRuntime({ taskId: bound.id, expectedRunId: currentRunId(core, bound.id), runtime: { runId: `TEST-run-${job.id}`, attempt: 1, stage: 'generating', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
       input: { prompt: bound.prompt, mode: 'chat', attachments: [] } } });
     await chat.bindRun(p.id, job.id, `TEST-run-${job.id}`); job.runId = `TEST-run-${job.id}`; p = await projects.read(p.id);
     p = await projects.saveOriginalStory(p.id, p.revision, 'TEST 已由用户更新的确认原文');

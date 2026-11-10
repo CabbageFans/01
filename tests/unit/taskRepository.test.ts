@@ -55,6 +55,18 @@ describe('TaskRepository 单一写入边界', () => {
     expect(stored()[0].status).toBe('executing');
   });
 
+  it('每个实际变更任务授予递增版本，无关任务保留版本，保存失败不推进持久版本', (): void => {
+    const { repository, stored, write } = fixture([task('first'), task('second')]);
+    const first = repository.read(); first[0].status = 'executing';
+    expect(repository.replace(first)).toBe(true);
+    expect(stored().map((item: Task): number => item.revision || 0)).toEqual([1, 0]);
+    const failed = repository.read(); failed[0].status = 'paused'; write.mockReturnValueOnce(false);
+    expect(repository.replace(failed)).toBe(false);
+    expect(stored()[0]).toMatchObject({ revision: 1, status: 'executing' });
+    const retry = repository.read(); retry[0].status = 'paused'; expect(repository.replace(retry)).toBe(true);
+    expect(stored()[0]).toMatchObject({ revision: 2, status: 'paused' });
+  });
+
   it('状态、阶段、产物和删除均产生版本化事件', () => {
     const { repository, events } = fixture([task('t1')]);
     const tasks = repository.read();

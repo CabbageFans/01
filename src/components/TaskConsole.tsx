@@ -468,7 +468,7 @@ const TaskConsole: React.FC<{ view?: 'create' | 'tasks' }> = ({ view = 'tasks' }
     const isActive = editingTask.status === 'executing' || editingTask.status === 'generating' || editingTask.status === 'waiting_verification' || editingTask.status === 'waiting_generation_confirmation' || editingTask.status === 'manual_submission_observing';
     if (isActive) {
       window.dispatchEvent(new CustomEvent('cancel-task-automation', {
-        detail: { taskId: editingTask.id, restartTask: updates },
+        detail: { taskId: editingTask.id, expectedRunId: editingTask.runtime?.runId, restartTask: updates },
       }));
     } else {
       const updated = await updateTask(editingTask.id, updates);

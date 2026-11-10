@@ -17,9 +17,10 @@ import {
   isExactPromptInComposer,
   normalizePromptForComposer,
   startNewConversation,
+  submitPromptOnce,
   verifyPromptReadyForSubmission,
 } from '../../src/utils/doubaoBridge';
-import type { WebviewHandle } from '../../src/utils/doubaoBridge';
+import type { WebviewHandle, NativeMouseInputEvent } from '../../src/utils/doubaoBridge';
 import {
   classifySubmissionReadback,
   canAttemptSubmission,
@@ -31,6 +32,10 @@ import {
   TERMINAL_STABLE_THRESHOLD,
 } from '../../src/utils/realSendStateMachine';
 import type { SubmissionReadback, TerminalSample } from '../../src/utils/realSendStateMachine';
+import { dispatchSubmissionAttempt } from '../../src/automation/SubmissionCoordinator';
+import type { SubmissionDispatchSafety } from '../../src/utils/doubaoBridge';
+import { createAcceptedObservationBinding } from '../../src/utils/acceptedObservation';
+import { videoSubmissionHarness } from '../fixtures/videoSubmissionHarness';
 
 // ==================== mock webview ====================
 
@@ -306,7 +311,7 @@ describe('P0-3 真实回复终态', () => {
   });
 });
 
-describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
+describe('P0-2/P0-3 发送、恢复与完成纪律', () => {
   it('正文写入仅限页内编辑器事件，不依赖系统键盘或把换行变成发送', () => {
     const bridgeSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'utils', 'doubaoBridge.ts'), 'utf8');
     const inputStart = bridgeSource.indexOf('async function injectCharByChar');
@@ -316,88 +321,89 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     expect(inputBody).not.toContain('sendInputEvent');
     expect(inputBody).not.toMatch(/keyCode: 'Enter'|submitPrompt|button\.click\(/);
   });
-  it('每个 run 只有一个点击提交调用点，禁止 Enter 与循环自动重提', () => {
-    const panelSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'BrowserPanel.tsx'), 'utf8');
-    const clickCalls = panelSource.match(/submitPromptOnce\(/g) || [];
-    expect(clickCalls.length, '页内单次提交必须只有一个调用点').toBe(1);
-    expect(panelSource).not.toContain('submitPromptWithNativeClick');
-    expect(panelSource).not.toContain('submitPromptWithNativeEnter');
-    expect(panelSource).not.toContain('submissionAttempt < 3');
-    expect(panelSource).not.toContain('验证已完成，正在新对话中重新上传并提交');
-    expect(panelSource).toContain('系统不会自动重新提交');
-    const readinessIndex = panelSource.indexOf('const preparation = await preparePageSubmission(webview, undefined, backgroundInput)');
-    const submittingIndex = panelSource.indexOf("markSubmissionIntent('submitting'");
-    const clickIndex = panelSource.indexOf('submitPromptOnce(webview, {');
-    expect(readinessIndex, '发送前必须先确认页面输入区和控件稳定').toBeGreaterThan(0);
-    expect(submittingIndex).toBeGreaterThan(readinessIndex);
-    expect(clickIndex, '唯一真实点击调用必须位于提交意图持久化之后').toBeGreaterThan(submittingIndex);
-    const intentBody = panelSource.slice(panelSource.indexOf('const markSubmissionIntent ='), submittingIndex);
-    expect(intentBody).toContain('submittedAt: markedAt');
-    expect(intentBody).toContain('persistedRuntime?.runId !== expectedRunId || persistedRuntime?.submittedAt !== markedAt');
-    const guardedCall = panelSource.slice(clickIndex, panelSource.indexOf('new Promise<boolean>', clickIndex));
-    expect(guardedCall).toContain('signal: dispatchController.signal');
-    expect(guardedCall).toContain('deadlineAt: dispatchDeadline');
-    expect(guardedCall).toContain('dispatchKey:');
-    expect(guardedCall).toContain('expectedPrompt: prompt');
-    expect(guardedCall).toContain('current.runtime?.submittedAt === submissionMarkedAt');
-    expect(guardedCall).toContain('automationEngine.confirmSubmissionOwnership(taskId, accountId, controller)');
-    expect(panelSource).not.toContain('prepareNativeSubmission');
-    // 点击 ACK 丢失后的单次只读受理由 submissionAcknowledgementReadback.test.ts
-    // 执行真实分支验证，不以旧版立即退出文案锁死受理状态流转。
+  it('激活ACK丢失后沿原运行恢复并完成，不给原任务第二次发送权限', async (): Promise<void> => {
+    const fixture = videoSubmissionHarness(); const original = fixture.current();
+    expect(original.runtime?.submittedAt).toBeUndefined();
+    const dispatch = vi.fn(async (safety: SubmissionDispatchSafety): Promise<{ kind: 'dispatch_unknown'; reason: string }> => {
+      await safety.beforeDispatch?.();
+      expect(fixture.current().runtime?.submission?.state).toBe('dispatch_unknown');
+      return { kind: 'dispatch_unknown', reason: 'activation_ack_missing' };
+    });
+    await dispatchSubmissionAttempt({ ...fixture, dispatch });
+    const submittedAt = fixture.current().runtime!.submittedAt;
+    expect(fixture.service.recoverInterruptedTasks().success).toBe(true);
+    expect(fixture.service.retry(original.id).success).toBe(false);
+    expect(fixture.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId,
+      status: 'manual_submission_observing', runtime: { stage: 'manual_submission_observing' } }).success).toBe(true);
+    await fixture.persist('accepted');
+    expect(fixture.service.updateStatus({ taskId: original.id, expectedRunId: original.runtime!.runId, status: 'done', outputs: ['https://fixture.invalid/original.mp4'] }).success).toBe(true);
+    expect(fixture.current()).toMatchObject({ status: 'done', runtime: { runId: original.runtime!.runId, attempt: 1, submittedAt } });
+    expect(fixture.current().artifacts?.[0].runId).toBe(original.runtime!.runId);
+    expect(dispatch).toHaveBeenCalledOnce();
   });
 
-  it('素材安全确认只读识别；人工确认前持久化 submittedAt，确认后禁止二次提交', () => {
-    const panelSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'BrowserPanel.tsx'), 'utf8');
-    const bridgeSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'utils', 'doubaoBridge.ts'), 'utf8');
-    const inspectorBody = bridgeSource.slice(
-      bridgeSource.indexOf('export async function inspectMaterialAuthorization'),
-      bridgeSource.indexOf('\nexport async function', bridgeSource.indexOf('export async function inspectMaterialAuthorization') + 1),
-    );
-    expect(panelSource).toContain('inspectMaterialAuthorization(webview)');
-    expect(panelSource).not.toContain('confirmMaterialAuthorizationIfPresent');
-    expect(inspectorBody).not.toContain('.click()');
-    expect(inspectorBody).not.toContain('dispatchEvent');
-    expect(panelSource).toContain("'material_authorization_required'");
-    expect(panelSource.indexOf("markSubmissionIntent('waiting_verification'")).toBeLessThan(
-      panelSource.indexOf('while (true)'),
-    );
-    expect(panelSource).toContain('authorizationTriggeredSubmission');
-    expect(panelSource).toContain('if (!authorizationTriggeredSubmission)');
-    expect((panelSource.match(/submitPromptOnce\(/g) || []).length).toBe(1);
+  it('素材授权等待能在同一次尝试中保存受理并进入生成，不回到最终发送', async (): Promise<void> => {
+    const fixture = videoSubmissionHarness(); const original = fixture.current();
+    expect(fixture.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId,
+      status: 'waiting_verification', runtime: { stage: 'waiting_verification' } }).success).toBe(true);
+    await fixture.persist('dispatch_unknown', 'material_authorization_may_submit');
+    const evidence: SubmissionReadback = { inputCleared: true, promptPublished: true, generationStarted: true, messageCount: 1 };
+    expect(classifySubmissionReadback(evidence)).toBe('confirmed');
+    const current = fixture.current();
+    const binding = createAcceptedObservationBinding({ accountId: current.assignedAccountId!, runId: current.runtime!.runId,
+      conversationUrl: 'https://www.doubao.com/chat/fixture-original', acceptedAt: current.runtime!.submittedAt!, ownerId: 'fixture-observer',
+      mode: 'video', evidence, materialAuthorizationConfirmed: true });
+    await fixture.persist('accepted');
+    expect(fixture.service.updateRuntime({ taskId: current.id, expectedRunId: current.runtime!.runId, status: 'generating',
+      runtime: { stage: 'generating', conversationUrl: binding.conversationUrl, acceptanceObservation: binding } }).success).toBe(true);
+    expect(fixture.current()).toMatchObject({ status: 'generating', runtime: { runId: original.runtime!.runId, attempt: 1,
+      submission: { operationId: 'fixture-operation', state: 'accepted' }, acceptanceObservation: { evidence: { kind: 'material_authorization_confirmed' } } } });
   });
 
-  it('正式提交直接调用页内控件一次，不依赖鼠标、窗口焦点或其他提交回退', () => {
-    const bridgeSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'utils', 'doubaoBridge.ts'), 'utf8');
-    const probeSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'utils', 'submissionControls.ts'), 'utf8');
-    const panelSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'BrowserPanel.tsx'), 'utf8');
-    const submitStart = bridgeSource.indexOf('export async function submitPromptOnce');
-    const nextExport = bridgeSource.indexOf('\nexport ', submitStart + 1);
-    const submitBody = bridgeSource.slice(submitStart, nextExport > 0 ? nextExport : undefined);
-    expect(submitStart).toBeGreaterThan(0);
-    expect(submitBody).not.toContain('return submitPrompt(webview)');
-    expect(submitBody).toContain('await safety.verifyLease()');
-    expect(submitBody).toContain('submissionDispatchAllowed(safety)');
-    expect(submitBody).not.toMatch(/sendInputEvent|prepareNativeInput|\.focus\(|MouseEvent|PointerEvent/);
-    expect(probeSource).toContain('button.click()');
-    expect(probeSource).not.toMatch(/sendInputEvent|prepareNativeInput|\.focus\(|document\.hasFocus|document\.activeElement|MouseEvent|PointerEvent/);
-    expect(bridgeSource).not.toContain('export async function submitPromptWithNativeClick');
-    expect(bridgeSource).not.toContain('export async function submitPromptWithNativeEnter');
-    expect(bridgeSource).not.toMatch(/\.sendInputEvent\s*\(/);
-    expect(panelSource).not.toMatch(/prepareNativeInput|webview\.focus\s*\(/);
-    expect(bridgeSource).toContain('const target = await findSendButtonTarget(webview)');
+  it('媒体只向已核实目标原生单击，Chat页内兼容，均不聚焦、不发键盘或回退重发', async (): Promise<void> => {
+    // 探针/原生IPC为边界替身；真实DOM归属与可信事件由nativeMediaDispatch及Electron fixture另验。
+    vi.useFakeTimers();
+    try {
+      for (const mode of ['image', 'video', 'chat'] as const) {
+        const fixture = videoSubmissionHarness(mode); const focus = vi.fn(); const events: NativeMouseInputEvent[] = [];
+        const verifyLease = vi.fn(async (): Promise<boolean> => true); let domActivations = 0; let locate = true;
+        const target = { ok: true, method: 'exact-id', geometry: '100,200,40,40,800,600', position: '120,220', inputHash: 'fixture-exact-input', documentId: 1 };
+        const view: WebviewHandle = { focus, getURL: (): string => 'https://www.doubao.com/chat/fixture-original', loadURL: vi.fn(),
+          sendInputEvent: (event: NativeMouseInputEvent): void => { events.push(event); },
+          executeJavaScript: async (code: string): Promise<unknown> => {
+            if (!locate) return { ok: false };
+            if (code.includes('"reserveNative":true') || code.includes('"validateNativeKey":')) return { ...target, nativeReserved: true };
+            if (code.includes('"readReceiptKey":')) return { ...target, nativeReceipt: { mouseDown: true, activated: true, trusted: true, cancelled: false, documentId: 1 } };
+            if (code.includes('"dispatchKey":')) { domActivations++; return { ...target, dispatched: true, dispatchAttempted: true }; }
+            return target;
+          },
+        };
+        const safety: SubmissionDispatchSafety = { ...fixture.safety, verifyLease, activation: mode === 'chat' ? 'dom_compat' : 'native_media' };
+        const pending = dispatchSubmissionAttempt({ ...fixture, safety, dispatch: (guard): ReturnType<typeof submitPromptOnce> => submitPromptOnce(view, guard) });
+        await vi.advanceTimersByTimeAsync(500); expect(await pending).toMatchObject({ kind: 'dispatch_attempted' });
+        expect(verifyLease).toHaveBeenCalledOnce(); expect(focus).not.toHaveBeenCalled(); expect(view.loadURL).not.toHaveBeenCalled();
+        expect(domActivations).toBe(mode === 'chat' ? 1 : 0);
+        expect(events).toEqual(mode === 'chat' ? [] : [
+          { type: 'mouseDown', x: 120, y: 220, button: 'left', clickCount: 1 }, { type: 'mouseUp', x: 120, y: 220, button: 'left', clickCount: 1 },
+        ]);
+        // 控件丢失仍fail-closed，不因媒体原生路径而换成Enter、DOM或其它入口。
+        locate = false; const unavailable = submitPromptOnce(view, safety); await vi.advanceTimersByTimeAsync(500);
+        expect(await unavailable).toMatchObject({ kind: 'not_dispatched' }); expect(domActivations).toBe(mode === 'chat' ? 1 : 0); expect(events).toHaveLength(mode === 'chat' ? 0 : 2);
+      }
+    } finally { vi.useRealTimers(); }
   });
 
   it('只读核对路径不包含提交调用，普通 retry/edit-rerun 对不确定任务隐藏', () => {
-    const panelSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'BrowserPanel.tsx'), 'utf8');
-    const reconcileBody = panelSource.slice(
-      panelSource.indexOf('const handleSubmissionReconcile'),
-      panelSource.indexOf("window.addEventListener('reconcile-task-submission'"),
+    const recoverySource = readFileSync(resolve(__dirname, '..', '..', 'src', 'automation', 'TaskRecoveryCoordinator.ts'), 'utf8');
+    const reconcileBody = recoverySource.slice(
+      recoverySource.indexOf('const handleSubmissionReconcile'),
+      recoverySource.indexOf('return { handleManualSubmission, handleSubmissionReconcileSafely }'),
     );
     expect(reconcileBody).toContain('resolveVideoArtifact');
     expect(reconcileBody).not.toContain('manualResolveVideoArtifact');
     expect(reconcileBody).not.toContain('submitPrompt');
     expect(reconcileBody).not.toContain('injectPrompt');
-    expect(panelSource).toContain("code: 'submission_uncertain'");
+    expect(recoverySource).toContain("code: 'submission_uncertain'");
 
     const consoleSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'TaskConsole.tsx'), 'utf8');
     const detailSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'TaskDetailModal.tsx'), 'utf8');
@@ -419,9 +425,16 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     expect(bridgeSource).toContain("await openMenu('duration', targetRatio)");
   });
 
-  it('完成路径必须经过 evaluateTerminal（chat 模式无绕过）', () => {
-    const panelSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'BrowserPanel.tsx'), 'utf8');
-    expect(panelSource).toContain('evaluateTerminal');
-    expect(panelSource).toContain("mode === 'chat'");
+  it('文字终态需要真实新增的稳定回复，未保存原回复时服务端拒绝完成', async (): Promise<void> => {
+    const fixture = videoSubmissionHarness('chat');
+    expect(evaluateTerminal({ baselineText: '', currentText: '', networkFinished: true, messageCountDelta: 1, stableStreak: 9 })).toBe('waiting');
+    expect(fixture.service.updateStatus({ taskId: 'fixture-task', expectedRunId: 'fixture-run', status: 'done', outputs: [] }).success).toBe(false);
+    expect(fixture.current().status).toBe('executing');
+    await fixture.persist('dispatch_unknown');
+    const response = '真实助手新增且稳定的逐字回复';
+    expect(evaluateTerminal({ baselineText: '', currentText: response, networkFinished: false, messageCountDelta: 2, stableStreak: TERMINAL_STABLE_THRESHOLD })).toBe('completed');
+    expect(fixture.service.updateRuntime({ taskId: 'fixture-task', expectedRunId: 'fixture-run', runtime: { chatResponse: { text: response, capturedAt: new Date().toISOString() } } }).success).toBe(true);
+    expect(fixture.service.updateStatus({ taskId: 'fixture-task', expectedRunId: 'fixture-run', status: 'done', outputs: [] }).success).toBe(true);
+    expect(fixture.current().runtime?.chatResponse?.text).toBe(response);
   });
 });

@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TaskService } from '../../main/core/TaskService';
+import type { TaskUpdateRuntimeParams } from '@doubao-studio/contracts';
 import type { Account, AccountAvailability, Task } from '../../src/types';
 import { detectRobotVerification } from '../../src/utils/doubaoBridge';
 import { classifyAccountAvailability } from '../../src/utils/accountAvailability';
@@ -37,18 +39,18 @@ function account(id: string): Account {
 }
 
 function actualFailurePause(bindings: Record<string, unknown>): () => Promise<void> {
-  const file = ts.createSourceFile('BrowserPanel.tsx', readFileSync(resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const file = ts.createSourceFile('BrowserPanel.tsx', readFileSync(resolve('src/components/BrowserPanel.tsx'), 'utf8') + '\n' + readFileSync(resolve('src/automation/TaskExecutionCoordinator.ts'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
   let expression = '';
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && node.expression.getText(file) === 'pauseAutomation' && node.arguments[3]?.getText(file).includes('acceptedObservationActive')) expression = node.getText(file);
     ts.forEachChild(node, visit);
   };
   visit(file); if (!expression) throw new Error('OFFLINE failure pause missing');
-  return vm.runInNewContext(ts.transpileModule(`(async () => { await ${expression}; })`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, bindings) as () => Promise<void>;
+  return vm.runInNewContext(ts.transpileModule(`(async () => { await ${expression}; })`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, { ...bindings, failure: bindings.err }) as () => Promise<void>;
 }
 
 function actualFailureGuard(bindings: Record<string, unknown>): () => Promise<unknown> {
-  const file = ts.createSourceFile('BrowserPanel.tsx', readFileSync(resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const file = ts.createSourceFile('BrowserPanel.tsx', readFileSync(resolve('src/components/BrowserPanel.tsx'), 'utf8') + '\n' + readFileSync(resolve('src/automation/TaskExecutionCoordinator.ts'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
   const statements: string[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isCatchClause(node) && node.variableDeclaration?.name.getText(file) === 'caught' && node.block.getText(file).includes('currentFailedTask')) {
@@ -60,10 +62,11 @@ function actualFailureGuard(bindings: Record<string, unknown>): () => Promise<un
     ts.forEachChild(node, visit);
   };
   visit(file); if (!statements.length) throw new Error('OFFLINE failure guard missing');
-  return vm.runInNewContext(ts.transpileModule(`(async () => { ${statements.join('\n')}; return afterGuard(); })`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, bindings) as () => Promise<unknown>;
+  return vm.runInNewContext(ts.transpileModule(`(async () => { ${statements.join('\n')}; return afterGuard(); })`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText,
+    { pendingCancellationStatusRef: { current: new Map<string, 'paused' | 'cancelled'>() }, ...bindings }) as () => Promise<unknown>;
 }
 function actualPanelCallback(name: string, bindings: Record<string, unknown>): (...args: unknown[]) => Promise<unknown> {
-  const file = ts.createSourceFile('BrowserPanel.tsx', readFileSync(resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const file = ts.createSourceFile('BrowserPanel.tsx', readFileSync(resolve('src/components/BrowserPanel.tsx'), 'utf8') + '\n' + readFileSync(resolve('src/automation/TaskExecutionCoordinator.ts'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
   let expression = '';
   const visit = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && node.name.getText(file) === name && node.initializer && ts.isCallExpression(node.initializer)) expression = node.initializer.arguments[0].getText(file);
@@ -165,7 +168,12 @@ describe('只读观察中的验证守卫', (): void => {
     const task: Task = { id: taskId, prompt: 'OFFLINE input', mode: 'image', status: 'generating', assignedAccountId: accountId, outputs: [], result: null, createdAt: now, updatedAt: now,
       runtime: { runId, submittedAt: now, attempt: 1, startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, stage: 'generating', message: 'OFFLINE', conversationUrl: observation.conversationUrl, acceptanceObservation: observation, input: { prompt: 'OFFLINE input', mode: 'image', attachments: [] } } };
     useTaskStore.setState({ tasks: [task], executingTasks: { [accountId]: taskId }, accountBusy: { [accountId]: true } });
-    const updateRuntime = vi.fn(async (): Promise<object> => ({ success: true }));
+    let stored = [structuredClone(task)];
+    const service = new TaskService({ store: { read: (): Task[] => structuredClone(stored), replace: (tasks: Task[]): boolean => { stored = structuredClone(tasks); return true; } }, defaultProjectId: (): string => 'OFFLINE-project' });
+    const updateRuntime = vi.fn(async (id: string, patch: Omit<TaskUpdateRuntimeParams, 'taskId'>): Promise<object> => {
+      const result = service.updateRuntime({ taskId: id, ...patch });
+      return result.success ? { success: true, task: result.data } : result;
+    });
     vi.stubGlobal('window', { electronAPI: { logs: { append: vi.fn(async (): Promise<void> => undefined) }, tasks: { updateRuntime }, accounts: { setStatus: vi.fn(async (): Promise<object> => ({ success: true })) } } });
     await actualFailurePause({ taskId, accountId, cancelled: false, requestedCancellationStatus: undefined, errorMessage: 'OFFLINE visible verification',
       availabilityPaused: true, err: { code: 'human_verification' }, acceptedObservationActive: true, confirmationPaused: false, petstoryPaused: false, safetyPaused: false,

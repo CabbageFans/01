@@ -6,7 +6,8 @@ import { useTaskStore } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
 import { selectPlanReview } from '../utils/petstoryPlanReview';
 import { canStartBoundChat } from '../utils/petstoryCandidate';
-import { revealBrowser } from '../utils/workspace';
+import { navigateWorkspace, revealBrowser } from '../utils/workspace';
+import { originalVideoResultAction, pendingVideoProductionStep, selectVideoWorkflowActions } from '../utils/videoWorkflowActions';
 import { canvasPromptNames, petStoryVideoRecoveryMessage } from './petStoryCanvasShared';
 import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
 import { resolveTaskConversationTarget } from '../utils/taskConversationLocator';
@@ -209,7 +210,10 @@ const PetStoryProductionResultCheck: React.FC<{ task: Task; disabled: boolean }>
     window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId, ...(useCurrentPage ? { useCurrentPage: true } : {}) } }));
     revealBrowser();
   };
+  const resultAction = originalVideoResultAction(task);
   const beginCheck = (): void => {
+    if (resultAction.kind === 'select_original') { navigateWorkspace('tasks'); window.dispatchEvent(new CustomEvent('show-workspace-task', { detail: { taskId: task.id } })); return; }
+    if (resultAction.kind === 'verify_account' && task.assignedAccountId) { useAccountStore.getState().selectAccount(task.assignedAccountId); revealBrowser(); return; }
     if (resolveTaskConversationTarget(task).ok) { dispatchCheck(task.id); return; }
     if (!task.runtime?.runId || !task.runtime.submittedAt) { message.warning('原运行记录不完整，请先刷新任务记录。'); return; }
     setTarget({ taskId: task.id, runId: task.runtime.runId, submittedAt: task.runtime.submittedAt });
@@ -220,7 +224,7 @@ const PetStoryProductionResultCheck: React.FC<{ task: Task; disabled: boolean }>
     if (current?.runtime?.runId !== target.runId || current.runtime.submittedAt !== target.submittedAt) { setTarget(null); message.warning('原任务运行已变化，请重新选择需要检查的原任务。'); return; }
     dispatchCheck(target.taskId, true); setTarget(null);
   };
-  return <><Button size="small" disabled={disabled} onClick={beginCheck}>检查原制作结果（不重复发送）</Button>
+  return <><Button size="small" disabled={disabled} onClick={beginCheck}>{resultAction.kind === 'check_original' ? '检查原制作结果（不重复发送）' : resultAction.label}</Button>
     {target && <Modal title="核对当前原会话" open okText="当前页就是原会话，检查结果" cancelText="取消" onOk={confirmCurrentPage} onCancel={(): void => setTarget(null)}>
       <p>请先打开原执行账号，在豆包历史对话中手动找到原请求所在会话。确认右侧当前页就是原会话后再检查；工具会核对原请求和结果归属，不会发送。</p>
       <Button onClick={(): void => openOriginalTask(task)}>打开原执行账号</Button>
@@ -242,8 +246,8 @@ function productionImageTarget(step: PetStoryProductionStep | undefined): PetSto
 const PetStoryProductionRecovery: React.FC<{ project: PetStoryProject }> = ({ project }): React.ReactElement | null => {
   const state = usePetStoryStore(); const taskState = useTaskStore(); const tasks = taskState.tasks;
   const production = project.production;
-  if (!production || production.state === 'complete') return null;
-  const step = production.steps.find((item): boolean => item.status !== 'complete');
+  const step = pendingVideoProductionStep(project, tasks);
+  if (!production || production.state === 'complete' && !step) return null;
   const task = tasks.find((item): boolean => item.id === step?.taskId);
   const imageTarget = productionImageTarget(step);
   const material = project.materials?.find((item): boolean => item.id === imageTarget?.materialId);
@@ -252,15 +256,18 @@ const PetStoryProductionRecovery: React.FC<{ project: PetStoryProject }> = ({ pr
   const inspectImages = (): void => { const stage = imageTarget?.materialId ? 'materials' : 'keyframes'; const id = imageTarget?.materialId ? `material-${imageTarget.materialId}` : `shot-media-${step?.shotId}-${step?.kind}`; window.dispatchEvent(new CustomEvent('petstory-locate-draft', { detail: { stage, id, objectId: step?.shotId } })); requestAnimationFrame((): void => document.getElementById(id)?.scrollIntoView({ block: 'center', behavior: 'smooth' })); };
   const resubmissionTask = petStoryResubmissionTask(project, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]);
   const productionMessage = resubmissionTask ? '受理仍未确认，可检查原结果或确认重发一次' : petStoryVideoRecoveryMessage(production.message);
+  const actions = selectVideoWorkflowActions({ task, step, production });
+  const localAction = actions.find((action): boolean => ['retry_download', 'revalidate', 'retry_library'].includes(action.kind));
+  const continueLabel = localAction?.label || '继续原制作任务';
   const stepError = resubmissionTask && /只读.*(?:禁止|不能).*重发|禁止重发/.test(step?.error || '') ? undefined : petStoryVideoRecoveryMessage(step?.error || '');
   return <section className="py-3" aria-label="当前媒体制作任务">
       <strong>{material?.name || (shot ? `镜头 ${shot.order}` : '当前素材制作')}</strong> <Tag color={production.state === 'paused' ? 'orange' : 'blue'}>{production.state === 'paused' ? '制作已暂停' : '正在制作'}</Tag>
       <p className="my-2">{productionMessage}</p>{stepError && <Alert type="warning" message={stepError} />}
       <Space wrap>{awaitingImage && <Button size="small" type="primary" onClick={inspectImages}>查看待确认图片</Button>}{task && <Button size="small" onClick={(): void => openOriginalTask(task)}>打开对应豆包会话</Button>}{production.state === 'running' ? <Button size="small" disabled={state.busy} onClick={(): void => { void state.pauseProduction(); }}>暂停后续制作</Button> : <>
-        <Button size="small" disabled={state.busy} onClick={(): void => { void state.resumeProduction(); }}>继续原制作任务</Button>
-        {task?.runtime?.submittedAt && <PetStoryProductionResultCheck task={task} disabled={state.busy} />}
+        <Button size="small" disabled={state.busy} onClick={(): void => { void state.resumeProduction(); }}>{continueLabel}</Button>
+        {task?.runtime?.submittedAt && task.status !== 'done' && <PetStoryProductionResultCheck task={task} disabled={state.busy} />}
         {resubmissionTask && <PetStoryResubmissionActions projectId={project.id} task={resubmissionTask} />}
-      </>}{productionHistoryTasks(step, task, tasks).map((original, index): React.ReactNode => <Button size="small" key={original.id} onClick={(): void => openOriginalTask(original)}>{index === 0 ? '打开原制作任务' : `打开更早制作任务 ${index + 1}`}</Button>)}</Space>
+      </>}{actions.some((action): boolean => action.kind === 'end') && <Button size="small" disabled={state.busy} onClick={(): void => { void state.endProduction(); }}>结束本次制作</Button>}{productionHistoryTasks(step, task, tasks).map((original, index): React.ReactNode => <Button size="small" key={original.id} onClick={(): void => openOriginalTask(original)}>{index === 0 ? '打开原制作任务' : `打开更早制作任务 ${index + 1}`}</Button>)}</Space>
     </section>;
 };
 
@@ -271,11 +278,11 @@ export const PetStoryCurrentTasks: React.FC<{ project: PetStoryProject; onContin
   const mergedPlanIds = new Set(hidePlanRequests ? selectPlanReview(project).family.map((job): string => job.id) : []);
   const jobs = currentJobs(project).filter((job): boolean => !mergedPlanIds.has(job.id));
   const ended = project.jobs.filter((job): boolean => !!job.endedWaitingAt).length;
-  const production = project.production;
-  if (!jobs.length && (!production || production.state === 'complete') && !ended) return <></>;
-  if (!jobs.length && (!production || production.state === 'complete')) return <details className="petstory-secondary-tools"><summary>历史等待记录 · {ended} 条</summary><p>已结束等待的请求仍保留原记录；平台任务未被取消，迟到回复不会自动采用。</p>{onContinue && <Button size="small" onClick={onContinue}>继续其他可制作项</Button>}</details>;
+  const production = project.production; const pendingLocalStep = pendingVideoProductionStep(project, tasks);
+  if (!jobs.length && (!production || production.state === 'complete' && !pendingLocalStep) && !ended) return <></>;
+  if (!jobs.length && (!production || production.state === 'complete' && !pendingLocalStep)) return <details className="petstory-secondary-tools"><summary>历史等待记录 · {ended} 条</summary><p>已结束等待的请求仍保留原记录；平台任务未被取消，迟到回复不会自动采用。</p>{onContinue && <Button size="small" onClick={onContinue}>继续其他可制作项</Button>}</details>;
   return <Card size="small" className="petstory-current-tasks" title="待处理事项">
-    {!jobs.length && (!production || production.state === 'complete') && <p role="status">当前没有正在等待的任务。请按当前阶段的推荐操作继续。</p>}
+    {!jobs.length && (!production || production.state === 'complete' && !pendingLocalStep) && <p role="status">当前没有正在等待的任务。请按当前阶段的推荐操作继续。</p>}
     {jobs.map((job): React.ReactNode => {
       const original = tasks.find((item): boolean => item.id === job.taskId);
       const repairPreparing = repairJobIds.includes(job.id);
