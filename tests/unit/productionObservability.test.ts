@@ -184,7 +184,7 @@ describe('P0-2 初始化闸门与慢上传', () => {
 });
 
 describe('P0-3 人工提交只读观察边界', () => {
-  const panel = readFileSync(resolve(__dirname, '../../src/components/BrowserPanel.tsx'), 'utf8');
+  const panel = readFileSync(resolve(__dirname, '../../src/automation/TaskRecoveryCoordinator.ts'), 'utf8');
 
   it('人工声明入口只接受具体豆包会话并进入独立状态', () => {
     expect(panel).toContain("status: 'manual_submission_observing'");
@@ -197,7 +197,7 @@ describe('P0-3 人工提交只读观察边界', () => {
 
   it('只读核对函数不包含注入、发送或新建对话调用', () => {
     const start = panel.indexOf('const handleSubmissionReconcile');
-    const end = panel.indexOf("window.addEventListener('mark-manual-submission'", start);
+    const end = panel.indexOf('return { handleManualSubmission, handleSubmissionReconcileSafely }', start);
     const body = panel.slice(start, end);
     expect(body).not.toContain('injectPrompt(');
     expect(body).not.toContain('submitPromptWithNativeClick(');
@@ -207,9 +207,9 @@ describe('P0-3 人工提交只读观察边界', () => {
   });
 
   it('观察超时进入 manual_review，不计入账号失败或自动冷却', () => {
-    expect(panel).toContain("code: isManualObservation ? 'manual_review_required' : 'submission_uncertain'");
+    expect(panel).toContain("videoPaused ? error.code : isManualObservation ? 'manual_review_required' : 'submission_uncertain'");
     const reconcileStart = panel.indexOf('const handleSubmissionReconcile');
-    const reconcileEnd = panel.indexOf("window.addEventListener('mark-manual-submission'", reconcileStart);
+    const reconcileEnd = panel.indexOf('return { handleManualSubmission, handleSubmissionReconcileSafely }', reconcileStart);
     const reconcileBody = panel.slice(reconcileStart, reconcileEnd);
     expect(reconcileBody).not.toContain('recordAccountOutcome(accountId, \'failure\'');
     expect(reconcileBody).not.toContain('cooldownUntil');

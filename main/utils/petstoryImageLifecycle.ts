@@ -23,6 +23,7 @@ function unfinishedSteps(production: PetStoryProduction): PetStoryProductionStep
 
 /** 恢复与防重复创建使用的未完成事实；暂停仍保留原步骤、任务和提交证据。 */
 export function imageOperationHasPendingWork(project: PetStoryProject, operation: PetStoryImageOperation): boolean {
+  if (operation.endedAt) return false;
   if (!isCurrentImageOperation(project, operation) && ['complete', 'failed'].includes(operation.stage)) return false;
   const production = imageOperationProduction(project, operation.id);
   if (production?.steps.length) return unfinishedSteps(production).length > 0;

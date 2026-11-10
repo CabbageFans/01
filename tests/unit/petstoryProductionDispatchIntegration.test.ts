@@ -1,3 +1,4 @@
+import { localMediaPort } from '../fixtures/taskRunIdentity';
 /** 真实任务域、项目磁盘与制作服务的离线派发集成；不挂载浏览器或请求平台。 */
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -82,7 +83,7 @@ beforeEach(async (): Promise<void> => {
   tasks = []; let sequence = 0;
   core = new TaskService({ store: { read: listed, replace: (items: Task[]): boolean => { tasks = structuredClone(items); return true; } },
     defaultProjectId: (): string => project.studioProjectId, id: (): string => `TEST-production-dispatch-task-${++sequence}` });
-  service = new PetStoryProductionService(projects, { list: listed, create,
+  service = new PetStoryProductionService(projects, { updateLocalMedia: localMediaPort(core), list: listed, create,
     adopt: (id: string, binding: NonNullable<Task['petstory']>, text?: string): Task => { const result = core.bindPetStory(id, binding, text); if (!result.success) throw new Error(result.error); return result.data; },
     bindPageInput: (id: string, runId: string, text: string): Task => { const result = core.bindPetStoryPageInput(id, runId, text); if (!result.success) throw new Error(result.error); return result.data; },
     retryUnsubmitted: (id: string): Task => { const result = core.retry(id, 'hold'); if (!result.success) throw new Error(result.error); return result.data; },

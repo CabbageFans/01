@@ -17,7 +17,7 @@ export type ImageArtifactMessage = ChatPageSnapshot['messages'][number] & {
 };
 
 export type ImageArtifactReadbackReason = 'request_missing' | 'request_ambiguous' | 'reply_missing'
-  | 'reply_ambiguous' | 'image_pending' | 'generation_in_progress' | 'ready';
+  | 'reply_ambiguous' | 'image_pending' | 'generation_not_started' | 'generation_in_progress' | 'ready';
 
 export interface ImageArtifactReadbackResult {
   reason: ImageArtifactReadbackReason;
@@ -42,12 +42,19 @@ export interface ImageArtifactObservationOptions {
   stopOnStableAmbiguity?: boolean;
 }
 
+/** 指向用户下一步操作的完整建议，不把任意“生图面板”提及视作失败。 */
+function isImageOperationAdvice(text: string): boolean {
+  const value = text.normalize('NFKC').replace(/\s+/g, ' ').trim();
+  return /^(?:这是(?:一个)?图生图修改任务[，,。 ]*)?你(?:现在)?可以(?:直接)?在生图面板(?:中)?选择[^。！？]{0,140}(?:参考图编辑|图生图)[^。！？]{0,140}生成(?:即可)?(?:[。！! ]|$)/u.test(value);
+}
+
 /** 仅识别原轮次助手明确给出的平台失败，不扫描用户提示词或整页文字。 */
 export function imageGenerationBlocker(text: string): string | undefined {
   const value = text.normalize('NFKC').replace(/\s+/g, ' ').trim();
   if (/^(?:抱歉[，,。 ]*)?(?:本次|这次|当前)?(?:图片生成失败|生成图片失败|图片生成异常|图片生成出错|生成失败)(?:[，,。！!：: ]|$)/.test(value)) return '平台提示图片生成失败';
   if (/^(?:抱歉[，,。 ]*)?(?:当前|今日|本次)?(?:图片生成|生图|免费生图|免费图片生成)(?:次数|额度)(?:已用完|不足|已耗尽)/.test(value)) return '平台提示图片生成额度不足';
   if (/^(?:抱歉[，,。 ]*)?(?:该|本次|这次)?(?:图片|图片生成请求|生图请求|请求)(?:未通过|不符合|违反)(?:内容)?(?:审核|安全|平台|社区)/.test(value)) return '平台提示图片请求未通过内容审核';
+  if (isImageOperationAdvice(value)) return '平台仅提供生图操作建议，未执行图片生成';
   return undefined;
 }
 
@@ -100,7 +107,7 @@ function confirmsOriginalImageGeneration(message: ImageArtifactMessage, original
 function hasImageGenerationEvidence(message: ImageArtifactMessage): boolean {
   return message.imageArtifactUrls !== undefined || message.imageArtifactPending !== undefined || message.imageArtifactFailure !== undefined
     || !!message.imageUrls?.length || !!message.imageArtifactDiagnostics?.cardCount || !!message.imageArtifactDiagnostics?.creationCount
-    || !!imageGenerationBlocker(message.rawText ?? message.text);
+    || !isImageOperationAdvice(message.rawText ?? message.text) && !!imageGenerationBlocker(message.rawText ?? message.text);
 }
 
 interface ImageGenerationContinuation {
@@ -135,12 +142,18 @@ function readImageGenerationContinuation(snapshot: ChatPageSnapshot, originalUse
 }
 
 function inspectImageArtifactReplies(replies: ImageArtifactMessage[], originalMessageId: string | undefined, generating: boolean): ImageArtifactReadbackResult {
-  for (const reply of replies) {
-    const blocker = imageGenerationBlocker(reply.imageArtifactFailure || '') || imageGenerationBlocker(reply.rawText ?? reply.text);
-    if (blocker) return { reason: 'image_pending', outputs: [], originalMessageId, blocker };
-  }
   const outputs = [...new Set(replies.flatMap((message: ImageArtifactMessage): string[] => (message.imageArtifactUrls || [])
     .filter((url: string): boolean => /^https:\/\//i.test(url))))].sort();
+  for (const reply of replies) {
+    const blocker = imageGenerationBlocker(reply.imageArtifactFailure || '') || imageGenerationBlocker(reply.rawText ?? reply.text);
+    if (blocker && isImageOperationAdvice(reply.imageArtifactFailure || reply.rawText || reply.text)) {
+      if (!generating && !outputs.length && !replies.some((message: ImageArtifactMessage): boolean => message.imageArtifactPending === true)) {
+        return { reason: 'generation_not_started', outputs, originalMessageId, blocker };
+      }
+      continue;
+    }
+    if (blocker) return { reason: 'image_pending', outputs: [], originalMessageId, blocker };
+  }
   if (replies.some((message: ImageArtifactMessage): boolean => message.imageArtifactPending === true) || !outputs.length) return { reason: 'image_pending', outputs, originalMessageId };
   if (generating) return { reason: 'generation_in_progress', outputs, originalMessageId };
   return { reason: 'ready', outputs, originalMessageId };
@@ -218,7 +231,7 @@ export async function waitForImageArtifactReadback(options: WaitForImageArtifact
     abortWait = (): void => reject(new DOMException('用户已暂停图片观察', 'AbortError'));
     options.signal?.addEventListener('abort', abortWait, { once: true });
   });
-  let previous = ''; let stable = 0; let originalMessageId = options.context.userMessageId; let previousAmbiguity = '';
+  let previous = ''; let stable = 0; let originalMessageId = options.context.userMessageId; let previousAmbiguity = ''; let previousAdvice = '';
   try {
     while (true) {
       assertCurrent();
@@ -227,7 +240,15 @@ export async function waitForImageArtifactReadback(options: WaitForImageArtifact
       const result = inspectImageArtifactReadback(snapshot, options.context);
       if (originalMessageId && result.originalMessageId && result.originalMessageId !== originalMessageId) throw new ImageArtifactObservationError('context_changed', '原图片用户消息身份已变化，未绑定其它产物');
       if (result.originalMessageId) originalMessageId = result.originalMessageId;
-      if (result.blocker) throw new ImageArtifactObservationError('platform_blocked', `${result.blocker}；已保留原任务，未重新发送`);
+      if (result.reason === 'generation_not_started' && result.blocker) {
+        // 完整原回复连续两次稳定、且无生成卡才结束；流式文字或生图尚在进行时不抢先判定。
+        const advice = JSON.stringify([result.originalMessageId, snapshot.messages.map((message: ImageArtifactMessage): unknown[] => [message.messageId, message.rawText ?? message.text])]);
+        if (advice === previousAdvice) throw new ImageArtifactObservationError('generation_not_started', `${result.blocker}；已保留原任务，未重新发送`);
+        previousAdvice = advice;
+      } else {
+        previousAdvice = '';
+        if (result.blocker) throw new ImageArtifactObservationError('platform_blocked', `${result.blocker}；已保留原任务，未重新发送`);
+      }
       reason = result.reason;
       // 恢复中完整历史的稳定结构性歧义不能靠15分钟轮询解决；缺消息或待生成仍继续观察。
       if (options.stopOnStableAmbiguity && snapshot.historyComplete === true

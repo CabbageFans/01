@@ -105,11 +105,11 @@ describe('单次页内提交与系统鼠标、窗口焦点无关', (): void => {
     expect(await settled(pending)).toBeInstanceOf(HumanVerificationRequiredError); expect(test.events).toEqual([]); expectNoHostInput(test);
   });
   it.each([{ hiddenVerification: true }, { messageVerification: true }])('隐藏或消息正文验证文字不阻断单次发送%j', async (options): Promise<void> => {
-    const test = fixture({ verification: true, ...options }); expect(await settled(submitPromptOnce(test.webview, safety().guard))).toBe(true);
+    const test = fixture({ verification: true, ...options }); expect(await settled(submitPromptOnce(test.webview, safety().guard))).toMatchObject({ kind: 'dispatch_attempted' });
     expect(test.events).toEqual(['click']); expectNoHostInput(test);
   });
   it.each([{ focused: false }, { hostOutside: true }, { hostButtonOccluded: true }, { hostOutside: true, parked: true, inert: true }])('用户切换工具或宿主不可命中仍只提交一次 %j', async (options): Promise<void> => {
-    const test = fixture(options); expect(await settled(submitPromptOnce(test.webview, safety().guard))).toBe(true);
+    const test = fixture(options); expect(await settled(submitPromptOnce(test.webview, safety().guard))).toMatchObject({ kind: 'dispatch_attempted' });
     expect(test.events).toEqual(['click']); expectNoHostInput(test);
   });
   it('只读准备连续两次稳定页面快照，不改变焦点或正文', async (): Promise<void> => {
@@ -119,31 +119,31 @@ describe('单次页内提交与系统鼠标、窗口焦点无关', (): void => {
   });
   it.each([{ outside: true }, { occluded: true }, { moving: true }, { duplicateEditor: true }])('页面内按钮或编辑器失稳时在点击前停止 %j', async (options): Promise<void> => {
     const test = fixture(options); expect((await settled(preparePageSubmission(test.webview))).ok).toBe(false);
-    expect(await settled(submitPromptOnce(test.webview, safety().guard))).toBe(false); expect(test.events).toEqual([]); expectNoHostInput(test);
+    expect(await settled(submitPromptOnce(test.webview, safety().guard))).toMatchObject({ kind: 'not_dispatched' }); expect(test.events).toEqual([]); expectNoHostInput(test);
   });
   it('精确多段正文和部分可见输入区无需焦点即可准备，丢段后禁止发送', async (): Promise<void> => {
     const test = fixture(); const prompt = 'OFFLINE 第一段。\n\n第二段“台词”。'; test.editor.innerText = prompt; test.editor.bounds = rect(50, -20, 300, 110);
     expect(await verifyPromptReadyForSubmission(test.webview, prompt, true)).toBe(true); expect((await settled(preparePageSubmission(test.webview))).ok).toBe(true);
-    test.editor.innerText = prompt.replace(/\n+/g, ' '); expect(await settled(submitPromptOnce(test.webview, safety(prompt).guard))).toBe(false);
+    test.editor.innerText = prompt.replace(/\n+/g, ' '); expect(await settled(submitPromptOnce(test.webview, safety(prompt).guard))).toMatchObject({ kind: 'not_dispatched' });
     expect(test.events).toEqual([]); expectNoHostInput(test);
   });
   it('输入摘要不向宿主返回正文', async (): Promise<void> => {
     const test = fixture(); const target = await settled(preparePageSubmission(test.webview));
     expect(target.ok).toBe(true); expect(target.inputHash).toBeTypeOf('string'); expect(JSON.stringify(target)).not.toContain(offlinePrompt); expectNoHostInput(test);
   });
-  it('支持真实序列化的主色按钮定位与子图标回读', async (): Promise<void> => {
-    const test = fixture({ exact: false, icon: true }); expect(await findSendButtonTarget(test.webview)).toMatchObject({ ok: true, method: 'composer-accent' });
-    expect(await settled(submitPromptOnce(test.webview, safety().guard))).toBe(true); expect(test.events).toEqual(['click']); expectNoHostInput(test);
+  it('只有主色与子图标不能证明最终发送身份', async (): Promise<void> => {
+    const test = fixture({ exact: false, icon: true }); expect(await findSendButtonTarget(test.webview)).toMatchObject({ ok: false });
+    expect(await settled(submitPromptOnce(test.webview, safety().guard))).toMatchObject({ kind: 'not_dispatched' }); expect(test.events).toEqual([]); expectNoHostInput(test);
   });
   it('后台操作授权与窗口位置、parked 样式无关，仍核对当前任务及租约', async (): Promise<void> => {
     const test = fixture({ hostOutside: true, focused: false }); const attempt = safety();
-    expect(await settled(submitPromptOnce(test.webview, attempt.guard, { taskId: 'OFFLINE-image-operation', isCurrent: (): boolean => true }))).toBe(true);
+    expect(await settled(submitPromptOnce(test.webview, attempt.guard, { taskId: 'OFFLINE-image-operation', isCurrent: (): boolean => true }))).toMatchObject({ kind: 'dispatch_attempted' });
     expect(attempt.verifyLease).toHaveBeenCalledOnce(); expect(test.events).toEqual(['click']); expectNoHostInput(test);
   });
   it('后台授权在租约回读时撤销则不提交', async (): Promise<void> => {
     const test = fixture(); const attempt = safety(); let current = true;
     attempt.verifyLease.mockImplementation(async (): Promise<boolean> => { current = false; return true; });
-    expect(await settled(submitPromptOnce(test.webview, attempt.guard, { taskId: 'OFFLINE-image-operation', isCurrent: (): boolean => current }))).toBe(false);
+    expect(await settled(submitPromptOnce(test.webview, attempt.guard, { taskId: 'OFFLINE-image-operation', isCurrent: (): boolean => current }))).toMatchObject({ kind: 'not_dispatched' });
     expect(test.events).toEqual([]); expectNoHostInput(test);
   });
   it.each(['host-move', 'focus-lost'] as const)('等待租约期间 %s 不影响原页面单次提交', async (change): Promise<void> => {
@@ -151,7 +151,7 @@ describe('单次页内提交与系统鼠标、窗口焦点无关', (): void => {
     attempt.verifyLease.mockImplementation((): Promise<boolean> => new Promise((resolve): void => { releaseLease = resolve; }));
     const pending = submitPromptOnce(test.webview, attempt.guard); await vi.advanceTimersByTimeAsync(500); expect(attempt.verifyLease).toHaveBeenCalledOnce();
     if (change === 'host-move') test.setHostBounds(rect(2300, 80, 800, 600)); if (change === 'focus-lost') test.setFocused(false);
-    releaseLease(true); expect(await settled(pending)).toBe(true); expect(test.events).toEqual(['click']); expectNoHostInput(test);
+    releaseLease(true); expect(await settled(pending)).toMatchObject({ kind: 'dispatch_attempted' }); expect(test.events).toEqual(['click']); expectNoHostInput(test);
   });
   it.each(['button-move', 'guest-occluded', 'disabled', 'prompt-change'] as const)('租约回读后 %s 会在最终页内点击前停止', async (change): Promise<void> => {
     const test = fixture(); const attempt = safety(); let releaseLease: (value: boolean) => void = (): void => {};
@@ -159,20 +159,20 @@ describe('单次页内提交与系统鼠标、窗口焦点无关', (): void => {
     const pending = submitPromptOnce(test.webview, attempt.guard); await vi.advanceTimersByTimeAsync(500); expect(attempt.verifyLease).toHaveBeenCalledOnce();
     if (change === 'button-move') test.button.bounds = rect(315, 210, 40, 40); if (change === 'guest-occluded') test.setOccluded(true);
     if (change === 'disabled') test.button.disabled = true; if (change === 'prompt-change') test.editor.innerText += 'OFFLINE 已改变';
-    releaseLease(true); expect(await settled(pending)).toBe(false); expect(test.events).toEqual([]); expectNoHostInput(test);
+    releaseLease(true); expect(await settled(pending)).toMatchObject({ kind: 'not_dispatched' }); expect(test.events).toEqual([]); expectNoHostInput(test);
   });
   it('同一已持久化提交标识重复调用也只点击一次', async (): Promise<void> => {
-    const test = fixture(); const attempt = safety(); expect(await settled(submitPromptOnce(test.webview, attempt.guard))).toBe(true);
-    expect(await settled(submitPromptOnce(test.webview, attempt.guard))).toBe(false); expect(test.events).toEqual(['click']); expectNoHostInput(test);
+    const test = fixture(); const attempt = safety(); expect(await settled(submitPromptOnce(test.webview, attempt.guard))).toMatchObject({ kind: 'dispatch_attempted' });
+    expect(await settled(submitPromptOnce(test.webview, attempt.guard))).toMatchObject({ kind: 'dispatch_unknown' }); expect(test.events).toEqual(['click']); expectNoHostInput(test);
   });
   it('控件激活抛异常后不回退，并消费该提交标识以防补点', async (): Promise<void> => {
-    const test = fixture(); test.button.failClick = true; const attempt = safety(); expect(await settled(submitPromptOnce(test.webview, attempt.guard))).toBe(false);
-    test.button.failClick = false; expect(await settled(submitPromptOnce(test.webview, attempt.guard))).toBe(false); expect(test.events).toEqual(['click']); expectNoHostInput(test);
+    const test = fixture(); test.button.failClick = true; const attempt = safety(); expect(await settled(submitPromptOnce(test.webview, attempt.guard))).toMatchObject({ kind: 'dispatch_unknown' });
+    test.button.failClick = false; expect(await settled(submitPromptOnce(test.webview, attempt.guard))).toMatchObject({ kind: 'dispatch_unknown' }); expect(test.events).toEqual(['click']); expectNoHostInput(test);
   });
   it.each(['abort', 'expired', 'old-run'] as const)('初始 %s 时不执行页面探针或提交', async (reason): Promise<void> => {
     const test = fixture(); const attempt = safety(); if (reason === 'abort') attempt.controller.abort();
     if (reason === 'expired') attempt.guard.deadlineAt = Date.now() - 1; if (reason === 'old-run') attempt.isCurrent.mockReturnValue(false);
-    expect(await settled(submitPromptOnce(test.webview, attempt.guard))).toBe(false); expect(test.webview.executeJavaScript).not.toHaveBeenCalled();
+    expect(await settled(submitPromptOnce(test.webview, attempt.guard))).toMatchObject({ kind: 'not_dispatched' }); expect(test.webview.executeJavaScript).not.toHaveBeenCalled();
     expect(attempt.verifyLease).not.toHaveBeenCalled(); expect(test.events).toEqual([]); expectNoHostInput(test);
   });
   it.each(['abort', 'expired', 'old-run'] as const)('异步页面准备期间 %s 后不继续发送', async (reason): Promise<void> => {
@@ -180,14 +180,14 @@ describe('单次页内提交与系统鼠标、窗口焦点无关', (): void => {
     test.webview.executeJavaScript = (code: string): Promise<unknown> => new Promise((resolve): void => { releaseProbe = (): void => { void execute(code).then(resolve); }; });
     const pending = submitPromptOnce(test.webview, attempt.guard);
     if (reason === 'abort') attempt.controller.abort(); if (reason === 'expired') attempt.guard.deadlineAt = Date.now() - 1; if (reason === 'old-run') attempt.isCurrent.mockReturnValue(false);
-    releaseProbe!(); expect(await settled(pending)).toBe(false); expect(attempt.verifyLease).not.toHaveBeenCalled(); expect(test.events).toEqual([]); expectNoHostInput(test);
+    releaseProbe!(); expect(await settled(pending)).toMatchObject({ kind: 'not_dispatched' }); expect(attempt.verifyLease).not.toHaveBeenCalled(); expect(test.events).toEqual([]); expectNoHostInput(test);
   });
   it.each(['abort', 'expired', 'old-run', 'lost-lease'] as const)('最终租约完成后重核 %s 并阻止任何点击', async (reason): Promise<void> => {
     const test = fixture(); const attempt = safety(); let finishLease: (value: boolean) => void = (): void => {};
     attempt.verifyLease.mockImplementation((): Promise<boolean> => new Promise((resolve): void => { finishLease = resolve; }));
     const pending = submitPromptOnce(test.webview, attempt.guard); await vi.advanceTimersByTimeAsync(500); expect(attempt.verifyLease).toHaveBeenCalledOnce();
     if (reason === 'abort') attempt.controller.abort(); if (reason === 'expired') attempt.guard.deadlineAt = Date.now() - 1; if (reason === 'old-run') attempt.isCurrent.mockReturnValue(false);
-    finishLease(reason !== 'lost-lease'); expect(await settled(pending)).toBe(false); expect(test.events).toEqual([]); expectNoHostInput(test);
+    finishLease(reason !== 'lost-lease'); expect(await settled(pending)).toMatchObject({ kind: 'not_dispatched' }); expect(test.events).toEqual([]); expectNoHostInput(test);
   });
   it('最终派发脚本迟到执行时由 guest 自身截止检查阻止点击', async (): Promise<void> => {
     const test = fixture(); const attempt = safety(); const execute = test.webview.executeJavaScript; let runDispatch: (() => void) | undefined;
@@ -198,7 +198,7 @@ describe('单次页内提交与系统鼠标、窗口焦点无关', (): void => {
     expect(attempt.verifyLease).toHaveBeenCalledOnce(); expect(runDispatch).toBeTypeOf('function');
     // 仍早于 executeJavaScript 的 5 秒超时，直接验证 guest 内过期判定。
     await vi.advanceTimersByTimeAsync(2_001); runDispatch!();
-    expect(await settled(pending)).toBe(false); expect(test.events).toEqual([]); expectNoHostInput(test);
+    expect(await settled(pending)).toMatchObject({ kind: 'not_dispatched' }); expect(test.events).toEqual([]); expectNoHostInput(test);
   });
   it('宿主执行超时后排队脚本失去激活权限，即使原运行截止尚未到达', async (): Promise<void> => {
     const test = fixture(); const attempt = safety(); const execute = test.webview.executeJavaScript; let runDispatch: (() => void) | undefined;
@@ -207,7 +207,7 @@ describe('单次页内提交与系统鼠标、窗口焦点无关', (): void => {
     const pending = submitPromptOnce(test.webview, attempt.guard); await vi.advanceTimersByTimeAsync(100);
     expect(runDispatch).toBeTypeOf('function');
     await vi.advanceTimersByTimeAsync(5001);
-    expect(await pending).toBe(false); expect(attempt.guard.deadlineAt).toBeGreaterThan(Date.now());
+    expect(await pending).toMatchObject({ kind: 'dispatch_unknown' }); expect(attempt.guard.deadlineAt).toBeGreaterThan(Date.now());
     runDispatch!(); await Promise.resolve();
     expect(test.events).toEqual([]); expectNoHostInput(test);
   });

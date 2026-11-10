@@ -119,4 +119,13 @@ describe('视频制作接力保持暂停和项目归属', (): void => {
     advance.reject(new Error('TEST 原项目推进失败')); await continuing;
     expect(usePetStoryStore.getState().project).toBe(other); expect(usePetStoryStore.getState().error).toBe('');
   });
+  it('一次推进IPC失败必须落盘暂停，后续明确继续仍能接力', async (): Promise<void> => {
+    window.electronAPI.petstory.advanceProduction = vi.fn().mockRejectedValueOnce(new Error('TEST 临时IPC失败'))
+      .mockResolvedValue({ success: true, project: snapshot('running', 6) });
+    await initial.pet.resumeProduction();
+    expect(window.electronAPI.petstory.pauseProduction).toHaveBeenCalledOnce();
+    expect(usePetStoryStore.getState().project?.production?.state).toBe('paused');
+    expect(usePetStoryStore.getState().error).toContain('TEST 临时IPC失败');
+  });
+
 });

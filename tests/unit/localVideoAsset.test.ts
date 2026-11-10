@@ -1,0 +1,21 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, expect, it, vi } from 'vitest';
+import { PetStoryProjects } from '../../main/utils/petstoryProject';
+import { PetStoryProductionService } from '../../main/utils/petstoryProduction';
+import { mediaCommand, validatePetStoryMedia } from '../../main/utils/petstoryMedia';
+let directory: string;
+afterEach(async (): Promise<void> => { if (directory) await fs.rm(directory, { recursive: true, force: true }); });
+it('原任务清理、远端产物失效后，校验过的项目本地视频仍可读取并作为接力源', async (): Promise<void> => {
+  directory = await fs.mkdtemp(path.join(os.tmpdir(), 'local-video-asset-'));
+  const projects = new PetStoryProjects(); let project = await projects.create(directory, 'studio', 'account');
+  const filename = path.join(directory, 'shots/shot/asset.mp4'); await fs.mkdir(path.dirname(filename), { recursive: true });
+  await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=blue:s=32x48:r=5:d=5', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', filename]);
+  project.assets.push({ id: 'asset', kind: 'video', shotId: 'shot', relativePath: 'shots/shot/asset.mp4', taskId: 'cleaned-task', runId: 'original-run', artifactId: 'expired-artifact', downloadJobId: 'saved-download', validation: await validatePetStoryMedia(filename, 'video'), generationPrompt: '原始输入' });
+  project = await projects.write(project);
+  const create = vi.fn();
+  const production = new PetStoryProductionService(projects, { updateLocalMedia: (): never => { throw new Error('TEST历史本地视频读取不写任务'); }, list: (): [] => [], downloads: (): [] => [], download: vi.fn(), create, adopt: vi.fn(), retryUnsubmitted: vi.fn() });
+  expect(await production.assetFile(project, 'asset', 'video')).toBe(await fs.realpath(filename));
+  expect(create).not.toHaveBeenCalled();
+});

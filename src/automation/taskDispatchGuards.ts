@@ -13,3 +13,11 @@ export function registerTaskDispatchGuard(name: string, guard: TaskDispatchGuard
 export async function runTaskDispatchGuards(task: Task): Promise<void> {
   for (const guard of guards.values()) await guard(task);
 }
+
+/** 停止事件也绑定原运行；旧组件/旧异步操作不能撤销同task的新执行权。 */
+export function matchesTaskRunCommand(task: Pick<Task, 'id' | 'runtime'> | undefined,
+  command: { taskId: string; expectedRunId?: string; runId?: string }): boolean {
+  if (!task || task.id !== command.taskId) return false;
+  const expected = command.expectedRunId || command.runId;
+  return task.runtime ? !!expected && expected === task.runtime.runId : !expected;
+}

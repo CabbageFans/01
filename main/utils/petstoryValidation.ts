@@ -1,7 +1,7 @@
 import type { PetStoryAutoModePlan, PetStoryPlan, PetStoryShot, PetStoryCharacter, PetStoryPrompt, PetStoryMode, PetStoryProp, PetStoryScene, PetStoryMaterialEditIntent, PetStoryPromptTaskContract, PetStoryPromptReference, PetStoryProject, PetStoryChatJob } from '@doubao-studio/contracts';
 
-export { PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptQuality';
-import { compileReferencedText, PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptQuality';
+export { PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptReferences';
+import { compileReferencedText, PROMPT_RULES_VERSION as PETSTORY_RULES_VERSION } from './petstoryPromptReferences';
 import { subtitlePolicyIssues } from './petstorySubtitlePolicy';
 import { petStoryCharacterLabelKey, petStoryCharacterLabelOwners, seedanceSpeakerLabels } from './petstoryCharacterLabels';
 import { collectPetStoryPlanIssues, PetStoryContentValidationError, validPetStoryDuration } from './petstoryValidationIssues';

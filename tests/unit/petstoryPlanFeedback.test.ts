@@ -1,3 +1,4 @@
+import { currentRunId } from '../fixtures/taskRunIdentity';
 /** 离线方案反馈回归：技术占位方案与模拟回复只验证正式任务链，不代表平台验收。 */
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -52,8 +53,8 @@ async function finish(job: PetStoryChatJob, incoming: PetStoryPlan, invalid = fa
   const answer = { ...incoming, requestId: job.requestId, targetIds: job.expectedIds, storyUsable: true, contentBasis: { beginning: 'TEST开头', middle: 'TEST变化', ending: 'TEST结局' },
     shots: incoming.shots.map(({ prompts: _prompts, ...shot }: PetStoryPlan['shots'][number], index: number): object => { void _prompts; return invalid && !index ? { ...shot, durationSeconds: '5' } : shot; }) };
   const runtime: TaskRunSnapshot = { runId: `TEST-run-${job.id}`, attempt: 1, stage: 'completed', message: 'TEST 离线回复', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
-    input: { mode: 'chat', prompt: task.prompt, attachments: task.attachments || [] }, chatResponse: { text: JSON.stringify(answer), capturedAt: now } };
-  const updated = core.updateRuntime({ taskId: task.id, status: 'done', errorInfo: null, runtime }); if (!updated.success) throw new Error(updated.error);
+    input: { mode: 'chat', prompt: task.prompt, attachments: task.attachments || [], promptReadback: task.promptReadback }, chatResponse: { text: JSON.stringify(answer), capturedAt: now } };
+  const updated = core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: 'done', errorInfo: null, runtime }); if (!updated.success) throw new Error(updated.error);
   p = (await service.bindRun(p.id, job.id, runtime.runId)).project!;
   p = (await service.collect(p.id, job.id)).project!; return p.jobs.find((item: PetStoryChatJob): boolean => item.id === job.id)!;
 }
@@ -85,7 +86,7 @@ describe('完整方案的反馈任务', (): void => {
   it.each([true, false])('通用启动遗漏job.runId后仅凭唯一已完成原运行和严格回读证据恢复收取（有新归属标记=%s），不改Task或重发', async (marked: boolean): Promise<void> => {
     const root = await prepare(target()); await finish(root, plan());
     const task = stored.find((item: Task): boolean => item.id === root.taskId)!; const runtime = task.runtime!;
-    const update = core.updateRuntime({ taskId: task.id, runtime: { input: { ...runtime.input, promptReadback: task.promptReadback }, chatReadback: { runId: runtime.runId, baselineMessageCount: 0, requestId: root.requestId, targetIds: root.expectedIds,
+    const update = core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), runtime: { chatReadback: { runId: runtime.runId, baselineMessageCount: 0, requestId: root.requestId, targetIds: root.expectedIds,
       association: 'recorded_turn', userTurnId: 'TEST-user', assistantTurnId: 'TEST-assistant', observedAt: new Date().toISOString() } } });
     expect(update.success).toBe(true);
     if (!marked) delete stored.find((item: Task): boolean => item.id === root.taskId)!.petstoryChat;

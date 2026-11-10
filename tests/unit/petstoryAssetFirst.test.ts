@@ -1,3 +1,4 @@
+import { currentRunId, localMediaPort } from '../fixtures/taskRunIdentity';
 /** 工具级离线验收：互不相关的剧本，真实项目文件／TaskService／媒体校验，无平台请求。 */
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -52,7 +53,7 @@ async function harness(which: 'music' | 'repair' = 'repair'): Promise<{
   const list = (): Task[] => structuredClone(stored);
   const core = new TaskService({ store: { read: list, replace: (tasks: Task[]): boolean => { stored = structuredClone(tasks); return true; } }, defaultProjectId: (): string => 'TEST-studio', id: (): string => `TEST-${++sequence}` });
   const create = (params: TaskAddParams, accountId: string): Task => { const result = core.create(params); if (!result.success) throw new Error(result.error); const assigned = core.assign({ taskId: result.data[0].id, accountId }); if (!assigned.success) throw new Error(assigned.error); return assigned.data; };
-  const service = new PetStoryProductionService(projects, { list, create,
+  const service = new PetStoryProductionService(projects, { updateLocalMedia: localMediaPort(core), list, create,
     adopt: (id, binding, text): Task => { const r = core.bindPetStory(id, binding, text); if (!r.success) throw new Error(r.error); return r.data; },
     bindPageInput: (id, runId, text): Task => { const r = core.bindPetStoryPageInput(id, runId, text); if (!r.success) throw new Error(r.error); return r.data; },
     retryUnsubmitted: (id): Task => { const r = core.retry(id, 'hold'); if (!r.success) throw new Error(r.error); return r.data; }, downloads: (): DownloadJob[] => downloads,
@@ -64,9 +65,9 @@ async function harness(which: 'music' | 'repair' = 'repair'): Promise<{
     } });
   const finish = async (taskId: string): Promise<void> => {
     const task = list().find((t): boolean => t.id === taskId)!; const now = new Date().toISOString(); const runId = `run-${task.id}`;
-    const result = core.updateRuntime({ taskId, status: 'executing', runtime: { runId, attempt: 1, stage: 'injecting_prompt', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { prompt: task.prompt, mode: task.mode, attachments: task.attachments || [], videoConfig: task.videoConfig, petstory: task.petstory } } });
+    const result = core.updateRuntime({ taskId, expectedRunId: currentRunId(core, taskId), status: 'executing', runtime: { runId, attempt: 1, stage: 'injecting_prompt', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { prompt: task.prompt, mode: task.mode, attachments: task.attachments || [], videoConfig: task.videoConfig, petstory: task.petstory } } });
     expect(result.success).toBe(true); await service.bindRun(project.id, taskId, runId);
-    core.updateRuntime({ taskId, runtime: { submittedAt: now } }); core.updateStatus({ taskId, status: 'done', outputs: [`https://TEST.invalid/${task.id}.png`] });
+    core.updateRuntime({ taskId, expectedRunId: currentRunId(core, taskId), runtime: { submittedAt: now } }); core.updateStatus({ taskId, expectedRunId: currentRunId(core, taskId), status: 'done', outputs: [`https://TEST.invalid/${task.id}.png`] });
   };
   return { projects, project, core, service, list, downloads, finish, setDownloadFailure: (value: boolean): void => { failure = value; } };
 }
@@ -200,7 +201,7 @@ describe('通用剧本资产与确认', (): void => {
     const body = '以第1张参考图为当前人物形象，生成单幅完整人物图，保留实际图片中的形象。';
     const now = new Date().toISOString(); const runId = 'TEST-character-regenerate-chat'; const task = h.list().find((item): boolean => item.id === job.taskId)!;
     expect(task.mode).toBe('chat'); expect(task.attachments).toEqual([await h.projects.referenceFile(p.id, old)]);
-    expect(h.core.updateRuntime({ taskId: task.id, status: 'done', runtime: { runId, attempt: 1, stage: 'completed', message: 'TEST离线回复', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
+    expect(h.core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(h.core, task.id), status: 'done', runtime: { runId, attempt: 1, stage: 'completed', message: 'TEST离线回复', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
       input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] }, chatResponse: { text: JSON.stringify({ requestId: job.requestId, targetIds: job.expectedIds, optimized: body }), capturedAt: now } } }).success).toBe(true);
     p = (await chats.bindRun(p.id, job.id, runId)).project!; p = (await chats.collect(p.id, job.id)).project!;
     const prepared = await operations.advance(p.id, begun.operationId!); expect(prepared.success, prepared.error).toBe(true);
@@ -254,22 +255,25 @@ describe('镜头输入与实际引用', (): void => {
   });
   it.each(['submitted', 'safe_retry'] as const)('实际编号重排后保存绑定并保护普通任务与恢复：%s', async (outcome): Promise<void> => {
     const h = await harness('music'); let p = await accepted(h); await h.service.approve(p.id, p.revision, capability(), {}); const next = await h.service.advance(p.id); const task = h.list()[0]; const now = new Date().toISOString(); const runId = 'TEST-binding-run';
-    h.core.updateRuntime({ taskId: task.id, status: 'executing', runtime: { runId, attempt: 1, stage: 'injecting_prompt', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { prompt: task.prompt, mode: 'image', attachments: task.attachments! } } });
+    h.core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(h.core, task.id), status: 'executing', runtime: { runId, attempt: 1, stage: 'injecting_prompt', message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: { prompt: task.prompt, mode: 'image', attachments: task.attachments! } } });
     await h.service.bindRun(p.id, task.id, runId); const source = next.project!.production!.steps[0].compiledPrompt!;
     const bindings = source.references.map((ref, index): import('@doubao-studio/contracts').PetStoryPageBinding => ({ assetId: ref.assetId, order: index + 1, slot: 'reference', previewHash: String(index + 1).repeat(64), label: `@图片${source.references.length - index}`, reference: 'mention', nodeId: `node-${index}`, targetId: `asset-${index}`, fileSha256: p.assets.find((a): boolean => a.id === ref.assetId)!.validation!.sha256, occurrenceCount: source.segments!.filter((s): boolean => 'referenceOrder' in s && s.referenceOrder === ref.order).length, nodeIds: source.segments!.filter((s): boolean => 'referenceOrder' in s && s.referenceOrder === ref.order).map((): string => `node-${index}`) }));
     const reordered = bindReferenceText(source, bindings); const saved = await h.service.recordPageBindings(p.id, task.id, runId, bindings);
     expect(saved.compiledPrompt?.text).toBe(reordered.text); expect(h.list()[0].runtime?.input.prompt).toBe(reordered.text); expect((await h.service.guard(task.id)).success).toBe(true);
     p = await h.projects.read(p.id); expect(p.plan!.shots[0].prompts.firstFrame.final).toBe(source.final);
-    await expect(h.service.recordPageBindings(p.id, task.id, runId, bindings)).rejects.toThrow('已经固定');
+    const replayed = await h.service.recordPageBindings(p.id, task.id, runId, bindings);
+    expect(replayed.success).toBe(true); expect(replayed.project?.revision).toBe(saved.project?.revision);
+    expect(h.list()[0].runtime?.runId).toBe(runId);
+    await expect(h.service.recordPageBindings(p.id, task.id, runId, bindings.map((binding): import('@doubao-studio/contracts').PetStoryPageBinding => ({ ...binding, label: '@图片99' })))).rejects.toThrow();
     if (outcome === 'safe_retry') {
-      h.core.updateRuntime({ taskId: task.id, status: 'paused', errorInfo: { code: 'petstory_controls_unconfirmed', message: 'TEST提交前页面变化', recoverable: true, detectedAt: now } });
+      h.core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(h.core, task.id), status: 'paused', errorInfo: { code: 'petstory_controls_unconfirmed', message: 'TEST提交前页面变化', recoverable: true, detectedAt: now } });
       expect((await h.service.advance(p.id)).success).toBe(false);
       await h.service.resume(p.id, capability()); const resumed = await h.service.advance(p.id);
       expect(resumed.taskId).toBe(task.id); expect(h.list()).toHaveLength(1); expect(h.list()[0].prompt).toBe(source.text);
       const step = resumed.project!.production!.steps[0]; expect(step.pageBindings).toBeUndefined(); expect(step.pageBindingHistory?.[0].compiledPrompt.text).toBe(reordered.text);
       return;
     }
-    h.core.updateRuntime({ taskId: task.id, runtime: { submittedAt: now } }); expect(h.core.bindPetStoryPageInput(task.id, runId, 'changed').success).toBe(false);
+    h.core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(h.core, task.id), runtime: { submittedAt: now } }); expect(h.core.bindPetStoryPageInput(task.id, runId, 'changed').success).toBe(false);
     const generic = h.core.create({ prompts: ['普通文本'], mode: 'image' }); if (!generic.success) throw new Error('TEST'); expect(h.core.bindPetStoryPageInput(generic.data[0].id, runId, 'changed').success).toBe(false);
   });
 });

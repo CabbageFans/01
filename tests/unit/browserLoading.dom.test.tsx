@@ -1,3 +1,5 @@
+import { TaskService } from '../../main/core/TaskService';
+import type { TaskUpdateRuntimeParams } from '@doubao-studio/contracts';
 /** 离线执行真实浏览器面板；模拟 Electron 事件，不访问账号会话或平台。 */
 import React from 'react';
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
@@ -74,7 +76,13 @@ beforeEach((): void => {
     logs: { append: vi.fn(async (): Promise<void> => undefined) },
     accounts: { setStatus: vi.fn(async (): Promise<object> => ({ success: true })) },
     tasks: {
-      updateRuntime: vi.fn(async (): Promise<object> => ({ success: true })),
+      updateRuntime: vi.fn(async (taskId: string, patch: Omit<TaskUpdateRuntimeParams, 'taskId'>): Promise<object> => {
+        const service = new TaskService({ defaultProjectId: (): string => 'TEST-studio', store: {
+          read: (): Task[] => structuredClone(useTaskStore.getState().tasks),
+          replace: (tasks: Task[]): boolean => { useTaskStore.getState().reconcileTasks(tasks); return true; },
+        } });
+        return service.updateRuntime({ taskId, ...patch });
+      }),
       acquireLock: vi.fn(async (): Promise<object> => ({ success: true })),
       releaseLock: vi.fn(async (): Promise<object> => ({ success: true })),
     },

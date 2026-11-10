@@ -504,18 +504,18 @@ describe('@doubao-studio/contracts ElectronAPI', () => {
     expect(methods).toHaveLength(11);
   });
 
-  it('ElectronAPI.tasks 包含 23 个方法', () => {
+  it('ElectronAPI.tasks 保留 24 项任务与本地媒体方法', () => {
     type TaskMethods = keyof ElectronAPI['tasks'];
     const methods: TaskMethods[] = [
       'list', 'add', 'assign', 'updateStatus', 'updateRuntime',
       'acquireLock', 'releaseLock', 'importCsv', 'update',
       'delete', 'retry', 'batchPause', 'getCompletedOutputs',
       'selectImages', 'selectAudio', 'readFileAsBase64',
-      'downloadOutputs', 'listDownloads', 'exportDiagnostics',
+      'downloadOutputs', 'listDownloads', 'readDownloadedMedia', 'exportDiagnostics',
       'validateArtifact', 'saveAdapterReport',
       'selectAdapterRules', 'selectSaveDir',
     ];
-    expect(methods).toHaveLength(23);
+    expect(methods).toHaveLength(24);
   });
 
   it('ElectronAPI.system 包含 9 个方法（含 3 个窗口控制）', () => {

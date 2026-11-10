@@ -1,9 +1,10 @@
+import { localMediaPort } from '../fixtures/taskRunIdentity';
 /** P4 离线集成：真实 TaskService/归一化/项目磁盘/FFmpeg，网页与下载仅用明确 TEST 夹具。 */
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DownloadJob, PetStoryCapability, PetStoryPageBinding, PetStoryPlan, PetStoryProductionResult, PetStoryProject, Task, TaskAddParams } from '@doubao-studio/contracts';
+import type { DownloadJob, PetStoryCapability, PetStoryPageBinding, PetStoryPlan, PetStoryProductionResult, PetStoryProject, Task, TaskAddParams, TaskUpdateRuntimeParams, TaskUpdateStatusParams } from '@doubao-studio/contracts';
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
 import { PetStoryProductionService, productionCounts, checkProductionReferences, productionPlanHash, legacyProductionPlanHash } from '../../main/utils/petstoryProduction';
 import { resolvePetStoryMode } from '../../main/utils/petstoryModes';
@@ -63,20 +64,27 @@ function create(params: TaskAddParams, accountId: string): Task {
   return assigned.data;
 }
 function makeService(storage: PetStoryProjects = projects): PetStoryProductionService {
-  return new PetStoryProductionService(storage, { list, create,
+  return new PetStoryProductionService(storage, { updateLocalMedia: localMediaPort(core), list, create,
+    reviseVideoInput: (id, runId, snapshot): Task => { const result = core.revisePetStoryVideoInput(id, runId, snapshot); if (!result.success) throw new Error(result.error); return result.data; },
     bindPageInput: (id, runId, body): Task => { const result = core.bindPetStoryPageInput(id, runId, body); if (!result.success) throw new Error(result.error); return result.data; },
     adopt: (id, binding, compiledPrompt): Task => { const result = core.bindPetStory(id, binding, compiledPrompt); if (!result.success) throw new Error(result.error); return result.data; },
     retryUnsubmitted: (id): Task => { const result = core.retry(id, 'hold'); if (!result.success) throw new Error(result.error); return result.data; },
     resubmitUncertain: (request): Task => { const result = core.resubmitUncertain(request); if (!result.success) throw new Error(result.error); return result.data; },
     downloads: (): DownloadJob[] => structuredClone(jobs), download });
 }
+function updateRuntime(params: TaskUpdateRuntimeParams): ReturnType<TaskService['updateRuntime']> {
+  return core.updateRuntime({ ...params, expectedRunId: list().find((task): boolean => task.id === params.taskId)?.runtime?.runId });
+}
+function updateStatus(params: TaskUpdateStatusParams): ReturnType<TaskService['updateStatus']> {
+  return core.updateStatus({ ...params, expectedRunId: list().find((task): boolean => task.id === params.taskId)?.runtime?.runId });
+}
 async function start(taskId: string): Promise<Task> {
   const task = tasks.find((t): boolean => t.id === taskId);
   if (!task) throw new Error('TEST missing task');
   const now = new Date().toISOString();
   const runtime = { runId: `TEST-run-${taskId}`, attempt: 1, stage: 'injecting_prompt' as const, message: 'TEST', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
-    input: { prompt: task.prompt, mode: task.mode, attachments: task.attachments || [], videoConfig: task.videoConfig, petstory: task.petstory, promptReadback: task.promptReadback } };
-  expect(core.updateRuntime({ taskId, status: 'executing', runtime }).success).toBe(true);
+    input: { prompt: task.prompt, mode: task.mode, attachments: task.attachments || [], videoConfig: task.videoConfig, petstory: task.petstory, promptReadback: task.promptReadback, videoInputSnapshot: task.videoInputSnapshot } };
+  expect(updateRuntime({ taskId, status: 'executing', runtime }).success).toBe(true);
   const bound = await service.bindRun(p.id, taskId, runtime.runId);
   expect(bound.success).toBe(true);
   expect((await service.guard(taskId)).success).toBe(true);
@@ -84,8 +92,8 @@ async function start(taskId: string): Promise<Task> {
 }
 async function complete(taskId: string): Promise<void> {
   const task = await start(taskId);
-  expect(core.updateRuntime({ taskId, runtime: { submittedAt: new Date().toISOString() } }).success).toBe(true);
-  expect(core.updateStatus({ taskId, status: 'done', outputs: [`https://TEST.invalid/${task.id}.${task.mode === 'video' ? 'mp4' : 'png'}`] }).success).toBe(true);
+  expect(updateRuntime({ taskId, runtime: { submittedAt: new Date().toISOString() } }).success).toBe(true);
+  expect(updateStatus({ taskId, status: 'done', outputs: [`https://TEST.invalid/${task.id}.${task.mode === 'video' ? 'mp4' : 'png'}`] }).success).toBe(true);
 }
 async function approve(value: PetStoryCapability = capability()): Promise<void> {
   p = await projects.read(p.id);
@@ -249,7 +257,7 @@ describe('P4 实际入口和请求模式', (): void => {
     p.promptCapability = fast; seedOfflinePromptContracts(p, { shotId, promptKind: 'video' }, { completeVideoBody: true }); p = await projects.write(p);
     const generated = await service.generateShotMedia(p.id, p.revision, shotId, 'video', fast); expect(generated.success).toBe(true);
     const pending = await service.advance(p.id); const original = await start(pending.taskId!);
-    expect(core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code: 'petstory_controls_unconfirmed', message: 'TEST 仅有普通参考上传，尚未上传或提交', recoverable: true, detectedAt: new Date().toISOString() } }).success).toBe(true);
+    expect(updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code: 'petstory_controls_unconfirmed', message: 'TEST 仅有普通参考上传，尚未上传或提交', recoverable: true, detectedAt: new Date().toISOString() } }).success).toBe(true);
     expect((await service.advance(p.id)).success).toBe(false); p = await projects.read(p.id);
     const step = p.production!.steps[0];
     return { request: { shotId, taskId: original.id, runId: original.runtime!.runId, inputHash: step.inputHash,
@@ -275,7 +283,7 @@ describe('P4 实际入口和请求模式', (): void => {
     const source = structuredClone(p.plan);
     expect((await service.generateShotMedia(p.id, p.revision, shotId, 'video', capability())).success).toBe(true);
     const pending = await service.advance(p.id); const running = await start(pending.taskId!);
-    expect(core.updateRuntime({ taskId: running.id, status: 'paused', errorInfo: { code: 'petstory_controls_unconfirmed', message: 'TEST 统一首帧上传入口，尚未上传或提交', recoverable: true, detectedAt: new Date().toISOString() } }).success).toBe(true);
+    expect(updateRuntime({ taskId: running.id, status: 'paused', errorInfo: { code: 'petstory_controls_unconfirmed', message: 'TEST 统一首帧上传入口，尚未上传或提交', recoverable: true, detectedAt: new Date().toISOString() } }).success).toBe(true);
     expect((await service.advance(p.id)).success).toBe(false); p = await projects.read(p.id);
     const original = list()[0]; await service.resume(p.id);
     const task = await start(original.id); p = await projects.read(p.id);
@@ -402,7 +410,7 @@ describe('P4 实际入口和请求模式', (): void => {
     const beforeReplay = list()[0].runtime;
     const replay = await service.resumeReferenceVideo(p.id, p.revision, request); expect(replay.success).toBe(true); expect(tasks).toHaveLength(1); expect(list()[0].runtime).toEqual(beforeReplay);
     const nextAt = new Date().toISOString();
-    expect(core.updateRuntime({ taskId: original.id, status: 'executing', runtime: { runId: 'TEST-reference-next-run', attempt: 2, stage: 'preparing_account', message: 'TEST',
+    expect(updateRuntime({ taskId: original.id, status: 'executing', runtime: { runId: 'TEST-reference-next-run', attempt: 2, stage: 'preparing_account', message: 'TEST',
       startedAt: nextAt, stageStartedAt: nextAt, lastHeartbeatAt: nextAt, input: original.runtime!.input } }).success).toBe(true);
     await service.bindRun(p.id, original.id, 'TEST-reference-next-run');
     const nextRun = list()[0].runtime;
@@ -424,10 +432,10 @@ describe('P4 实际入口和请求模式', (): void => {
     const { request, original } = await prepareReferenceContinuation();
     await service.resumeReferenceVideo(p.id, p.revision, request);
     const now = new Date().toISOString(); const runId = 'TEST-reference-submitted-run';
-    expect(core.updateRuntime({ taskId: original.id, status: 'executing', runtime: { runId, attempt: 2, stage: 'preparing_account', message: 'TEST',
+    expect(updateRuntime({ taskId: original.id, status: 'executing', runtime: { runId, attempt: 2, stage: 'preparing_account', message: 'TEST',
       startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, input: original.runtime!.input } }).success).toBe(true);
     await service.bindRun(p.id, original.id, runId);
-    expect(core.updateRuntime({ taskId: original.id, status: 'waiting_verification', runtime: { submittedAt: now },
+    expect(updateRuntime({ taskId: original.id, status: 'waiting_verification', runtime: { submittedAt: now },
       errorInfo: { code: 'human_verification', message: 'TEST 验证阻断', recoverable: true, detectedAt: now } }).success).toBe(true);
     await service.pause(p.id); const paused = await projects.read(p.id);
     const result = await service.resubmit(p.id, paused.revision, { taskId: original.id, runId, submittedAt: now,
@@ -680,7 +688,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   });
   it.each(['video_assets_not_ready', 'quota_exhausted', 'membership_required', 'login_required', 'petstory_controls_unconfirmed', 'page_changed'])('safe preparation failure %s reuses the original task only after explicit resume', async (code): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
-    core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code, message: 'TEST upload', recoverable: true, detectedAt: new Date().toISOString() } });
+    updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code, message: 'TEST upload', recoverable: true, detectedAt: new Date().toISOString() } });
     const stopped = await service.advance(p.id);
     expect(stopped.success).toBe(false); expect(tasks).toHaveLength(1);
     await service.resume(p.id, capability());
@@ -690,7 +698,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   });
   it.each(legacyPreparationErrors)('旧版发送前错误 $code：$message 可显式继续同一个任务', async (error): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
-    core.updateRuntime({ taskId: original.id, status: error.code === 'unknown' ? 'fail' : 'paused', errorInfo: { ...error, recoverable: true, detectedAt: new Date().toISOString() } });
+    updateRuntime({ taskId: original.id, status: error.code === 'unknown' ? 'fail' : 'paused', errorInfo: { ...error, recoverable: true, detectedAt: new Date().toISOString() } });
     expect((await service.advance(p.id)).success).toBe(false);
     await service.resume(p.id, capability());
     const continued = await service.advance(p.id);
@@ -701,14 +709,14 @@ describe('P4 顺序素材接力与持久化', (): void => {
   });
   it.each(['发送动作结果不确定，请人工核对豆包会话；系统未自动重发', '发送按钮不可用或点击结果不确定；系统已停止且未自动重发', '最终全文或段落回读不一致，未提交；请重试', 'TEST 未确认的其他错误'])('其他 submission_uncertain 错误仍保留原运行：%s', async (errorMessage): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
-    core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code: 'submission_uncertain', message: errorMessage, recoverable: true, detectedAt: new Date().toISOString() } });
+    updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code: 'submission_uncertain', message: errorMessage, recoverable: true, detectedAt: new Date().toISOString() } });
     await service.advance(p.id); const before = list();
     await expect(service.resume(p.id, capability())).rejects.toThrow('未确认可安全恢复');
     expect(list()).toEqual(before); expect(tasks).toHaveLength(1); expect(download).not.toHaveBeenCalled();
   });
   it.each(['图片模式入口未就绪，已在提交前停止；请重试', '视频模式入口未就绪，已在提交前停止', 'TEST 未知错误，未提交'])('其他 unknown 错误仍拒绝恢复：%s', async (message): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
-    core.updateRuntime({ taskId: original.id, status: 'fail', errorInfo: { code: 'unknown', message, recoverable: true, detectedAt: new Date().toISOString() } });
+    updateRuntime({ taskId: original.id, status: 'fail', errorInfo: { code: 'unknown', message, recoverable: true, detectedAt: new Date().toISOString() } });
     await service.advance(p.id); const before = list();
     await expect(service.resume(p.id, capability())).rejects.toThrow('未确认可安全恢复');
     expect(list()).toEqual(before); expect(tasks).toHaveLength(1);
@@ -716,7 +724,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   it.each(legacyPreparationErrors.flatMap((error) => (['acceptance', 'media-receipt', 'reply', 'readback', 'review', 'observation', 'outputs', 'artifacts'] as const).map((evidence) => ({ error, evidence }))))('发送前错误 $error.code 遇到 $evidence 证据仍禁止重新发送', async ({ error, evidence }): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
     const now = new Date().toISOString();
-    core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { ...error, recoverable: true, detectedAt: now } });
+    updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { ...error, recoverable: true, detectedAt: now } });
     await service.advance(p.id);
     const task = tasks[0]; const runtime = task.runtime!; const runId = runtime.runId;
     if (evidence === 'acceptance') runtime.acceptanceObservation = {
@@ -738,7 +746,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   });
   it.each(['run', 'mode'] as const)('旧版发送前错误也必须核对原运行 %s 归属', async (mismatch): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
-    core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code: 'submission_uncertain', message: '最终全文或段落回读不一致，未提交', recoverable: true, detectedAt: new Date().toISOString() } });
+    updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { code: 'submission_uncertain', message: '最终全文或段落回读不一致，未提交', recoverable: true, detectedAt: new Date().toISOString() } });
     await service.advance(p.id);
     if (mismatch === 'run') tasks[0].runtime!.runId = 'TEST-foreign-run';
     else tasks[0].runtime!.input.mode = 'video';
@@ -748,7 +756,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   });
   it.each(legacyPreparationErrors)('旧版发送前错误 $code 缺少生产步骤的运行绑定时不猜测恢复', async (error): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
-    core.updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { ...error, recoverable: true, detectedAt: new Date().toISOString() } });
+    updateRuntime({ taskId: original.id, status: 'paused', errorInfo: { ...error, recoverable: true, detectedAt: new Date().toISOString() } });
     await service.advance(p.id);
     const stopped = await projects.read(p.id); stopped.production!.steps[0].runId = undefined; await projects.write(stopped);
     const before = list();
@@ -757,7 +765,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   });
   it('即使错误文案声称未提交，已有提交意图仍只能核对原运行', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const original = await start(next.taskId || '');
-    core.updateRuntime({ taskId: original.id, status: 'paused', runtime: { submittedAt: new Date().toISOString() }, errorInfo: { code: 'submission_uncertain', message: '最终全文或段落回读不一致，未提交', recoverable: true, detectedAt: new Date().toISOString() } });
+    updateRuntime({ taskId: original.id, status: 'paused', runtime: { submittedAt: new Date().toISOString() }, errorInfo: { code: 'submission_uncertain', message: '最终全文或段落回读不一致，未提交', recoverable: true, detectedAt: new Date().toISOString() } });
     await service.advance(p.id); const before = list();
     await service.resume(p.id, capability());
     const continued = await service.advance(p.id);
@@ -780,7 +788,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   it('保存同一运行的可解码图片候选，跳过损坏文件且不自动采用或重生成', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); await complete(next.taskId || '');
     const original = tasks[0].outputs[0];
-    core.updateStatus({ taskId: tasks[0].id, status: 'done', outputs: [original, 'https://TEST.invalid/second.png'] });
+    updateStatus({ taskId: tasks[0].id, status: 'done', outputs: [original, 'https://TEST.invalid/second.png'] });
     const corrupt = path.join(root, 'TEST-corrupt-image.png'); await fs.writeFile(corrupt, 'TEST not image');
     download.mockImplementationOnce(async (): Promise<object> => {
       const now = new Date().toISOString();
@@ -794,7 +802,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   });
   it('多个图片均为候选，用户选择具体产物后采用，保留其他候选与任务身份', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); await complete(next.taskId || '');
-    core.updateStatus({ taskId: tasks[0].id, status: 'done', outputs: [...tasks[0].outputs, 'https://TEST.invalid/choice.png'] });
+    updateStatus({ taskId: tasks[0].id, status: 'done', outputs: [...tasks[0].outputs, 'https://TEST.invalid/choice.png'] });
     const imported = await service.advance(p.id);
     const current = imported.project!; const candidates = current.assets.filter((asset): boolean => asset.imageReview?.state === 'candidate');
     expect(candidates).toHaveLength(2); expect(current.production?.shots['TEST-shot-1'].firstFrameId).toBeUndefined();
@@ -808,7 +816,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   });
   it('第二张候选下载失败仍保存第一张，恢复只补下载原缺项，不再次生成', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); await complete(next.taskId || '');
-    core.updateStatus({ taskId: tasks[0].id, status: 'done', outputs: [...tasks[0].outputs, 'https://TEST.invalid/second-download.png'] });
+    updateStatus({ taskId: tasks[0].id, status: 'done', outputs: [...tasks[0].outputs, 'https://TEST.invalid/second-download.png'] });
     const originalDownload = download.getMockImplementation(); if (!originalDownload) throw new Error('TEST download missing');
     download.mockImplementationOnce(originalDownload).mockImplementationOnce(async (): Promise<object> => ({ success: false, failed: 1, count: 0 }));
     expect((await service.advance(p.id)).success).toBe(false);
@@ -843,7 +851,8 @@ describe('P4 顺序素材接力与持久化', (): void => {
     expect(saved.plan!.shots[0].durationSeconds).toBe(7);
     expect(saved.selectedVideos?.[saved.plan!.shots[0].id]).toBe(asset.id);
     expect(await fs.readFile(await service.assetFile(saved, asset.id, 'video'))).toEqual(await fs.readFile(video));
-    expect(tasks).toHaveLength(count); expect(list().find((task): boolean => task.id === original.id)).toEqual(original);
+    expect(tasks).toHaveLength(count); const persisted = list().find((task): boolean => task.id === original.id)!;
+    expect(persisted).toMatchObject({ id: original.id, status: 'done', outputs: original.outputs, artifacts: original.artifacts, runtime: { runId: original.runtime!.runId, input: original.runtime!.input, localMedia: { phase: 'ready', state: 'ready', assetId: asset.id } } });
   });
   it('actual out-of-range video pauses before continuation and never recreates the generation', async (): Promise<void> => {
     await approve(); const next = await advanceToVideo(); await complete(next.taskId || '');
@@ -883,7 +892,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   it('accepted task resumes observation of the same run, unknown submission never retries', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); const task = await start(next.taskId || '');
     const now = new Date().toISOString(); const runId = task.runtime?.runId || '';
-    core.updateRuntime({ taskId: task.id, status: 'paused', runtime: { submittedAt: now, conversationUrl: 'https://www.doubao.com/chat/TEST-existing', acceptanceObservation: {
+    updateRuntime({ taskId: task.id, status: 'paused', runtime: { submittedAt: now, conversationUrl: 'https://www.doubao.com/chat/TEST-existing', acceptanceObservation: {
       schemaVersion: 1, accountId: p.accountId, runId, conversationUrl: 'https://www.doubao.com/chat/TEST-existing', acceptedAt: now,
       evidence: { kind: 'generation_started' }, cursor: { messageCount: 1, pollCount: 0 }, expectedArtifact: { kind: 'image', runId },
       lease: { ownerId: 'TEST', acquiredAt: now, expiresAt: now, lastHeartbeatAt: now }, outcome: 'observing',
@@ -891,7 +900,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
     await service.pause(p.id); await service.resume(p.id, capability());
     const observe = await service.advance(p.id);
     expect(observe).toMatchObject({ success: true, action: 'observe', taskId: task.id }); expect(tasks).toHaveLength(1);
-    core.updateRuntime({ taskId: task.id, runtime: { acceptanceObservation: undefined } });
+    updateRuntime({ taskId: task.id, runtime: { acceptanceObservation: undefined } });
     // 明确删除该受理凭证，模拟“发送过但平台受理不明”。
     tasks[0].runtime = { ...tasks[0].runtime as NonNullable<Task['runtime']>, acceptanceObservation: undefined };
     const uncertain = await service.advance(p.id);
@@ -900,7 +909,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   async function uncertainProduction(): Promise<{ task: Task; request: import('@doubao-studio/contracts').TaskResubmitUncertainParams; current: PetStoryProject }> {
     await approve(); const next = await service.advance(p.id); const task = await start(next.taskId || '');
     const submittedAt = new Date().toISOString();
-    expect(core.updateRuntime({ taskId: task.id, status: 'waiting_verification', runtime: { submittedAt }, errorInfo: { code: 'human_verification', message: 'TEST 验证阻断', recoverable: true, detectedAt: submittedAt } }).success).toBe(true);
+    expect(updateRuntime({ taskId: task.id, status: 'waiting_verification', runtime: { submittedAt }, errorInfo: { code: 'human_verification', message: 'TEST 验证阻断', recoverable: true, detectedAt: submittedAt } }).success).toBe(true);
     await service.pause(p.id);
     return { task: list().find((item): boolean => item.id === task.id)!, current: await projects.read(p.id),
       request: { taskId: task.id, runId: task.runtime!.runId, submittedAt, authorizationId: `TEST-authorization-${task.id}`, acceptDuplicateRisk: true } };
@@ -929,13 +938,13 @@ describe('P4 顺序素材接力与持久化', (): void => {
     p.promptCapability = c; seedOfflinePromptContracts(p, { shotId, promptKind: 'video' }, { completeVideoBody: true }); p = await projects.write(p);
     await service.generateShotMedia(p.id, p.revision, shotId, 'video', c);
     const prepared = await service.advance(p.id); const original = await start(prepared.taskId!); const submittedAt = new Date().toISOString();
-    core.updateRuntime({ taskId: original.id, status: 'waiting_verification', runtime: { submittedAt },
+    updateRuntime({ taskId: original.id, status: 'waiting_verification', runtime: { submittedAt },
       errorInfo: { code: 'human_verification', message: 'TEST 验证阻断', recoverable: true, detectedAt: submittedAt } });
     await service.pause(p.id); const paused = await projects.read(p.id);
     const replacement = await service.resubmit(p.id, paused.revision, { taskId: original.id, runId: original.runtime!.runId, submittedAt,
       authorizationId: 'TEST-late-video-authorization', acceptDuplicateRisk: true }, c);
     await complete(replacement.taskId!); await service.advance(p.id); await service.advance(p.id);
-    core.updateStatus({ taskId: original.id, status: 'done', outputs: ['https://TEST.invalid/late-original.mp4'] });
+    updateStatus({ taskId: original.id, status: 'done', outputs: ['https://TEST.invalid/late-original.mp4'] });
     const source = list().find((task): boolean => task.id === original.id)!; const artifact = source.artifacts![0]; const now = new Date().toISOString();
     jobs.push({ id: 'TEST-late-video-download', taskId: source.id, accountId: p.accountId, mode: 'video', url: artifact.url, status: 'done', attempts: 1,
       saveDir: root, filePath: video, createdAt: now, updatedAt: now });
@@ -965,7 +974,10 @@ describe('P4 顺序素材接力与持久化', (): void => {
     const continuation = await service.generateShotMedia(p.id, p.revision, nextShotId, 'firstFrame', c);
     expect(continuation.project!.production!.shots[nextShotId].startFromPreviousEnd?.assetId).toBe(imported.id);
     tasks.find((task): boolean => task.id === original.id)!.runtime!.runId = 'TEST-foreign-video-run';
-    await expect(service.assetFile(linked, imported.id, 'video')).rejects.toThrow('归属无效');
+    // 已入库来源独立于清理或变化后的队列Task，仍能读原文件；本地来源错绑继续拒绝。
+    expect(await service.assetFile(linked, imported.id, 'video')).toBe(path.join(projects.directory(p.id), imported.relativePath));
+    const tampered = structuredClone(linked); tampered.assets.find((asset): boolean => asset.id === imported.id)!.sourceSnapshot!.runId = 'TEST-wrong-local-source';
+    await expect(service.assetFile(tampered, imported.id, 'video')).rejects.toThrow('来源记录不符');
     expect(tasks).toHaveLength(2);
   });
   it.each(['shape', 'missing', 'other-shot', 'image'] as const)('镜头视频选择%s无效时拒绝读盘，不沿用其他视频', async (change): Promise<void> => {
@@ -1026,7 +1038,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
     }));
     await service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings);
     const submittedAt = new Date().toISOString();
-    core.updateRuntime({ taskId: task.id, status: 'paused', runtime: { submittedAt } });
+    updateRuntime({ taskId: task.id, status: 'paused', runtime: { submittedAt } });
     await service.pause(p.id); const current = await projects.read(p.id); const originalRuntime = list()[0].runtime;
     const result = await service.resubmit(p.id, current.revision, { taskId: task.id, runId: task.runtime!.runId, submittedAt, authorizationId: 'TEST-page-binding-retry', acceptDuplicateRisk: true }, capability());
     const replacementStep = result.project!.production!.steps[0];
@@ -1045,7 +1057,7 @@ describe('P4 顺序素材接力与持久化', (): void => {
   });
   it('late original completion prevents a new request while existing results remain available', async (): Promise<void> => {
     const { task, current, request } = await uncertainProduction();
-    expect(core.updateStatus({ taskId: task.id, status: 'done', outputs: ['https://TEST.invalid/late.png'] }).success).toBe(true);
+    expect(updateStatus({ taskId: task.id, status: 'done', outputs: ['https://TEST.invalid/late.png'] }).success).toBe(true);
     await expect(service.resubmit(p.id, current.revision, request, capability())).rejects.toThrow('原任务仍在运行或已有回复');
     expect(tasks).toHaveLength(1); expect(tasks[0].outputs).toEqual(['https://TEST.invalid/late.png']);
   });
@@ -1067,7 +1079,8 @@ describe('P4 顺序素材接力与持久化', (): void => {
     const failed = await unsafe.advance(p.id);
     expect(failed.success).toBe(false); expect(tasks).toHaveLength(1); expect(tasks[0].executionIntent).toBe('hold'); expect(tasks[0].runtime).toBeUndefined();
     await unsafe.resume(p.id, capability());
-    expect((await unsafe.advance(p.id)).error).toContain('创建或写盘结果不确定'); expect(tasks).toHaveLength(1);
+    const recovered = await unsafe.advance(p.id);
+    expect(recovered.success, recovered.error).toBe(true); expect(recovered.action).toBe('start'); expect(recovered.taskId).toBe(tasks[0].id); expect(tasks).toHaveLength(1);
   });
   it('wrong task ownership is rejected before downloading or downstream generation', async (): Promise<void> => {
     await approve(); const next = await service.advance(p.id); await complete(next.taskId || '');
@@ -1109,4 +1122,176 @@ describe('P4 真实离线媒体校验', (): void => {
     await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=32x48:r=5:d=5', '-c:v', 'libx264', '-y', black]);
     await expect(extractActualEndFrame(black, path.join(root, 'TEST-no-frame.png'))).rejects.toThrow('非黑画面');
   });
+});
+
+
+describe('视频工作流输入与结束', (): void => {
+  it('视频输入在创建步骤时固定版本、真实素材摘要和原文，重开后保持不变', async (): Promise<void> => {
+    await approve(); const next = await advanceToVideo();
+    const stored = await projects.read(p.id); const step = stored.production!.steps.find((item): boolean => item.taskId === next.taskId)!;
+    const snapshot = (step as unknown as { videoInputSnapshot?: { schemaVersion: number; inputVersion: number; references: { sha256: string }[]; prompt: string } }).videoInputSnapshot;
+    expect(snapshot).toBeDefined(); expect(snapshot?.schemaVersion).toBe(1); expect(snapshot?.inputVersion).toBeGreaterThan(0);
+    expect(snapshot?.references.every((reference): boolean => /^[a-f0-9]{64}$/.test(reference.sha256))).toBe(true);
+    expect(snapshot?.prompt).toBe(tasks.find((task): boolean => task.id === next.taskId)?.prompt);
+    const reopened = new PetStoryProjects(); await reopened.open(projects.directory(p.id));
+    expect((await reopened.read(p.id)).production!.steps.find((item): boolean => item.id === step.id)).toEqual(step);
+  });
+  it('明确结束保留原步骤与任务历史，解除编辑槽位并能制作独立节点', async (): Promise<void> => {
+    await approve(); const next = await service.advance(p.id); await service.pause(p.id);
+    const end = (service as unknown as { end: (id: string) => Promise<PetStoryProductionResult> }).end;
+    expect(end).toBeTypeOf('function');
+    const ended = await end.call(service, p.id); expect(ended.success).toBe(true);
+    expect(ended.project?.production).toBeUndefined(); expect(ended.project?.productionHistory?.at(-1)?.steps[0].taskId).toBe(next.taskId);
+    expect((ended.project?.productionHistory?.at(-1) as unknown as { state: string }).state).toBe('ended');
+    expect(tasks).toHaveLength(1); expect(tasks[0].id).toBe(next.taskId);
+    const saved = await projects.savePlan(p.id, ended.project!.revision, ended.project!.plan!); expect(saved.production).toBeUndefined();
+  });
+});
+
+describe('原文件媒体工具恢复', (): void => {
+  it('ffprobe 缺失不拒绝原视频，工具恢复后只重校验已下载文件并完成入库', async (): Promise<void> => {
+    p.plan!.shots = [p.plan!.shots[0]]; p = await projects.write(p);
+    await approve(); const next = await advanceToVideo(); await complete(next.taskId!);
+    const count = tasks.length; const originalPath = process.env.DOUBAO_FFPROBE_PATH;
+    process.env.DOUBAO_FFPROBE_PATH = path.join(root, 'TEST-missing-ffprobe');
+    try {
+      const stopped = await service.advance(p.id);
+      expect(stopped.success).toBe(false); expect(stopped.error).toContain('ffprobe');
+      const saved = await projects.read(p.id); const step = saved.production!.steps.find((item): boolean => item.taskId === next.taskId)!;
+      expect(list().find((task): boolean => task.id === next.taskId)?.runtime?.localMedia).toMatchObject({ phase: 'validating', state: 'failed', error: { code: 'MEDIA_TOOL_MISSING' } });
+      expect(step.rejectedArtifactIds || []).toEqual([]); expect(await fs.stat(video)).toMatchObject({ size: expect.any(Number) });
+    } finally {
+      if (originalPath === undefined) delete process.env.DOUBAO_FFPROBE_PATH; else process.env.DOUBAO_FFPROBE_PATH = originalPath;
+    }
+    const calls = download.mock.calls.length;
+    const expired = tasks.find((task): boolean => task.id === next.taskId)!.artifacts![0]; expired.validation = { state: 'expired', checkedAt: new Date().toISOString() };
+    await service.resume(p.id, capability()); const recovered = await service.advance(p.id);
+    expect(recovered.success, recovered.error).toBe(true); expect(download).toHaveBeenCalledTimes(calls); expect(tasks).toHaveLength(count);
+    const asset = recovered.project!.assets.find((item): boolean => item.taskId === next.taskId && item.kind === 'video');
+    expect(asset?.sourceSnapshot).toMatchObject({ taskId: next.taskId, projectId: p.id, accountId: p.accountId });
+    expect(asset?.validation?.decoded).toBe(true);
+    expect(list().find((task): boolean => task.id === next.taskId)?.runtime?.localMedia).toMatchObject({ phase: 'ready', state: 'ready', assetId: asset?.id });
+  });
+  it('历史工具误拒可重复迁移，保留原拒绝历史并只校验原下载', async (): Promise<void> => {
+    p.plan!.shots = [p.plan!.shots[0]]; p = await projects.write(p);
+    await approve(); const next = await advanceToVideo(); await complete(next.taskId!);
+    await service.pause(p.id); let saved = await projects.read(p.id);
+    const step = saved.production!.steps.find((item): boolean => item.taskId === next.taskId)!;
+    step.rejectedArtifactIds = [tasks.find((task): boolean => task.id === next.taskId)!.artifacts![0].id];
+    step.error = 'ffprobe媒体处理失败，请检查工具和真实文件；已停止且不重新生成';
+    saved = await projects.write(saved);
+    const migrated = await projects.read(p.id); const again = await projects.read(p.id);
+    const migratedStep = migrated.production!.steps.find((item): boolean => item.id === step.id)!;
+    expect(migratedStep.rejectedArtifactIds).toEqual([]); expect(migratedStep.mediaRejectionHistory).toHaveLength(1);
+    expect(again.production!.steps.find((item): boolean => item.id === step.id)).toEqual(migratedStep);
+    await service.resume(p.id, capability()); expect((await service.advance(p.id)).success).toBe(true);
+    expect(tasks).toHaveLength(2);
+  });
+});
+
+describe('制作长操作与界面分离', (): void => {
+  it('切换项目保留本次run到下载入库，完成后不自动开始下一镜', async (): Promise<void> => {
+    await approve(); const next = await advanceToVideo(); const running = await start(next.taskId!);
+    const detached = await service.detach(p.id); expect(detached.project?.production).toMatchObject({ state: 'running', stopAfterCurrent: true });
+    expect(list().find((task): boolean => task.id === running.id)?.runtime?.runId).toBe(running.runtime?.runId);
+    updateRuntime({ taskId: running.id, runtime: { submittedAt: new Date().toISOString() } });
+    updateStatus({ taskId: running.id, status: 'done', outputs: [`https://TEST.invalid/${running.id}.mp4`] });
+    const saved = await service.advance(p.id); expect(saved.success, saved.error).toBe(true);
+    expect(saved.project?.production?.state).toBe('paused'); expect(saved.project?.selectedVideos?.['TEST-shot-1']).toBeTruthy();
+    const count = tasks.length; expect((await service.advance(p.id)).taskId).toBeUndefined(); expect(tasks).toHaveLength(count);
+  });
+  it('页面绑定项目已存而任务保存失败，重试仅补同run正文并保留原素材节点', async (): Promise<void> => {
+    await approve(); const next = await advanceToVideo(); const running = await start(next.taskId!);
+    const current = await projects.read(p.id); const step = current.production!.steps.find((item): boolean => item.taskId === running.id)!;
+    const bindings: PetStoryPageBinding[] = step.attachmentAssetIds.map((assetId, index): PetStoryPageBinding => ({ assetId, order: index + 1,
+      label: `@图片${index + 2}`, slot: 'reference', reference: 'plain', previewHash: 'e'.repeat(64), fileSha256: current.assets.find((asset): boolean => asset.id === assetId)!.validation!.sha256 }));
+    download.mockClear(); let failing = true;
+    const wrapped = new PetStoryProductionService(projects, { updateLocalMedia: localMediaPort(core), list, create, adopt: (id, binding): Task => { const result = core.bindPetStory(id, binding); if (!result.success) throw new Error(result.error); return result.data; },
+      retryUnsubmitted: (id): Task => { const result = core.retry(id, 'hold'); if (!result.success) throw new Error(result.error); return result.data; }, downloads: (): DownloadJob[] => jobs, download,
+      bindPageInput: (id, runId, prompt): Task => { if (failing) { failing = false; throw new Error('TEST page input write failed'); } const result = core.bindPetStoryPageInput(id, runId, prompt); if (!result.success) throw new Error(result.error); return result.data; } });
+    await expect(wrapped.recordPageBindings(p.id, running.id, running.runtime!.runId, bindings)).rejects.toThrow('TEST page input write failed');
+    const recovered = await wrapped.recordPageBindings(p.id, running.id, running.runtime!.runId, bindings);
+    expect(recovered.success).toBe(true); expect(recovered.project?.production?.steps.find((item): boolean => item.id === step.id)?.pageBindings).toEqual(bindings);
+    expect(list().find((task): boolean => task.id === running.id)?.runtime?.submittedAt).toBeUndefined(); expect(download).not.toHaveBeenCalled();
+  });
+});
+
+describe('旧媒体异步回执隔离', (): void => {
+  it('结束不等待网络，迟到原下载保留且不能越过结束命令覆盖新制作', async (): Promise<void> => {
+    await approve(); const original = await advanceToVideo(); await complete(original.taskId!);
+    const network = download.getMockImplementation(); if (!network) throw new Error('TEST下载fixture缺失');
+    let release!: () => void; const gate = new Promise<void>((done): void => { release = done; });
+    download.mockClear(); download.mockImplementationOnce(async (params: unknown): Promise<unknown> => { await gate; return network(params); });
+    const pending = service.advance(p.id); await vi.waitFor((): void => expect(download).toHaveBeenCalled());
+    // 不解除网络gate时，结束命令已经完成：长操作没有占据项目事务。
+    const ended = await service.end(p.id); expect(ended.project?.production).toBeUndefined();
+    const next = await service.generateShotMedia(p.id, ended.project!.revision, 'TEST-shot-1', 'video', capability());
+    const currentProduction = structuredClone(next.project!.production); release(); const late = await pending;
+    expect(late.success).toBe(false); const stored = await projects.read(p.id);
+    expect(stored.production).toEqual(currentProduction); expect(stored.selectedVideos?.['TEST-shot-1']).toBeUndefined();
+    const history = stored.productionHistory?.find((production): boolean => production.state === 'ended');
+    expect(history?.steps.find((step): boolean => step.taskId === original.taskId)?.status).toBe('bound');
+    expect(list().find((task): boolean => task.id === original.taskId)?.runtime?.localMedia?.state).toBe('paused');
+    expect(jobs.some((job): boolean => job.taskId === original.taskId && job.status === 'done')).toBe(true);
+    expect(stored.assets.some((asset): boolean => asset.kind === 'video' && asset.taskId === original.taskId)).toBe(false);
+    expect((await service.advance(p.id)).action).toBe('start');
+  });
+});
+
+describe('页面绑定事务重启恢复', (): void => {
+  it('项目绑定已保存但任务更新失败后重启，只重做原task准备并保留旧页面绑定历史', async (): Promise<void> => {
+    await approve(); const next = await advanceToVideo(); const task = await start(next.taskId!);
+    const current = await projects.read(p.id); const step = current.production!.steps.find((item): boolean => item.taskId === task.id)!;
+    const bindings: PetStoryPageBinding[] = step.attachmentAssetIds.map((assetId, index): PetStoryPageBinding => ({ assetId, order: index + 1, label: `@图片${index + 2}`,
+      slot: 'reference', reference: 'plain', previewHash: 'f'.repeat(64), fileSha256: current.assets.find((asset): boolean => asset.id === assetId)!.validation!.sha256 }));
+    vi.spyOn(core, 'bindPetStoryPageInput').mockImplementationOnce((): { success: false; error: string } => ({ success: false, error: 'TEST任务引用写入失败' }));
+    await expect(service.recordPageBindings(p.id, task.id, task.runtime!.runId, bindings)).rejects.toThrow('TEST任务引用写入失败');
+    expect(updateRuntime({ taskId: task.id, status: 'paused', runtime: { stage: 'paused' }, errorInfo: { code: 'dispatch_not_ready', message: 'TEST应用退出前已停止执行', recoverable: true, detectedAt: new Date().toISOString() } }).success).toBe(true);
+    const reopened = new PetStoryProjects(); await reopened.open(projects.directory(p.id)); const recovered = makeService(reopened);
+    const resumed = await recovered.resume(p.id, capability()); expect(resumed.success).toBe(true);
+    const prepared = await recovered.advance(p.id); expect(prepared).toMatchObject({ success: true, taskId: task.id, action: 'start' });
+    const originalStep = prepared.project!.production!.steps.find((item): boolean => item.id === step.id)!;
+    expect(originalStep.pageBindings).toBeUndefined(); expect(originalStep.pageBindingHistory?.at(-1)?.bindings).toEqual(bindings);
+    expect(list().find((item): boolean => item.id === task.id)?.runtime?.submittedAt).toBeUndefined(); expect(list().filter((item): boolean => item.mode === 'video')).toHaveLength(1);
+  });
+});
+
+
+describe('Task运行拥有本地媒体阶段', (): void => {
+  it('下载失败持久原run failed；继续仅重试原下载，任务身份与派发事实不变', async (): Promise<void> => {
+    p.plan!.shots = [p.plan!.shots[0]]; p = await projects.write(p); await approve(); const next = await advanceToVideo(); await complete(next.taskId!);
+    const before = list().find((task): boolean => task.id === next.taskId)!; downloadFailure = true;
+    const failed = await service.advance(p.id); expect(failed.success).toBe(false);
+    expect(failed.taskSnapshots?.find((task): boolean => task.id === before.id)?.runtime?.localMedia).toMatchObject({ phase: 'downloading', state: 'failed' });
+    downloadFailure = false; await service.resume(p.id, capability()); const saved = await service.advance(p.id); expect(saved.success, saved.error).toBe(true);
+    const after = list().find((task): boolean => task.id === before.id)!;
+    expect(after.runtime).toMatchObject({ runId: before.runtime!.runId, submittedAt: before.runtime!.submittedAt, input: before.runtime!.input, localMedia: { phase: 'ready', state: 'ready' } });
+    expect(after.outputs).toEqual(before.outputs); expect(after.artifacts).toEqual(before.artifacts);
+  });
+  it('库文件已复制而项目写失败，原Task checkpoint恢复同一资产且不重下或重新解码', async (): Promise<void> => {
+    p.plan!.shots = [p.plan!.shots[0]]; p = await projects.write(p); await approve(); const next = await advanceToVideo(); await complete(next.taskId!);
+    const write = projects.write.bind(projects); let once = true;
+    vi.spyOn(projects, 'write').mockImplementation(async (project: PetStoryProject): Promise<PetStoryProject> => {
+      if (once && project.assets.some((asset): boolean => asset.kind === 'video')) { once = false; throw new Error('TEST项目入库写失败'); }
+      return write(project);
+    });
+    const failed = await service.advance(p.id); expect(failed.success).toBe(false);
+    const checkpoint = list().find((task): boolean => task.id === next.taskId)!.runtime!.localMedia!;
+    expect(checkpoint).toMatchObject({ phase: 'library', state: 'working', mediaInfo: { decoded: true } }); expect(checkpoint.assetId).toBeTruthy();
+    const downloadsBefore = download.mock.calls.length; const media = await import('../../main/utils/petstoryMedia'); const decode = vi.spyOn(media, 'validatePetStoryMedia'); decode.mockClear();
+    await service.resume(p.id, capability()); const saved = await service.advance(p.id); expect(saved.success, saved.error).toBe(true);
+    expect(download).toHaveBeenCalledTimes(downloadsBefore); expect(decode).not.toHaveBeenCalled();
+    expect(saved.project?.assets.find((asset): boolean => asset.kind === 'video')?.id).toBe(checkpoint.assetId);
+    expect(list().find((task): boolean => task.id === next.taskId)?.runtime?.localMedia).toMatchObject({ phase: 'ready', state: 'ready', assetId: checkpoint.assetId });
+    decode.mockRestore();
+  });
+});
+
+
+it('暂停原制作的结果回读完成后，advance只下载入库原done，不授权下一镜', async (): Promise<void> => {
+  await approve(); const next = await advanceToVideo(); await complete(next.taskId!); await service.pause(p.id);
+  const before = tasks.length; const saved = await service.advance(p.id); expect(saved.success, saved.error).toBe(true);
+  expect(saved.project?.assets.some((asset): boolean => asset.kind === 'video' && asset.taskId === next.taskId)).toBe(true);
+  expect(saved.project?.production?.state).toBe('paused'); expect(saved.taskSnapshots?.find((task): boolean => task.id === next.taskId)?.runtime?.localMedia?.state).toBe('ready');
+  expect((await service.advance(p.id)).action).toBeUndefined(); expect(tasks).toHaveLength(before);
 });

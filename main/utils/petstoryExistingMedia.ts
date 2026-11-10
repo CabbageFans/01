@@ -6,6 +6,8 @@ import { PetStoryProjects, projectPath } from './petstoryProject';
 import { identityAsset } from './petstoryPromptQuality';
 import { parsePetStoryAnswer } from './petstoryValidation';
 import { mediaDigest, validatePetStoryMedia } from './petstoryMedia';
+import { localMediaSource } from './localMediaSource';
+import { downloadBelongsToArtifact } from './downloadIdentity';
 import { imageTargetBasis } from './petstoryImageReview';
 
 interface ExistingMediaPort { list: () => Task[]; downloads: () => DownloadJob[] }
@@ -56,7 +58,7 @@ export class PetStoryExistingMediaService {
   constructor(private readonly projects: Pick<PetStoryProjects, 'read' | 'write' | 'directory' | 'referenceFile'>, private readonly tasks: ExistingMediaPort) {}
   private download(task: Task, artifactId: string, p: PetStoryProject): DownloadJob | undefined {
     const artifact = validArtifacts(task).find((a): boolean => a.id === artifactId);
-    return artifact ? this.tasks.downloads().find((d): boolean => d.taskId === task.id && d.accountId === p.accountId && d.mode === task.mode && d.url === artifact.url && d.status === 'done' && !!d.filePath) : undefined;
+    return artifact ? this.tasks.downloads().find((d): boolean => downloadBelongsToArtifact(d, task, artifact, p.accountId) && !!d.filePath) : undefined;
   }
   private async verifyLegacyInputs(p: PetStoryProject, task: Task, shotId: string, kind: PetStoryPromptKind, body: BodyMatch): Promise<boolean> {
     const shot = p.plan?.shots.find((s): boolean => s.id === shotId); if (!shot || kind === 'video') return false;
@@ -127,14 +129,6 @@ export class PetStoryExistingMediaService {
     }
     return true;
   }
-  /** 显式关联的视频不占用当前制作步骤；播放与后续接力仍按同一原任务证据核对。 */
-  async linkedVideoTask(p: PetStoryProject, asset: PetStoryAsset): Promise<Task | undefined> {
-    if (asset.kind !== 'video' || asset.origin !== 'historical_task' || !asset.shotId || !asset.taskId || !asset.runId) return undefined;
-    const task = this.tasks.list().find((item): boolean => item.id === asset.taskId && item.runtime?.runId === asset.runId);
-    if (!task || asset.generationPrompt !== task.prompt) return undefined;
-    const body = await this.verifyBinding(p, task, asset.shotId, 'video');
-    return body && body.final === asset.generationFinal ? task : undefined;
-  }
   async candidates(id: string, shotId: string, kind: PetStoryPromptKind): Promise<PetStoryMediaCandidate[]> {
     const p = await this.projects.read(id);
     if (!p.plan?.shots.some((s): boolean => s.id === shotId && !!s.prompts[kind])) throw new Error('镜头或提示词用途不存在');
@@ -177,6 +171,7 @@ export class PetStoryExistingMediaService {
     if ((await mediaDigest(destination)).sha256 !== validation.sha256) throw new Error('历史媒体复制后的摘要不一致，未关联');
     const asset: PetStoryAsset = { id: assetId, kind: imageKind(kind), shotId, relativePath, taskId: task.id, runId: task.runtime?.runId, artifactId: artifact.id, downloadJobId: downloaded.id, validation,
       origin: 'historical_task', generationPrompt: task.prompt, generationFinal: body.final, promptJobId: body.jobId };
+    if (kind === 'video') asset.sourceSnapshot = localMediaSource(p, asset, undefined, task);
     if (kind !== 'video') {
       const target = { shotId, kind };
       asset.imageReview = { state: 'candidate', target, basisHash: imageTargetBasis(p, target) };

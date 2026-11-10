@@ -1,5 +1,7 @@
+declare const __doubaoAssertOperation: (() => void) | undefined;
 /** 自包含的精确正文写入探针；原生编辑器事件保留段落，不触发 Enter 或发送。 */
 export function insertExactComposerText(value: string): boolean {
+  if (typeof __doubaoAssertOperation === 'function') __doubaoAssertOperation();
   try {
     const editors = Array.from(document.querySelectorAll<HTMLElement>('textarea,[contenteditable="true"],[contenteditable=""]')).filter((editor: HTMLElement): boolean => {
       const style = window.getComputedStyle(editor);
@@ -37,6 +39,7 @@ export function readExactComposerText(editor: HTMLElement): string {
 
 /** 原生追加到当前编辑器光标末端；@ 菜单由平台创建引用节点，不注入伪造 HTML。 */
 export function appendExactComposerText(value: string, reset = false): boolean {
+  if (typeof __doubaoAssertOperation === 'function') __doubaoAssertOperation();
   const editors = Array.from(document.querySelectorAll<HTMLElement>('textarea,[contenteditable="true"],[contenteditable=""]')).filter((el): boolean => {
     const rect = el.getBoundingClientRect(); const style = window.getComputedStyle(el);
     return el.offsetParent !== null && !('disabled' in el && el.disabled) && el.getAttribute('aria-disabled') !== 'true'

@@ -12,10 +12,15 @@ import { resolvePublicShareMedia } from '../utils/publicShareMedia';
 import { v4 as uuidv4 } from 'uuid';
 import { getDefaultProjectId } from './projects';
 import { replaceIpcHandlers } from './lifecycle';
-import { recoverInterruptedDownloads, removeExactDownloadPart } from '../utils/downloadRecovery';
+import { recoverInterruptedDownloads } from '../utils/downloadRecovery';
+import { DownloadRepository } from '../utils/DownloadRepository';
+import { DownloadService } from '../utils/DownloadService';
+import { readDownloadedMedia } from '../utils/downloadedMedia';
+import { localMediaStreams } from '../utils/LocalMediaProtocol';
 import { TaskEventStream } from '../core/TaskEventStream';
 import { TaskRepository } from '../core/TaskRepository';
 import { TaskService } from '../core/TaskService';
+import { buildVideoWorkflowDiagnostics, saveAdapterDiagnostic } from '../utils/videoWorkflowDiagnostics';
 import type { ArtifactProbeResult } from '../core/TaskService';
 import type {
   Task,
@@ -41,6 +46,7 @@ import type {
   TaskValidateArtifactParams,
   TaskValidateArtifactResult,
   TaskSaveAdapterReportParams,
+  TaskLocalMediaUpdate,
 } from '@doubao-studio/contracts';
 
 // ==================== 类型定义 ====================
@@ -77,6 +83,9 @@ const taskService = new TaskService({
   probeArtifact: createArtifactProbe(),
   basename: (value) => require('path').basename(value),
 });
+let petStoryDiagnosticsProvider: () => Promise<object[]> = async (): Promise<object[]> => [];
+/** 由项目IPC注册只读投影，避免tasks反向依赖petstory形成运行时循环。 */
+export function setPetStoryDiagnosticsProvider(provider: () => Promise<object[]>): void { petStoryDiagnosticsProvider = provider; }
 
 /** PetStory 同进程接线：仍经过正式 TaskService/Repository，仅创建 hold 草稿。 */
 export function createPetStoryTask(params: import('@doubao-studio/contracts').TaskAddParams, accountId: string): Task {
@@ -90,6 +99,18 @@ export function createPetStoryTask(params: import('@doubao-studio/contracts').Ta
 /** 仅供同进程业务恢复；不 arm、不启动队列，仍由项目绑定门禁授权新 run。 */
 export function retryPetStoryTask(taskId: string): Task {
   const result = taskService.retry(taskId, 'hold');
+  if (!result.success) throw new Error(result.error);
+  return result.data;
+}
+/** 同进程明确模式继续：不修改原运行输入，不授予队列执行权。 */
+export function revisePetStoryVideoInput(taskId: string, expectedRunId: string, snapshot: NonNullable<Task['videoInputSnapshot']>): Task {
+  const result = taskService.revisePetStoryVideoInput(taskId, expectedRunId, snapshot);
+  if (!result.success) throw new Error(result.error);
+  return result.data;
+}
+/** 仅供同进程正式下载/制作链；每次回执都绑定原run和artifact。 */
+export function updatePetStoryLocalMedia(taskId: string, runId: string, patch: TaskLocalMediaUpdate): Task {
+  const result = taskService.updateLocalMedia(taskId, runId, patch);
   if (!result.success) throw new Error(result.error);
   return result.data;
 }
@@ -224,7 +245,7 @@ function loadDownloadJobs(): DownloadJob[] {
   const result = normalizeDownloadJobs(raw);
   // 仅在归一化确实改变数据时写回磁盘
   if (result.changed) {
-    writeJSON(DOWNLOAD_STORE_FILE, result.data);
+    if (!writeJSON(DOWNLOAD_STORE_FILE, result.data)) throw new Error('下载台账迁移写入失败');
   }
   if (result.warnings.length > 0) {
     console.warn('[Downloads] 数据归一化告警:', result.warnings);
@@ -236,14 +257,19 @@ function loadDownloadJobs(): DownloadJob[] {
     const fs = require('fs') as typeof import('fs');
     const path = require('path') as typeof import('path');
     const recovery = recoverInterruptedDownloads(fs, path, jobs, new Date().toISOString());
-    if (recovery.recovered > 0) writeJSON(DOWNLOAD_STORE_FILE, jobs);
+    if (recovery.recovered > 0 && !writeJSON(DOWNLOAD_STORE_FILE, jobs)) { downloadRecoveryApplied = false; throw new Error('下载中断恢复写入失败'); }
   }
   return jobs;
 }
 
 function saveDownloadJobs(jobs: DownloadJob[]): boolean {
-  return writeJSON(DOWNLOAD_STORE_FILE, jobs.slice(-1000));
+  return writeJSON(DOWNLOAD_STORE_FILE, jobs);
 }
+
+const downloadRepository = new DownloadRepository({ read: loadDownloadJobs, write: saveDownloadJobs });
+const downloadService = new DownloadService(downloadRepository);
+/** 暂停只撤销本地下载；不取消平台生成。 */
+export function cancelTaskDownloads(taskId: string, runId?: string): void { downloadService.cancelTask(taskId, runId); }
 
 function getAvailableDownloadPath(fs: typeof import('fs'), path: typeof import('path'), saveDir: string, fileName: string): string {
   const parsed = path.parse(fileName);
@@ -314,7 +340,6 @@ export async function downloadArtifactForLocalControl(
 
   const fs = require('fs') as typeof import('fs');
   const path = require('path') as typeof import('path');
-  const { app } = require('electron') as typeof import('electron');
   const saveDir = resolveLocalControlSaveDir(fs, path, app);
   if (!saveDir) return { success: false, code: 'DOWNLOAD_DIRECTORY_UNAVAILABLE' };
 
@@ -323,65 +348,14 @@ export async function downloadArtifactForLocalControl(
   if (!task.assignedAccountId || !account) return { success: false, code: 'ACCOUNT_NOT_FOUND' };
   if (account.platform === 'dola') return { success: false, code: 'PLATFORM_NOT_VERIFIED' };
   const accountSession = session.fromPartition(`persist:doubao_${account.partition}`);
-  const now = new Date().toISOString();
-  const job: DownloadJob = {
-    id: uuidv4(),
-    taskId: task.id,
-    accountId: task.assignedAccountId,
-    mode: task.mode,
-    url: artifact.url,
-    status: 'downloading',
-    attempts: 1,
-    saveDir,
-    createdAt: now,
-    updatedAt: now,
-  };
-  const jobs = loadDownloadJobs();
-  jobs.push(job);
-  if (!saveDownloadJobs(jobs)) return { success: false, code: 'DOWNLOAD_LEDGER_WRITE_FAILED' };
-
-  let temporaryPath: string | undefined;
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60_000);
-    const response = await accountSession.fetch(artifact.url, {
-      headers: {
-        Referer: 'https://www.doubao.com/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-      },
-      signal: controller.signal,
-    }).finally(() => clearTimeout(timeout));
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const contentType = response.headers.get('content-type') || '';
-    const validation = validateDownloadResponse(response.status, contentType, buffer.length, task.mode);
-    if (!validation.valid) throw new Error(validation.message || 'DOWNLOAD_VALIDATION_FAILED');
-
-    let ext = path.extname(parsedUrl.pathname).toLowerCase();
-    if (!ext || ext.length > 6) {
-      if (contentType.includes('video/mp4') || task.mode === 'video') ext = '.mp4';
-      else if (contentType.includes('webp')) ext = '.webp';
-      else if (contentType.includes('jpeg')) ext = '.jpg';
-      else ext = '.png';
-    }
-    const filePath = getAvailableDownloadPath(fs, path, saveDir, `${task.id.substring(0, 8)}_${artifact.id.substring(0, 8)}${ext}`);
-    temporaryPath = `${filePath}.${job.id}.part`;
-    fs.writeFileSync(temporaryPath, buffer);
-    fs.renameSync(temporaryPath, filePath);
-    job.status = 'done';
-    job.filePath = filePath;
-    job.bytes = buffer.length;
-    job.updatedAt = new Date().toISOString();
-    if (!saveDownloadJobs(jobs)) return { success: false, code: 'DOWNLOAD_LEDGER_WRITE_FAILED' };
-    return { success: true, code: 'DOWNLOADED', jobId: job.id, bytes: buffer.length };
-  } catch (error) {
-    try { removeExactDownloadPart(fs, path, saveDir, temporaryPath, job.id); } catch {}
-    const normalizedError = error instanceof Error ? error : new Error(String(error));
-    const classified = classifyDownloadException(normalizedError);
-    job.status = 'failed';
-    job.error = classified.message;
-    job.updatedAt = new Date().toISOString();
-    saveDownloadJobs(jobs);
-    return { success: false, code: 'DOWNLOAD_FAILED', jobId: job.id };
+    const job = await downloadService.download({ taskId: task.id, projectId: task.projectId, batchId: task.batchId, runId: artifact.runId, artifactId: artifact.id,
+      inputVersion: task.runtime && task.runtime.runId === artifact.runId ? task.runtime.input.videoInputSnapshot?.inputVersion : undefined,
+      accountId: task.assignedAccountId, mode: task.mode, url: artifact.url, saveDir,
+      fetch: (url: string, init: RequestInit): Promise<Response> => accountSession.fetch(url, init) });
+    return { success: true, code: 'DOWNLOADED', jobId: job.id, bytes: job.bytes };
+  } catch (error: unknown) {
+    return { success: false, code: error instanceof Error && error.message === 'DOWNLOAD_LEDGER_WRITE_FAILED' ? 'DOWNLOAD_LEDGER_WRITE_FAILED' : 'DOWNLOAD_FAILED' };
   }
 }
 
@@ -392,136 +366,59 @@ const TASK_IPC_CHANNELS = [
   'tasks:delete', 'tasks:retry', 'tasks:batchPause', 'tasks:updateRuntime', 'tasks:setQualityVerdict',
   'tasks:acquireLock', 'tasks:renewLock', 'tasks:importCsv', 'tasks:releaseLock',
   'tasks:getCompletedOutputs', 'tasks:selectImages', 'tasks:selectAudio',
-  'tasks:readFileAsBase64', 'tasks:downloadOutputs', 'tasks:downloadPublicShareMedia', 'tasks:listDownloads',
+  'tasks:readFileAsBase64', 'tasks:downloadOutputs', 'tasks:downloadPublicShareMedia', 'tasks:listDownloads', 'tasks:readDownloadedMedia',
   'tasks:exportDiagnostics', 'tasks:validateArtifact', 'tasks:saveAdapterReport',
   'tasks:selectAdapterRules', 'settings:get', 'settings:save', 'tasks:selectSaveDir',
 ] as const;
 
+/** 兼容旧下载 DTO 只在边界解析一次；有任务时必须核对原运行和账号。 */
+function downloadSource(output: CompletedOutput, authoritative: Task[]): { task?: Task; accountId: string | null; mode: Task['mode']; runId?: string } {
+  const task = authoritative.find((item: Task): boolean => item.id === output.taskId);
+  if (output.runId && task?.runtime?.runId !== output.runId) throw new Error('原运行已变化，请刷新原产物');
+  if (task && (task.assignedAccountId !== output.accountId || task.mode !== output.mode)) throw new Error('产物账号或用途与原任务不符');
+  return task ? { task, accountId: task.assignedAccountId, mode: task.mode, runId: task.runtime?.runId } : { accountId: output.accountId, mode: output.mode, runId: output.runId };
+}
+function downloadArtifact(source: ReturnType<typeof downloadSource>, output: CompletedOutput, url: string): TaskArtifact | undefined {
+  if (!source.task) return undefined;
+  // 无运行、无产物台账的旧任务只兼容原已保存URL；不补造run或平台受理。
+  if (!source.runId && !source.task.artifacts?.length && source.task.outputs.includes(url)) return undefined;
+  const artifact = source.task.artifacts?.find((item: TaskArtifact): boolean => item.url === url && item.runId === source.runId);
+  if (!artifact || !source.task.outputs.includes(url) || output.artifactIds && !output.artifactIds.includes(artifact.id)) throw new Error('产物不属于原任务运行');
+  return artifact;
+}
 /** PetStory 与原 IPC 共用同一 Session 下载、作业登记及文件校验链。 */
 export async function downloadTaskOutputs(params: TaskDownloadOutputsParams, policy?: { redirect: 'error' }): Promise<import('@doubao-studio/contracts').TaskDownloadOutputsResult> {
-      try {
-        const fs = require('fs');
-        const path = require('path');
-        const { app } = require('electron');
-
-        // 默认下载目录
-        const defaultDir = path.join(app.getPath('downloads'), '豆包工作室产物');
-        const saveDir = params.saveDir || defaultDir;
-
-        // 确保目录存在
-        if (!fs.existsSync(saveDir)) {
-          fs.mkdirSync(saveDir, { recursive: true });
+  const path = require('path') as typeof import('path');
+  const saveDir = params.saveDir || path.join(app.getPath('downloads'), '豆包工作室产物');
+  let count = 0;
+  const failures: string[] = [];
+  const jobIds: string[] = [];
+  try {
+    const accounts = readJSON<Array<{ id: string; partition: string; platform?: string }>>('accounts.json', []);
+    const authoritative = listTasksForLocalControl();
+    for (const output of params.outputs) {
+      const source = downloadSource(output, authoritative);
+      const accountId = source.accountId;
+      const account = accounts.find((item): boolean => item.id === accountId);
+      if (account?.platform === 'dola') { failures.push('Dola 下载链尚未验证'); continue; }
+      if (accountId && !account) { failures.push('原账号不存在，请恢复原账号后重试下载'); continue; }
+      const accountSession = account ? session.fromPartition(`persist:doubao_${account.partition}`) : session.defaultSession;
+      for (const url of output.outputs) {
+        try {
+          const artifact = downloadArtifact(source, output, url);
+          const job = await downloadService.download({ taskId: output.taskId, projectId: source.task?.projectId, batchId: source.task?.batchId, runId: source.runId, artifactId: artifact?.id, inputVersion: output.inputVersion,
+            accountId, mode: source.mode, url, saveDir, redirect: policy?.redirect,
+            fetch: (address: string, init: RequestInit): Promise<Response> => accountSession.fetch(address, init) });
+          jobIds.push(job.id); count++;
+        } catch (error: unknown) {
+          failures.push(error instanceof Error ? error.message : '原产物下载失败');
         }
-
-        let downloadedCount = 0;
-        const failures: string[] = [];
-        const jobs = loadDownloadJobs();
-        const jobIds: string[] = [];
-        const accounts = readJSON<Array<{ id: string; partition: string }>>('accounts.json', []);
-
-        for (const task of params.outputs) {
-          const account = accounts.find((item) => item.id === task.accountId);
-          const accountSession = account
-            ? session.fromPartition(`persist:doubao_${account.partition}`)
-            : session.defaultSession;
-          for (let outputIndex = 0; outputIndex < task.outputs.length; outputIndex++) {
-            const url = task.outputs[outputIndex];
-            let parsedUrl: URL;
-            try {
-              parsedUrl = new URL(url);
-              if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('不支持的地址协议');
-            } catch {
-              failures.push(`${task.taskId.slice(0, 8)}: 产物地址无效`);
-              continue;
-            }
-            const now = new Date().toISOString();
-            const job: DownloadJob = {
-              id: uuidv4(),
-              taskId: task.taskId,
-              accountId: task.accountId,
-              mode: task.mode,
-              url,
-              status: 'downloading',
-              attempts: 1,
-              saveDir,
-              createdAt: now,
-              updatedAt: now,
-            };
-            jobs.push(job);
-            jobIds.push(job.id);
-            saveDownloadJobs(jobs);
-            let temporaryPath: string | undefined;
-            try {
-              const controller = new AbortController();
-              const timeout = setTimeout(() => controller.abort(), 60000);
-              const response = await accountSession.fetch(url, {
-                ...(policy ? { redirect: policy.redirect } : {}),
-                headers: {
-                  Referer: 'https://www.doubao.com/',
-                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-                },
-                signal: controller.signal,
-              }).finally(() => clearTimeout(timeout));
-
-              const buffer = Buffer.from(await response.arrayBuffer());
-              const contentType = response.headers.get('content-type') || '';
-
-              // 统一验证：HTTP 状态、非空文件、视频 content-type
-              const validation = validateDownloadResponse(response.status, contentType, buffer.length, task.mode);
-              if (!validation.valid) {
-                const failure = validation.message || '下载验证失败';
-                failures.push(`${task.taskId.slice(0, 8)}: ${failure}`);
-                job.status = 'failed';
-                job.error = failure;
-                job.updatedAt = new Date().toISOString();
-                saveDownloadJobs(jobs);
-                continue;
-              }
-
-              let ext = path.extname(parsedUrl.pathname).toLowerCase();
-              if (!ext || ext.length > 6) {
-                if (contentType.includes('video/mp4') || task.mode === 'video') ext = '.mp4';
-                else if (contentType.includes('webp')) ext = '.webp';
-                else if (contentType.includes('jpeg')) ext = '.jpg';
-                else ext = '.png';
-              }
-              const fileName = `${task.taskId.substring(0, 8)}_${outputIndex + 1}${ext}`;
-              const filePath = getAvailableDownloadPath(fs, path, saveDir, fileName);
-              temporaryPath = `${filePath}.${job.id}.part`;
-              fs.writeFileSync(temporaryPath, buffer);
-              fs.renameSync(temporaryPath, filePath);
-              job.status = 'done';
-              job.filePath = filePath;
-              job.bytes = buffer.length;
-              job.updatedAt = new Date().toISOString();
-              saveDownloadJobs(jobs);
-              downloadedCount++;
-            } catch (e: any) {
-              try {
-                removeExactDownloadPart(fs, path, saveDir, temporaryPath, job.id);
-              } catch {}
-              const classified = classifyDownloadException(e);
-              failures.push(`${task.taskId.slice(0, 8)}: ${classified.message}`);
-              job.status = 'failed';
-              job.error = classified.message;
-              job.updatedAt = new Date().toISOString();
-              saveDownloadJobs(jobs);
-              console.warn(`[tasks:downloadOutputs] 下载产物失败 (${classified.type}):`, e.message);
-            }
-          }
-        }
-
-        return {
-          success: downloadedCount > 0,
-          count: downloadedCount,
-          failed: failures.length,
-          saveDir,
-          error: failures.length ? failures.slice(0, 3).join('；') : undefined,
-          jobIds,
-        };
-      } catch (err: any) {
-        return { success: false, count: 0, failed: 0, error: err.message };
       }
+    }
+    return { success: count > 0, count, failed: failures.length, saveDir, jobIds, error: failures.length ? failures.slice(0, 3).join('；') : undefined };
+  } catch (error: unknown) {
+    return { success: false, count, failed: failures.length, jobIds, error: error instanceof Error ? error.message : '下载服务失败' };
+  }
 }
 export function listTaskDownloads(): DownloadJob[] { return loadDownloadJobs(); }
 export function revisePetStoryHeldPrompt(taskId: string, prompt: string): Task {
@@ -579,8 +476,7 @@ export function registerTaskIPC(): () => void {
       }
       const fs = require('fs') as typeof import('fs');
       const path = require('path') as typeof import('path');
-      const { app } = require('electron') as typeof import('electron');
-      const transientSession = session.fromPartition(`public-share-${uuidv4()}`);
+          const transientSession = session.fromPartition(`public-share-${uuidv4()}`);
       try {
         const fetchPublic = (url: string, init?: Record<string, unknown>) => transientSession.fetch(url, init as RequestInit);
         const resolution = await resolvePublicShareMedia(params.shareUrl, fetchPublic);
@@ -646,8 +542,9 @@ export function registerTaskIPC(): () => void {
     async (
       _event,
       params: TaskUpdateStatusParams
-    ): Promise<{ success: boolean; error?: string }> => {
-      return taskService.updateStatus(params);
+    ): Promise<{ success: boolean; task?: Task; error?: string }> => {
+      const result = taskService.updateStatus(params);
+      return result.success ? { success: true, task: result.data } : result;
     }
   );
 
@@ -686,9 +583,9 @@ export function registerTaskIPC(): () => void {
   // ---- 批量暂停/继续 ----
   ipcMain.handle(
     'tasks:batchPause',
-    async (): Promise<{ success: boolean }> => {
+    async (): Promise<import('@doubao-studio/contracts').TaskBatchPauseResult> => {
       const result = taskService.batchPause();
-      return { success: result.success };
+      return result.success ? { success: true, tasks: result.data } : result;
     }
   );
 
@@ -845,13 +742,17 @@ export function registerTaskIPC(): () => void {
   ipcMain.handle('tasks:listDownloads', async (): Promise<DownloadJob[]> => {
     return loadDownloadJobs();
   });
+  ipcMain.handle('tasks:readDownloadedMedia', async (event, params: { jobId: string }): Promise<import('@doubao-studio/contracts').TaskReadDownloadedMediaResult> => {
+    if (event.senderFrame !== event.sender.mainFrame || event.sender.getType() !== 'window') return { success: false, errorCode: 'HOST_REQUIRED', error: '仅宿主窗口可读取本地视频' };
+    if (!params || typeof params.jobId !== 'string' || !params.jobId) return { success: false, errorCode: 'DOWNLOAD_NOT_FOUND', error: '请重新选择已有下载记录' };
+    return readDownloadedMedia(params.jobId, downloadRepository, localMediaStreams);
+  });
 
   ipcMain.handle(
     'tasks:exportDiagnostics',
     async (): Promise<{ success: boolean; filePath?: string; error?: string }> => {
       try {
         const fs = require('fs');
-        const path = require('path');
         const result = await dialog.showSaveDialog({
           title: '导出诊断包',
           defaultPath: `doubao-studio-diagnostics-${new Date().toISOString().slice(0, 10)}.json`,
@@ -862,6 +763,8 @@ export function registerTaskIPC(): () => void {
         const tasksResult = taskService.buildTaskDiagnostics();
         if (!tasksResult.success) return { success: false, error: tasksResult.error };
         const tasks = tasksResult.data;
+        const rawTasksResult = taskService.getTasks();
+        if (!rawTasksResult.success) return { success: false, error: rawTasksResult.error };
         const accounts = readJSON<Array<Record<string, any>>>('accounts.json', []).map((account) => ({
           id: account.id,
           name: account.name,
@@ -870,22 +773,12 @@ export function registerTaskIPC(): () => void {
           seedanceQuota: account.seedanceQuota,
           health: account.health,
         }));
-        const downloads = loadDownloadJobs().map((job) => ({
-          ...job,
-          url: '[已脱敏]',
-          saveDir: path.basename(job.saveDir),
-          filePath: job.filePath ? path.basename(job.filePath) : undefined,
-        }));
-        const payload = {
-          exportedAt: new Date().toISOString(),
-          appVersion: require('electron').app.getVersion(),
-          platform: process.platform,
-          taskCount: tasks.length,
-          accountCount: accounts.length,
-          tasks,
-          accounts,
-          downloads,
-        };
+        const payload = buildVideoWorkflowDiagnostics({
+          exportedAt: new Date().toISOString(), build: { appVersion: app.getVersion(), platform: process.platform,
+            electronVersion: process.versions.electron, nodeVersion: process.versions.node },
+          tasks: rawTasksResult.data, taskDiagnostics: tasks, accounts, downloads: loadDownloadJobs(),
+          projects: await petStoryDiagnosticsProvider(), adapterReports: readJSON('adapter-diagnostics.json', []), logs: readJSON('logs.json', []),
+        });
         fs.writeFileSync(result.filePath, JSON.stringify(payload, null, 2), 'utf-8');
         return { success: true, filePath: result.filePath };
       } catch (err: any) {
@@ -913,11 +806,9 @@ export function registerTaskIPC(): () => void {
 
   ipcMain.handle(
     'tasks:saveAdapterReport',
-    async (_event, params: TaskSaveAdapterReportParams): Promise<{ success: boolean }> => {
-      const reports = readJSON<Array<Record<string, any>>>('adapter-diagnostics.json', []);
-      reports.push({ ...params.report, accountId: params.accountId, savedAt: new Date().toISOString() });
-      writeJSON('adapter-diagnostics.json', reports.slice(-50));
-      return { success: true };
+    async (_event, params: TaskSaveAdapterReportParams): Promise<{ success: boolean; error?: string }> => {
+      return saveAdapterDiagnostic(params.report, params, { read: (): unknown => readJSON('adapter-diagnostics.json', []),
+        write: (reports: Record<string, unknown>[]): boolean => writeJSON('adapter-diagnostics.json', reports), now: (): string => new Date().toISOString() });
     }
   );
 

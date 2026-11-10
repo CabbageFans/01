@@ -1,3 +1,4 @@
+import { currentRunId } from '../fixtures/taskRunIdentity';
 /** 原五镜头已保存数据派生的离线技术状态；模拟响应不作为豆包产出或业务验收。 */
 import { withOfflineTimingPlan } from '../fixtures/petstoryTimingPlan';
 import fs from 'node:fs/promises';
@@ -48,7 +49,7 @@ async function recordRun(job: PetStoryChatJob, response?: string, active = false
   const task = stored.find((item): boolean => item.id === job.taskId)!; const now = new Date().toISOString();
   const runtime: TaskRunSnapshot = { runId: `TEST-run-${job.id}`, attempt: 1, stage: response ? 'completed' : active ? 'generating' : 'paused', message: '离线原任务状态', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now, submittedAt: now,
     input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] }, ...(response ? { chatResponse: { text: response, capturedAt: now } } : {}) };
-  const result = core.updateRuntime({ taskId: task.id, status: response ? 'done' : active ? 'generating' : 'paused', runtime }); if (!result.success) throw new Error(result.error);
+  const result = core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: response ? 'done' : active ? 'generating' : 'paused', runtime }); if (!result.success) throw new Error(result.error);
   if (!job.runId) p = (await chat.bindRun(p.id, job.id, runtime.runId)).project!;
   return runtime;
 }
@@ -236,7 +237,9 @@ describe('F03 明确结束等待、迟到回复与依赖范围', (): void => {
     expect(pendingChatConflicts(p, { shotId: 'shot_1' })).toEqual([]);
     expect(pendingChatConflicts(p, { shotId: 'shot_5' }).map((item): string => item.id)).toEqual(['TEST-material']);
     p.jobs.pop(); p = await projects.write(p);
-    await recordRun({ ...job, runId: stored[0].runtime!.runId }, undefined, true); p = (await chat.endWaiting(p.id, p.revision, job.id)).project!;
+    // 显式检查原请求才可恢复已暂停运行；迟到generating不能自行复活。
+    const resumed = core.updateRuntime({ taskId: job.taskId, expectedRunId: stored[0].runtime!.runId, status: 'manual_submission_observing', runtime: { stage: 'manual_submission_observing' } });
+    expect(resumed.success).toBe(true); p = (await chat.endWaiting(p.id, p.revision, job.id)).project!;
     expect(pendingChatConflicts(p)).toEqual([]);
     await expect(prepare('shot_5')).rejects.toThrow('活动任务'); expect(stored).toHaveLength(1);
   });
@@ -358,7 +361,7 @@ describe('原待发送请求恢复时重新核对事实', (): void => {
     const body = job.promptKind === 'video' ? simulatedOriginalVideo(job) : snapshot.plan.shots[2].prompts.firstFrame.optimized;
     const runtime: TaskRunSnapshot = { runId: `TEST-held-${job.id}`, attempt: 1, stage: submitted ? 'completed' : 'injecting_prompt', message: 'TEST离线原运行', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
       input: { prompt: task.prompt, mode: 'chat', attachments: task.attachments || [] }, ...(submitted ? { submittedAt: now, chatResponse: { text: response(job, body), capturedAt: now } } : {}) };
-    const saved = core.updateRuntime({ taskId: task.id, status: submitted ? 'done' : 'executing', runtime }); if (!saved.success) throw new Error(saved.error);
+    const saved = core.updateRuntime({ taskId: task.id, expectedRunId: currentRunId(core, task.id), status: submitted ? 'done' : 'executing', runtime }); if (!saved.success) throw new Error(saved.error);
     return runtime;
   }
   it.each(['model', 'facts', 'boundary'] as const)('未提交原hold的%s变化时不允许启动，原任务保留且不创建新请求', async (change: 'model' | 'facts' | 'boundary'): Promise<void> => {

@@ -1,3 +1,4 @@
+declare const __doubaoAssertOperation: (() => void) | undefined;
 import type { VideoControlReadinessResult } from './videoControlReadiness';
 
 export interface CreationModeEntryDiagnostic {
@@ -81,6 +82,7 @@ export async function selectCreationModeFromPage(mode: 'image' | 'video'): Promi
             : `${targetLabel}模式入口未在等待窗口内挂载` } : {}),
   });
   const activate = (element: HTMLElement): boolean => {
+    if (typeof __doubaoAssertOperation === 'function') __doubaoAssertOperation();
     if (!visible(element)) { failureReason = 'changed'; return false; }
     if (element.matches(':disabled') || element.closest('[aria-disabled="true"]')) { failureReason = 'disabled'; return false; }
     const rect = element.getBoundingClientRect();

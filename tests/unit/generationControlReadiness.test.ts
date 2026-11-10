@@ -196,7 +196,7 @@ describe('视频参数控件有界分段等待', () => {
 
 describe('源码安全边界', () => {
   const bridge = readFileSync(resolve(__dirname, '../../src/utils/doubaoBridge.ts'), 'utf8');
-  const panel = readFileSync(resolve(__dirname, '../../src/components/BrowserPanel.tsx'), 'utf8');
+  const panel = readFileSync(resolve(__dirname, '../../src/components/BrowserPanel.tsx'), 'utf8') + '\n' + readFileSync(resolve(__dirname, '../../src/automation/TaskRecoveryCoordinator.ts'), 'utf8') + '\n' + readFileSync(resolve(__dirname, '../../src/automation/TaskExecutionCoordinator.ts'), 'utf8');
 
   it('确认检测函数只读且执行器不发送“确认”', () => {
     const start = bridge.indexOf('export async function inspectGenerationConfirmation');
@@ -208,7 +208,7 @@ describe('源码安全边界', () => {
 
   it('只读恢复必须持有原会话 URL，且不得调用注入或提交函数', () => {
     const start = panel.indexOf('const handleSubmissionReconcile');
-    const end = panel.indexOf("window.addEventListener('reconcile-task-submission'", start);
+    const end = panel.indexOf('return { handleManualSubmission, handleSubmissionReconcileSafely }', start);
     const body = panel.slice(start, end);
     expect(body).toContain('resolveTaskConversationTarget(task)');
     expect(body).toContain("synchronizeConversation(webview, conversationTarget.url, originalContextIsCurrent, 'explicit', observationController?.signal)");

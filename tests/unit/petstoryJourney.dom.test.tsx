@@ -99,7 +99,7 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     expect(screen.getByRole('button', { name: '分析剧本' }).hasAttribute('disabled')).toBe(true);
     await act(async (): Promise<void> => undefined); expect(analyze).not.toHaveBeenCalled();
   });
-  it.each(['制作关键帧', '制作镜头视频'])('%s沿用完整四列画布、故事栏和缩放，不因浏览阶段生成', async (stageName: string): Promise<void> => {
+  it.each(['制作关键帧', '制作镜头视频'])('%s直接显示完整四列画布、故事栏和镜头导航，不因浏览阶段生成', async (stageName: string): Promise<void> => {
     readyMediaJourney(1, 1);
     const generate = vi.fn(async (): Promise<void> => undefined);
     usePetStoryStore.setState({ generateShotMedia: generate }); render(<PetStoryPanel />);
@@ -115,8 +115,11 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     expect(canvas?.querySelector('.canvas-story-column')).not.toBeNull();
     expect(canvas?.querySelector('.canvas-shot-row')?.children.length).toBe(4);
     expect(canvas?.querySelector<HTMLElement>('.canvas-content')?.style.transform).toMatch(/translate.*scale/);
-    expect(screen.getByRole('button', { name: '缩小画布' })).toBeDefined();
-    expect(screen.getByRole('button', { name: '放大画布' })).toBeDefined();
+    expect(canvas?.querySelector('.canvas-toolbar')).toBeNull();
+    const navigation = canvas?.querySelector<HTMLElement>('.canvas-navigation');
+    expect(navigation).not.toBeNull();
+    expect(within(navigation!).getByRole('button', { name: '01' })).toBeDefined();
+    expect(screen.getByRole('button', { name: '聚焦镜头1' })).toBeDefined();
     await act(async (): Promise<void> => undefined); expect(generate).not.toHaveBeenCalled();
   });
   it('画布不显示依赖任务预检卡或跳转，生成仍遵守实际资格且不会创建请求', async (): Promise<void> => {
@@ -210,21 +213,24 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     expect(screen.getByText('待处理事项')).toBeDefined();
     fireEvent.click(button); await act(async (): Promise<void> => undefined); expect(analyze).not.toHaveBeenCalled();
   });
-  it.each(['制作关键帧', '制作镜头视频'])('%s的文字入口明确缺失镜头范围，不恢复素材提示词和顶部待处理面板', async (stageName: string): Promise<void> => {
+  it.each(['制作关键帧', '制作镜头视频'])('%s通过本镜媒体入口准备文字，不恢复顶部批次操作', async (stageName: string): Promise<void> => {
     readyMediaJourney(1, 1);
     const shot = p.plan!.shots[0]; shot.prompts.video.final = '';
     const inspect = vi.fn(async (): Promise<import('@doubao-studio/contracts').PetStoryResult> => ({ success: true, promptTargets: [{ materialId: 'TEST-missing-material' }, { shotId: shot.id, kind: 'video' }] }));
     window.electronAPI.petstory.promptStageTargets = inspect;
-    const generate = vi.fn(async (): Promise<void> => undefined); const continueStage = vi.fn(async (): Promise<void> => undefined);
-    usePetStoryStore.setState({ generateCanvasPrompts: generate, continuePromptStage: continueStage }); render(<PetStoryPanel />);
+    const generate = vi.fn(async (): Promise<void> => undefined); const generateBatch = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ generateShotMedia: generate, generateCanvasPrompts: generateBatch }); render(<PetStoryPanel />);
     await act(async (): Promise<void> => { fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: new RegExp(stageName) })); });
+    expect(document.querySelector('.canvas-toolbar')).toBeNull();
+    expect(screen.queryByRole('button', { name: /补齐提示词|生成镜头提示词/ })).toBeNull();
     expect(screen.queryByRole('button', { name: '去补充素材提示词' })).toBeNull();
     expect(document.querySelector('.journey-recommendation')).toBeNull();
     expect(document.querySelector('.petstory-current-tasks')).toBeNull();
-    const button = await screen.findByRole('button', { name: '补齐提示词（1项）' });
-    expect(button.getAttribute('title')).toBe('生成镜头文字：镜头 1 · 视频提示词'); fireEvent.click(button);
-    await waitFor((): void => expect(generate).toHaveBeenCalledOnce()); expect(continueStage).not.toHaveBeenCalled();
-    expect(inspect.mock.calls.length).toBeLessThanOrEqual(2);
+    const kind = stageName === '制作关键帧' ? 'firstFrame' : 'video';
+    const node = document.querySelector<HTMLElement>(`[data-shot-id="${shot.id}"] [data-media-kind="${kind}"]`)!;
+    fireEvent.click(within(node).getByRole('button', { name: kind === 'firstFrame' ? '生成图片' : /生成视频/ }));
+    await waitFor((): void => expect(generate).toHaveBeenCalledExactlyOnceWith(shot.id, kind));
+    expect(generateBatch).not.toHaveBeenCalled(); expect(inspect.mock.calls.length).toBeLessThanOrEqual(2);
   });
   it('打开画布后资格核对自动同步最新版本与计数，正常确认使用无需用户刷新且不循环查询或发送', async (): Promise<void> => {
     readyMediaJourney(1, 1); const shot = p.plan!.shots[0];
@@ -240,7 +246,8 @@ describe('正常可见的六阶段与直接剧本入口', (): void => {
     usePetStoryStore.setState({ project: p, promptBatch: { total: 2, completed: 0, status: 'paused' }, generateCanvasPrompts: generate });
     render(<PetStoryPanel />);
     await act(async (): Promise<void> => { fireEvent.click(within(screen.getByRole('navigation', { name: '短剧制作阶段' })).getByRole('button', { name: /制作镜头视频/ })); });
-    await waitFor((): void => expect(screen.getByText('已生成 1/2 · 待继续')).toBeDefined());
+    await waitFor((): void => expect(usePetStoryStore.getState().promptBatch).toEqual({ total: 2, completed: 1, status: 'paused' }));
+    expect(document.querySelector('.canvas-toolbar')).toBeNull();
     expect(usePetStoryStore.getState().project?.revision).toBe(corrected.revision);
     fireEvent.click(screen.getByRole('button', { name: '确认使用' }));
     await waitFor((): void => expect(adopt).toHaveBeenCalledExactlyOnceWith(p.id, corrected.revision, job.id));

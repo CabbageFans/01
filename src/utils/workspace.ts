@@ -1,4 +1,5 @@
 import type { Task } from '../types';
+import { localVideoRecoveryAction, videoLocalPhaseLabel } from './videoWorkflowActions';
 import { requiresSubmissionReconciliation } from './realSendStateMachine';
 
 export type WorkspacePage = 'overview' | 'create' | 'tasks' | 'assets' | 'accounts' | 'settings';
@@ -13,6 +14,8 @@ export const WORKSPACE_PAGES: ReadonlyArray<{ id: WorkspacePage; label: string; 
 
 /** 只解释既有任务事实，不创建新状态或改变重试规则。 */
 export function taskNextAction(task: Task): string {
+  const localAction = localVideoRecoveryAction(task); if (localAction) return localAction.label;
+  const localPhase = videoLocalPhaseLabel(task); if (localPhase) return localPhase;
   if (requiresSubmissionReconciliation(task)) return task.status === 'waiting_generation_confirmation' ? '确认参数后只读回读' : '核对原会话';
   if (task.errorInfo?.code?.startsWith('dependency_')) return '查看前置任务';
   if (task.status === 'waiting_verification') return '处理登录或验证';
@@ -27,7 +30,7 @@ export function taskNextAction(task: Task): string {
 
 export function needsTaskAttention(task: Task): boolean {
   return ['paused', 'fail', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(task.status)
-    || !!task.errorInfo?.code?.startsWith('dependency_');
+    || !!localVideoRecoveryAction(task) || !!task.errorInfo?.code?.startsWith('dependency_');
 }
 
 export function navigateWorkspace(page: WorkspacePage, mode?: 'studio' | 'petstory'): void {

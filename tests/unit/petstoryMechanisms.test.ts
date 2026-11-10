@@ -1,3 +1,4 @@
+import { currentRunId } from '../fixtures/taskRunIdentity';
 /** 通用机制回归：正式收取与产品导出，不使用历史五镜头或人工校订稿。 */
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -158,13 +159,13 @@ describe('正式 Chat 与产品导出', (): void => {
     const core=new TaskService({store:{read:list,replace:(items:Task[]):boolean=>{stored=structuredClone(items);return true;}},defaultProjectId:():string=>'TEST-studio',id:():string=>`TEST-chat-${++sequence}`});
     const create=(input:TaskAddParams,accountId:string):Task=>{const result=core.create(input);if(!result.success)throw new Error(result.error);const assigned=core.assign({taskId:result.data[0].id,accountId});if(!assigned.success)throw new Error(assigned.error);return assigned.data;};
     const chat=new PetStoryChatService(projects,{list,create}); const input='请按提供的剧本返回完整 JSON，不生成媒体。'; const prepared=await chat.prepare(project.id,input,'analysis'); const job=prepared.project!.jobs[0]; const task=list()[0]; const now=new Date().toISOString(); const runId='TEST-run';
-    core.updateRuntime({taskId:task.id,status:'executing',runtime:{runId,attempt:1,stage:'submitting',message:'TEST',startedAt:now,stageStartedAt:now,lastHeartbeatAt:now,submittedAt:now,conversationUrl:'https://www.doubao.com/chat/TEST-only',input:{prompt:input,mode:'chat',attachments:task.attachments || []}}});
+    core.updateRuntime({taskId:task.id, expectedRunId: currentRunId(core, task.id),status:'executing',runtime:{runId,attempt:1,stage:'submitting',message:'TEST',startedAt:now,stageStartedAt:now,lastHeartbeatAt:now,submittedAt:now,conversationUrl:'https://www.doubao.com/chat/TEST-only',input:{prompt:input,mode:'chat',attachments:task.attachments || []}}});
     await chat.bindRun(project.id,job.id,runId);
     const answer=plan('library'); answer.characters[0].description='不应覆盖规范身份的模型猜测';
     const raw='```json\n'+JSON.stringify({...answer,storyUsable:true,contentBasis:{beginning:'桌上放册子',middle:'完成交接',ending:'送到借阅台'}})+'\n```';
     const view={getURL:():string=>'https://www.doubao.com/chat/TEST-only',loadURL:vi.fn(),sendInputEvent:vi.fn(),executeJavaScript:vi.fn(async():Promise<unknown>=>({messages:[{role:'user',text:input},{role:'assistant',text:raw,rawText:raw}],editorPresent:true,editorText:'',generating:false}))};
     vi.useFakeTimers(); const capture=readStableChatAnswer(view,input,view.getURL()); await vi.advanceTimersByTimeAsync(3000); const captured=await capture; vi.useRealTimers();
-    expect(captured).toBe(raw); core.updateRuntime({taskId:task.id,runtime:{chatResponse:{text:captured,capturedAt:now}}}); core.updateStatus({taskId:task.id,status:'done',outputs:[]});
+    expect(captured).toBe(raw); core.updateRuntime({taskId:task.id, expectedRunId: currentRunId(core, task.id),runtime:{chatResponse:{text:captured,capturedAt:now}}}); core.updateStatus({taskId:task.id, expectedRunId: currentRunId(core, task.id),status:'done',outputs:[]});
     const collected=await chat.collect(project.id,job.id); expect(collected.success,collected.error).toBe(true); const p=collected.project!;
     expect(p.jobs[0]).toMatchObject({status:'applied',rawText:raw,runId}); expect(p.plan!.characters[0].description).toBe(plan('library').characters[0].description); expect(p.plan!.shots[0].prompts.firstFrame.final).toBe(savedFinal);
     expect(list()).toHaveLength(1); expect(list()[0].mode).toBe('chat'); expect(view.sendInputEvent).not.toHaveBeenCalled();expect(view.loadURL).not.toHaveBeenCalled();

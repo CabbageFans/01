@@ -21,6 +21,7 @@ import type {
   TaskReleaseLockParams,
   TaskRunSnapshot,
   TaskRunRecord,
+  TaskLocalMediaUpdate,
   TaskValidateArtifactParams,
   CompletedOutput,
   AccountPlatform,
@@ -29,7 +30,7 @@ import type {
 import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
 import { isImageExecutionTask, IMAGE_EXECUTION_CONCURRENCY, tasksExecutionConflict } from '../utils/taskExecutionScope';
 import { parseCsv } from '../utils/csv';
-import { normalizeMediaSubmissionReceipt, validPetStoryChatBinding } from '../utils/persistenceNormalization';
+import { normalizeMediaSubmissionReceipt, normalizeTaskLocalMediaInfo, validPetStoryChatBinding } from '../utils/persistenceNormalization';
 
 /** JSON 落盘省略 undefined 并重排白名单字段；仅比较实际数据，原回复字符串仍逐字比较。 */
 function samePersistedChatEvidence(stored: unknown, requested: unknown): boolean {
@@ -253,6 +254,7 @@ function createResubmissionTask(source: Task, input: TaskRunSnapshot['input'], t
   return {
     id: taskId, prompt: input.prompt, assignedAccountId: source.assignedAccountId, mode: input.mode,
     videoConfig: input.videoConfig ? structuredClone(input.videoConfig) : undefined, attachments: [...input.attachments], audioAttachment: input.audioAttachment,
+    videoInputSnapshot: input.videoInputSnapshot ? structuredClone(input.videoInputSnapshot) : undefined,
     petstory: binding ? structuredClone(binding) : undefined, petstoryChat: source.petstoryChat ? structuredClone(source.petstoryChat) : undefined, promptReadback: input.promptReadback || source.promptReadback,
     projectId: source.projectId, batchId: source.batchId, source: source.source,
     dependsOnTaskIds: source.dependsOnTaskIds ? [...source.dependsOnTaskIds] : undefined, dependencyPolicy: source.dependencyPolicy,
@@ -376,10 +378,28 @@ export class TaskService {
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const mode: GenerationMode = params.mode || 'chat';
     if (params.petstoryChat !== undefined && (!validPetStoryChatBinding(params.petstoryChat) || mode !== 'chat' || prompts.length !== 1 || params.petstory)) return { success: false, error: '短剧文字任务归属无效，未创建任务' };
+    if (params.petstory || params.petstoryChat) {
+      if (prompts.length !== 1) return { success: false, error: '一个制作步骤只能对应一个任务' };
+      const existing = tasks.filter((task: Task): boolean => params.petstory
+        ? task.petstory?.projectId === params.petstory.projectId && task.petstory?.stepId === params.petstory.stepId
+        : task.petstoryChat?.projectId === params.petstoryChat?.projectId && task.petstoryChat?.jobId === params.petstoryChat?.jobId);
+      if (existing.length) {
+        const task = existing[0];
+        if (existing.length !== 1 || task.prompt !== prompts[0] || task.mode !== mode
+          || !samePersistedChatEvidence(task.petstory, params.petstory)
+          || !samePersistedChatEvidence(task.petstoryChat, params.petstoryChat)
+          || !samePersistedChatEvidence(task.attachments || [], params.attachments || [])
+          || !samePersistedChatEvidence(task.audioAttachment, params.audioAttachment)
+          || !samePersistedChatEvidence(task.videoConfig, params.videoConfig)
+          || !samePersistedChatEvidence(task.videoInputSnapshot, params.videoInputSnapshot)) return { success: false, error: '原制作步骤已有不同输入或多个任务，请先核对原任务；未创建重复任务' };
+        return { success: true, data: [task] };
+      }
+    }
     const created = prompts.map((prompt): Task => {
       const timestamp = this.now();
       return {
-        id: this.id(), prompt, assignedAccountId: null, status: 'queued', mode,
+        id: this.id(), revision: 0, prompt, assignedAccountId: null, status: 'queued', mode,
+        videoInputSnapshot: params.videoInputSnapshot ? structuredClone(params.videoInputSnapshot) : undefined,
         executionIntent: params.executionIntent || 'hold',
         petstory: params.petstory, petstoryChat: params.petstoryChat ? { ...params.petstoryChat } : undefined, promptReadback: params.promptReadback, videoConfig: params.videoConfig, attachments: params.attachments,
         audioAttachment: params.audioAttachment, result: null, outputs: [], artifacts: [],
@@ -418,6 +438,22 @@ export class TaskService {
     task.prompt = prompt; task.runtime.input.prompt = prompt; task.promptReadback = 'exact'; task.updatedAt = this.now();
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true, data: task };
+  }
+
+  /** 仅显式未发送的模式继续可固定新输入版本；原 runtime.input 与来源快照保持历史。 */
+  revisePetStoryVideoInput(taskId: string, expectedRunId: string, snapshot: NonNullable<Task['videoInputSnapshot']>): TaskServiceResult<Task> {
+    const tasks = this.readTasks(); const task = tasks?.find((item: Task): boolean => item.id === taskId);
+    if (!tasks || !task?.petstory || task.mode !== 'video' || task.status !== 'queued' || task.executionIntent !== 'hold'
+      || task.runtime?.runId !== expectedRunId || !expectedRunId || task.runtime.submittedAt || task.runtime.acceptanceObservation
+      || task.runtime.mediaSubmissionReceipt || task.outputs.length || task.artifacts?.length
+      || snapshot.schemaVersion !== 1 || snapshot.projectId !== task.petstory.projectId || snapshot.stepId !== task.petstory.stepId
+      || snapshot.accountId !== task.assignedAccountId || !Number.isSafeInteger(snapshot.inputVersion) || snapshot.inputVersion < 1
+      || !/^[a-f0-9]{64}$/i.test(snapshot.digest)) return { success: false, error: '仅允许原未发送制作在 hold 状态固定明确的新视频输入', task };
+    if (samePersistedChatEvidence(task.videoInputSnapshot, snapshot)) return { success: true, data: task };
+    if (task.videoInputSnapshot && snapshot.inputVersion <= task.videoInputSnapshot.inputVersion) return { success: false, error: '视频输入版本未递增，保留原快照', task };
+    task.videoInputSnapshot = structuredClone(snapshot); task.updatedAt = this.now();
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: true, data: this.readPersistedTask(taskId) || task };
   }
   /** 仅显式保存业务草稿时更新未运行 hold 的全文；不改变原任务身份及附件。 */
   reviseHeldPrompt(taskId: string, prompt: string): TaskServiceResult<Task> {
@@ -462,12 +498,15 @@ export class TaskService {
     return { success: true, data: task };
   }
 
-  updateStatus(params: TaskUpdateStatusParams): TaskServiceResult {
+  updateStatus(params: TaskUpdateStatusParams): TaskServiceResult<Task> {
     const tasks = this.readTasks();
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
-    if (params.status === 'cancelled' && task.runtime?.chatAdjustmentGuard?.active) return { success: false, error: '该任务正在保护豆包创作对话，请先采用回复或结束调整' };
+    if (params.expectedRunId !== undefined && params.expectedRunId !== task.runtime?.runId) return this.receiveHistoricalOutputs(tasks, task, params);
+    if (task.status === 'cancelled' && params.outputs?.length && params.expectedRunId) return this.receiveHistoricalOutputs(tasks, task, params);
+    const rejected = this.statusUpdateError(task, params);
+    if (rejected) return { success: false, error: rejected, task };
     task.status = params.status;
     if (params.result !== undefined) task.result = params.result;
     const timestamp = this.now();
@@ -488,23 +527,131 @@ export class TaskService {
       task.errorInfo = undefined;
       const runtime = task.runtime;
       const observation = runtime?.acceptanceObservation;
-      const artifact = task.artifacts?.find((item) => item.runId === task.runtime?.runId) || task.artifacts?.[0];
-      if (runtime && observation && artifact) {
+      const artifact = task.artifacts?.find((item) => item.runId === task.runtime?.runId);
+      if (runtime && observation) {
         task.runtime = {
           ...runtime,
           acceptanceObservation: {
             ...observation,
-            expectedArtifact: { ...observation.expectedArtifact, artifactId: artifact.id },
+            expectedArtifact: { ...observation.expectedArtifact, ...(artifact ? { artifactId: artifact.id } : {}) },
             lease: { ...observation.lease, lastHeartbeatAt: timestamp, expiresAt: timestamp },
             outcome: 'completed',
             completedAt: timestamp,
           },
         };
       }
+      this.completeRunStage(task, timestamp);
     }
     task.updatedAt = timestamp;
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
-    return { success: true };
+    return { success: true, data: this.readPersistedTask(task.id) || task };
+  }
+
+  private statusUpdateError(task: Task, params: TaskUpdateStatusParams): string | undefined {
+    if (params.expectedRevision !== undefined && params.expectedRevision !== (task.revision || 0)) return '任务版本已变化，未覆盖新状态';
+    if (task.runtime && !params.expectedRunId && params.expectedRevision === undefined) return '运行状态更新必须绑定原运行或版本，未更新';
+    if (task.runtime && params.outputs !== undefined && !params.expectedRunId) return '媒体产物必须绑定原运行，未登记';
+    if (task.status === 'done' && params.status !== 'done') return '已完成运行不能被迟到状态覆盖';
+    if (task.status === 'cancelled' && params.status !== 'cancelled') return '本地等待已正式结束，迟到结果仅可保留原运行历史';
+    if (task.mode === 'chat' && task.runtime && params.status === 'done' && !task.runtime.chatResponse?.text.trim()) return '原文字回复尚未保存，不能标记完成';
+    if (params.status === 'cancelled' && task.runtime?.chatAdjustmentGuard?.active) return '该任务正在保护豆包创作对话，请先采用回复或结束调整';
+    return undefined;
+  }
+
+  /** 产物、队列终态和运行终态必须同次落盘，不依赖Renderer第二次补写完成阶段。 */
+  private completeRunStage(task: Task, timestamp: string): void {
+    const runtime = task.runtime;
+    if (!runtime) return;
+    if (runtime.stage !== 'completed') {
+      const history = structuredClone(runtime.phaseHistory?.length ? runtime.phaseHistory : [{ stage: runtime.stage, enteredAt: runtime.stageStartedAt }]);
+      history[history.length - 1].leftAt = timestamp;
+      runtime.phaseHistory = [...history, { stage: 'completed' as const, enteredAt: timestamp }].slice(-64);
+      runtime.stageStartedAt = timestamp;
+    }
+    runtime.stage = 'completed'; runtime.message = '生成完成'; runtime.lastHeartbeatAt = timestamp;
+    const record = task.runHistory?.find((run: TaskRunRecord): boolean => run.runId === runtime.runId);
+    if (record && (record.outcome !== 'done' || !record.finishedAt)) {
+      record.finishedAt = timestamp; record.finalStage = 'completed'; record.outcome = 'done'; record.errorCode = undefined;
+      const elapsed = Date.parse(timestamp) - Date.parse(record.startedAt);
+      record.durationMs = Number.isFinite(elapsed) ? Math.max(0, elapsed) : undefined;
+    }
+  }
+
+  /** 已知旧运行的迟到产物只追加历史；当前 status、outputs 和 runtime 永不被借用。 */
+  private receiveHistoricalOutputs(tasks: Task[], task: Task, params: TaskUpdateStatusParams): TaskServiceResult<Task> {
+    const runId = params.expectedRunId;
+    if (!runId || !params.outputs?.length || !(task.runtime?.runId === runId || task.runHistory?.some((record: TaskRunRecord): boolean => record.runId === runId))) {
+      return { success: false, error: '原任务运行已变化，未登记迟到产物', task };
+    }
+    const timestamp = this.now(); const artifacts = [...(task.artifacts || [])];
+    for (const url of [...new Set(params.outputs.filter(Boolean))]) {
+      if (artifacts.some((artifact: TaskArtifact): boolean => artifact.runId === runId && artifact.url === url)) continue;
+      artifacts.push({ id: artifactId(`${runId}:${url}`), runId, url, kind: task.mode === 'video' ? 'video' : task.mode === 'image' ? 'image' : 'file',
+        source: 'network', discoveredAt: timestamp });
+    }
+    task.artifacts = artifacts; task.updatedAt = timestamp;
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: false, error: '原运行已停止或变化，迟到产物已保留在原运行历史；未修改当前结果', task: this.readPersistedTask(task.id) || task };
+  }
+
+  /** 原运行的本地媒体命令；不改变远端完成事实，不接收仅taskId的异步媒体回执。 */
+  updateLocalMedia(taskId: string, runId: string, patch: TaskLocalMediaUpdate): TaskServiceResult<Task> {
+    const tasks = this.readTasks(); const task = tasks?.find((item: Task): boolean => item.id === taskId);
+    if (!tasks || !task?.runtime || task.runtime.runId !== runId || task.status !== 'done'
+      || !task.artifacts?.some((artifact: TaskArtifact): boolean => artifact.id === patch.artifactId && artifact.runId === runId)
+      || patch.operationId !== `media:${runId}:${patch.artifactId}`) return { success: false, error: '本地媒体回执与原运行或产物不符，未更新', task };
+    const previous = task.runtime.localMedia;
+    const mergedUpdate = this.mergeLocalMediaUpdate(previous, patch);
+    const rejected = this.localMediaUpdateError(task, mergedUpdate);
+    if (rejected) return { success: false, error: rejected, task };
+    const { expectedRevision: _expectedRevision, ...mediaUpdate } = mergedUpdate;
+    if (previous && samePersistedChatEvidence({ ...previous, updatedAt: undefined, phaseHistory: undefined }, mediaUpdate)) return { success: true, data: task };
+    const timestamp = this.now();
+    const history = structuredClone(previous?.phaseHistory || []);
+    if (!history.length || history[history.length - 1].phase !== patch.phase || history[history.length - 1].state !== patch.state) {
+      if (history.length) history[history.length - 1].leftAt = timestamp;
+      history.push({ phase: patch.phase, state: patch.state, enteredAt: timestamp });
+    }
+    task.runtime.localMedia = { ...structuredClone(mediaUpdate), updatedAt: timestamp, phaseHistory: history.slice(-64) };
+    task.runtime.lastHeartbeatAt = timestamp; task.updatedAt = timestamp;
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: true, data: this.readPersistedTask(taskId) || task };
+  }
+
+  private mergeLocalMediaUpdate(previous: TaskRunSnapshot['localMedia'], patch: TaskLocalMediaUpdate): TaskLocalMediaUpdate {
+    return { expectedRevision: patch.expectedRevision, operationId: patch.operationId, artifactId: patch.artifactId, phase: patch.phase, state: patch.state, error: patch.error,
+      inputVersion: patch.inputVersion ?? previous?.inputVersion, inputDigest: patch.inputDigest ?? previous?.inputDigest,
+      downloadJobId: patch.downloadJobId ?? previous?.downloadJobId, assetId: patch.assetId ?? previous?.assetId,
+      sha256: patch.sha256 ?? previous?.sha256, mediaInfo: patch.mediaInfo ?? previous?.mediaInfo };
+  }
+
+  private localMediaUpdateError(task: Task, patch: TaskLocalMediaUpdate): string | undefined {
+    const previous = task.runtime?.localMedia;
+    const snapshot = task.runtime?.input.videoInputSnapshot;
+    if (patch.expectedRevision !== undefined && patch.expectedRevision !== (task.revision || 0)) return '本地媒体运行版本已变化，未接收迟到结果';
+    if (snapshot && (patch.inputVersion !== snapshot.inputVersion || patch.inputDigest !== snapshot.digest)) return '本地媒体输入版本与原运行不符';
+    const phases: TaskLocalMediaUpdate['phase'][] = ['downloading', 'downloaded', 'validating', 'library', 'ready'];
+    if (!phases.includes(patch.phase) || !['working', 'paused', 'failed', 'ready'].includes(patch.state)) return '本地媒体阶段无效';
+    const invalidResult = this.localMediaResultError(patch);
+    if (invalidResult) return invalidResult;
+    if (!previous) return undefined;
+    if (previous.assetId && patch.assetId !== previous.assetId) return '原入库资产身份已固定，未改建另一项资产';
+    if (previous.downloadJobId && patch.downloadJobId !== previous.downloadJobId) return '原下载身份已固定，未改绑其他下载';
+    if (previous.operationId !== patch.operationId || previous.artifactId !== patch.artifactId) return '原运行已有本地产物处理，不能接入其他操作';
+    if (previous.state === 'paused' && patch.state === 'failed') return '本地等待已暂停，迟到错误不能覆盖暂停事实';
+    if (phases.indexOf(patch.phase) < phases.indexOf(previous.phase)) return '本地媒体回执早于当前阶段，未回退';
+    if (previous.state === 'ready' && (patch.state !== 'ready' || patch.assetId !== previous.assetId || patch.sha256 !== previous.sha256
+      || patch.downloadJobId !== previous.downloadJobId)) return '本地媒体已入库，迟到回执不能撤销或替换';
+    if (['failed', 'paused'].includes(previous.state) && patch.state === 'working' && patch.phase !== previous.phase) return '请明确重试原失败阶段，未跳过本地检查';
+    return undefined;
+  }
+
+  private localMediaResultError(patch: TaskLocalMediaUpdate): string | undefined {
+    if (patch.mediaInfo && (!samePersistedChatEvidence(normalizeTaskLocalMediaInfo(patch.mediaInfo), patch.mediaInfo)
+      || patch.sha256 && patch.sha256 !== patch.mediaInfo.sha256)) return '本地媒体检测信息无效或与文件摘要不符';
+    if ((patch.phase === 'ready') !== (patch.state === 'ready')) return '本地媒体完成状态必须与就绪阶段一致';
+    if (patch.state === 'ready' && (!patch.assetId || !patch.downloadJobId || !patch.sha256 || !/^[a-f0-9]{64}$/i.test(patch.sha256))) return '本地媒体尚缺入库资产、下载或文件摘要';
+    return undefined;
   }
 
   delete(taskId: string): TaskServiceResult {
@@ -514,6 +661,7 @@ export class TaskService {
     if (index < 0) return { success: false, error: '任务不存在' };
     if (tasks[index].runtime?.chatAdjustmentGuard?.active) return { success: false, error: '该任务正在保护豆包创作对话，请先采用回复或结束调整' };
     if (ACTIVE.has(tasks[index].status)) return { success: false, error: '任务正在执行，请先暂停后再删除' };
+    if (tasks[index].runtime?.localMedia?.state === 'working') return { success: false, error: '原视频仍在下载、校验或入库，请先停止本地等待后再清理任务' };
     const dependentCount = tasks.filter((task) => task.dependsOnTaskIds?.includes(taskId)).length;
     if (dependentCount > 0) return { success: false, error: `仍有 ${dependentCount} 个任务依赖此任务，请先调整依赖关系` };
     tasks.splice(index, 1);
@@ -597,29 +745,47 @@ export class TaskService {
     return { success: true, data: created };
   }
 
-  batchPause(): TaskServiceResult {
+  batchPause(): TaskServiceResult<Task[]> {
     const tasks = this.readTasks();
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const timestamp = this.now();
     let changed = false;
     for (const task of tasks) {
-      // 该状态已经释放执行锁，但平台侧仍停在一次已提交请求的人工确认边界。
-      // 批量暂停不得把它降级成普通 cancelled，否则会丢失禁止重发保护。
-      if (task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing') continue;
+      // 停止的是本地等待；提交、平台确认与原消息证据完整保留，仍禁止普通重发。
       if (ACTIVE.has(task.status)) {
         task.status = 'paused';
         task.result = '批量暂停';
         task.errorInfo = { code: 'cancelled', message: '批量暂停', recoverable: true, detectedAt: timestamp };
-        if (task.runtime) {
-          task.runtime = { ...task.runtime, stage: 'paused', message: '批量暂停', stageStartedAt: timestamp, lastHeartbeatAt: timestamp };
-        }
+        this.pauseBatchRun(task, timestamp);
         task.updatedAt = timestamp;
         changed = true;
       }
     }
-    if (!changed) return { success: true };
+    if (!changed) return { success: true, data: tasks };
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
-    return { success: true };
+    const saved = this.readTasks();
+    return saved ? { success: true, data: saved } : { success: false, error: WRITE_ERROR };
+  }
+
+  private pauseBatchRun(task: Task, timestamp: string): void {
+    const runtime = task.runtime;
+    if (!runtime) return;
+    const history = structuredClone(runtime.phaseHistory?.length ? runtime.phaseHistory : [{ stage: runtime.stage, enteredAt: runtime.stageStartedAt }]);
+    if (runtime.stage !== 'paused') {
+      history[history.length - 1].leftAt = timestamp;
+      history.push({ stage: 'paused', enteredAt: timestamp });
+    }
+    task.runtime = { ...runtime, stage: 'paused', message: '批量暂停', stageStartedAt: timestamp, lastHeartbeatAt: timestamp, phaseHistory: history.slice(-64),
+      ...(runtime.acceptanceObservation ? { acceptanceObservation: { ...runtime.acceptanceObservation, outcome: 'manual_review',
+        lease: { ...runtime.acceptanceObservation.lease, expiresAt: timestamp, lastHeartbeatAt: timestamp } } } : {}),
+      ...(runtime.manualObservation ? { manualObservation: { ...runtime.manualObservation, outcome: 'manual_review', lastCheckedAt: timestamp } } : {}),
+    };
+    const record = task.runHistory?.find((item: TaskRunRecord): boolean => item.runId === runtime.runId);
+    if (record) {
+      record.finishedAt = timestamp; record.outcome = 'paused'; record.finalStage = 'paused'; record.errorCode = 'cancelled';
+      const elapsed = Date.parse(timestamp) - Date.parse(record.startedAt);
+      if (Number.isFinite(elapsed)) record.durationMs = Math.max(0, elapsed);
+    }
   }
 
   recoverInterruptedTasks(): TaskServiceResult<TaskRecoverySummary> {
@@ -632,6 +798,7 @@ export class TaskService {
     let changed = false;
 
     for (const task of tasks) {
+      if (this.pauseInterruptedLocalMedia(task, timestamp)) { changed = true; recoveredTasks++; }
       const acceptedObservation = task.runtime?.acceptanceObservation;
       const orphanedObservation = isOrphanedSubmissionObservation(task);
       if (task.status === 'generating' && acceptedObservation?.outcome === 'observing' &&
@@ -717,6 +884,17 @@ export class TaskService {
     return { success: true, data: { recoveredTasks, clearedLocks } };
   }
 
+  private pauseInterruptedLocalMedia(task: Task, timestamp: string): boolean {
+    if (!task.runtime || task.runtime.localMedia?.state !== 'working') return false;
+    const local = task.runtime.localMedia; const history = structuredClone(local.phaseHistory || []);
+    if (history.length) history[history.length - 1].leftAt = timestamp;
+    history.push({ phase: local.phase, state: 'paused', enteredAt: timestamp });
+    task.runtime.localMedia = { ...local, state: 'paused', updatedAt: timestamp, phaseHistory: history.slice(-64),
+      error: { code: 'local_media_interrupted', message: '程序重启，本地媒体处理已暂停，可继续原阶段' } };
+    task.updatedAt = timestamp;
+    return true;
+  }
+
   /**
    * 按请求构造回读校验条件：只有显式请求的字段才参与比较，
    * 未请求的字段保持缺省（= 不校验），明确请求清空时才要求回读为空。
@@ -748,10 +926,56 @@ export class TaskService {
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
+    if (params.expectedRevision !== undefined && params.expectedRevision !== (task.revision || 0)) return { success: false, error: '任务版本已变化，未覆盖新状态', task };
     if (params.expectedRunId !== undefined && (typeof params.expectedRunId !== 'string' || !params.expectedRunId || task.runtime?.runId !== params.expectedRunId)) {
-      return { success: false, error: '原任务运行已变化，未更新运行状态' };
+      return { success: false, error: '原任务运行已变化，未更新运行状态', task };
     }
+    if (task.runtime && (params.status !== undefined || params.errorInfo !== undefined || params.result !== undefined)
+      && !params.expectedRunId && params.expectedRevision === undefined) return { success: false, error: '运行状态与错误更新必须绑定原运行或版本，未更新', task };
+    if (task.runtime && params.runtime && !params.expectedRunId) return { success: false, error: '运行阶段与证据更新必须绑定原运行身份', task };
     if (params.runtime && Object.prototype.hasOwnProperty.call(params.runtime, 'chatAdjustmentGuard')) return { success: false, error: '对话保护只能由对应创作调整操作更新' };
+    if (params.runtime && Object.prototype.hasOwnProperty.call(params.runtime, 'localMedia')) return { success: false, error: '本地媒体阶段只能由原产物处理命令更新', task };
+    if (params.runtime?.lastHeartbeatAt && task.runtime?.lastHeartbeatAt
+      && Date.parse(params.runtime.lastHeartbeatAt) < Date.parse(task.runtime.lastHeartbeatAt)) return { success: false, error: '运行回执早于当前阶段，未覆盖新状态', task };
+    const replacingRun = !!params.runtime?.runId && params.runtime.runId !== task.runtime?.runId;
+    if (task.status === 'cancelled' && !replacingRun && (params.status && params.status !== 'cancelled'
+      || params.runtime?.stage && params.runtime.stage !== 'cancelled' || params.runtime?.acceptanceObservation?.outcome === 'observing')) {
+      return { success: false, error: '本地等待已正式结束，迟到回执不能重新激活原运行', task };
+    }
+    if (replacingRun && task.runtime && (params.expectedRunId !== task.runtime.runId
+      || !params.runtime?.attempt || params.runtime.attempt <= task.runtime.attempt)) return { success: false, error: '新运行必须基于原运行身份并递增尝试序号', task };
+    if (task.status === 'done' && !replacingRun && (params.status && params.status !== 'done'
+      || params.runtime?.stage && params.runtime.stage !== 'completed')) return { success: false, error: '已完成运行不能被迟到阶段覆盖', task };
+    if (!replacingRun && ['paused', 'fail', 'cancelled'].includes(task.status)
+      && (params.status === 'executing' || params.status === 'generating'
+        || params.runtime?.stage && !['paused', 'failed', 'cancelled', 'completed'].includes(params.runtime.stage)
+          && params.status !== 'queued' && params.status !== 'manual_submission_observing')) {
+      return { success: false, error: '已停止运行不能由迟到阶段重新激活，请显式继续原观察或重新准备', task };
+    }
+    if (!replacingRun && params.runtime?.input && !samePersistedChatEvidence(params.runtime.input, task.runtime?.input)) return { success: false, error: '运行输入已固定，修改草稿不能改写原运行', task };
+    if (replacingRun && task.runtime?.submittedAt && task.status !== 'done') return { success: false, error: '原运行已有提交事实，必须保留并通过关联新任务重发', task };
+    const submission = params.runtime?.submission;
+    if (submission) {
+      const previous = task.runtime?.submission;
+      if (!params.expectedRunId || submission.runId !== task.runtime?.runId || submission.schemaVersion !== 1 || !submission.operationId.trim()
+        || !Number.isFinite(Date.parse(submission.updatedAt))) return { success: false, error: '提交事实必须绑定当前原运行', task };
+      if (previous && (previous.runId !== submission.runId || previous.operationId !== submission.operationId)
+        && previous.state !== 'not_dispatched') return { success: false, error: '本次运行已有最终派发意图，禁止重复激活', task };
+      if (previous?.state === 'accepted' && submission.state !== 'accepted'
+        || submission.state === 'not_dispatched' && (!previous || previous.operationId !== submission.operationId || !!(task.runtime?.acceptanceObservation || task.runtime?.mediaSubmissionReceipt || task.outputs.length))
+        || submission.state === 'intent_saved' && (previous?.state === 'dispatch_unknown' || previous?.state === 'accepted')) return { success: false, error: '已有平台提交证据，不能回退为未派发', task };
+      if (submission.state === 'not_dispatched') {
+        params = { ...params, runtime: { ...params.runtime, submittedAt: undefined } };
+      } else if ((submission.state === 'dispatch_unknown' || submission.state === 'accepted') && !(params.runtime?.submittedAt || task.runtime?.submittedAt)) {
+        return { success: false, error: '派发事实缺少原尝试时间', task };
+      }
+    }
+    const accepted = params.runtime?.acceptanceObservation;
+    if (accepted && (accepted.runId !== task.runtime?.runId || accepted.accountId !== task.assignedAccountId
+      || accepted.expectedArtifact.runId !== task.runtime.runId || !(params.runtime?.submittedAt || task.runtime.submittedAt)
+      || accepted.conversationUrl !== (params.runtime?.conversationUrl || task.runtime.conversationUrl))) {
+      return { success: false, error: '平台受理回执与原账号、运行或会话不符，未绑定', task };
+    }
     if (task.runtime?.chatAdjustmentGuard?.active && params.runtime && Object.prototype.hasOwnProperty.call(params.runtime, 'runId') && params.runtime.runId !== task.runtime.runId) return { success: false, error: '自由对话调整尚未结束，不得替换原运行' };
 
     const chatEvidenceRunIds = [params.runtime?.chatReadback?.runId, params.runtime?.chatReadbackReview?.runId].filter((runId): runId is string => runId !== undefined);
@@ -805,10 +1029,18 @@ export class TaskService {
       // 新 run 必须替换而不是合并旧快照。否则旧 submittedAt/conversationUrl 会
       // 穿透到改派后的新运行，防重复门禁会把安全的新提交误判为二次发送。
       // runHistory 只保留运行摘要；不明提交必须保留原 Task 快照并显式建立关联新任务。
+      const previousStage = task.runtime?.stage;
+      const previousHistory = task.runtime?.phaseHistory;
       task.runtime = (startsNewRun
         ? { ...params.runtime }
         : { ...(task.runtime || {}), ...params.runtime }) as TaskRunSnapshot;
       const runtime = task.runtime;
+      if (startsNewRun || !previousHistory?.length) runtime.phaseHistory = [{ stage: runtime.stage, enteredAt: timestamp }];
+      else if (previousStage !== runtime.stage) {
+        const history = structuredClone(previousHistory);
+        history[history.length - 1].leftAt = timestamp;
+        runtime.phaseHistory = [...history, { stage: runtime.stage, enteredAt: timestamp }].slice(-64);
+      } else runtime.phaseHistory = previousHistory;
       task.runHistory = task.runHistory || [];
       let record = task.runHistory.find((item) => item.runId === runtime.runId);
       if (!record && runtime.runId && runtime.startedAt) {
@@ -1240,6 +1472,9 @@ export class TaskService {
         .filter((task) => task.status === 'done' && task.outputs.length > 0)
         .map((task) => ({
           taskId: task.id,
+          ...(task.runtime?.runId ? { runId: task.runtime.runId } : {}),
+          ...(task.runtime?.runId && task.outputs.every((url: string): boolean => !!task.artifacts?.some((artifact: TaskArtifact): boolean => artifact.runId === task.runtime?.runId && artifact.url === url))
+            ? { artifactIds: (task.artifacts || []).filter((artifact: TaskArtifact): boolean => artifact.runId === task.runtime?.runId && task.outputs.includes(artifact.url)).map((artifact: TaskArtifact): string => artifact.id) } : {}),
           prompt: task.prompt,
           outputs: task.outputs,
           accountId: task.assignedAccountId,
@@ -1265,11 +1500,17 @@ export class TaskService {
       acceptanceObservation: runtime.acceptanceObservation ? { ...runtime.acceptanceObservation, conversationUrl: '[已脱敏]' } : undefined,
       input: {
         ...runtime.input,
+        videoInputSnapshot: this.diagnosticVideoInput(runtime.input.videoInputSnapshot),
         prompt: `[已脱敏，长度 ${runtime.input.prompt.length}]`,
         attachments: runtime.input.attachments.map((item: string): string => this.basename(item)),
         audioAttachment: runtime.input.audioAttachment ? this.basename(runtime.input.audioAttachment) : undefined,
       },
     };
+  }
+
+  private diagnosticVideoInput(snapshot: Task['videoInputSnapshot']): Task['videoInputSnapshot'] {
+    if (!snapshot) return undefined;
+    return { ...snapshot, sourceText: `[已脱敏，长度 ${snapshot.sourceText.length}]`, dialogue: `[已脱敏，长度 ${snapshot.dialogue.length}]`, prompt: `[已脱敏，长度 ${snapshot.prompt.length}]` };
   }
 
   buildTaskDiagnostics(): TaskServiceResult<Task[]> {
@@ -1279,12 +1520,13 @@ export class TaskService {
       success: true,
       data: tasks.map((task) => ({
         ...task,
+        videoInputSnapshot: this.diagnosticVideoInput(task.videoInputSnapshot),
         prompt: `[已脱敏，长度 ${task.prompt.length}]`,
         runtime: this.diagnosticRuntime(task.runtime),
         attachments: (task.attachments || []).map((item) => this.basename(item)),
         audioAttachment: task.audioAttachment ? this.basename(task.audioAttachment) : undefined,
         outputs: task.outputs.map((_, index) => `[产物地址 ${index + 1}]`),
-        artifacts: (task.artifacts || []).map((artifact) => ({ ...artifact, url: '[已脱敏]' })),
+        artifacts: (task.artifacts || []).map((artifact) => ({ ...artifact, url: '[已脱敏]', conversationUrl: artifact.conversationUrl ? '[已脱敏]' : undefined })),
       })),
     };
   }

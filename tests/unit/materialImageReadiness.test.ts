@@ -1,9 +1,5 @@
 /** 离线运行真实执行入口和catch；输入区就绪由事件promise提供，不访问豆包或发送。 */
-import fs from 'node:fs';
-import path from 'node:path';
-import vm from 'node:vm';
-import ts from 'typescript';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AccountAvailability, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { availabilityBlocksAutomation } from '../../src/utils/accountAvailability';
 import { getTaskExecutionScope, isMaterialImageTask, usesIndependentImagePage } from '../../src/utils/taskExecutionScope';
@@ -14,23 +10,22 @@ import { PetStoryControlError } from '../../src/utils/doubaoBridge';
 import { VideoControlReadinessError } from '../../src/utils/videoControlReadiness';
 import { ChatAttachmentUploadError } from '../../src/utils/chatAttachments';
 
+import { executeTaskAutomation, type TaskExecutionHost } from '../../src/automation/TaskExecutionCoordinator';
+import { AccountAvailabilityPauseError, SubmissionSafetyPauseError, GenerationConfirmationPauseError, resumableRepairDraft } from '../../src/automation/taskExecutionSupport';
+import { useTaskStore } from '../../src/store/useTaskStore';
+import { useAccountStore } from '../../src/store/useAccountStore';
+import { usePetStoryStore } from '../../src/store/usePetStoryStore';
+import { automationEngine } from '../../src/automation/AutomationEngine';
+import { initializationGate } from '../../src/utils/initializationGate';
+import * as bridge from '../../src/utils/doubaoBridge';
+import * as hydration from '../../src/utils/webviewHydration';
+import { notification } from 'antd';
+import { MaterialImagePages } from '../../src/utils/materialImagePages';
+afterEach(async (): Promise<void> => { await new Promise<void>((resolve): void => { setTimeout(resolve, 0); }); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
 type ExecuteAutomation = (accountId: string, taskId: string, prompt: string, mode: string, webview: object) => Promise<void>;
 type RuntimePatch = Partial<Omit<Task, 'runtime'>> & { runtime?: Partial<NonNullable<Task['runtime']>> };
 type PauseOptions = { status: Task['status']; code: string };
-
-function actual<T>(name: string, bindings: Record<string, unknown> = {}): T {
-  const file = ts.createSourceFile('BrowserPanel.tsx', fs.readFileSync(path.resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
-  let expression = '';
-  const visit = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && node.name.getText(file) === name) expression = node.initializer!.getText(file);
-    if (ts.isClassDeclaration(node) && node.name?.getText(file) === name) expression = node.getText(file);
-    if (ts.isFunctionDeclaration(node) && node.name?.getText(file) === name) expression = node.getText(file);
-    ts.forEachChild(node, visit);
-  };
-  visit(file); if (!expression) throw new Error(`TEST actual ${name} not found`);
-  const script = ts.transpileModule(`(${expression})`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
-  return vm.runInNewContext(script, { ...bindings, Error, Date, AbortController, DOMException, setTimeout, clearTimeout }) as T;
-}
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve: (value: T) => void = (): void => { throw new Error('TEST promise not initialized'); };
@@ -42,7 +37,7 @@ function evidence(state: AccountAvailability['state'], reason: string): AccountA
 }
 
 interface FixtureOptions {
-  mode?: 'chat' | 'image';
+  mode?: 'chat' | 'image' | 'video';
   target?: 'material' | 'firstFrame' | 'lastFrame';
   visible?: boolean;
 }
@@ -59,20 +54,28 @@ function fixture(availability: AccountAvailability, options: FixtureOptions = {}
   const mode = options.mode || 'chat';
   const target = options.target || 'material';
   const binding = { projectId: 'TEST-project', jobId: 'TEST-job', imageOperationId: 'TEST-op', ...(target === 'material' ? { materialId: 'character:TEST-person' } : {}) };
-  const productionBinding = { projectId: binding.projectId, stepId: 'TEST-step', imageOperationId: binding.imageOperationId, materialId: binding.materialId };
+  const productionBinding = { projectId: binding.projectId, stepId: 'TEST-step', ...(mode === 'video' ? {} : { imageOperationId: binding.imageOperationId, materialId: binding.materialId }) };
   let task: Task = { id: 'TEST-preparing-image', projectId: 'TEST-studio', assignedAccountId: 'TEST-account', mode, status: 'executing',
     prompt: 'TEST 图片操作的后台准备请求', ...(mode === 'chat' ? { petstoryChat: binding } : { petstory: productionBinding }), executionIntent: 'armed', promptReadback: 'exact', outputs: [], result: null,
     createdAt: now, updatedAt: now, runtime: { runId: 'TEST-run', attempt: 1, stage: 'preparing_account', message: '', startedAt: now,
-      stageStartedAt: now, lastHeartbeatAt: now, input: { mode, prompt: 'TEST 图片操作的后台准备请求', attachments: [], ...(mode === 'image' ? { petstory: productionBinding } : {}) } } };
+      stageStartedAt: now, lastHeartbeatAt: now, input: { mode, prompt: 'TEST 图片操作的后台准备请求', attachments: [], ...(mode !== 'chat' ? { petstory: productionBinding } : {}) } } };
   const project: PetStoryProject = { id: 'TEST-project', schemaVersion: 1, revision: 1, studioProjectId: 'TEST-studio', accountId: 'TEST-account',
     source: { kind: 'script', url: '', status: 'review_required' }, assets: [], updatedAt: now,
     jobs: [{ id: binding.jobId, taskId: task.id, kind: 'materialPrompt', materialId: binding.materialId, status: 'bound', inputHash: 'TEST', sourceUrl: '', createdAt: now }],
     imageOperations: [{ id: binding.imageOperationId, requestId: 'TEST-request', target: target === 'material' ? { materialId: 'character:TEST-person' } : { shotId: 'TEST-shot', kind: target }, mode: 'generate', stage: mode === 'chat' ? 'preparing' : 'generating', basisHash: 'TEST', createdAt: now, chatJobId: binding.jobId, ...(mode === 'image' ? { taskId: task.id } : {}) }] };
+  if (mode === 'video') {
+    const unknown = { state: 'unknown' as const, reason: 'TEST fixture not a platform capability claim' };
+    project.imageOperations = []; project.jobs = [];
+    project.production = { state: 'running', planHash: 'TEST', approvedAt: now, message: '',
+      capability: { accountId: project.accountId, image: unknown, modes: { first_frame: unknown, first_last_frame: unknown, reference: unknown }, durations: [] },
+      fallbacks: {}, shots: { 'TEST-shot': { requestedMode: 'first_frame', resolvedMode: 'first_frame', reason: 'TEST' } },
+      steps: [{ id: productionBinding.stepId, shotId: 'TEST-shot', taskId: task.id, runId: task.runtime!.runId, kind: 'video', status: 'bound', inputHash: 'TEST', attachmentAssetIds: [] }] };
+  }
   const readiness = deferred<boolean>(); const entered = deferred<void>();
   const view = { getURL: vi.fn((): string => 'https://www.doubao.com/chat/'), executeJavaScript: vi.fn(), loadURL: vi.fn(), sendInputEvent: vi.fn() };
   const waitForChatReady = vi.fn(async (): Promise<boolean> => { entered.resolve(); return readiness.promise; });
   const probe = vi.fn(async (): Promise<AccountAvailability> => availability);
-  const promotion = vi.fn(async (): Promise<string> => 'none');
+  const promotion = vi.fn(async (): Promise<'none'> => 'none');
   const newConversation = vi.fn(async (): Promise<{ ok: false; reason: string }> => ({ ok: false, reason: 'EDITOR_NOT_FOUND' }));
   const inject = vi.fn(); const send = vi.fn(); const failed = vi.fn(); const gateRelease = vi.fn();
   const runtimeWrites = vi.fn(async (_id: string, patch: RuntimePatch): Promise<boolean> => {
@@ -87,8 +90,7 @@ function fixture(availability: AccountAvailability, options: FixtureOptions = {}
   const bindings: Record<string, unknown> = {
     getTaskExecutionScope, isMaterialImageTask, usesIndependentImagePage, isBackgroundPetStoryTask, availabilityBlocksAutomation, classifyTaskError,
     HumanVerificationRequiredError, PetStoryControlError, VideoControlReadinessError, ChatAttachmentUploadError,
-    AccountAvailabilityPauseError: actual('AccountAvailabilityPauseError'), SubmissionSafetyPauseError: actual('SubmissionSafetyPauseError'),
-    GenerationConfirmationPauseError: actual('GenerationConfirmationPauseError'),
+    AccountAvailabilityPauseError, SubmissionSafetyPauseError, GenerationConfirmationPauseError,
     useTaskStore: { getState: (): object => ({ tasks: [task], setAccountAutomationState: vi.fn(), updateTaskRuntime: runtimeWrites,
       pauseAutomation: pause, failAutomation: failed, armTasks: vi.fn(), updateTask: vi.fn(), completeAutomation: vi.fn(), processQueue: vi.fn() }) },
     usePetStoryStore: { getState: (): object => ({ project }) },
@@ -108,14 +110,35 @@ function fixture(availability: AccountAvailability, options: FixtureOptions = {}
     initializationGate: { acquire: vi.fn(async (): Promise<object> => ({ waitedMs: 0, release: gateRelease })) },
     window: { electronAPI: { settings: { get: vi.fn(async (): Promise<object> => ({ initializationConcurrency: 3 })) },
       petstory: { guardProductionTask: vi.fn(async (): Promise<object> => ({ success: true, guard: {} })) } } },
-    setInteractiveTaskPageId: vi.fn(), materialPagesRef: { current: { uses: usesIndependentImagePage, activate: vi.fn() } },
+    setInteractiveTaskPageId: vi.fn(), materialPagesRef: { current: new MaterialImagePages() },
     forceWebviewLayoutRepaint: vi.fn(async (): Promise<void> => undefined), assertNoHumanVerification: vi.fn(async (): Promise<void> => undefined),
     dismissKnownDesktopDownloadPromotion: promotion,
-    resumableRepairDraft: actual('resumableRepairDraft'), waitForChatReady,
+    resumableRepairDraft, waitForChatReady,
     performAvailabilityCheck: probe, startNewConversation: newConversation, injectPrompt: inject, submitPromptOnce: send,
     notification: { destroy: vi.fn() }, console: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
   };
-  const execute = actual<ExecuteAutomation>('executeAutomation', bindings);
+  const taskStore = bindings.useTaskStore as { getState: typeof useTaskStore.getState };
+  const accountStore = bindings.useAccountStore as { getState: typeof useAccountStore.getState };
+  const petStore = bindings.usePetStoryStore as { getState: typeof usePetStoryStore.getState };
+  vi.spyOn(useTaskStore, 'getState').mockImplementation(taskStore.getState);
+  vi.spyOn(useAccountStore, 'getState').mockImplementation(accountStore.getState);
+  vi.spyOn(usePetStoryStore, 'getState').mockImplementation(petStore.getState);
+  const engine = bindings.automationEngine as typeof automationEngine;
+  vi.spyOn(automationEngine, 'hasController').mockImplementation(engine.hasController);
+  vi.spyOn(automationEngine, 'createController').mockImplementation(engine.createController);
+  vi.spyOn(automationEngine, 'ownsController').mockImplementation(engine.ownsController);
+  vi.spyOn(automationEngine, 'release').mockImplementation(engine.release);
+  vi.spyOn(initializationGate, 'acquire').mockImplementation((bindings.initializationGate as typeof initializationGate).acquire);
+  vi.spyOn(bridge, 'waitForChatReady').mockImplementation(waitForChatReady);
+  vi.spyOn(bridge, 'dismissKnownDesktopDownloadPromotion').mockImplementation(promotion);
+  vi.spyOn(bridge, 'startNewConversation').mockImplementation(newConversation);
+  vi.spyOn(bridge, 'injectPrompt').mockImplementation(inject);
+  vi.spyOn(bridge, 'submitPromptOnce').mockImplementation(send);
+  vi.spyOn(hydration, 'forceWebviewLayoutRepaint').mockImplementation(async (): Promise<void> => undefined);
+  vi.spyOn(notification, 'destroy').mockImplementation((): void => {});
+  vi.stubGlobal('window', { ...(bindings.window as object), setTimeout, clearTimeout });
+  const context = { ...bindings, ownsTaskWebview: (): boolean => true, submittedImagePagesRef: { current: new Map() }, pauseForHumanVerification: vi.fn() } as unknown as TaskExecutionHost;
+  const execute: ExecuteAutomation = (accountId, taskId, prompt, mode, webview): Promise<void> => executeTaskAutomation(context, accountId, taskId, prompt, mode, webview as HTMLWebViewElement);
   return { run: (): Promise<void> => execute(task.assignedAccountId!, task.id, task.prompt, task.mode!, view), task: (): Task => task,
     readiness, entered: entered.promise, waitForChatReady, promotion, probe, newConversation, inject, send, pause, failed, runtimeWrites, view, controllers, running, gateRelease, visible };
 }
@@ -142,7 +165,7 @@ describe('独立图片页输入区实际就绪后才判账号及准备发送', (
     expect(test.inject).not.toHaveBeenCalled(); expect(test.send).not.toHaveBeenCalled(); expect(test.failed).not.toHaveBeenCalled();
   });
 
-  it.each(['chat', 'image'] as const)('关键帧%s准备期间打开Chat不撤销本次独立页面的执行权', async (mode: 'chat' | 'image'): Promise<void> => {
+  it.each(['chat', 'image', 'video'] as const)('关键帧%s准备期间打开Chat不撤销本次独立页面的执行权', async (mode: 'chat' | 'image' | 'video'): Promise<void> => {
     const test = fixture(evidence('ready', 'ready'), { mode, target: 'firstFrame' }); const pending = test.run();
     expect(await Promise.race([test.entered.then((): string => 'readiness'), pending.then((): string => 'finished')])).toBe('readiness');
     test.visible.current = true; test.readiness.resolve(true); await pending;
@@ -161,7 +184,7 @@ describe('独立图片页输入区实际就绪后才判账号及准备发送', (
     expect(test.promotion).toHaveBeenCalledExactlyOnceWith(test.view);
     expect(test.waitForChatReady.mock.invocationCallOrder[0]).toBeLessThan(test.promotion.mock.invocationCallOrder[0]);
     expect(test.promotion.mock.invocationCallOrder[0]).toBeLessThan(test.probe.mock.invocationCallOrder[0]);
-    expect(test.pause).toHaveBeenCalledExactlyOnceWith(test.task().id, test.task().assignedAccountId, 'TEST page_unrecognized', { status: 'paused', code: 'page_unrecognized' });
+    expect(test.pause).toHaveBeenCalledExactlyOnceWith(test.task().id, test.task().assignedAccountId, 'TEST page_unrecognized', { status: 'paused', code: 'page_unrecognized', expectedRunId: 'TEST-run' });
     expect(test.task().status).toBe('paused'); expect(test.failed).not.toHaveBeenCalled();
     for (const operation of [test.newConversation, test.inject, test.send]) expect(operation).not.toHaveBeenCalled();
     expect(test.task().runtime?.submittedAt).toBeUndefined(); expect(test.controllers.size).toBe(0); expect(test.running.size).toBe(0); expect(test.gateRelease).toHaveBeenCalledOnce();
@@ -171,7 +194,7 @@ describe('独立图片页输入区实际就绪后才判账号及准备发送', (
   it('输入区未就绪时按原任务暂停，无账号探测、导航、提交或追加尝试', async (): Promise<void> => {
     const test = fixture(evidence('ready', 'ready')); const pending = test.run(); await test.entered;
     test.readiness.resolve(false); await pending;
-    expect(test.pause).toHaveBeenCalledWith(test.task().id, test.task().assignedAccountId, expect.any(String), { status: 'paused', code: 'page_unrecognized' });
+    expect(test.pause).toHaveBeenCalledWith(test.task().id, test.task().assignedAccountId, expect.any(String), { status: 'paused', code: 'page_unrecognized', expectedRunId: 'TEST-run' });
     for (const operation of [test.promotion, test.probe, test.newConversation, test.inject, test.send, test.failed]) expect(operation).not.toHaveBeenCalled();
     expect(test.waitForChatReady).toHaveBeenCalledOnce(); expect(test.task().runtime?.attempt).toBe(1); expect(test.task().runtime?.submittedAt).toBeUndefined();
   });

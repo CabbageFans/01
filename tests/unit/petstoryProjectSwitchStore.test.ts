@@ -1,4 +1,4 @@
-/** 项目切换沿真实 Zustand/TaskStore 暂停链；IPC 与控制器为明确 TEST 离线替身。 */
+/** 项目切换不撤销当前视频运行；IPC 与控制器为明确TEST离线替身。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PetStoryProject, PetStoryResult, Task } from '@doubao-studio/contracts';
 import { usePetStoryStore } from '../../src/store/usePetStoryStore';
@@ -11,7 +11,7 @@ const original = { petstory: usePetStoryStore.getState(), tasks: useTaskStore.ge
 type RuntimePatch = Parameters<ReturnType<typeof useTaskStore.getState>['updateTaskRuntime']>[1];
 const now = '2026-11-01T01:30:00.000Z';
 let project: PetStoryProject; let other: PetStoryProject; let video: Task; let persisted: Task[]; let controller: AbortController; let order: string[];
-const open = vi.fn(); const create = vi.fn(); const pauseProduction = vi.fn(); const updateRuntime = vi.fn();
+const open = vi.fn(); const create = vi.fn(); const pauseProduction = vi.fn(); const detachProduction = vi.fn(); const updateRuntime = vi.fn();
 
 beforeEach((): void => {
   vi.clearAllMocks(); order = []; controller = new AbortController();
@@ -36,9 +36,9 @@ beforeEach((): void => {
     const detail = (event as CustomEvent<{ taskId: string; targetStatus?: string }>).detail;
     order.push(`cancel:${detail.taskId}:${detail.targetStatus}`); if (detail.taskId === video.id) controller.abort();
   });
-  pauseProduction.mockImplementation(async (id: string): Promise<PetStoryResult> => {
-    order.push(`pause:${id}`); expect(controller.signal.aborted).toBe(true);
-    project = { ...project, revision: project.revision + 1, production: { ...project.production!, state: 'paused' } };
+  detachProduction.mockImplementation(async (id: string): Promise<PetStoryResult> => {
+    order.push(`detach:${id}`);
+    project = { ...project, revision: project.revision + 1, production: { ...project.production!, stopAfterCurrent: true } };
     return { success: true, project: structuredClone(project) };
   });
   updateRuntime.mockImplementation(async (taskId: string, patch: RuntimePatch): Promise<{ success: true; task: Task }> => {
@@ -50,7 +50,7 @@ beforeEach((): void => {
   });
   const select = async (): Promise<PetStoryResult> => { order.push('select'); return { success: true, project: structuredClone(other) }; };
   open.mockImplementation(select); create.mockImplementation(select);
-  Object.assign(target, { electronAPI: { petstory: { open, create, pauseProduction }, tasks: { list: async (): Promise<Task[]> => structuredClone(persisted), updateRuntime },
+  Object.assign(target, { electronAPI: { petstory: { open, create, pauseProduction, detachProduction }, tasks: { list: async (): Promise<Task[]> => structuredClone(persisted), updateRuntime },
     logs: { append: vi.fn() }, accounts: { setStatus: vi.fn(async (): Promise<{ success: true }> => ({ success: true })) } } });
   vi.stubGlobal('window', target); vi.spyOn(automationEngine, 'hasController').mockImplementation((id: string): boolean => id === video.id && !controller.signal.aborted);
   usePetStoryStore.setState({ ...original.petstory, project, busy: false, error: '', activeImageOperationId: null });
@@ -60,35 +60,31 @@ beforeEach((): void => {
 });
 afterEach((): void => { usePetStoryStore.setState(original.petstory); useTaskStore.setState(original.tasks); useAccountStore.setState(original.accounts); useProjectStore.setState(original.projects); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-describe('切换项目前暂停正式视频，保留原提交证据', (): void => {
-  it.each(['executing', 'generating', 'manual_submission_observing'] as const)('打开另一项目前同步停止%s原控制器，再保存暂停状态', async (status): Promise<void> => {
-    persisted[0].status = status; useTaskStore.setState({ tasks: structuredClone(persisted) }); const evidence = structuredClone(video.runtime!);
+describe('切换项目保留当前视频执行与阶段身份', (): void => {
+  it.each(['executing', 'generating', 'manual_submission_observing'] as const)('打开另一项目不停止%s原运行；只安排完成本镜后停止后续', async (status): Promise<void> => {
+    persisted[0].status = status; useTaskStore.setState({ tasks: structuredClone(persisted) }); const evidence = structuredClone(persisted[0]);
     await usePetStoryStore.getState().openProject('TEST/other-project');
-    expect(order[0]).toBe(`cancel:${video.id}:paused`); expect(order.indexOf(`pause:${project.id}`)).toBeLessThan(order.indexOf('select'));
-    expect(project.production!.state).toBe('paused'); expect(controller.signal.aborted).toBe(true); expect(persisted[0].status).toBe('paused');
-    expect(persisted[0].runtime!.runId).toBe(evidence.runId); expect(persisted[0].runtime!.submittedAt).toBe(evidence.submittedAt);
-    expect(persisted[0].runtime!.input).toEqual(evidence.input); expect(persisted[0].runtime!.acceptanceObservation).toEqual(evidence.acceptanceObservation);
+    expect(order).toEqual([`detach:${project.id}`, 'select']); expect(pauseProduction).not.toHaveBeenCalled(); expect(updateRuntime).not.toHaveBeenCalled();
+    expect(controller.signal.aborted).toBe(false); expect(project.production).toMatchObject({ state: 'running', stopAfterCurrent: true }); expect(persisted[0]).toEqual(evidence);
     expect(usePetStoryStore.getState().project!.id).toBe(other.id); expect(create).not.toHaveBeenCalled();
   });
-  it('新建项目同样先暂停原制作，暂停写盘失败时保留原项目且不调用create', async (): Promise<void> => {
-    pauseProduction.mockResolvedValueOnce({ success: false, error: 'TEST 暂停写盘失败' });
+  it('后续安排落盘失败时保留原项目和执行权，错误明确且不调用create', async (): Promise<void> => {
+    detachProduction.mockResolvedValueOnce({ success: false, error: 'TEST 安排写盘失败' });
     await usePetStoryStore.getState().createProject({ accountId: project.accountId, studioProjectId: project.studioProjectId });
-    expect(controller.signal.aborted).toBe(true); expect(create).not.toHaveBeenCalled();
-    expect(usePetStoryStore.getState().project!.id).toBe(project.id); expect(usePetStoryStore.getState().error).toContain('暂停写盘失败');
+    expect(controller.signal.aborted).toBe(false); expect(create).not.toHaveBeenCalled(); expect(pauseProduction).not.toHaveBeenCalled();
+    expect(usePetStoryStore.getState().project!.id).toBe(project.id); expect(usePetStoryStore.getState().error).toContain('安排写盘失败');
   });
-  it('打开失败仍保留已暂停的原项目和原视频，不复活控制器或清除提交证据', async (): Promise<void> => {
+  it('打开失败保留原项目与运行；原提交、观察和输入均不变', async (): Promise<void> => {
     open.mockResolvedValueOnce({ success: false, error: 'TEST 打开失败' }); const before = structuredClone(video);
     await usePetStoryStore.getState().openProject('TEST/broken-project');
-    expect(usePetStoryStore.getState().project!.id).toBe(project.id); expect(usePetStoryStore.getState().project!.production!.state).toBe('paused');
-    expect(usePetStoryStore.getState().error).toContain('打开失败'); expect(persisted[0].runtime!.input).toEqual(before.runtime!.input);
-    expect(persisted[0].runtime!.acceptanceObservation).toEqual(before.runtime!.acceptanceObservation); expect(controller.signal.aborted).toBe(true);
+    expect(usePetStoryStore.getState().project!.id).toBe(project.id); expect(usePetStoryStore.getState().project!.production!.state).toBe('running');
+    expect(usePetStoryStore.getState().error).toContain('打开失败'); expect(persisted[0]).toEqual(before); expect(controller.signal.aborted).toBe(false);
   });
-  it('成功新建只暂停当前项目正式视频，不取消或修改无关联自由任务', async (): Promise<void> => {
+  it('成功新建仅改变原项目后续安排，不取消或修改任何当前Task', async (): Promise<void> => {
     const free: Task = { ...structuredClone(video), id: 'TEST-free-video', assignedAccountId: 'TEST-other-account', petstory: undefined };
-    persisted.push(free); useTaskStore.setState({ tasks: structuredClone(persisted) });
+    persisted.push(free); useTaskStore.setState({ tasks: structuredClone(persisted) }); const before = structuredClone(persisted);
     await usePetStoryStore.getState().createProject({ accountId: project.accountId, studioProjectId: project.studioProjectId });
-    expect(project.production!.state).toBe('paused'); expect(usePetStoryStore.getState().project!.id).toBe(other.id);
-    expect(order.filter((item): boolean => item.startsWith('cancel:'))).toEqual([`cancel:${video.id}:paused`]);
-    expect(persisted.find((task): boolean => task.id === free.id)).toEqual(free); expect(open).not.toHaveBeenCalled();
+    expect(project.production).toMatchObject({ state: 'running', stopAfterCurrent: true }); expect(usePetStoryStore.getState().project!.id).toBe(other.id);
+    expect(order).toEqual([`detach:${project.id}`, 'select']); expect(persisted).toEqual(before); expect(open).not.toHaveBeenCalled();
   });
 });

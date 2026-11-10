@@ -42,6 +42,7 @@ type ImageProgress = ReturnType<typeof petStoryImageProgress>;
 function imageError(local: string, external: string | undefined, operation: string): string { return local || external || operation || ''; }
 const StopImageButton: React.FC<{ stop: () => Promise<void>; stopping: boolean }> = ({ stop, stopping }): React.ReactElement => <Button size="small" danger icon={<StopOutlined />} loading={stopping} disabled={stopping} title="停止本工具的处理与等待，保留豆包对话和已有图片" onClick={(): void => { void stop(); }}>停止</Button>;
 const ImageOperationStatus: React.FC<{ progress: ImageProgress; error: string; disabled: boolean; preparing?: boolean; retry?: () => Promise<void>; stop?: () => Promise<void>; stopping: boolean }> = ({ progress, error, disabled, preparing, retry, stop, stopping }): React.ReactElement | null => {
+  if (progress.operation?.endedAt) return <p className="canvas-hint">{progress.message}</p>;
   const stopAction = stop && <StopImageButton stop={stop} stopping={stopping} />;
   if (error) return <div className="petstory-image-feedback-error" role="alert"><span>{error}</span>{retry && <Button size="small" disabled={disabled} onClick={(): void => { void retry(); }}>{progress.operation ? progress.task?.outputs.length ? '重新下载图片' : '继续本次任务' : '重试剩余原图'}</Button>}{stopAction}</div>;
   if (progress.resumable && !preparing) return <div className="petstory-image-progress" role="status"><span>{progress.message}</span>{retry && <Button size="small" disabled={disabled} onClick={(): void => { void retry(); }}>继续本次任务</Button>}{stopAction}</div>;
@@ -235,13 +236,15 @@ export const PetStoryImageReview: React.FC<PetStoryImageReviewProps> = ({ projec
     try { await state.recoverImageOperation(operationId); if (!isCurrentAction(version)) return; const ownError = usePetStoryStore.getState().imageTargetErrors[targetKey]; if (ownError) { setError(ownError); setRecoveryFailed(true); } }
     catch (failure: unknown) { if (isCurrentAction(version)) { setError(failure instanceof Error ? failure.message : '原图片任务未能继续，请重试'); setRecoveryFailed(true); } }
   };
-  const retry = operationId && operationIssueVisible ? recover : externalError ? onRetry : undefined;
+  const endWaiting = (): void => { const operation = progress.operation; if (operation) void state.endImageOperation(operation.id); };
+  const retry = progress.operation?.endedAt ? undefined : operationId && operationIssueVisible ? recover : externalError ? onRetry : undefined;
   return <div ref={root} className="petstory-image-review" data-image-target={title}>
     {current ? <button type="button" className="petstory-current-image" onClick={(): void => show(current.id)} aria-label={`查看${title}已采用图片`}><ReviewImage projectId={project.id} asset={current} name={`${title} · 当前采用`} /></button>
       : <div className="petstory-image-empty"><PictureOutlined /><span>尚未采用图片</span></div>}
     {current && needsReview && <p className="canvas-error">参考内容已更新，请复核这张图片。</p>}
     <ImageActions current={current} currentNeedsReview={needsReview} candidateCount={candidates.length} disabled={disabled} busy={busy} generationDisabled={generationBlocked} show={show} upload={upload} generate={onGenerate ? generate : undefined} openConversation={task ? (): void => openConversation() : undefined} conversationLabel={task && !resolveTaskConversationTarget(task).ok ? '打开原账号豆包' : undefined} />
     {!open && !feedbackBase && <ImageOperationStatus progress={progress} error={visibleError} preparing={starting} disabled={disabled || busy || recoveryBlocked} retry={retry} stop={canStop ? stop : undefined} stopping={stopping} />}
+    {!open && progress.operation?.stage === 'failed' && !progress.operation.endedAt && <Button size="small" disabled={busy || state.busy} onClick={endWaiting}>结束本次图片等待</Button>}
     {!feedbackBase && currentResubmission && <PetStoryResubmissionActions projectId={project.id} task={currentResubmission} disabled={disabled || busy || recoveryBlocked} />}
     {open && <Modal className="petstory-image-modal" title={`${title} · 选择图片`} open width={1000} onCancel={(): void => setOpen(false)} footer={<PreviewActions reviewingCurrent={reviewingCurrent} confirmingCurrent={confirmingCurrent} hasCurrent={!!current} hasSelected={!!selected} locked={disabled || busy} readable={readable} saving={state.busy} generationDisabled={generationBlocked} modificationDisabled={flowBusy} generating={busy} regenerate={onGenerate ? generate : undefined} close={(): void => setOpen(false)} modify={beginFeedback} adopt={adopt} />}>
       <div ref={previewBody}>

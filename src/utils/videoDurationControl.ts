@@ -1,3 +1,4 @@
+declare const __doubaoAssertOperation: (() => void) | undefined;
 export interface VideoDurationControlResult {
   position?: string;
   verified?: boolean;
@@ -6,6 +7,8 @@ export interface VideoDurationControlResult {
 
 /** 自包含 guest 操作：每次输入后跨宏任务回读真实滑条，避免 React 批处理吞掉连续步进。 */
 export async function setVideoDurationFromPage(targetSeconds: number, deadlineAt: number): Promise<VideoDurationControlResult> {
+  const assertOperation = (): void => { if (typeof __doubaoAssertOperation === 'function') __doubaoAssertOperation(); };
+  assertOperation();
   let position: string | undefined;
   try {
     if (!Number.isInteger(targetSeconds) || targetSeconds < 4 || targetSeconds > 15 || !Number.isFinite(deadlineAt) || Date.now() >= deadlineAt) return {};
@@ -113,6 +116,7 @@ export async function setVideoDurationFromPage(targetSeconds: number, deadlineAt
       if (!control) return stopped();
       const expectedIdentity = controlIdentity(control); const targetValue = control.min === 0 ? targetSeconds - 4 : targetSeconds;
       const currentPopup = (): DurationControl | undefined => {
+        assertOperation();
         if (Date.now() >= deadlineAt) { failureReason = 'value_not_applied'; return undefined; }
         const current = readPopup();
         if (current && controlIdentity(current) !== expectedIdentity) { failureReason = 'changed'; return undefined; }
@@ -131,6 +135,7 @@ export async function setVideoDurationFromPage(targetSeconds: number, deadlineAt
       if (!control) return stopped();
       if (control.value === targetValue) return { position, verified: true };
       if (control.native) {
+        assertOperation();
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         if (!setter) return { position, verified: false, failureReason: 'not_found' };
         setter.call(control.element, String(targetValue));
@@ -139,7 +144,9 @@ export async function setVideoDurationFromPage(targetSeconds: number, deadlineAt
         control = await waitPopupValue(targetValue);
       } else {
         const pressPopup = (element: HTMLElement, key: string): void => {
+          assertOperation();
           element.dispatchEvent(new KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }));
+          assertOperation();
           element.dispatchEvent(new KeyboardEvent('keyup', { key, code: key, bubbles: true }));
         };
         pressPopup(control.element, 'Home');
@@ -177,14 +184,17 @@ export async function setVideoDurationFromPage(targetSeconds: number, deadlineAt
     if (!slider) return standaloneFailure === 'not_found' && !position ? await setPopupControl() : { position, verified: false, failureReason: standaloneFailure };
     const semanticIdentity = identity(slider);
     const current = (): HTMLElement | undefined => {
+      assertOperation();
       if (Date.now() >= deadlineAt) { standaloneFailure = 'value_not_applied'; return undefined; }
       const candidate = read();
       if (candidate && identity(candidate) !== semanticIdentity) { standaloneFailure = 'changed'; return undefined; }
       return candidate;
     };
     const press = (element: HTMLElement, key: string): void => {
+      assertOperation();
       // 事件只发给已定位的控件；不获取系统焦点，不触碰鼠标或原生键盘。
       element.dispatchEvent(new KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }));
+      assertOperation();
       element.dispatchEvent(new KeyboardEvent('keyup', { key, code: key, bubbles: true }));
     };
     const waitForValue = async (expected: number): Promise<HTMLElement | undefined> => {
@@ -211,5 +221,8 @@ export async function setVideoDurationFromPage(targetSeconds: number, deadlineAt
       if (!slider) return { position, verified: false, failureReason: standaloneFailure };
     }
     return { position };
-  } catch { return position ? { position } : {}; }
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') throw error;
+    return position ? { position, verified: false } : {};
+  }
 }

@@ -1,3 +1,9 @@
+declare const __doubaoAssertOperation: (() => void) | undefined;
+export interface NativeSubmissionReceipt { mouseDown: boolean; activated: boolean; trusted: boolean; cancelled: boolean; documentId: number }
+interface NativeReservation {
+  element: HTMLElement; target: SendButtonTarget; receipt: NativeSubmissionReceipt;
+  validate: () => boolean; onEvent: EventListener; dispose: () => void; cancel: () => void;
+}
 /** 当前 guest 内的发送控件；只返回定位与正文摘要，不带页面内容。 */
 export interface SendButtonTarget {
   ok: boolean;
@@ -6,7 +12,11 @@ export interface SendButtonTarget {
   geometry?: string;
   inputHash?: string;
   dispatched?: boolean;
+  dispatchAttempted?: boolean;
   humanVerification?: boolean;
+  documentId?: number;
+  nativeReserved?: boolean;
+  nativeReceipt?: NativeSubmissionReceipt;
 }
 
 export interface PageSubmissionOperation {
@@ -15,11 +25,26 @@ export interface PageSubmissionOperation {
   deadlineAt?: number;
   expectedPrompt?: string;
   strictParagraphs?: boolean;
+  reserveNative?: boolean;
+  validateNativeKey?: string;
+  readReceiptKey?: string;
+  cancelNativeKey?: string;
 }
 
 /** 序列化到当前账号 guest：定位、复核和单次控件激活共用一条路径，不读取系统焦点。 */
 export function pageSubmissionProbe(operation: PageSubmissionOperation, readText: (editor: HTMLElement) => string, hasVerification?: () => boolean): SendButtonTarget {
   try {
+    const page = globalThis as typeof globalThis & { __doubaoStudioSubmissionAttempts?: Set<string>; __doubaoNativeSubmissionReceipts?: Map<string, NativeReservation> };
+    const receipts = page.__doubaoNativeSubmissionReceipts || new Map<string, NativeReservation>();
+    const receiptResult = (record: NativeReservation): SendButtonTarget => ({ ...record.target, nativeReserved: !record.receipt.cancelled,
+      nativeReceipt: { ...record.receipt }, dispatched: record.receipt.activated, dispatchAttempted: record.receipt.mouseDown || record.receipt.activated });
+    if (operation.cancelNativeKey) {
+      const record = receipts.get(operation.cancelNativeKey);
+      if (record) { if (!record.receipt.activated) record.cancel(); return receiptResult(record); }
+      return { ok: false };
+    }
+    if (operation.readReceiptKey) { const record = receipts.get(operation.readReceiptKey); return record ? receiptResult(record) : { ok: false }; }
+    if (typeof __doubaoAssertOperation === 'function') __doubaoAssertOperation();
     if (hasVerification?.()) return { ok: false, humanVerification: true };
     const visible = (element: HTMLElement | null): element is HTMLElement => {
       if (!element || element.offsetParent === null || element.isConnected === false) return false;
@@ -46,7 +71,20 @@ export function pageSubmissionProbe(operation: PageSubmissionOperation, readText
       return `${a >>> 0}-${b >>> 0}`;
     };
     const inputHash = fingerprint(`${typeof location === 'undefined' ? '' : location.href}\u0000${actualText}`);
+    const sameExpected = (target: SendButtonTarget): boolean => {
+      const expected = operation.expected;
+      return !!expected?.ok && target.method === expected.method && target.geometry === expected.geometry && target.position === expected.position
+        && target.inputHash === expected.inputHash && target.documentId === expected.documentId;
+    };
+    const validateReserved = (button: HTMLElement, target: SendButtonTarget, key: string): SendButtonTarget => {
+      const reserved = receipts.get(key);
+      if (!reserved || reserved.element !== button || reserved.target.geometry !== target.geometry || reserved.target.inputHash !== target.inputHash
+        || reserved.target.documentId !== target.documentId || !reserved.validate()) return { ok: false };
+      return receiptResult(reserved);
+    };
     const finish = (button: HTMLElement, method: string): SendButtonTarget => {
+      const identity = [button.getAttribute('aria-label'), button.getAttribute('title'), button.getAttribute('data-action')].filter(Boolean).join(' ');
+      if (/上传|附件|文件|upload|attach|purchase|subscribe|购买|充值|订阅/i.test(identity)) return { ok: false };
       if (!enabled(button) || typeof button.click !== 'function') return { ok: false };
       const bounds = button.getBoundingClientRect();
       const x = Math.round(bounds.left + bounds.width / 2); const y = Math.round(bounds.top + bounds.height / 2);
@@ -54,23 +92,68 @@ export function pageSubmissionProbe(operation: PageSubmissionOperation, readText
       // 此命中检查只验证 guest 内是否有阻挡弹窗，与用户鼠标位置和其他应用无关。
       const hit = document.elementFromPoint(x, y);
       if (!hit || !(hit === button || button.contains(hit))) return { ok: false };
-      const target: SendButtonTarget = { ok: true, method, position: `${x},${y}`, inputHash,
+      const target: SendButtonTarget = { ok: true, method, position: `${x},${y}`, inputHash, documentId: typeof performance === 'undefined' ? undefined : performance.timeOrigin,
         geometry: [Math.round(bounds.left), Math.round(bounds.top), Math.round(bounds.width), Math.round(bounds.height), window.innerWidth, window.innerHeight].join(',') };
+      if (operation.validateNativeKey) return validateReserved(button, target, operation.validateNativeKey);
       if (!operation.dispatchKey) return target;
-      const expected = operation.expected;
-      if (!expected?.ok || target.method !== expected.method || target.geometry !== expected.geometry || target.position !== expected.position || target.inputHash !== expected.inputHash) return { ok: false };
+      if (!sameExpected(target)) return { ok: false };
       if (!Number.isFinite(operation.deadlineAt) || Date.now() >= (operation.deadlineAt as number) || operation.expectedPrompt === undefined) return { ok: false };
       const normalize = (value: string): string => operation.strictParagraphs ? value.replace(/\r\n?/g, '\n')
         : value.replace(/\u00a0/g, ' ').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim();
       if (normalize(actualText) !== normalize(operation.expectedPrompt)) return { ok: false };
-      const page = globalThis as typeof globalThis & { __doubaoStudioSubmissionAttempts?: Set<string> };
       const attempts = page.__doubaoStudioSubmissionAttempts || (page.__doubaoStudioSubmissionAttempts = new Set<string>());
-      if (attempts.has(operation.dispatchKey) || Date.now() >= (operation.deadlineAt as number)) return { ok: false };
+      if (attempts.has(operation.dispatchKey)) return { ok: false, dispatchAttempted: true };
+      if (Date.now() >= (operation.deadlineAt as number)) return { ok: false };
       if (hasVerification?.()) return { ok: false, humanVerification: true };
       // 先消费本次运行的单次权限，再激活真实控件；异常／回执不明也不能再次点击。
       attempts.add(operation.dispatchKey);
-      button.click();
-      return { ...target, dispatched: true };
+      if (operation.reserveNative) return reserveNative(button, target, normalize);
+      try { button.click(); } catch { return { ...target, dispatched: false, dispatchAttempted: true }; }
+      return { ...target, dispatched: true, dispatchAttempted: true };
+    };
+    const reserveNative = (button: HTMLElement, target: SendButtonTarget, normalize: (value: string) => string): SendButtonTarget => {
+      if (!Number.isFinite(target.documentId)) return { ok: false };
+      // 新的正式预留交接前才移除旧取消守卫；旧宿主异步续步仍受冻结操作上下文阻断。
+      for (const previous of receipts.values()) if (previous.receipt.cancelled || !previous.validate()) previous.dispose();
+      const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+      const receipt: NativeSubmissionReceipt = { mouseDown: false, activated: false, trusted: false, cancelled: false, documentId: target.documentId as number };
+      const validate = (): boolean => {
+        try {
+          if (typeof __doubaoAssertOperation === 'function') __doubaoAssertOperation();
+          if (receipt.cancelled || Date.now() >= (operation.deadlineAt as number) || performance.timeOrigin !== receipt.documentId || !enabled(button)
+            || normalize(readText(editor)) !== normalize(operation.expectedPrompt as string) || hasVerification?.()) return false;
+          const rect = button.getBoundingClientRect(); const centerX = Math.round(rect.left + rect.width / 2); const centerY = Math.round(rect.top + rect.height / 2);
+          const currentGeometry = [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height), window.innerWidth, window.innerHeight].join(',');
+          const hit = document.elementFromPoint(centerX, centerY);
+          return target.geometry === currentGeometry && !!hit && (hit === button || button.contains(hit));
+        } catch { return false; }
+      };
+      const dispose = (): void => { if (timer) clearTimeout(timer); for (const name of events) document.removeEventListener(name, onEvent, true); };
+      const cancel = (): void => { receipt.cancelled = true; if (timer) clearTimeout(timer); };
+      const onEvent: EventListener = (event: Event): void => {
+        const belongs = event.target === button || event.target instanceof Node && button.contains(event.target);
+        if (receipt.cancelled) {
+          // 保留取消墓碑，拒绝已排队的迟到原生序列；其它位置的用户交互不受影响。
+          const point = target.position?.split(',').map(Number); const mouse = event as MouseEvent;
+          if (belongs || point && mouse.clientX === point[0] && mouse.clientY === point[1]) { event.preventDefault(); event.stopImmediatePropagation(); }
+          return;
+        }
+        if (!event.isTrusted || !belongs || !validate()) {
+          event.preventDefault(); event.stopImmediatePropagation(); cancel(); return;
+        }
+        if (event.type === 'mousedown') receipt.mouseDown = true;
+        if (event.type === 'click') {
+          if (!receipt.mouseDown) { event.preventDefault(); event.stopImmediatePropagation(); cancel(); return; }
+          else { receipt.activated = true; receipt.trusted = true; }
+          dispose();
+        }
+      };
+      const record: NativeReservation = { element: button, target, receipt, validate, onEvent, dispose, cancel };
+      page.__doubaoNativeSubmissionReceipts = receipts;
+      receipts.set(operation.dispatchKey as string, record);
+      for (const name of events) document.addEventListener(name, onEvent, true);
+      const timer = setTimeout(cancel, Math.max(0, (operation.deadlineAt as number) - Date.now()));
+      return receiptResult(record);
     };
     const exactButtons = Array.from(document.querySelectorAll<HTMLElement>('#flow-end-msg-send'));
     if (exactButtons.length > 1) return { ok: false };
@@ -81,17 +164,19 @@ export function pageSubmissionProbe(operation: PageSubmissionOperation, readText
       const matches = Array.from(root.querySelectorAll<HTMLElement>('button, [role="button"], [data-testid], [aria-label], [title]')).flatMap((control): { element: HTMLElement; semantic: boolean }[] => {
         if (!enabled(control) || control.getAttribute('aria-haspopup')) return [];
         const descriptor = [control.id, control.getAttribute('aria-label'), control.getAttribute('title'), control.getAttribute('data-testid'), control.getAttribute('data-action'), control.innerText].filter(Boolean).join(' ').toLowerCase();
-        if (/麦克风|语音|voice|microphone|audio|更多|more/.test(descriptor)) return [];
+        if (/麦克风|语音|voice|microphone|audio|更多|more|上传|附件|upload|attach|购买|充值|订阅|purchase|subscribe/.test(descriptor)) return [];
         const bounds = control.getBoundingClientRect();
         const nearRight = bounds.left >= editorBounds.right - 180 && bounds.left <= editorBounds.right + 120;
         const nearVertical = bounds.top <= editorBounds.bottom + 80 && bounds.bottom >= editorBounds.top - 40;
         const square = bounds.width >= 24 && bounds.width <= 64 && bounds.height >= 24 && bounds.height <= 64;
-        const semantic = /发送|提交|生成|send|submit|generate/.test(descriptor);
-        const rgb = (window.getComputedStyle(control).backgroundColor || '').match(/\d+/g);
-        const accent = !!(rgb && rgb.length >= 3 && Number(rgb[2]) > Number(rgb[0]) && Number(rgb[2]) > Number(rgb[1]) && Number(rgb[2]) > 120);
-        return nearRight && nearVertical && square && (semantic || accent) ? [{ element: control, semantic }] : [];
+        if (control.closest?.('[data-testid="skill_input_exit_button"],[data-valid-btn="mode-select-action-btn"],[data-testid="skill_bar_button_more"]')) return [];
+        const labels = [control.getAttribute('aria-label'), control.getAttribute('title'), control.innerText].filter((value): value is string => !!value)
+          .map((value): string => value.trim().replace(/\s+/g, ' ').toLowerCase());
+        const semantic = labels.some((value): boolean => ['发送', '发送消息', '提交', '生成', '立即生成', '开始生成', 'send', 'send message', 'submit', 'generate'].includes(value))
+          || [control.getAttribute('data-testid'), control.getAttribute('data-action')].some((value): boolean => !!value && /^(?:chat[-_]send|send[-_]button|message[-_]send|submit[-_]button|generate[-_]button)$/.test(value));
+        return nearRight && nearVertical && square && semantic ? [{ element: control, semantic }] : [];
       });
-      if (matches.length === 1) return finish(matches[0].element, matches[0].semantic ? 'composer-semantic' : 'composer-accent');
+      if (matches.length === 1) return finish(matches[0].element, 'composer-semantic');
     }
   } catch { /* 页面控件／单次激活不确定时只返回失败，调用方保留提交意图。 */ }
   return { ok: false };

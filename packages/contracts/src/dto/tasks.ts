@@ -27,6 +27,13 @@ export interface TaskOperationResult {
   error?: string;
 }
 
+/** 批量暂停的权威快照；Renderer不得从success标志推造任务状态。 */
+export interface TaskBatchPauseResult {
+  success: boolean;
+  tasks?: Task[];
+  error?: string;
+}
+
 /** 任务操作结果（包含任务数据） */
 export interface TaskResult {
   success: boolean;
@@ -44,6 +51,7 @@ export interface TaskAddResult {
 // ==================== IPC 参数 DTO ====================
 
 export interface TaskAddParams {
+  videoInputSnapshot?: import('./petstory').VideoInputSnapshot;
   petstory?: Task['petstory'];
   petstoryChat?: Task['petstoryChat'];
   promptReadback?: Task['promptReadback'];
@@ -73,6 +81,8 @@ export interface TaskResubmitUncertainParams {
 
 export interface TaskUpdateStatusParams {
   taskId: string;
+  expectedRunId?: string;
+  expectedRevision?: number;
   status: TaskStatus;
   result?: string;
   outputs?: string[];
@@ -80,6 +90,8 @@ export interface TaskUpdateStatusParams {
 
 export interface TaskUpdateRuntimeParams {
   taskId: string;
+  /** 乐观并发控制；命令可用当前落盘 revision 防止旧回执。 */
+  expectedRevision?: number;
   /** 只更新当前原运行；不匹配时零写入，不能把迟到的阶段上报写入新运行。 */
   expectedRunId?: string;
   status?: TaskStatus;
@@ -155,6 +167,9 @@ export interface CsvImportResult {
 /** 已完成任务的产物摘要 */
 export interface CompletedOutput {
   taskId: string;
+  runId?: string;
+  artifactIds?: string[];
+  inputVersion?: number;
   prompt: string;
   outputs: string[];
   accountId: string | null;
@@ -173,6 +188,15 @@ export interface TaskDownloadOutputsResult {
   saveDir?: string;
   error?: string;
   jobIds?: string[];
+}
+
+export interface TaskReadDownloadedMediaResult {
+  success: boolean;
+  /** 仅本机受控媒体协议URL，不包含实际文件路径。 */
+  data?: string;
+  mimeType?: 'video/mp4' | 'video/webm';
+  error?: string;
+  errorCode?: string;
 }
 
 /** 公开分享页媒体下载：不使用账号 Cookie，只接受豆包页面实际公开声明的媒体流。 */
@@ -229,6 +253,11 @@ export interface TaskValidateArtifactResult {
 
 export interface TaskSaveAdapterReportParams {
   accountId: string;
+  taskId?: string;
+  runId?: string;
+  projectId?: string;
+  shotId?: string;
+  stepId?: string;
   report: Record<string, any>;
 }
 

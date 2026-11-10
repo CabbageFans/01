@@ -22,6 +22,7 @@ export type VideoArtifactSource =
 export type VideoArtifactStatus =
   | 'resolved'                 // 成功获取到地址
   | 'unavailable'              // 平台未返回可用地址
+  | 'generation_not_started'   // 原回复稳定仅给操作建议／可复制提示词，没有执行生成
   | 'expired'                  // 产物已过期
   | 'unauthorized'             // 登录失效或无权限
   | 'retryable_error'          // 网络/超时等可重试错误
@@ -32,6 +33,8 @@ export interface ArtifactAttempt {
   strategy: string;
   result: 'success' | 'fail' | 'skip';
   reason?: string;
+  /** 平台/网络结果必须保留类型，不能在最终选择时压成“尚无产物”。 */
+  status?: Exclude<VideoArtifactStatus, 'resolved'>;
 }
 
 /** 解析结果 */
@@ -42,6 +45,8 @@ export interface VideoArtifactResolution {
   vid?: string;
   reason?: string;
   attempts: ArtifactAttempt[];
+  /** 仅供同一次观察比较稳定采样；不含原回复正文，也不作为运行身份或媒体身份。 */
+  evidenceKey?: string;
 }
 
 /** 从响应中解析出的视频候选地址 */
@@ -228,105 +233,28 @@ export interface ConversationScanResult {
  */
 export function parseConversationScanData(raw: unknown): ConversationScanResult {
   const candidates: VideoCandidate[] = [];
-  if (!raw || typeof raw !== 'object') return { candidates };
-
-  const obj = raw as Record<string, unknown>;
-  const vid = findVidDeep(obj, 0);
-  const foundUrls = new Set<string>();
-
-  // 1. original_media_info 仅代表源媒体，不代表无水印授权
-  const originalUrls = collectUrlsFromKey(obj, 'original_media_info');
-  for (const url of originalUrls) {
-    if (!foundUrls.has(url)) {
-      foundUrls.add(url);
-      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: false });
-    }
-  }
-
-  // 2. 普通结构化 download_url 也不能证明无水印授权
-  const downloadUrls = collectUrlsFromKey(obj, 'download_url');
-  for (const url of downloadUrls) {
-    if (!foundUrls.has(url)) {
-      foundUrls.add(url);
-      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: false });
-    }
-  }
-
-  // 3. 页面结构化字段不是当前权威能力接口，仍保守标记
-  const noWmUrls = collectUrlsFromKey(obj, 'no_watermark_url');
-  for (const url of noWmUrls) {
-    if (!foundUrls.has(url)) {
-      foundUrls.add(url);
-      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: false });
-    }
-  }
-
-  // 4. 从 play_info / play_infos 对象提取 URL（普通播放地址 → isOriginal: false）
-  const playInfoUrls = collectUrlsFromKey(obj, 'play_info');
-  for (const url of playInfoUrls) {
-    if (!foundUrls.has(url)) {
-      foundUrls.add(url);
-      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: false });
-    }
-  }
-  const playInfosUrls = collectUrlsFromKey(obj, 'play_infos');
-  for (const url of playInfosUrls) {
-    if (!foundUrls.has(url)) {
-      foundUrls.add(url);
-      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: false });
-    }
-  }
-
-  // 5. 深度搜索其他视频 URL（无法证明来自原始字段 → isOriginal: false）
-  const deepUrl = findVideoUrlDeep(obj, 0);
-  if (deepUrl && !foundUrls.has(deepUrl)) {
-    candidates.push({ url: deepUrl, source: 'conversation_scan', vid, isOriginal: false });
-  }
-
-  return { vid, candidates };
-}
-
-/**
- * 遍历对象树，当找到包含指定 key 的对象时，
- * 从该 key 对应的值中提取视频 URL。
- * 保证 URL 与 key 属于同一个对象，不会串数据。
- */
-function collectUrlsFromKey(obj: Record<string, unknown>, keyName: string): string[] {
-  const urls: string[] = [];
-  function search(node: unknown, depth: number): void {
-    if (depth > 12 || !node) return;
-    if (Array.isArray(node)) {
-      for (const item of node) search(item, depth + 1);
-      return;
-    }
-    if (typeof node !== 'object') return;
+  const vids = new Set<string>();
+  const seen = new Set<string>();
+  const visited = new WeakSet<object>();
+  const visit = (node: unknown, inheritedVid: string | undefined, depth: number): void => {
+    if (!node || typeof node !== 'object' || depth > 12 || visited.has(node)) return;
+    visited.add(node);
+    if (Array.isArray(node)) { for (const item of node) visit(item, inheritedVid, depth + 1); return; }
     const record = node as Record<string, unknown>;
-    // 当前对象包含目标 key → 从该 key 的值中提取 URL
-    if (keyName in record) {
-      const target = record[keyName];
-      if (typeof target === 'string' && isValidVideoUrl(target)) {
-        urls.push(target);
-      } else if (target && typeof target === 'object') {
-        const targetObj = target as Record<string, unknown>;
-        const url = extractUrlFromFields(targetObj, ['main_url', 'main', 'url', 'download_url']);
-        if (url) {
-          urls.push(url);
-        } else {
-          // 在 target 内部深度搜索
-          const deepUrl = findVideoUrlDeep(targetObj, 0);
-          if (deepUrl) urls.push(deepUrl);
-        }
-      }
+    const ownVid = [record.vid, record.video_id, record.videoId].find((value: unknown): value is string => typeof value === 'string' && !!value.trim());
+    const vid = ownVid?.trim() || inheritedVid;
+    if (ownVid) vids.add(ownVid.trim());
+    for (const [key, value] of Object.entries(record)) {
+      if (typeof value === 'string' && isValidVideoUrl(value)) {
+        const identity = `${vid || ''}\u0000${value}`;
+        if (!seen.has(identity)) { seen.add(identity); candidates.push({ url: value, source: 'conversation_scan', vid, isOriginal: false }); }
+      } else if (value && typeof value === 'object') visit(value, vid, depth + 1);
+      // key 只用于明确结构遍历，不从其他兄弟对象借用 vid。
+      void key;
     }
-    // 继续递归子节点（可能有多个同 key 对象，如数组中的多个消息）
-    for (const k in record) {
-      if (Object.prototype.hasOwnProperty.call(record, k) && k !== keyName) {
-        search(record[k], depth + 1);
-      }
-    }
-  }
-  search(obj, 0);
-  return urls;
+  };
+  visit(raw, undefined, 0);
+  return { vid: vids.size === 1 ? [...vids][0] : undefined, candidates };
 }
 
 // ==================== 候选排序 ====================

@@ -107,7 +107,7 @@ const App: React.FC = (): React.ReactElement => {
 
   useEffect(() => {
     let startupQueueTimer: ReturnType<typeof setTimeout> | undefined;
-    void Promise.all([loadAccounts(), loadProjects(), loadTasks(true)]).then(() => {
+    void Promise.all([loadAccounts(), loadProjects(), loadTasks()]).then(() => {
       // 账号/任务加载完成后做一次启动队列评估；否则已满足 all_accepted 的排队任务可能没有调度事件。
       startupQueueTimer = setTimeout(() => useTaskStore.getState().processQueue(), 0);
     });
@@ -133,7 +133,7 @@ const App: React.FC = (): React.ReactElement => {
         readTasks: async (): Promise<Task[]> => {
           const tasks = await window.electronAPI.tasks.list();
           // 本机指派写入主进程后，控制动作必须使用同一份新快照，不能启动旧的未指派投影。
-          useTaskStore.setState({ tasks });
+          useTaskStore.getState().reconcileTasks(tasks);
           return tasks;
         },
         start: (taskId) => useTaskStore.getState().startAutomation(taskId),
@@ -141,7 +141,7 @@ const App: React.FC = (): React.ReactElement => {
         getLastError: () => useTaskStore.getState().error,
         updateStatus: (taskId, status, result) => useTaskStore.getState().updateTaskStatus(taskId, status, result),
         abortActive: (taskId, targetStatus) => window.dispatchEvent(new CustomEvent('cancel-task-automation', {
-          detail: { taskId, targetStatus },
+          detail: { taskId, targetStatus, expectedRunId: useTaskStore.getState().tasks.find((task): boolean => task.id === taskId)?.runtime?.runId },
         })),
       });
       try {

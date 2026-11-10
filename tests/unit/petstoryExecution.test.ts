@@ -1,3 +1,4 @@
+import { currentRunId } from '../fixtures/taskRunIdentity';
 /** 只运行离线内存 TaskService 与 store；不挂载 Webview，不调用模型。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Account, PetStoryPlan, Task, TaskUpdateRuntimeParams } from '@doubao-studio/contracts';
@@ -36,9 +37,9 @@ beforeEach((): void => {
     defaultProjectId: (): string => 'TEST-project', id: (): string => 'TEST-task' });
   vi.stubGlobal('window', { electronAPI: { tasks: {
     list: async (): Promise<Task[]> => structuredClone(stored),
-    updateStatus: async (id: string, status: Task['status'], result?: string, outputs?: string[]): Promise<unknown> => core.updateStatus({ taskId: id, status, result, outputs }),
+    updateStatus: async (id: string, status: Task['status'], result?: string, outputs?: string[]): Promise<unknown> => core.updateStatus({ taskId: id, expectedRunId: currentRunId(core, id), status, result, outputs }),
     updateRuntime: async (id: string, patch: Omit<TaskUpdateRuntimeParams, 'taskId'>): Promise<unknown> => {
-      const result = core.updateRuntime({ taskId: id, ...patch });
+      const result = core.updateRuntime({ taskId: id, expectedRunId: currentRunId(core, id), ...patch });
       return result.success ? { success: true, task: result.data } : result;
     },
     acquireLock: async (): Promise<unknown> => ({ success: true }),
@@ -91,21 +92,34 @@ describe('PetStory final prompt and body persistence through actual execution bo
   it('success flags without persisted done/output evidence never fabricate completion', async (): Promise<void> => {
     await submittedVideo();
     vi.spyOn(window.electronAPI.tasks, 'updateStatus').mockResolvedValueOnce({ success: true });
-    vi.spyOn(window.electronAPI.tasks, 'updateRuntime').mockResolvedValueOnce({ success: true });
     await expect(useTaskStore.getState().completeAutomation('TEST-task', 'TEST-account', 'https://TEST.invalid/result.mp4', ['https://TEST.invalid/result.mp4'])).rejects.toThrow('权威回读不一致');
     expect(useTaskStore.getState().tasks[0].status).toBe('executing'); expect(useTaskStore.getState().tasks[0].outputs).toEqual([]);
   });
 
-  it('a runtime-write failure preserves an already persisted done result instead of downgrading it', async (): Promise<void> => {
+  it('atomic completion does not need a second runtime-write and releases the local execution slot', async (): Promise<void> => {
     await submittedVideo();
-    vi.spyOn(window.electronAPI.tasks, 'updateRuntime').mockRejectedValueOnce(new Error('TEST runtime receipt failed'));
-    await expect(useTaskStore.getState().completeAutomation('TEST-task', 'TEST-account', 'https://TEST.invalid/result.mp4', ['https://TEST.invalid/result.mp4'])).rejects.toThrow('receipt failed');
+    const duplicate = vi.spyOn(window.electronAPI.tasks, 'updateRuntime').mockRejectedValueOnce(new Error('TEST redundant write must not run'));
+    await useTaskStore.getState().completeAutomation('TEST-task', 'TEST-account', 'https://TEST.invalid/result.mp4', ['https://TEST.invalid/result.mp4']);
     expect(useTaskStore.getState().tasks[0]).toEqual(stored[0]); expect(stored[0].status).toBe('done'); expect(stored[0].outputs).toHaveLength(1);
+    expect(duplicate).not.toHaveBeenCalled(); expect(useTaskStore.getState().executingTasks).toEqual({}); expect(useTaskStore.getState().accountBusy).toEqual({});
+  });
+
+  it('a lost completion ACK followed by authoritative original-run readback releases the slot as completed', async (): Promise<void> => {
+    const original = await submittedVideo();
+    const completion = vi.spyOn(window.electronAPI.tasks, 'updateStatus').mockImplementationOnce(async (): Promise<never> => {
+      expect(core.updateStatus({ taskId: original.id, expectedRunId: original.runtime!.runId, status: 'done', outputs: ['https://TEST.invalid/result.mp4'] }).success).toBe(true);
+      throw new Error('TEST completion ACK lost');
+    });
+    await useTaskStore.getState().completeAutomation('TEST-task', 'TEST-account', 'https://TEST.invalid/result.mp4', ['https://TEST.invalid/result.mp4'], original.runtime!.runId);
+    expect(completion).toHaveBeenCalledOnce();
+    expect(useTaskStore.getState().tasks[0]).toMatchObject({ status: 'done', runtime: { stage: 'completed', runId: original.runtime!.runId } });
+    expect(useTaskStore.getState().executingTasks).toEqual({}); expect(useTaskStore.getState().accountBusy).toEqual({});
   });
 
   it('a later run in the authoritative completion reply is synchronized and rejected', async (): Promise<void> => {
     const original = await submittedVideo();
-    vi.spyOn(window.electronAPI.tasks, 'updateRuntime').mockImplementationOnce(async (): Promise<{ success: boolean; task: Task }> => {
+    vi.spyOn(window.electronAPI.tasks, 'updateStatus').mockImplementationOnce(async (): Promise<{ success: boolean; task: Task }> => {
+      expect(core.updateStatus({ taskId: original.id, expectedRunId: original.runtime!.runId, status: 'done', outputs: ['https://TEST.invalid/result.mp4'] }).success).toBe(true);
       const changed = structuredClone(stored[0]);
       if (changed.runtime) changed.runtime.runId = 'TEST-later-run';
       stored = [changed]; return { success: true, task: changed };
@@ -116,8 +130,11 @@ describe('PetStory final prompt and body persistence through actual execution bo
   });
 
   it('uncertain completion readback fences later pause writes until the persisted done can be read', async (): Promise<void> => {
-    await submittedVideo();
-    vi.spyOn(window.electronAPI.tasks, 'updateRuntime').mockRejectedValueOnce(new Error('TEST runtime receipt failed'));
+    const original = await submittedVideo();
+    vi.spyOn(window.electronAPI.tasks, 'updateStatus').mockImplementationOnce(async (): Promise<never> => {
+      expect(core.updateStatus({ taskId: original.id, expectedRunId: original.runtime!.runId, status: 'done', outputs: ['https://TEST.invalid/result.mp4'] }).success).toBe(true);
+      throw new Error('TEST completion receipt failed');
+    });
     const listing = vi.spyOn(window.electronAPI.tasks, 'list').mockRejectedValue(new Error('TEST readback unavailable'));
     await expect(useTaskStore.getState().completeAutomation('TEST-task', 'TEST-account', 'https://TEST.invalid/result.mp4', ['https://TEST.invalid/result.mp4'])).rejects.toThrow('receipt failed');
     const write = vi.spyOn(window.electronAPI.tasks, 'updateRuntime');
@@ -136,7 +153,9 @@ describe('PetStory final prompt and body persistence through actual execution bo
     const runId = stored[0].runtime?.runId || '';
     const observation = createAcceptedObservationBinding({ accountId: 'TEST-account', runId, conversationUrl: 'https://www.doubao.com/chat/TEST-completion',
       acceptedAt: now, ownerId: 'TEST-observer', mode: 'chat', evidence: { generationStarted: true, promptPublished: true, inputCleared: true, messageCount: 2 } });
-    await useTaskStore.getState().updateTaskRuntime('TEST-task', { runtime: { acceptanceObservation: observation, chatResponse: { text: 'TEST 完整正文\n保留换行', capturedAt: now } } });
+    expect(await useTaskStore.getState().updateTaskRuntime('TEST-task', { runtime: { submittedAt: now } })).toBe(true);
+    const captured = await useTaskStore.getState().updateTaskRuntime('TEST-task', { runtime: { conversationUrl: observation.conversationUrl, acceptanceObservation: observation, chatResponse: { text: 'TEST 完整正文\n保留换行', capturedAt: now } } });
+    expect(captured, useTaskStore.getState().error || undefined).toBe(true);
     vi.useFakeTimers();
     try {
       await useTaskStore.getState().completeAutomation('TEST-task', 'TEST-account', '', []);
@@ -198,7 +217,7 @@ describe('PetStory final prompt and body persistence through actual execution bo
     const broken = new TaskService({ store: {
       read: (): Task[] => structuredClone(stored), replace: (value: Task[]): boolean => { stored = structuredClone(value); if (stored[0].runtime) stored[0].runtime.chatResponse = undefined; return true; },
     }, defaultProjectId: (): string => 'TEST-project' });
-    const failed = broken.updateRuntime({ taskId: prior.id, runtime: { chatResponse: { text: raw, capturedAt: now } } });
+    const failed = broken.updateRuntime({ taskId: prior.id, expectedRunId: currentRunId(broken, prior.id), runtime: { chatResponse: { text: raw, capturedAt: now } } });
     expect(failed.success).toBe(false);
     expect(stored).toHaveLength(1);
   });

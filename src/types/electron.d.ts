@@ -28,6 +28,7 @@ declare global {
     getURL(): string;
     isLoadingMainFrame(): boolean;
     executeJavaScript(code: string): Promise<any>;
+    sendInputEvent(event: import('../utils/doubaoBridge').NativeMouseInputEvent): Promise<void>;
     addEventListener(
       type: string,
       listener: EventListenerOrEventListenerObject,

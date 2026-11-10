@@ -221,6 +221,7 @@ export class PetStoryImageOperationService {
   }
   async resume(id: string, operationId: string, capability?: PetStoryCapability): Promise<PetStoryImageOperationResult> {
     let p = await this.projects.read(id); const operation = operationFor(p, operationId);
+    if (operation.endedAt) throw new Error('本次图片等待已结束，原记录保留；如需新图请重新点击生成或修改');
     if (operation.stage === 'complete') return resultFor(p, operation);
     if (!isCurrentImageOperation(p, operation)) throw new Error('原图片任务已有记录或创建结果不明，请核对当前图片操作，不重新发送');
     if (p.chatAdjustment?.status === 'active') throw new Error('请先结束当前豆包调整，避免覆盖对话草稿');
@@ -259,6 +260,23 @@ export class PetStoryImageOperationService {
       this.authorize(p.id, operation.id);
       return result;
     } catch (error: unknown) { return this.failed(p.id, operation.id, error); }
+  }
+  /** 正式结束已停止图片的本地等待；不修改原任务，不声称撤销远端请求。 */
+  async end(id: string, operationId: string): Promise<PetStoryImageOperationResult> {
+    const p = await this.projects.read(id); const operation = operationFor(p, operationId);
+    if (operation.endedAt) return { success: true, project: p, operationId };
+    const run = operationProduction(p, operationId);
+    if (operation.stage !== 'failed' || run && run.state !== 'paused') throw new Error('请先停止本次图片处理，再结束等待；原请求不会重复发送');
+    const taskIds = new Set([operation.taskId, ...run?.steps.map((step): string | undefined => step.taskId) || [],
+      ...p.jobs.filter((job): boolean => job.id === operation.chatJobId).map((job): string => job.taskId)]);
+    if (this.tasks().some((task): boolean => taskIds.has(task.id) && ['executing', 'generating', 'manual_submission_observing'].includes(task.status))) throw new Error('原图片处理尚未停止，请先点击停止后重试结束等待');
+    this.authorized.delete(`${id}:${operationId}`); const endedAt = new Date().toISOString();
+    operation.endedAt = endedAt; operation.error = '本次图片等待已结束；原请求、对话和候选保留，豆包后台可能继续完成';
+    if (run) { run.state = 'ended'; run.endedAt = endedAt; p.productionHistory = [...(p.productionHistory || []), run]; }
+    if (p.production?.imageOperationId === operationId) p.production = undefined;
+    if (p.imageProductions) { const remaining = { ...p.imageProductions }; delete remaining[operationId]; p.imageProductions = remaining; }
+    const job = p.jobs.find((item): boolean => item.id === operation.chatJobId); if (job) job.endedWaitingAt ||= endedAt;
+    return { success: true, project: await this.projects.write(p), operationId };
   }
   /** 只停当前图片操作；其他目标继续生成，原任务与受理证据不变。 */
   async pause(id: string, operationId: string): Promise<PetStoryImageOperationResult> {

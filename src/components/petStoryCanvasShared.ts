@@ -6,11 +6,13 @@ export const canvasPromptNames: Record<PetStoryPromptKind, string> = {
   firstFrame: '首帧生图提示词', lastFrame: '尾帧编辑提示词', video: '视频提示词 / 运镜',
 };
 /** 仅保护原任务使用的方案／设置输入，暂停后仍保留；不代表新媒体入口的执行占用。 */
-export const isCanvasPlanEditLocked = (project: PetStoryProject): boolean => {
-  if (project.imageOperations?.some((operation): boolean => !['complete', 'failed'].includes(operation.stage))
-    || Object.values(project.imageProductions || {}).some((run): boolean => run.state === 'running' || run.steps.some((step): boolean => step.status !== 'complete'))) return true;
+export const isCanvasPlanEditLocked = (project: PetStoryProject, shotId?: string): boolean => {
+  const inScope = (target?: { shotId?: string }): boolean => shotId === undefined || target?.shotId === shotId;
+  if (project.imageOperations?.some((operation): boolean => !operation.endedAt && inScope(operation.target) && !['complete', 'failed'].includes(operation.stage))
+    || Object.values(project.imageProductions || {}).some((run): boolean => inScope(run.target) && run.state !== 'ended'
+      && (run.state === 'running' || run.steps.some((step): boolean => step.status !== 'complete')))) return true;
   const production = project.production;
-  if (!production) return false;
+  if (!production || production.state === 'ended') return false;
   if (production.state === 'running' || production.steps.some((step): boolean => step.status !== 'complete')) return true;
   if (production.state === 'complete') return false;
   return production.phase !== 'materials';

@@ -83,6 +83,7 @@ function makeValidAccount(): Account {
 function makeValidTask(): Task {
   return {
     id: 'task-1',
+    revision: 0,
     prompt: '测试提示词',
     assignedAccountId: null,
     status: 'queued',

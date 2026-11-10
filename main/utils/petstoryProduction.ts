@@ -1,8 +1,10 @@
+import { compileVideoInputSnapshot } from './videoInputCompiler';
+import { commitPetStoryTaskIntent, reconcilePetStoryTaskIntents } from './petstoryTaskTransaction';
 import { currentReferenceContinuation, referenceContinuationHash, referenceContinuationStep } from './petstoryReferenceContinuation';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { DownloadJob, PetStoryAsset, PetStoryCapability, PetStoryChatJob, PetStoryExecutionGuard, PetStoryPlan, PetStoryProductionCounts, PetStoryProductionResult, PetStoryProductionStep, PetStoryProject, Task, TaskAddParams, TaskDownloadOutputsParams, TaskDownloadOutputsResult, TaskResubmitUncertainParams, PetStoryCompiledPrompt, PetStoryPromptKind, PetStoryShot, PetStoryShotMedia, PetStoryVideoReferenceRequest, PetStoryVideoReferenceContinuation } from '@doubao-studio/contracts';
+import type { DownloadJob, PetStoryAsset, PetStoryCapability, PetStoryChatJob, PetStoryExecutionGuard, PetStoryPlan, PetStoryProductionCounts, PetStoryProductionResult, PetStoryProductionStep, PetStoryProject, Task, TaskLocalMediaUpdate, TaskAddParams, TaskDownloadOutputsParams, TaskDownloadOutputsResult, TaskResubmitUncertainParams, PetStoryCompiledPrompt, PetStoryPromptKind, PetStoryShot, PetStoryShotMedia, PetStoryVideoReferenceRequest, PetStoryVideoReferenceContinuation } from '@doubao-studio/contracts';
 import { PetStoryProjects, projectPath } from './petstoryProject';
 import { compilePrompt, compileMaterialPrompt, checkPromptReferences, assetCharacterIds, requiresNativeFirstLastSlots } from './petstoryPromptQuality';
 import { bindReferenceText } from './petstoryReferenceText';
@@ -13,11 +15,12 @@ import { runtimePromptIssues, validatePetStoryPlan } from './petstoryValidation'
 import { validPetStoryDuration } from './petstoryValidationIssues';
 import { petStoryAutoModePlan, plannedPetStoryMode, resolvePetStoryMode } from './petstoryModes';
 import { productionCapability } from './petstoryCapability';
-import { extractActualEndFrame, mediaDigest, validatePetStoryMedia } from './petstoryMedia';
+import { extractActualEndFrame, mediaDigest, validatePetStoryMedia, isConfirmedMediaRejection, MediaProcessingError } from './petstoryMedia';
 import { inspectPromptCandidate, promptContractFactsCurrent, requirePromptEligibility, promptWritingTarget } from './petstoryEligibility';
 import { pendingChatConflicts } from './petstoryPending';
 import { hasCurrentPromptReviewError } from './petstoryReview';
-import { PetStoryExistingMediaService } from './petstoryExistingMedia';
+import { localMediaSource, migrateLocalMediaSources, assertLocalMediaSource } from './localMediaSource';
+import { downloadBelongsToArtifact } from './downloadIdentity';
 import { compileImageFeedback, imageTargetBasis, imageTargetMatches, isPetStoryImageAdopted, selectedShotImageId, shotImageUnavailableReason } from './petstoryImageReview';
 
 /** 页面绑定属于本次上传文件与当前编译片段，不接受导出文本作为绑定证据。 */
@@ -70,7 +73,10 @@ function validatePageBindings(p: PetStoryProject, step: PetStoryProductionStep, 
 type GenerationAdd = (code: PetStoryGenerationBlocker['code'], message: string, location?: Partial<PetStoryRuntimeTarget>) => void;
 type GenerationCheck = (code: PetStoryGenerationBlocker['code'], work: () => void | Promise<unknown>, location?: Partial<PetStoryRuntimeTarget>) => Promise<boolean>;
 
+interface MediaImportContext { task: Task }
 interface ProductionPort {
+  updateLocalMedia: (taskId: string, runId: string, patch: TaskLocalMediaUpdate) => Task;
+  reviseVideoInput?: (taskId: string, expectedRunId: string, snapshot: NonNullable<Task['videoInputSnapshot']>) => Task;
   bindPageInput?: (taskId: string, runId: string, prompt: string) => Task;
   list: () => Task[];
   create: (params: TaskAddParams, accountId: string) => Task;
@@ -78,6 +84,7 @@ interface ProductionPort {
   retryUnsubmitted: (taskId: string) => Task;
   resubmitUncertain?: (params: TaskResubmitUncertainParams) => Task;
   downloads: () => DownloadJob[];
+  cancelDownloads?: (taskId: string, runId?: string) => void;
   download: (params: TaskDownloadOutputsParams) => Promise<TaskDownloadOutputsResult>;
 }
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -98,7 +105,7 @@ function legacyUnsubmittedPreparationFailure(task: Task, step: PetStoryProductio
 /** 任何提交、观察、回复或产物记录都优先于可恢复错误码，不能用准备阶段重试清掉它们。 */
 function hasSubmissionEvidence(task: Task): boolean {
   const runtime = task.runtime;
-  return !!(runtime?.submittedAt || runtime?.acceptanceObservation || runtime?.mediaSubmissionReceipt || runtime?.chatResponse || runtime?.chatReadback
+  return !!(runtime?.submittedAt || runtime?.submission && ['dispatch_unknown', 'accepted'].includes(runtime.submission.state) || runtime?.acceptanceObservation || runtime?.mediaSubmissionReceipt || runtime?.chatResponse || runtime?.chatReadback
     || runtime?.chatReadbackReview || runtime?.manualObservation || task.outputs.length || task.artifacts?.length);
 }
 /** 任何活跃租约、人工会话或重发关联都阻止清理原运行。 */
@@ -226,13 +233,20 @@ function checkPlannedReferences(p: PetStoryProject, capability: PetStoryCapabili
     compilePrompt(p, shot.id, 'video', mode, true);
   }
 }
-/** 线性业务接力。只准备原 TaskService 的单个 hold 任务，发送仍由原队列和 BrowserPanel 完成。 */
+/** 线性业务接力。只准备原 TaskService 的单个 hold 任务，发送仍由正式执行协调器完成。 */
 export class PetStoryProductionService {
   private readonly authorized = new Set<string>();
+  private readonly advances = new Map<string, Promise<PetStoryProductionResult>>();
   private readonly validated = new Map<string, string>();
   private readonly imageServices = new Map<string, PetStoryProductionService>();
   suspend(id: string): void {
     this.authorized.delete(id);
+    for (const task of this.tasks.list()) {
+      if (task.petstory?.projectId !== id || this.imageOperationId && task.petstory.imageOperationId !== this.imageOperationId) continue;
+      this.tasks.cancelDownloads?.(task.id, task.runtime?.runId);
+      const local = task.runtime?.localMedia;
+      if (task.runtime && local?.state === 'working') this.tasks.updateLocalMedia(task.id, task.runtime.runId, { ...local, state: 'paused', expectedRevision: task.revision });
+    }
     for (const service of this.imageServices.values()) service.suspend(id);
   }
   constructor(private readonly projects: Pick<PetStoryProjects, 'read' | 'write' | 'directory' | 'referenceFile'>, private readonly tasks: ProductionPort, private readonly imageOperationId?: string) {}
@@ -428,20 +442,49 @@ export class PetStoryProductionService {
     p = await this.projects.write(p); this.authorized.add(id);
     return { success: true, project: p };
   }
+  /** 切换项目只收起后续镜头授权，当前运行仍由稳定宿主完成观察和入库。 */
+  async detach(id: string): Promise<PetStoryProductionResult> {
+    const project = await this.projects.read(id); const production = project.production;
+    if (!production || production.state !== 'running') return { success: true, project };
+    const pending = production.steps.find((step): boolean => step.status !== 'complete');
+    const task = pending?.taskId ? this.tasks.list().find((item): boolean => item.id === pending.taskId) : undefined;
+    if (pending && task && ['executing', 'generating', 'manual_submission_observing', 'done'].includes(task.status)) {
+      production.stopAfterCurrent = true; production.message = '当前镜头继续生成和保存；完成后停止后续镜头，返回项目可继续';
+    } else {
+      this.authorized.delete(id); production.state = 'paused'; production.message = '已离开项目，后续制作暂未启动；原任务和输入保留';
+    }
+    return { success: true, project: await this.projects.write(project) };
+  }
+  /** 结束本地制作占位；已提交的远端请求仍属于原历史，不声称取消平台。 */
+  async end(id: string): Promise<PetStoryProductionResult> {
+    this.suspend(id);
+    const project = await this.projects.read(id);
+    const production = project.production;
+    if (!production) return { success: true, project };
+    production.state = 'ended'; production.endedAt = new Date().toISOString();
+    production.message = '本次本地制作已结束；原任务、提交和成果保留，平台请求可能仍在完成';
+    project.productionHistory = [...(project.productionHistory || []), production];
+    project.production = undefined;
+    return { success: true, project: await this.projects.write(project) };
+  }
   async pause(id: string, message = '用户已暂停；点击继续后沿用原任务'): Promise<PetStoryProductionResult> {
-    this.authorized.delete(id);
+    this.suspend(id);
     const p = await this.projects.read(id);
     if (!p.production) throw new Error('尚未确认制作方案');
     p.production.state = 'paused'; p.production.message = message;
     return { success: true, project: await this.projects.write(p), taskId: p.production.steps.find((s): boolean => s.status !== 'complete')?.taskId };
   }
   async resume(id: string, capability?: PetStoryCapability): Promise<PetStoryProductionResult> {
-    const p = await this.projects.read(id);
+    let p = await this.projects.read(id);
+    p = await reconcilePetStoryTaskIntents(this.projects, this.tasks, p);
     capability = productionCapability(p, capability);
     if (!p.production || !productionPlanMatches(p)) throw new Error('原制作计划不存在或已经改变');
     // 停止后允许上传和采用图片；先核对原授权依据，再触碰原运行或页面输入。
     this.checked(p);
     const pending = p.production.steps.find((s): boolean => s.status !== 'complete');
+    const repaired = await this.recoverInterruptedPageBinding(p, pending);
+    if (repaired) return this.resume(repaired.id, capability);
+    if (pending) this.reconcilePageInput(p, pending);
     const pendingTask = pending?.taskId ? this.originalTask(p, pending) : undefined;
     const readOnly = pendingTask?.status === 'done' || !!pendingTask?.runtime?.submittedAt;
     if (!readOnly) {
@@ -454,18 +497,34 @@ export class PetStoryProductionService {
       if (!task.runtime?.submittedAt && !['queued', 'executing', 'generating', 'done'].includes(task.status)) {
         if ((!safePreparationFailure(task.errorInfo?.code || '') && !legacyUnsubmittedPreparationFailure(task, pending))
           || hasSubmissionEvidence(task)) throw new Error('原任务未确认可安全恢复，仅保留原任务核对，不重发');
-        const source = this.resetPageBindingForRetry(p, pending);
-        pending.runId = undefined;
-        const held = await this.projects.write(p);
-        this.tasks.retryUnsubmitted(task.id);
-        this.resetTaskPageInput(task, source);
+        const held = await this.retryStepPreparation(p, pending, task);
         return this.resume(held.id, capability);
       }
     }
-    p.production.capability = capability; p.production.state = 'running'; p.production.message = '继续原任务与素材，未授权重复发送';
+    p.production.capability = capability; p.production.state = 'running'; p.production.stopAfterCurrent = undefined; p.production.message = '继续原任务与素材，未授权重复发送';
     const saved = await this.projects.write(p);
     this.authorized.add(id);
     return { success: true, project: saved };
+  }
+  private async retryStepPreparation(project: PetStoryProject, step: PetStoryProductionStep, task: Task): Promise<PetStoryProject> {
+    const source = this.resetPageBindingForRetry(project, step); step.runId = undefined;
+    const held = await this.projects.write(project); this.tasks.retryUnsubmitted(task.id); this.resetTaskPageInput(task, source);
+    if (step.videoInputSnapshot && task.videoInputSnapshot?.digest !== step.videoInputSnapshot.digest) {
+      if (!this.tasks.reviseVideoInput || !task.runtime) throw new Error('原视频输入版本更新入口不可用，请结束本次制作后生成新版本');
+      this.tasks.reviseVideoInput(task.id, task.runtime.runId, step.videoInputSnapshot);
+    }
+    return held;
+  }
+  private async recoverInterruptedPageBinding(project: PetStoryProject, step: PetStoryProductionStep | undefined): Promise<PetStoryProject | undefined> {
+    if (!step?.pageBindings || !step.taskId || !step.runId) return undefined;
+    const task = this.tasks.list().find((item): boolean => item.id === step.taskId);
+    if (!task || task.runtime?.runId !== step.runId || task.prompt === step.compiledPrompt?.text
+      || !['paused', 'fail', 'cancelled'].includes(task.status) || hasSubmissionEvidence(task)) return undefined;
+    if (task.petstory?.projectId !== project.id || task.petstory.stepId !== step.id || task.assignedAccountId !== project.accountId
+      || task.runtime.input.prompt !== task.prompt) throw new Error('原页面绑定事务与原任务归属不符，请结束本次制作后按当前输入继续');
+    validatePageBindings(project, step, step.pageBindings);
+    // 重启后旧页面节点已经失效；保留绑定历史后重做原task准备，已提交请求不能走此分支。
+    return this.retryStepPreparation(project, step, task);
   }
   private async resumeAuthorizedReferenceVideo(id: string, p: PetStoryProject, request: PetStoryVideoReferenceRequest, existing: PetStoryVideoReferenceContinuation): Promise<PetStoryProductionResult> {
     const production = requireValue(p.production);
@@ -507,6 +566,7 @@ export class PetStoryProductionService {
     if (compiled.text !== source.text || compiled.references.length !== 2 || JSON.stringify(compiled.references.map((reference): string => reference.assetId)) !== JSON.stringify(step.attachmentAssetIds)
       || compiled.references.some((reference): boolean => reference.slot !== undefined)) throw new Error('两参考图编译改变了原全文或图片清单，未发送');
     step.compiledPrompt = compiled; production.capability = capability;
+    step.videoInputSnapshot = compileVideoInputSnapshot(p, step.id, shot.id, compiled, task.videoConfig);
     await this.projects.write(p);
     return this.resume(id, capability);
   }
@@ -684,28 +744,43 @@ export class PetStoryProductionService {
     const p = await this.projects.read(id); const production = this.checked(p);
     const step = production.steps.find((s): boolean => s.taskId === taskId && s.runId === runId && s.status === 'bound');
     if (!step || !Array.isArray(bindings) || bindings.length !== step.attachmentAssetIds.length) throw new Error('页面引用清单与本次运行不符');
-    const task = this.originalTask(p, step);
-    if (task.runtime?.submittedAt) throw new Error('已提交的网页绑定快照不可改写');
+    const task = this.tasks.list().find((item): boolean => item.id === taskId && item.petstory?.projectId === p.id && item.petstory.stepId === step.id);
+    if (!task || task.runtime?.runId !== runId || task.assignedAccountId !== p.accountId) throw new Error('原网页绑定与任务运行不符');
+    if (task.runtime.submittedAt) throw new Error('已提交的网页绑定快照不可改写');
     validatePageBindings(p, step, bindings);
-    if (step.pageBindings) throw new Error('本次网页绑定已经固定，不能重复改写');
+    if (step.pageBindings) {
+      if (JSON.stringify(step.pageBindings) !== JSON.stringify(bindings)) throw new Error('本次网页绑定已经固定，不能重复改写');
+      this.reconcilePageInput(p, step);
+      return { success: true, project: p, compiledPrompt: step.compiledPrompt };
+    }
     const source = requireValue(step.compiledPrompt, '原编译输入缺失');
     const compiled = bindReferenceText(source, bindings);
     if (!this.tasks.bindPageInput) throw new Error('原任务实际引用保存入口不可用');
+    // 项目中的已验证绑定就是可重入意图；任务写入失败后只补同run正文，不重新上传或派发。
     step.pageBindings = bindings; step.compiledPrompt = compiled; step.inputHash = hash(compiled.text);
     const saved = await this.projects.write(p);
-    const bound = this.tasks.bindPageInput(taskId, runId, compiled.text);
-    if (bound.prompt !== compiled.text || bound.runtime?.input.prompt !== compiled.text) throw new Error('网页引用保存回读不一致，零提交');
+    this.reconcilePageInput(saved, requireValue(saved.production?.steps.find((item): boolean => item.id === step.id)));
+
     return { success: true, project: saved, compiledPrompt: compiled };
+  }
+  private reconcilePageInput(project: PetStoryProject, step: PetStoryProductionStep): void {
+    if (!step.pageBindings || !step.runId || !step.taskId || !step.compiledPrompt) return;
+    const task = this.tasks.list().find((item): boolean => item.id === step.taskId);
+    if (!task || task.petstory?.projectId !== project.id || task.petstory.stepId !== step.id || task.assignedAccountId !== project.accountId
+      || task.runtime?.runId !== step.runId) throw new Error('原页面绑定运行已变化，未改写新运行');
+    if (task.prompt === step.compiledPrompt.text && task.runtime.input.prompt === step.compiledPrompt.text) return;
+    if (task.runtime.submittedAt || task.runtime.submission && !['not_dispatched', 'intent_saved'].includes(task.runtime.submission.state)) throw new Error('原页面绑定未完成且已有派发可能，请检查原请求');
+    const bound = this.tasks.bindPageInput?.(task.id, step.runId, step.compiledPrompt.text);
+    if (bound?.prompt !== step.compiledPrompt.text || bound.runtime?.input.prompt !== step.compiledPrompt.text) throw new Error('网页引用保存回读不一致，零提交；请继续原准备');
   }
   async assetFile(p: PetStoryProject, id: string, kind: 'image' | 'video', feedbackOperationId?: string): Promise<string> {
     const asset = p.assets.find((a): boolean => a.id === id);
     if (!asset || (kind === 'video' ? asset.kind !== 'video' : asset.kind === 'video')) throw new Error('素材未登记或类别不符');
     if (kind === 'image' && !isPetStoryImageAdopted(p, asset) && !isFeedbackBase(p, asset, feedbackOperationId)) throw new Error('这张图片尚未采用或当前文件确认无效，请先查看图片并明确采用');
     if (kind === 'video') {
-      const step = [p.production, ...(p.productionHistory || [])].flatMap((r): PetStoryProductionStep[] => r?.steps || []).find((s): boolean => s.kind === 'video' && s.assetId === asset.id && s.status === 'complete');
-      const task = step ? this.originalTask(p, step) : await new PetStoryExistingMediaService(this.projects, this.tasks).linkedVideoTask(p, asset);
-      const artifact = task?.artifacts?.find((a): boolean => a.id === asset.artifactId && a.runId === asset.runId && a.kind === 'video');
-      if (!task || task.status !== 'done' || !artifact || !task.outputs.includes(artifact.url) || ['expired', 'invalid'].includes(artifact.validation?.state || '')) throw new Error('选中视频的原任务或产物已过期、未选中或归属无效');
+      migrateLocalMediaSources(p);
+      // 入库时的来源和文件摘要是本地播放／接力依据，不再读取可清理的队列任务。
+      assertLocalMediaSource(p, asset);
     }
     const file = await projectPath(this.projects.directory(p.id), asset.relativePath);
     const digest = await mediaDigest(file);
@@ -741,7 +816,7 @@ export class PetStoryProductionService {
     this.validateRequestContext(p, production.capability, productionStepTarget(step));
     await this.validateStepInputs(p, step, task);
     const shot = p.plan?.shots.find((s): boolean => s.id === step.shotId);
-    const guard: PetStoryExecutionGuard = { capability: production.capability, mode: shot ? production.shots[shot.id].resolvedMode : undefined,
+    const guard: PetStoryExecutionGuard = { videoInputSnapshot: step.videoInputSnapshot, capability: production.capability, mode: shot ? production.shots[shot.id].resolvedMode : undefined,
       durationSeconds: shot?.durationSeconds, attachmentAssetIds: step.attachmentAssetIds, references: step.compiledPrompt?.references, compiledPrompt: step.compiledPrompt, fileSha256s: step.attachmentAssetIds.map((id): string => requireValue(p.assets.find((a): boolean => a.id === id)?.validation?.sha256)) };
     return { success: true, guard };
   }
@@ -802,9 +877,17 @@ export class PetStoryProductionService {
     return { success: true, project: await this.projects.write(p) };
   }
   async advance(id: string): Promise<PetStoryProductionResult> {
+    const pending = this.advances.get(id);
+    if (pending) return pending;
+    const work = this.advanceOnce(id).then((result): PetStoryProductionResult => ({ ...result, taskSnapshots: this.tasks.list().filter((task): boolean => task.petstory?.projectId === id && task.mode === 'video') })); this.advances.set(id, work);
+    try { return await work; } finally { if (this.advances.get(id) === work) this.advances.delete(id); }
+  }
+  private async advanceOnce(id: string): Promise<PetStoryProductionResult> {
     let p = await this.projects.read(id);
+    await this.reconcileLocalMediaAssets(p);
     const production = this.checked(p);
-    if (production.state !== 'running' || !this.authorized.has(id)) return { success: true, project: p };
+    const localOnly = production.state === 'paused' && production.steps.some((step): boolean => step.status !== 'complete' && this.tasks.list().some((task): boolean => task.id === step.taskId && task.runtime?.runId === step.runId && task.status === 'done'));
+    if (!localOnly && (production.state !== 'running' || !this.authorized.has(id))) return { success: true, project: p };
     try {
       const pending = production.steps.find((s): boolean => s.status !== 'complete');
       if (pending) return await this.advancePending(p, pending);
@@ -846,8 +929,9 @@ export class PetStoryProductionService {
       // 下载／验证失败只停止业务推进，保留原任务和所有产物；不进入生成重试。
       const current = await this.projects.read(id);
       const message = error instanceof Error ? error.message : '制作步骤失败';
-      this.authorized.delete(id);
-      if (current.production) { current.production.state = 'paused'; current.production.message = message; }
+      // 原下载/解码迟到不能暂停新制作或把用户已结束的历史重新激活。
+      if (!current.production || current.production.approvedAt !== production.approvedAt || current.production.state !== 'running') return { success: false, error: message, project: current };
+      this.authorized.delete(id); current.production.state = 'paused'; current.production.message = message;
       return { success: false, error: message, project: await this.projects.write(current) };
     }
   }
@@ -901,11 +985,22 @@ export class PetStoryProductionService {
     return this.prepareStep(p, { kind, shotId }, input, assetIds, compiled);
   }
   private async advancePending(p: PetStoryProject, pending: PetStoryProductionStep): Promise<PetStoryProductionResult> {
-        if (!pending.taskId) throw new Error('上次创建或写盘结果不确定；请核对原 hold 任务，禁止自动重建');
+        if (!pending.taskId) {
+          const recovered = await this.recoverPreparingStep(p, pending); p = recovered.project; pending = recovered.step;
+        }
         const task = this.originalTask(p, pending);
         if (task.status === 'done') {
+          const priorSelection = pending.shotId ? p.selectedVideos?.[pending.shotId] : undefined;
           await this.collectMedia(p, pending, task);
-          p = await this.projects.write(p);
+          if (p.production?.target && pending.status === 'complete') {
+            p.production.state = 'complete'; p.production.message = '本镜真实视频已下载入库，可在本地播放；原成果保留'; this.authorized.delete(p.id);
+          }
+          p = await this.commitCollectedMedia(p, pending, priorSelection);
+          if (p.production?.steps.some((step): boolean => step.id === pending.id && step.status === 'complete') && p.production.stopAfterCurrent) {
+            p.production.state = p.production.target ? 'complete' : 'paused';
+            p.production.message = '当前镜头已保存；后续镜头等待返回项目后明确继续';
+            this.authorized.delete(p.id); p = await this.projects.write(p);
+          }
           return { success: true, project: p, action: 'wait' };
         }
         // 活跃原控制器可能先写 submittedAt、再写受理证据。这里只等待同一绑定运行，
@@ -920,6 +1015,43 @@ export class PetStoryProductionService {
         if (pending.runId) throw new Error('原任务已有运行记录，禁止重新发送');
         await this.guard(task.id, false);
         return { success: true, project: p, taskId: task.id, action: 'start' };
+  }
+  private async recoverPreparingStep(p: PetStoryProject, pending: PetStoryProductionStep): Promise<{ project: PetStoryProject; step: PetStoryProductionStep }> {
+    const matches = this.tasks.list().filter((task): boolean => task.petstory?.projectId === p.id && task.petstory.stepId === pending.id);
+    if (matches.length > 1) throw new Error('原制作步骤存在多个历史任务，请先选择正确的原任务；未创建或发送');
+    const intent = p.taskIntents?.find((item): boolean => item.kind === 'media' && item.targetId === pending.id);
+    if (intent) {
+      const recovered = await commitPetStoryTaskIntent(this.projects, this.tasks, p, intent, (project, task): void => {
+        const step = requireValue(project.production?.steps.find((item): boolean => item.id === pending.id));
+        step.taskId = task.id; step.status = 'bound';
+      });
+      p = recovered.project; pending = requireValue(p.production?.steps.find((item): boolean => item.id === pending.id));
+    } else if (matches[0]) {
+      const found = matches[0];
+      if (found.projectId !== p.studioProjectId || found.assignedAccountId !== p.accountId || hash(found.prompt) !== pending.inputHash) throw new Error('历史制作步骤与原任务输入不一致，未授权');
+      pending.taskId = found.id; pending.status = 'bound'; p = await this.projects.write(p);
+    } else throw new Error('历史准备步骤缺少原任务及完整输入意图，请结束本次制作后按当前输入生成；未新增平台请求');
+    return { project: p, step: pending };
+  }
+  /** 长下载/解码在项目短事务外执行，完成后仅回填原step；新制作与用户选择不能被迟到结果覆盖。 */
+  private async commitCollectedMedia(source: PetStoryProject, step: PetStoryProductionStep, priorSelection: string | undefined): Promise<PetStoryProject> {
+    const latest = await this.projects.read(source.id);
+    if (latest.revision === source.revision) { const saved = await this.projects.write(source); await this.reconcileLocalMediaAssets(saved); return saved; }
+    const original = [latest.production, ...(latest.productionHistory || []), ...Object.values(latest.imageProductions || {})]
+      .find((production): boolean => !!production?.steps.some((item): boolean => item.id === step.id && item.taskId === step.taskId && item.runId === step.runId));
+    const target = original?.steps.find((item): boolean => item.id === step.id && item.taskId === step.taskId && item.runId === step.runId);
+    if (!target) throw new Error('原产物已下载，但制作运行已变化；原下载保留，请关联已有视频');
+    const generated = source.assets.filter((asset): boolean => asset.taskId === step.taskId && asset.runId === step.runId);
+    for (const asset of generated) if (!latest.assets.some((item): boolean => item.id === asset.id)) latest.assets.push(asset);
+    target.assetId = step.assetId; target.status = step.status; target.error = step.error;
+    target.rejectedArtifactIds = step.rejectedArtifactIds; target.failure = step.failure; target.mediaFailure = step.mediaFailure;
+    if (original && original === latest.production && original.target && step.status === 'complete') { original.state = 'complete'; original.message = '本镜原运行产物已保存，可本地播放'; this.authorized.delete(latest.id); }
+    if (original && original === latest.production && step.kind === 'video' && step.shotId && step.assetId
+      && latest.selectedVideos?.[step.shotId] === priorSelection) {
+      latest.selectedVideos = { ...latest.selectedVideos, [step.shotId]: step.assetId };
+      original.shots[step.shotId].videoId = step.assetId;
+    }
+    const saved = await this.projects.write(latest); await this.reconcileLocalMediaAssets(saved); return saved;
   }
   private async prepareStep(p: PetStoryProject, target: Pick<PetStoryProductionStep, 'kind' | 'shotId' | 'characterId' | 'materialId'>, input: TaskAddParams, assetIds: string[], compiledPrompt?: PetStoryCompiledPrompt): Promise<PetStoryProductionResult> {
     const production = this.checked(p);
@@ -936,19 +1068,23 @@ export class PetStoryProductionService {
       production.planHash = productionPlanHash(requireValue(p.plan));
     }
     const step: PetStoryProductionStep = { ...target, id: randomUUID(), inputHash: hash(final), attachmentAssetIds: assetIds, compiledPrompt, status: 'preparing' };
+    if (target.kind === 'video') {
+      step.videoInputSnapshot = compileVideoInputSnapshot(p, step.id, requireValue(target.shotId), requireValue(compiledPrompt), requireValue(input.videoConfig));
+      input = { ...input, videoInputSnapshot: step.videoInputSnapshot };
+    }
     production.steps.push(step); production.message = `${target.characterId || target.shotId} · ${target.kind}`;
-    // 创建前先登记意图；两文件写入间退出时宁可停下核对，不自动多建一次。
-    p = await this.projects.write(p);
     const binding = { projectId: p.id, stepId: step.id, ...(production.imageOperationId ? { imageOperationId: production.imageOperationId, materialId: target.materialId } : {}) };
+    const params: TaskAddParams = { ...input, petstory: binding, promptReadback: 'exact', executionIntent: 'hold' };
     const draft = target.kind === 'firstFrame' ? p.drafts?.find((d): boolean => d.shotId === target.shotId && d.kind === 'firstFrame' && (d.final === final || d.final === compiledPrompt?.final.trim())) : undefined;
     const old = draft ? this.tasks.list().find((t): boolean => t.id === draft.taskId) : undefined;
-    let task: Task;
-    if (old && old.projectId === p.studioProjectId && old.assignedAccountId === p.accountId && (old.prompt === final || old.prompt === compiledPrompt?.final.trim()) && JSON.stringify(old.attachments || []) === JSON.stringify(input.attachments || [])) task = this.tasks.adopt(old.id, binding, final);
-    else task = this.tasks.create({ ...input, petstory: binding, promptReadback: 'exact', executionIntent: 'hold' }, p.accountId);
-    if (task.prompt !== final || task.executionIntent !== 'hold' || task.status !== 'queued') throw new Error('hold 任务写入回读不符，禁止授权');
-    const savedStep = requireValue(this.checked(p).steps.find((s): boolean => s.id === step.id));
-    savedStep.taskId = task.id; savedStep.status = 'bound';
-    p = await this.projects.write(p);
+    const committed = await commitPetStoryTaskIntent(this.projects, this.tasks, p,
+      { operationId: `media:${step.id}`, kind: 'media', targetId: step.id, input: params, accountId: p.accountId, createdAt: new Date().toISOString() },
+      (project, task): void => {
+        if (task.prompt !== final || task.executionIntent !== 'hold' || task.status !== 'queued') throw new Error('hold 任务写入回读不符，禁止授权');
+        const savedStep = requireValue(project.production?.steps.find((item): boolean => item.id === step.id)); savedStep.taskId = task.id; savedStep.status = 'bound';
+      }, old && old.projectId === p.studioProjectId && old.assignedAccountId === p.accountId && (old.prompt === final || old.prompt === compiledPrompt?.final.trim()) && JSON.stringify(old.attachments || []) === JSON.stringify(input.attachments || [])
+        ? (): Task => this.tasks.adopt(old.id, binding, final) : undefined);
+    p = committed.project; const task = committed.task;
     return { success: true, project: p, taskId: task.id, action: 'start' };
   }
   /** 仅在暂停且下游尚未使用该图时替换，旧文件保留；已经影响视频的重做属于 P5。 */
@@ -971,9 +1107,8 @@ export class PetStoryProductionService {
     await this.collectMedia(p, step, { ...task, outputs: [artifact.url] });
     return { success: true, project: await this.projects.write(p) };
   }
-  private async importMediaArtifact(p: PetStoryProject, step: PetStoryProductionStep, task: Task, artifact: NonNullable<Task['artifacts']>[number]): Promise<PetStoryAsset | undefined> {
-    const kind = step.kind === 'video' ? 'video' : 'image';
-      let job: DownloadJob | undefined = this.tasks.downloads().filter((j): boolean => j.taskId === task.id && j.accountId === p.accountId && j.mode === task.mode && j.url === artifact.url && j.status === 'done').reverse()[0];
+  private async originalMediaDownload(p: PetStoryProject, step: PetStoryProductionStep, task: Task, artifact: NonNullable<Task['artifacts']>[number]): Promise<DownloadJob & { filePath: string }> {
+      let job: DownloadJob | undefined = this.tasks.downloads().filter((j): boolean => downloadBelongsToArtifact(j, task, artifact, p.accountId)).reverse()[0];
       if (job?.filePath) {
         try { await fs.lstat(job.filePath); }
         catch (error: unknown) {
@@ -983,42 +1118,119 @@ export class PetStoryProductionService {
         }
       }
       if (!job) {
-        const result = await this.tasks.download({ outputs: [{ taskId: task.id, prompt: task.prompt, outputs: [artifact.url], accountId: p.accountId, mode: task.mode }] });
-        if (!result.success || result.failed) throw new Error('下载失败，继续时只重试原产物下载，不重新生成');
-        job = this.tasks.downloads().find((j): boolean => !!result.jobIds?.includes(j.id) && j.taskId === task.id && j.accountId === p.accountId && j.url === artifact.url && j.status === 'done' && j.mode === task.mode);
+        const result = await this.tasks.download({ outputs: [{ taskId: task.id, runId: step.runId, artifactIds: [artifact.id], inputVersion: step.videoInputSnapshot?.inputVersion, prompt: task.prompt, outputs: [artifact.url], accountId: p.accountId, mode: task.mode }] });
+        if (!result.success || result.failed) throw new Error(result.error || '下载失败，继续时只重试原产物下载，不重新生成');
+        job = this.tasks.downloads().find((j): boolean => !!result.jobIds?.includes(j.id) && downloadBelongsToArtifact(j, task, artifact, p.accountId));
       }
       if (!job?.filePath) throw new Error('下载作业与原任务产物归属不符，未登记素材');
-      let validation;
-      try { validation = await validatePetStoryMedia(job.filePath, kind); }
+      return { ...job, filePath: job.filePath };
+  }
+  private localMediaFact(task: Task, step: PetStoryProductionStep, artifactId: string, patch: Pick<TaskLocalMediaUpdate, 'phase' | 'state'> & Partial<TaskLocalMediaUpdate>, context?: MediaImportContext): Task {
+    if (task.mode !== 'video') return task;
+    const runtime = requireValue(task.runtime); const previous = runtime.localMedia;
+    const { updatedAt: _at, phaseHistory: _history, ...stored } = previous || { updatedAt: '', phaseHistory: undefined };
+    const saved = this.tasks.updateLocalMedia(task.id, runtime.runId, { ...stored, ...patch, expectedRevision: task.revision,
+      operationId: `media:${runtime.runId}:${artifactId}`, artifactId,
+      inputVersion: runtime.input.videoInputSnapshot?.inputVersion || step.videoInputSnapshot?.inputVersion,
+      inputDigest: runtime.input.videoInputSnapshot?.digest || step.videoInputSnapshot?.digest, error: patch.error });
+    if (context) context.task = saved; return saved;
+  }
+  /** 项目是已入库成果目录；仅依据原来源及真实文件补原Task ready，重启不触发平台。 */
+  async reconcileLocalMediaAssets(project: PetStoryProject): Promise<void> {
+    for (const asset of project.assets) {
+      if (asset.kind !== 'video' || !asset.taskId || !asset.runId || !asset.artifactId || !asset.validation || !asset.downloadJobId) continue;
+      const task = this.tasks.list().find((item): boolean => item.id === asset.taskId && item.runtime?.runId === asset.runId);
+      if (!task?.runtime?.localMedia || task.runtime.localMedia.state === 'ready' || task.runtime.localMedia.assetId !== asset.id) continue;
+      const step = [project.production, ...(project.productionHistory || [])].flatMap((run): PetStoryProductionStep[] => run?.steps || []).find((item): boolean => item.taskId === task.id && item.runId === asset.runId);
+      if (!step || (await mediaDigest(await projectPath(this.projects.directory(project.id), asset.relativePath))).sha256 !== asset.validation.sha256) throw new Error('原入库视频文件与摘要不符，请重新读取或恢复原文件');
+      this.localMediaFact(task, step, asset.artifactId, { phase: 'ready', state: 'ready', assetId: asset.id, downloadJobId: asset.downloadJobId, sha256: asset.validation.sha256, mediaInfo: asset.validation });
+    }
+  }
+  private async decodedDownload(step: PetStoryProductionStep, task: Task, artifact: NonNullable<Task['artifacts']>[number], job: DownloadJob & { filePath: string }, kind: 'video' | 'image'): Promise<PetStoryAsset['validation']> {
+      try { return await validatePetStoryMedia(job.filePath, kind); }
       catch (error: unknown) {
+        step.mediaFailure = { code: error instanceof MediaProcessingError ? error.code : (error as NodeJS.ErrnoException)?.code || 'MEDIA_VALIDATION_FAILED',
+          taskId: task.id, runId: requireValue(step.runId), artifactId: artifact.id, recordedAt: new Date().toISOString(),
+          ...(error instanceof MediaProcessingError ? { exitCode: error.exitCode, stderr: error.stderr } : {}) };
         // 权限、文件竞态或磁盘错误可沿原下载重试，不能永久排除仍有效的平台产物。
-        if (error && typeof error === 'object' && typeof (error as NodeJS.ErrnoException).code === 'string') throw error;
+        if (!isConfirmedMediaRejection(error)) throw error;
+        step.failure = { stage: 'validation', code: 'MEDIA_CONTENT_INVALID', message: error instanceof Error ? error.message : '媒体内容校验失败' };
         step.rejectedArtifactIds = [...(step.rejectedArtifactIds || []), artifact.id];
         step.error = error instanceof Error ? error.message : '产物校验失败';
         return undefined; // 损坏产物不能采用，也不发起新生成。
       }
-      const assetId = randomUUID();
-      const ext = kind === 'video' ? '.mp4' : path.extname(job.filePath).toLowerCase();
-      if (!['.mp4', '.png', '.jpg', '.jpeg', '.webp'].includes(ext)) throw new Error('下载图片扩展名异常，未绑定');
-      const relativePath = step.materialId ? `materials/${assetId}${ext}` : step.kind === 'character' ? `characters/${assetId}${ext}` : `shots/${step.shotId}/${assetId}${ext}`;
-      const destination = await projectPath(this.projects.directory(p.id), relativePath);
-      await fs.mkdir(path.dirname(destination), { recursive: true });
-      await projectPath(this.projects.directory(p.id), relativePath);
-      await fs.copyFile(job.filePath, destination, 1);
-      if ((await mediaDigest(destination)).sha256 !== validation.sha256) throw new Error('下载复制后的素材校验不一致');
-      const asset: PetStoryAsset = { id: assetId, kind: step.kind === 'lastFrame' ? 'plannedEndImage' : step.kind, relativePath,
-        materialId: step.materialId, generationPrompt: task.prompt, generationFinal: step.compiledPrompt?.final, shotId: step.shotId, characterId: step.characterId, taskId: task.id, runId: step.runId, artifactId: artifact.id, downloadJobId: job.id, validation };
-      if (kind === 'image') {
-        const target = step.materialId ? { materialId: step.materialId } : step.kind === 'character' ? { materialId: `character:${requireValue(step.characterId)}` }
-          : { shotId: requireValue(step.shotId), kind: step.kind as 'firstFrame' | 'lastFrame' };
-        asset.imageReview = { state: 'candidate', target, basisHash: imageTargetBasis(p, target) };
+  }
+  private async prepareLocalDownload(p: PetStoryProject, step: PetStoryProductionStep, task: Task, artifact: NonNullable<Task['artifacts']>[number], context: MediaImportContext): Promise<{ task: Task; job: DownloadJob & { filePath: string } }> {
+    const previous = task.runtime?.localMedia;
+    if (previous && previous.state !== 'ready') task = this.localMediaFact(task, step, artifact.id, { phase: previous.phase, state: 'working' }, context);
+    else if (!previous) task = this.localMediaFact(task, step, artifact.id, { phase: 'downloading', state: 'working' }, context);
+    const job = await this.originalMediaDownload(p, step, task, artifact);
+    if (!task.runtime?.localMedia || task.runtime.localMedia.phase === 'downloading') task = this.localMediaFact(task, step, artifact.id, { phase: 'downloaded', state: 'working', downloadJobId: job.id }, context);
+    return { task, job };
+  }
+  private async validateLocalDownload(step: PetStoryProductionStep, task: Task, artifact: NonNullable<Task['artifacts']>[number], job: DownloadJob & { filePath: string }, kind: 'video' | 'image', context: MediaImportContext): Promise<{ task: Task; validation: PetStoryAsset['validation'] }> {
+    let validation = task.runtime?.localMedia?.mediaInfo;
+    if (!validation) {
+      task = this.localMediaFact(task, step, artifact.id, { phase: 'validating', state: 'working', downloadJobId: job.id }, context);
+      validation = await this.decodedDownload(step, task, artifact, job, kind);
+      if (!validation) {
+        this.localMediaFact(task, step, artifact.id, { phase: 'validating', state: 'failed', error: { code: 'MEDIA_CONTENT_INVALID', message: step.error || '媒体内容校验失败' } }, context);
+        return { task, validation: undefined };
       }
-      return asset;
+    }
+    return { task, validation };
+  }
+  private async copyLocalAsset(p: PetStoryProject, step: PetStoryProductionStep, task: Task, artifact: NonNullable<Task['artifacts']>[number], job: DownloadJob & { filePath: string }, validation: NonNullable<PetStoryAsset['validation']>, kind: 'video' | 'image', context: MediaImportContext): Promise<PetStoryAsset> {
+    const assetId = task.runtime?.localMedia?.assetId || randomUUID();
+    if (task.runtime?.localMedia?.state !== 'ready') task = this.localMediaFact(task, step, artifact.id, { phase: 'library', state: 'working', assetId, mediaInfo: validation, sha256: validation.sha256, downloadJobId: job.id }, context);
+    const ext = kind === 'video' ? '.mp4' : path.extname(job.filePath).toLowerCase();
+    if (!['.mp4', '.png', '.jpg', '.jpeg', '.webp'].includes(ext)) throw new Error('下载图片扩展名异常，未绑定');
+    const relativePath = step.materialId ? `materials/${assetId}${ext}` : step.kind === 'character' ? `characters/${assetId}${ext}` : `shots/${step.shotId}/${assetId}${ext}`;
+    const destination = await projectPath(this.projects.directory(p.id), relativePath);
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    await projectPath(this.projects.directory(p.id), relativePath);
+    try { await fs.copyFile(job.filePath, destination, 1); }
+    catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    if ((await mediaDigest(destination)).sha256 !== validation.sha256) throw new Error('下载复制后的素材校验不一致');
+    // copy之后仍核对原版本；暂停/结束的迟到磁盘结果不取得新运行的写入权。
+    if (task.mode === 'video' && task.runtime?.localMedia?.state !== 'ready') task = this.localMediaFact(task, step, artifact.id, { phase: 'library', state: 'working', assetId, mediaInfo: validation, sha256: validation.sha256, downloadJobId: job.id }, context);
+    const asset: PetStoryAsset = { id: assetId, kind: step.kind === 'lastFrame' ? 'plannedEndImage' : step.kind, relativePath,
+      materialId: step.materialId, generationPrompt: task.prompt, generationFinal: step.compiledPrompt?.final, shotId: step.shotId, characterId: step.characterId, taskId: task.id, runId: step.runId, artifactId: artifact.id, downloadJobId: job.id, validation };
+    if (kind === 'video') asset.sourceSnapshot = localMediaSource(p, asset, step, task);
+    if (kind === 'image') {
+      const target = step.materialId ? { materialId: step.materialId } : step.kind === 'character' ? { materialId: `character:${requireValue(step.characterId)}` }
+        : { shotId: requireValue(step.shotId), kind: step.kind as 'firstFrame' | 'lastFrame' };
+      asset.imageReview = { state: 'candidate', target, basisHash: imageTargetBasis(p, target) };
+    }
+    step.failure = undefined;
+    return asset;
+  }
+  private recordLocalFailure(step: PetStoryProductionStep, task: Task, artifactId: string, stage: 'download' | 'validation' | 'library', error: unknown): void {
+    step.failure = { stage, code: error instanceof MediaProcessingError ? error.code : (error as NodeJS.ErrnoException)?.code || `${stage.toUpperCase()}_FAILED`, message: error instanceof Error ? error.message : '本地媒体处理失败' };
+    const local = task.runtime?.localMedia;
+    const latest = this.tasks.list().find((item): boolean => item.id === task.id && item.runtime?.runId === task.runtime?.runId);
+    if (task.mode === 'video' && local?.state !== 'ready' && latest?.runtime?.localMedia?.state === 'working') {
+      // 保存失败或运行被撤回不能再用晚到错误覆盖新版本；权威命令会拒绝旧revision。
+      try { this.localMediaFact(task, step, artifactId, { phase: local?.phase || 'downloading', state: 'failed', error: { code: step.failure.code, message: step.failure.message } }); } catch { /* 主错误保留，未伪报成功 */ }
+    }
+  }
+  private async importMediaArtifact(p: PetStoryProject, step: PetStoryProductionStep, task: Task, artifact: NonNullable<Task['artifacts']>[number]): Promise<PetStoryAsset | undefined> {
+    const kind = step.kind === 'video' ? 'video' : 'image';
+    const context: MediaImportContext = { task };
+    let stage: 'download' | 'validation' | 'library' = 'download';
+    try {
+      const prepared = await this.prepareLocalDownload(p, step, task, artifact, context); task = prepared.task;
+      stage = 'validation';
+      const checked = await this.validateLocalDownload(step, task, artifact, prepared.job, kind, context); task = checked.task;
+      if (!checked.validation) return undefined;
+      step.mediaFailure = undefined; stage = 'library';
+      return await this.copyLocalAsset(p, step, task, artifact, prepared.job, checked.validation, kind, context);
+    } catch (error: unknown) { this.recordLocalFailure(step, context.task, artifact.id, stage, error); throw error; }
   }
   private async collectMedia(p: PetStoryProject, step: PetStoryProductionStep, task: Task): Promise<void> {
     if (!step.runId || task.runtime?.runId !== step.runId || !task.runtime.submittedAt) throw new Error('生成结果缺少原运行与单次提交记录');
     const kind = step.kind === 'video' ? 'video' : 'image';
-    const artifacts = task.outputs.flatMap((url): NonNullable<Task['artifacts']> => (task.artifacts || []).filter((a): boolean => a.url === url && a.runId === step.runId && a.kind === kind && !['invalid', 'expired'].includes(a.validation?.state || '') && !step.rejectedArtifactIds?.includes(a.id)));
+    const artifacts = task.outputs.flatMap((url): NonNullable<Task['artifacts']> => (task.artifacts || []).filter((a): boolean => a.url === url && a.runId === step.runId && a.kind === kind && (!['invalid', 'expired'].includes(a.validation?.state || '') || this.tasks.downloads().some((job): boolean => downloadBelongsToArtifact(job, task, a, p.accountId))) && !step.rejectedArtifactIds?.includes(a.id)));
     if (!artifacts.length) throw new Error('没有属于原运行的可用真实产物，done 或缩略图不算媒体');
     // 同一运行的所有有效图片均保存为候选；下载和文件校验不代表用户采用。
     let firstAssetId: string | undefined;

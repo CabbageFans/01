@@ -1,16 +1,8 @@
 /* 分镜画布只作用于萌宠工作区；账号宿主与全局 Studio 样式保持独立。 */
 .storyboard-workspace { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; --canvas-teal:#087F72; --canvas-ink:#202A35; color:var(--canvas-ink); background:#F4F6F8; border:1px solid #dfe7e8; border-radius:12px; overflow:hidden; }
-.canvas-toolbar { display:flex; flex:0 0 52px; min-height:52px; align-items:center; gap:16px; padding:0 14px; background:#fff; border-bottom:1px solid #e5ebec; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; }
-.canvas-project-title { display:flex; align-items:center; gap:8px; flex-shrink:1; min-width:100px; }
-.canvas-project-title strong { font-size:14px; font-weight:650; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.canvas-project-title>span { color:#82909a; font-size:12px; white-space:nowrap; }
-.canvas-toolbar-actions { display:flex; gap:8px; align-items:center; min-width:0; }
-.canvas-toolbar .ant-btn { height:32px; padding-inline:12px; font-size:12px; white-space:nowrap; }
-.canvas-batch-progress { color:#697d83; font-size:12px; white-space:nowrap; }
-.canvas-zoom { margin-left:auto; display:flex; gap:2px; align-items:center; flex-shrink:0; }
 .storyboard-workspace button { cursor:pointer; }
-.canvas-zoom button,.canvas-field-label button,.canvas-node header button,.canvas-prompt-actions>button:not(.ant-btn),.canvas-text-button { border:0; background:transparent; color:#72818c; padding:5px; font-size:11px; }
-.canvas-zoom button:hover,.canvas-field-label button:hover,.canvas-node header button:hover,.canvas-text-button:hover { color:#087F72; background:#e9f7f4; border-radius:5px; }
+.canvas-field-label button,.canvas-node header button,.canvas-prompt-actions>button:not(.ant-btn),.canvas-text-button { border:0; background:transparent; color:#72818c; padding:5px; font-size:11px; }
+.canvas-field-label button:hover,.canvas-node header button:hover,.canvas-text-button:hover { color:#087F72; background:#e9f7f4; border-radius:5px; }
 /* 画布只通过transform平移；hidden仍允许焦点/scrollIntoView滚动，导致左下导航漂移。 */
 .canvas-viewport { flex:1; min-height:0; min-width:0; position:relative; overflow:clip; background-color:#f3f6f6; background-image:linear-gradient(to right,#dfe5e5 1px,transparent 1px),linear-gradient(to bottom,#dfe5e5 1px,transparent 1px); cursor:grab; touch-action:none; overscroll-behavior:contain; }
 .canvas-viewport:active { cursor:grabbing; }
@@ -96,7 +88,7 @@
 .canvas-modal-source { color:#84969a; font-size:12px; }
 .canvas-modal-text { padding:15px; background:#eff9f5; color:#41655e; max-height:300px; overflow:auto; }
 .canvas-error { color:#c65c4f; font-size:11px; }
-@media (max-width:1100px) { .canvas-toolbar { gap:8px; padding-inline:10px; }.canvas-project-title strong { max-width:110px; }.canvas-navigation-hint { display:none; }.canvas-batch-progress { max-width:150px; overflow:hidden; text-overflow:ellipsis; } }
+@media (max-width:1100px) { .canvas-navigation-hint { display:none; } }
 .canvas-active .canvas-node .ant-btn-primary { background:#087F72; color:#fff; }
 .canvas-active .canvas-node .ant-btn:disabled { color:#a9b5ba; border-color:#e2e9e9; background:#f6f8f8; }
 .canvas-character-fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin:14px 0; }
@@ -211,8 +203,8 @@
 .canvas-empty-media { background:#F8FAFB; color:#697584; }
 .canvas-prompt-modal .ant-input { font-size:14px; line-height:1.9; }
 .canvas-shot-row.is-focused>.canvas-node { border-color:#A8CBC2; }
-.canvas-navigation button,.canvas-zoom button { height:32px; min-width:32px; font-size:13px; }
-.canvas-zoom button:focus-visible,.canvas-navigation button:focus-visible,.petstory-panel button:focus-visible { outline:2px solid #087F72; outline-offset:2px; }
+.canvas-navigation button { height:32px; min-width:32px; font-size:13px; }
+.canvas-navigation button:focus-visible,.petstory-panel button:focus-visible { outline:2px solid #087F72; outline-offset:2px; }
 @media(max-width:1300px) { .petstory-image-preview-layout { grid-template-columns:minmax(0,1fr) 220px; } }
 @media(prefers-reduced-motion:reduce) { .petstory-panel * { scroll-behavior:auto!important; transition:none!important; } }
 
@@ -249,6 +241,3 @@
 .canvas-prompt-modal .canvas-modal-text { max-height:55vh; }
 .canvas-navigation { max-width:calc(100% - 36px); overflow-x:auto; white-space:nowrap; }
 .canvas-navigation button { flex-shrink:0; }
-@media(max-width:900px) { .canvas-toolbar { gap:6px; }.canvas-project-title { min-width:0; }.canvas-project-title strong { max-width:85px; }.canvas-project-title>span { display:none; }.canvas-batch-progress { max-width:110px; }.canvas-zoom button { font-size:10px; padding:4px; } }
-
-.canvas-toolbar .canvas-batch-progress.canvas-error { color:#ba4e40; max-width:260px; overflow:hidden; text-overflow:ellipsis; }

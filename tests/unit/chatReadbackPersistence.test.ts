@@ -34,7 +34,7 @@ describe('F03 消息轮次与原回复落盘（离线）', (): void => {
     const review: NonNullable<TaskRunSnapshot['chatReadbackReview']> = { runId: receipt().runId, checkedAt: receipt().observedAt, reason: 'reply_ambiguous', candidates: [
       { messageIndex: 1, rawText: 'OFFLINE PRIVATE RAW CANDIDATE A\n' + 'Ａ  B\\n'.repeat(20_000), turnId: 'OFFLINE-a' }, { messageIndex: 2, rawText: 'OFFLINE PRIVATE RAW CANDIDATE B', turnId: 'OFFLINE-b' },
     ] };
-    expect(service.updateRuntime({ taskId: originalTask().id, runtime: { chatReadback: receipt(), chatReadbackReview: review } }).success).toBe(true);
+    expect(service.updateRuntime({ taskId: originalTask().id, expectedRunId: originalTask().runtime!.runId, runtime: { chatReadback: receipt(), chatReadbackReview: review } }).success).toBe(true);
     const reopenedStore = repository(file);
     const reopened = new TaskService({ store: reopenedStore, defaultProjectId: (): string => 'OFFLINE-project' });
     const restored = reopenedStore.read()[0];
@@ -43,7 +43,7 @@ describe('F03 消息轮次与原回复落盘（离线）', (): void => {
     const diagnostic = JSON.stringify(reopened.buildTaskDiagnostics());
     expect(diagnostic).not.toContain('PRIVATE RAW'); expect(diagnostic).not.toContain('OFFLINE-private'); expect(diagnostic).not.toContain('OFFLINE private input');
     const response = 'OFFLINE PRIVATE RAW RESPONSE\n```json\n{"incomplete":true,"literal":"Ａ  B\\\\n"}\n```';
-    expect(reopened.updateRuntime({ taskId: restored.id, status: 'done', runtime: { stage: 'completed', chatReadback: receipt(), chatResponse: { text: response, capturedAt: receipt().observedAt } } }).success).toBe(true);
+    expect(reopened.updateRuntime({ taskId: restored.id, expectedRunId: restored.runtime!.runId, status: 'done', runtime: { stage: 'completed', chatReadback: receipt(), chatResponse: { text: response, capturedAt: receipt().observedAt } } }).success).toBe(true);
     const completed = repository(file).read()[0];
     expect(completed).toMatchObject({ status: 'done', runtime: { submittedAt: originalTask().runtime!.submittedAt, chatReadback: receipt(), chatReadbackReview: review, chatResponse: { text: response } } });
     expect(JSON.stringify(new TaskService({ store: repository(file), defaultProjectId: (): string => 'OFFLINE-project' }).buildTaskDiagnostics())).not.toContain('PRIVATE RAW');
@@ -93,7 +93,7 @@ describe('F03 消息轮次与原回复落盘（离线）', (): void => {
       const store = { read: (): Task[] => structuredClone(stored), replace: (tasks: Task[]): boolean => { stored = structuredClone(tasks); return true; } };
       const service = new TaskService({ store, defaultProjectId: (): string => 'OFFLINE-project' });
       const before = JSON.stringify(stored);
-      expect(service.updateRuntime({ taskId: task.id, runtime: { chatReadback: { ...receipt(), runId: changed === 'different-run' ? 'OFFLINE-other-run' : receipt().runId } } }).success).toBe(false);
+      expect(service.updateRuntime({ taskId: task.id, expectedRunId: task.runtime!.runId, runtime: { chatReadback: { ...receipt(), runId: changed === 'different-run' ? 'OFFLINE-other-run' : receipt().runId } } }).success).toBe(false);
       expect(JSON.stringify(stored)).toBe(before);
     }
   });
@@ -101,7 +101,7 @@ describe('F03 消息轮次与原回复落盘（离线）', (): void => {
   it('reports failed receipt readback instead of claiming the original turn has been saved', (): void => {
     let stored = [originalTask()];
     const service = new TaskService({ store: { read: (): Task[] => structuredClone(stored), replace: (tasks: Task[]): boolean => { stored = structuredClone(tasks); delete stored[0].runtime!.chatReadback; return true; } }, defaultProjectId: (): string => 'OFFLINE-project' });
-    const result = service.updateRuntime({ taskId: stored[0].id, runtime: { chatReadback: receipt() } });
+    const result = service.updateRuntime({ taskId: stored[0].id, expectedRunId: stored[0].runtime!.runId, runtime: { chatReadback: receipt() } });
     expect(result.success).toBe(false); if (!result.success) expect(result.error).toContain('回读不一致');
     expect(stored[0].runtime?.submittedAt).toBe(originalTask().runtime?.submittedAt); expect(stored[0].runtime?.chatResponse).toBeUndefined();
   });

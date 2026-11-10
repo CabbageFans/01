@@ -1,3 +1,4 @@
+import { wrapVideoPageScript, cancelTimedOutVideoOperation, captureVideoPageOperation } from '../automation/videoExecutionContext';
 /**
  * src/utils/doubaoBridge.ts
  * 豆包 webview DOM 操作工具函数
@@ -27,7 +28,7 @@ import type { CreationModeEntryDiagnostic } from './creationModeEntry';
 export type { CreationModeEntryDiagnostic } from './creationModeEntry';
 import type { VideoControlReadinessResult } from './videoControlReadiness';
 import { diagnoseVideoMessageChain, inspectChatReadback, inspectCreationReadback, readChatPage } from './chatReadback';
-import { readVideoConversationPage, relatedVideoCards } from './videoConversationReadback';
+import { readVideoConversationPage, readVideoGenerationAdvice, relatedVideoCards } from './videoConversationReadback';
 import type { VideoConversationCard, VideoConversationPage } from './videoConversationReadback';
 import { readCreationHistorySnapshot } from './creationReadbackSnapshot';
 import { readCurrentCreationConversation } from './creationConversationIdentity';
@@ -39,6 +40,8 @@ import { petStoryComposerProbe } from './petstoryControls';
 import { requiresNativePetStoryFrames, usesSharedPetStoryFrames } from './petstoryVideoUpload';
 import { readEmptyCreationComposer } from './creationConversation';
 import { pageSubmissionProbe } from './submissionControls';
+import { dispatchNativeMediaSubmission } from './nativeMediaSubmission';
+import type { PageSubmissionOperation } from './submissionControls';
 import { setVideoDurationFromPage } from './videoDurationControl';
 import type { VideoDurationControlResult } from './videoDurationControl';
 import { videoParameterControlFromPage } from './videoParameterControl';
@@ -51,7 +54,7 @@ export type { SendButtonTarget } from './submissionControls';
 import type { ChatPageSnapshot, ChatReadbackContext, ChatReadbackResult } from './chatReadback';
 import { readVideoBlockerPage } from './videoBlockerReadback';
 import type { VideoBlockerPageSnapshot, VideoBlockerReadbackContext } from './videoBlockerReadback';
-import { ImageArtifactObservationError, waitForImageArtifactReadback } from './imageArtifactReadback';
+import { waitForImageArtifactReadback } from './imageArtifactReadback';
 import type { ImageArtifactObservationOptions, ImageArtifactReadbackContext } from './imageArtifactReadback';
 
 // ==================== 类型 ====================
@@ -61,35 +64,22 @@ export interface WebviewHandle {
   executeJavaScript(code: string): Promise<any>;
   loadURL(url: string): void;
   getURL(): string;
-  sendInputEvent?(event: ElectronInputEvent): void | Promise<void>;
+  sendInputEvent?(event: NativeMouseInputEvent): void | Promise<void>;
   focus?(): void;
   getBoundingClientRect?(): { left: number; top: number; right: number; bottom: number; width: number; height: number };
   contains?(node: Node | null): boolean;
   closest?(selector: string): Element | null;
   readonly isConnected?: boolean;
   isLoadingMainFrame?(): boolean;
+  addEventListener?(name: string, listener: EventListener): void;
+  removeEventListener?(name: string, listener: EventListener): void;
 }
 
-/** Electron webview sendInputEvent 的键盘事件类型 */
-interface ElectronKeyboardEvent {
-  type: 'keyDown' | 'keyUp' | 'char';
-  keyCode?: string;
-  code?: string;
-  key?: string;
-  text?: string;
-  modifiers?: string[];
+/** Electron MouseInputEvent的受控子集；媒体没有键盘派发能力。 */
+export interface NativeMouseInputEvent {
+  type: 'mouseDown' | 'mouseUp' | 'mouseMove'; x: number; y: number;
+  button?: 'left' | 'middle' | 'right'; clickCount?: number;
 }
-
-/** Electron webview sendInputEvent 的鼠标事件类型 */
-interface ElectronMouseEvent {
-  type: 'mouseDown' | 'mouseUp' | 'mouseMove';
-  x: number;
-  y: number;
-  button?: 'left' | 'middle' | 'right';
-  clickCount?: number;
-}
-
-type ElectronInputEvent = ElectronKeyboardEvent | ElectronMouseEvent;
 
 // ==================== 工具函数 ====================
 
@@ -104,12 +94,18 @@ code: string,
 timeoutMs: number = 10000,
 label: string = 'executeJS'
 ): Promise<T> {
-return Promise.race([
-webview.executeJavaScript(code),
-new Promise<never>((_, reject) =>
-setTimeout(() => reject(new Error(`${label} 超时（${timeoutMs}ms）`)), timeoutMs)
-),
-]);
+let timer: ReturnType<typeof setTimeout> | undefined;
+try {
+  const value = await Promise.race([
+    webview.executeJavaScript(wrapVideoPageScript(webview, code, timeoutMs)) as Promise<T>,
+    new Promise<never>((_resolve, reject): void => {
+      timer = setTimeout((): void => { cancelTimedOutVideoOperation(webview); reject(new Error(`${label} 超时（${timeoutMs}ms）`)); }, timeoutMs);
+    }),
+  ]);
+  // ACK 也是异步边界；迟到结果不能使已撤销的原长动作继续调度下一条 guest 写入。
+  captureVideoPageOperation(webview);
+  return value;
+} finally { if (timer) clearTimeout(timer); }
 }
 
 /**
@@ -190,6 +186,7 @@ export async function injectPrompt(
   maxRetries: number = 3,
   strictParagraphs: boolean = false,
 ): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   console.log(`[doubaoBridge] injectPrompt 提示词长度=${prompt.length}`);
 
   // 直接写入当前 guest 的编辑器，不向宿主或其他应用派发键盘输入。
@@ -203,37 +200,6 @@ export async function injectPrompt(
 
   // 注入前先检查按钮初始状态
   const initialBtnReady = await checkSendButtonReady(webview);
-  // 视频模式守护：如果当前在视频生成页面，确保不被切走
-  const videoModeGuard = async () => {
-    const checkCode = `
-      (function() {
-        try {
-          // 检查 URL 或页面元素判断是否在视频模式
-          var url = window.location.href;
-          var inVideo = url.indexOf('video') >= 0 || url.indexOf('doubao.com/chat') >= 0;
-          
-          // 检查页面上是否有视频生成相关按钮/标识
-          var videoBtns = document.querySelectorAll('button, [role="button"]');
-          var hasVideoTab = false;
-          for (var i = 0; i < videoBtns.length; i++) {
-            var txt = (videoBtns[i].innerText || '').trim();
-            if (txt === '视频生成' || txt.indexOf('视频生成') >= 0 && txt.length < 10) {
-              hasVideoTab = true;
-              break;
-            }
-          }
-          return { inVideo: hasVideoTab };
-        } catch(e) { return { inVideo: false }; }
-      })()
-    `;
-    try {
-      const r = await safeExecuteJS<{ inVideo: boolean }>(webview, checkCode, 2000, 'video_guard');
-      return r.inVideo;
-    } catch {
-      return false;
-    }
-  };
-  const wasVideoMode = await videoModeGuard();
   console.log(`[doubaoBridge] 注入前按钮状态: ${initialBtnReady ? '已激活' : '未激活'}`);
 
   // 兼容输入也只在当前 guest 内派发编辑器事件，不使用原生键盘。
@@ -305,6 +271,7 @@ export async function verifyPromptReadyForSubmission(
   prompt: string,
   strictParagraphs: boolean = false,
 ): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   const expectedNormalized = JSON.stringify(strictParagraphs ? prompt.replace(/\r\n?/g, '\n') : normalizePromptForComposer(prompt));
   const code = `
     (function() {
@@ -838,6 +805,7 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
 
 /** 当前页面的输入区及发送控件只读回读，不依赖系统焦点或鼠标。 */
 export async function findSendButtonTarget(webview: WebviewHandle): Promise<SendButtonTarget> {
+  webview = captureVideoPageOperation(webview);
   try {
     return await safeExecuteJS<SendButtonTarget>(webview, `(${pageSubmissionProbe.toString()})({}, ${readExactComposerText.toString()}, function() { return (${hasHumanVerificationEvidence.toString()})((${readHumanVerificationEvidence.toString()})(document,window)); })`, 5000, 'findSendButtonTarget');
   } catch { return { ok: false }; }
@@ -848,6 +816,7 @@ export async function waitForSubmissionControlsStable(
   webview: WebviewHandle,
   timeoutMs: number = 20000,
 ): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   const startedAt = Date.now();
   let stable = 0;
   while (Date.now() - startedAt < timeoutMs) {
@@ -1402,408 +1371,13 @@ async function tryInjectOnce(
   }
 }
 
-// ==================== 点击发送按钮 ====================
-
-/**
- * 点击豆包发送按钮（多策略回退）
- *
- * 策略A：找 aria-label 含"发送"/"send"的 button
- * 策略B：找 textarea 父容器中最后一个非 disabled button
- * 策略C：在 textarea 上触发 Enter 键
- * 策略D：找蓝色圆形发送按钮（AI创作页面）
- * 策略E：找包含发送图标的可点击元素
- */
-export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
-  const code = `
-    (function() {
-      try {
-        var sendBtn = null;
-
-        // 豆包当前对话页的权威发送按钮。不能从整页任意按钮中猜测，
-        // 否则可能点到模式、菜单等控件并把“点击”误报为“已发送”。
-        var exactSendButton = document.querySelector('#flow-end-msg-send');
-        if (exactSendButton && exactSendButton.offsetParent !== null &&
-            !exactSendButton.disabled && exactSendButton.getAttribute('aria-disabled') !== 'true' &&
-            exactSendButton.getAttribute('data-disabled') !== 'true') {
-          sendBtn = exactSendButton;
-        }
-
-        // ========== 策略A：aria-label 匹配 ==========
-        var ariaSelectors = [
-          'button[aria-label*="发送"]',
-          'button[aria-label*="Send"]',
-          'button[aria-label*="send"]',
-          'button[aria-label*="提交"]',
-        ];
-        for (var s = 0; !sendBtn && s < ariaSelectors.length; s++) {
-          try {
-            var btn = document.querySelector(ariaSelectors[s]);
-            if (btn && !btn.disabled && btn.offsetParent !== null) {
-              sendBtn = btn;
-              break;
-            }
-          } catch (e) {}
-        }
-
-        // ========== 策略B：textarea 父容器中最后一个 button ==========
-        if (!sendBtn) {
-          var textareas = document.querySelectorAll('textarea');
-          var foundTa = null;
-          for (var i = 0; i < textareas.length; i++) {
-            if (textareas[i].offsetParent !== null) { foundTa = textareas[i]; break; }
-          }
-          if (foundTa) {
-            var container = foundTa.parentElement;
-            for (var level = 0; level < 8 && container; level++) {
-              var buttons = container.querySelectorAll('button');
-              if (buttons.length > 0) {
-                for (var b = buttons.length - 1; b >= 0; b--) {
-                  if (!buttons[b].disabled && buttons[b].offsetParent !== null) {
-                    sendBtn = buttons[b];
-                    break;
-                  }
-                }
-                if (sendBtn) break;
-              }
-              container = container.parentElement;
-            }
-          }
-        }
-
-        // ========== 策略D：AI创作页面的蓝色圆形发送按钮 ==========
-        // 在 textarea 右下方，通常是蓝色圆形带箭头图标
-        if (!sendBtn && foundTa) {
-          var taRect = foundTa.getBoundingClientRect();
-          var searchArea = document.elementsFromPoint(
-            taRect.right - 40,
-            taRect.bottom - 20
-          );
-          for (var i = 0; i < searchArea.length; i++) {
-            var el = searchArea[i];
-            if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' ||
-                (el.click && window.getComputedStyle(el).cursor === 'pointer')) {
-              // 排除 tag/label 类元素（如"图像生成 x"）
-              var cls = (el.className || '').toLowerCase();
-              var text = (el.textContent || '').trim();
-              if (text.length < 30 && !cls.includes('tag') && !text.includes('x') && !text.includes('×')) {
-                sendBtn = el;
-                break;
-              }
-            }
-          }
-        }
-
-        // ========== 策略E：通过 SVG 箭头图标找发送按钮 ==========
-        if (!sendBtn) {
-          var allSvg = document.querySelectorAll('svg');
-          for (var i = 0; i < allSvg.length; i++) {
-            var svg = allSvg[i];
-            // 找向上箭头 SVG（发送图标通常是 arrow-up）
-            var svgHtml = svg.outerHTML || '';
-            if (svgHtml.includes('arrow') || svgHtml.includes('Arrow') || svgHtml.includes('send')) {
-              var parent = svg.parentElement;
-              while (parent && parent !== document.body) {
-                if (parent.click && parent.offsetParent !== null) {
-                  var style = window.getComputedStyle(parent);
-                  if (style.cursor === 'pointer' || parent.tagName === 'BUTTON' || parent.getAttribute('role') === 'button') {
-                    sendBtn = parent;
-                    break;
-                  }
-                }
-                parent = parent.parentElement;
-              }
-              if (sendBtn) break;
-            }
-          }
-        }
-
-        // ========== 策略F：textarea 附近右下角的可点击元素 ==========
-        if (!sendBtn && foundTa) {
-          var taRect2 = foundTa.getBoundingClientRect();
-          // 在 textarea 右下角区域搜索
-          var nearbyEls = document.querySelectorAll('button, [role="button"], [onclick]');
-          for (var i = 0; i < nearbyEls.length; i++) {
-            var el = nearbyEls[i];
-            var rect = el.getBoundingClientRect();
-            // 在 textarea 右侧或下方 60px 范围内
-            if (rect.left > taRect2.right - 80 && rect.top > taRect2.bottom - 60 &&
-                rect.top < taRect2.bottom + 20 && !el.disabled) {
-              var text2 = (el.textContent || '').trim();
-              if (text2.length < 20) {
-                sendBtn = el;
-                break;
-              }
-            }
-          }
-        }
-
-        // ========== 策略C：按 Enter 键提交（兜底，支持 textarea 和 contenteditable） ==========
-        if (!sendBtn) {
-          // 尝试找 textarea
-          var ta = document.querySelector('textarea');
-          if (ta && ta.offsetParent !== null) {
-            console.log('[doubaoBridge] 未找到发送按钮，尝试按 Enter 提交(textarea)');
-            ta.focus();
-            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
-            if (nativeSetter) {
-              nativeSetter.call(ta, ta.value);
-            }
-            ta.dispatchEvent(new Event('input', { bubbles: true }));
-            ta.dispatchEvent(new KeyboardEvent('keydown', {
-              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
-            }));
-            ta.dispatchEvent(new KeyboardEvent('keypress', {
-              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
-            }));
-            ta.dispatchEvent(new KeyboardEvent('keyup', {
-              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
-            }));
-            return { ok: true, method: 'enter-textarea' };
-          }
-
-          // 尝试找 contenteditable
-          var editable = null;
-          var allEds = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
-          for (var e = 0; e < allEds.length; e++) {
-            if (allEds[e].offsetParent !== null) {
-              var eRect = allEds[e].getBoundingClientRect();
-              if (eRect.width > 100 && eRect.height > 20) {
-                editable = allEds[e];
-                break;
-              }
-            }
-          }
-          if (editable) {
-            console.log('[doubaoBridge] 未找到发送按钮，尝试按 Enter 提交(contenteditable)');
-            editable.focus();
-            // 将光标移到末尾
-            var range = document.createRange();
-            range.selectNodeContents(editable);
-            range.collapse(false);
-            var sel = window.getSelection();
-            sel.removeAllRanges();
-            sel.addRange(range);
-
-            editable.dispatchEvent(new KeyboardEvent('keydown', {
-              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
-            }));
-            editable.dispatchEvent(new KeyboardEvent('keypress', {
-              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
-            }));
-            // 某些编辑器通过 beforeinput 处理 Enter
-            try {
-              editable.dispatchEvent(new InputEvent('beforeinput', {
-                bubbles: true, cancelable: true, inputType: 'insertParagraph', data: null
-              }));
-            } catch(e) {}
-            editable.dispatchEvent(new KeyboardEvent('keyup', {
-              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
-            }));
-            return { ok: true, method: 'enter-editable' };
-          }
-
-          return { ok: false, error: '未找到发送按钮且无输入框可按 Enter' };
-        }
-
-        console.log('[doubaoBridge] 找到发送按钮 tag=' + sendBtn.tagName + ' class=' + (sendBtn.className || '').substring(0, 60));
-
-        // 先检测按钮是否可用（disabled/aria-disabled/低透明度 都算不可用）
-        var btnStyle = window.getComputedStyle(sendBtn);
-        var isDisabled = sendBtn.disabled || sendBtn.getAttribute('aria-disabled') === 'true' ||
-                        parseFloat(btnStyle.opacity) < 0.5 || btnStyle.pointerEvents === 'none';
-        if (isDisabled) {
-          console.log('[doubaoBridge] 发送按钮处于禁用状态，点击无效');
-          return { ok: false, error: '发送按钮被禁用，提示词可能未被 React 捕获' };
-        }
-
-        sendBtn.click();
-        return { ok: true, method: 'click' };
-      } catch (e) {
-        return { ok: false, error: e.message || '未知错误', actualLen: 0 };
-      }
-    })();
-  `;
-
-  try {
-    const result = await safeExecuteJS<{ ok: boolean; error?: string; method?: string }>(
-      webview, code, 10000, 'submitPrompt'
-    );
-    if (!result.ok) {
-      console.error('[doubaoBridge] submitPrompt 失败:', result.error);
-      return false;
-    }
-    console.log('[doubaoBridge] submitPrompt 成功, 方法:', result.method);
-    return true;
-  } catch (err: any) {
-    console.error('[doubaoBridge] submitPrompt 异常:', err.message);
-    return false;
-  }
-}
-
-/**
- * 视频模式：点击「生成视频」按钮（素材图区域的，不是顶部Tab）
- * 视频模式下必须点这个按钮才会用完整提示词生成，点普通发送按钮会走聊天流程导致提示词被曲解
- */
-export async function submitVideoGeneration(webview: WebviewHandle): Promise<boolean> {
-  const code = `
-    (function() {
-      try {
-        var viewportH = window.innerHeight;
-        var viewportW = window.innerWidth;
-        var candidates = [];
-
-        // 策略1：遍历所有元素，找文本精确为"生成视频"的可点击元素
-        var allElements = document.querySelectorAll('div, span, button, a, p, li');
-        for (var i = 0; i < allElements.length; i++) {
-          var el = allElements[i];
-          // 只检查直接文本（避免父元素被子元素文本污染）
-          var directText = '';
-          for (var n = 0; n < el.childNodes.length; n++) {
-            if (el.childNodes[n].nodeType === 3) {
-              directText += el.childNodes[n].textContent;
-            }
-          }
-          directText = directText.trim();
-          if (directText !== '生成视频') continue;
-          
-          var rect = el.getBoundingClientRect();
-          if (rect.width < 20 || rect.height < 20) continue;
-          if (rect.top < 0 || rect.top > viewportH) continue;
-          if (rect.left < 0 || rect.left > viewportW) continue;
-          
-          // 排除顶部 Tab 区域（top < 200）
-          if (rect.top < 200) continue;
-          
-          // 排除底部输入框区域的"视频生成"Tab（底部工具栏的）
-          if (rect.top > viewportH * 0.85) continue;
-          
-          // 判断是否可点击
-          var style = window.getComputedStyle(el);
-          var isClickable = (el.tagName === 'BUTTON' || el.tagName === 'A' || 
-                            style.cursor === 'pointer' || el.onclick ||
-                            el.getAttribute('role') === 'button');
-          
-          // 如果本身不可点击，往上找3层看有没有可点击的父元素
-          var clickTarget = el;
-          if (!isClickable) {
-            var parent = el.parentElement;
-            for (var d = 0; d < 5 && parent; d++) {
-              var pStyle = window.getComputedStyle(parent);
-              if (parent.tagName === 'BUTTON' || parent.tagName === 'A' ||
-                  pStyle.cursor === 'pointer' || parent.onclick ||
-                  parent.getAttribute('role') === 'button') {
-                clickTarget = parent;
-                isClickable = true;
-                // 更新 rect 为父元素的
-                var pRect = parent.getBoundingClientRect();
-                rect = pRect;
-                break;
-              }
-              parent = parent.parentElement;
-            }
-          }
-          
-          if (!isClickable) continue;
-          
-          var score = 0;
-          // 位置在页面中上部（素材图区域，通常在 30%-70% 高度之间）
-          if (rect.top > viewportH * 0.25 && rect.top < viewportH * 0.7) score += 100;
-          // 有一定大小的按钮加分
-          if (rect.width > 60 && rect.height > 30) score += 50;
-          if (rect.width > 100) score += 30;
-          // 背景色不是透明的（有按钮样式）加分
-          if (style.backgroundColor && style.backgroundColor !== 'transparent' && style.backgroundColor !== 'rgba(0, 0, 0, 0)') {
-            score += 40;
-          }
-          // 有圆角（按钮样式）加分
-          if (style.borderRadius && parseInt(style.borderRadius) > 0) {
-            score += 20;
-          }
-          
-          candidates.push({ 
-            el: clickTarget, 
-            score: score, 
-            text: directText,
-            top: Math.round(rect.top), 
-            w: Math.round(rect.width), 
-            h: Math.round(rect.height),
-            tag: clickTarget.tagName
-          });
-        }
-
-        // 策略2：如果没找到，用更模糊的匹配（包含"生成视频"的元素）
-        if (candidates.length === 0) {
-          var allDivs = document.querySelectorAll('div');
-          for (var k = 0; k < allDivs.length; k++) {
-            var div = allDivs[k];
-            var text = (div.textContent || '').trim();
-            if (text.indexOf('生成视频') < 0) continue;
-            if (text.length > 20) continue; // 太长的不是按钮
-            
-            var rect3 = div.getBoundingClientRect();
-            if (rect3.width < 40 || rect3.height < 25) continue;
-            if (rect3.top < 200 || rect3.top > viewportH * 0.85) continue;
-            
-            var style3 = window.getComputedStyle(div);
-            if (style3.cursor !== 'pointer' && div.tagName !== 'BUTTON') continue;
-            
-            candidates.push({
-              el: div,
-              score: 50,
-              text: text,
-              top: Math.round(rect3.top),
-              w: Math.round(rect3.width),
-              h: Math.round(rect3.height),
-              tag: 'DIV'
-            });
-          }
-        }
-
-        if (candidates.length === 0) {
-          return { ok: false, error: '未找到生成视频按钮（0候选）' };
-        }
-
-        // 按分数排序
-        candidates.sort(function(a, b) { return b.score - a.score; });
-        
-        var best = candidates[0];
-        console.log('[doubaoBridge] 视频生成按钮候选前3: ' + candidates.slice(0, 3).map(function(c) { 
-          return c.text + '(top=' + c.top + ',size=' + c.w + 'x' + c.h + ',score=' + c.score + ',tag=' + c.tag + ')'; 
-        }).join('; '));
-        
-        best.el.click();
-        return { ok: true, method: 'click-video-generate', text: best.text, top: best.top };
-      } catch (e) {
-        return { ok: false, error: e.message };
-      }
-    })()
-  `;
-
-  try {
-    const result = await safeExecuteJS<{ ok: boolean; method?: string; text?: string; error?: string }>(
-      webview, code, 10000, 'submitVideoGeneration'
-    );
-    if (!result.ok) {
-      console.warn('[doubaoBridge] submitVideoGeneration 失败:', result.error, '，回退到普通 submitPrompt');
-      // 回退到普通发送
-      return false;
-    }
-    console.log('[doubaoBridge] submitVideoGeneration 成功, 按钮文本:', result.text);
-    return true;
-  } catch (err: any) {
-    console.error('[doubaoBridge] submitVideoGeneration 异常:', err.message);
-    return false;
-  }
-}
-
-// ==================== 生成状态网络监控（后台 webview 可用） ====================
-
 /**
  * 注入生成状态监听器（基于 fetch/XHR 拦截，不依赖 DOM）
  * 监听 /chat/completion 的 SSE 流开始和结束，写入 window.__genState
  * 后台 webview DOM 被节流时，网络层仍然正常工作
  */
 export async function injectGenerationMonitor(webview: WebviewHandle): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   const injectCode = `
     (function() {
       if (window.__genMonitorInstalled) return;
@@ -1947,6 +1521,10 @@ export interface SubmissionDispatchSafety {
   strictParagraphs?: boolean;
   isCurrent: () => boolean;
   verifyLease: () => Promise<boolean>;
+  /** 最后一次只读门禁后、guest激活前，耐久记录可能派发；失败绝不激活。 */
+  beforeDispatch?: () => Promise<void>;
+  /** 媒体走可信原生单击；普通Chat保留原页内兼容提交。 */
+  activation?: 'native_media' | 'dom_compat';
 }
 
 function submissionDispatchAllowed(safety?: SubmissionDispatchSafety): boolean {
@@ -1968,6 +1546,7 @@ function samePageSubmissionTarget(current: SendButtonTarget, previous: SendButto
 
 /** 只读核对当前 guest 的输入与控件稳定；后台不等待焦点、鼠标位置或活跃渲染帧。 */
 export async function preparePageSubmission(webview: WebviewHandle, safety?: SubmissionDispatchSafety, background?: BackgroundPageSubmission): Promise<SendButtonTarget> {
+  webview = captureVideoPageOperation(webview);
   try {
     let previous: SendButtonTarget | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -1984,25 +1563,43 @@ export async function preparePageSubmission(webview: WebviewHandle, safety?: Sub
 }
 
 /** 原运行提交意图持久化后，仅激活一次当前真实发送控件；绝不切换输入策略重试。 */
-export async function submitPromptOnce(webview: WebviewHandle, safety: SubmissionDispatchSafety, background?: BackgroundPageSubmission): Promise<boolean> {
-  if (!safety || !safety.dispatchKey) return false;
+export type SubmissionDispatchResult =
+  | { kind: 'not_dispatched'; reason: string }
+  | { kind: 'dispatch_attempted'; activated: true }
+  | { kind: 'dispatch_unknown'; reason: string };
+
+export async function submitPromptOnce(webview: WebviewHandle, safety: SubmissionDispatchSafety, background?: BackgroundPageSubmission): Promise<SubmissionDispatchResult> {
+  webview = captureVideoPageOperation(webview);
+  if (!safety?.dispatchKey) return { kind: 'not_dispatched', reason: 'missing_operation' };
+  if (safety.activation === 'native_media' && typeof webview.sendInputEvent !== 'function') return { kind: 'not_dispatched', reason: 'native_input_unavailable' };
+  let guestRequested = false;
   try {
     const target = await preparePageSubmission(webview, safety, background);
     if (target.humanVerification) throw new HumanVerificationRequiredError();
-    if (!target.ok || !submissionDispatchAllowed(safety)) return false;
-    if (!await safety.verifyLease() || !submissionDispatchAllowed(safety) || !pageSubmissionAvailable(webview, background)) return false;
-    // guest 的权限先于 executeJavaScript 超时失效，防止队列在宿主报错后迟到激活。
+    if (!target.ok || !submissionDispatchAllowed(safety)) return { kind: 'not_dispatched', reason: 'controls_unavailable' };
+    if (!await safety.verifyLease() || !submissionDispatchAllowed(safety) || !pageSubmissionAvailable(webview, background)) return { kind: 'not_dispatched', reason: 'lease_withdrawn' };
+    await safety.beforeDispatch?.();
+    if (!submissionDispatchAllowed(safety)) return { kind: 'not_dispatched', reason: 'operation_cancelled' };
+    if (safety.activation === 'native_media') {
+      const probe = (operation: PageSubmissionOperation, cleanup = false): Promise<SendButtonTarget> => {
+        const code = `(${pageSubmissionProbe.toString()})(${JSON.stringify(operation)}, ${readExactComposerText.toString()}, function() { return (${hasHumanVerificationEvidence.toString()})((${readHumanVerificationEvidence.toString()})(document,window)); })`;
+        return cleanup ? webview.executeJavaScript(code) as Promise<SendButtonTarget> : safeExecuteJS<SendButtonTarget>(webview, code, Math.max(1, Math.min(1500, safety.deadlineAt - Date.now())), 'nativePageSubmission');
+      };
+      return dispatchNativeMediaSubmission(webview, safety, target, probe);
+    }
     const deadlineAt = Math.min(safety.deadlineAt, Date.now() + 4500);
     const operation = { expected: target, dispatchKey: safety.dispatchKey, deadlineAt, expectedPrompt: safety.expectedPrompt, strictParagraphs: safety.strictParagraphs };
+    guestRequested = true;
     const dispatched = await safeExecuteJS<SendButtonTarget>(webview,
       `(${pageSubmissionProbe.toString()})(${JSON.stringify(operation)}, ${readExactComposerText.toString()}, function() { return (${hasHumanVerificationEvidence.toString()})((${readHumanVerificationEvidence.toString()})(document,window)); })`, 5000, 'dispatchPageSubmission');
     if (dispatched.humanVerification) throw new HumanVerificationRequiredError();
-    return dispatched.dispatched === true;
+    if (dispatched.dispatched) return { kind: 'dispatch_attempted', activated: true };
+    return dispatched.dispatchAttempted ? { kind: 'dispatch_unknown', reason: 'activation_ack_unknown' }
+      : { kind: 'not_dispatched', reason: 'guest_preflight_refused' };
   } catch (error: unknown) {
     if (error instanceof HumanVerificationRequiredError) throw error;
-    // 控件可能已激活；保留提交意图，禁止自动回退、补点或切换成 Enter。
-    console.warn('[doubaoBridge] 单次页面提交结果不明，禁止自动回退');
-    return false;
+    return guestRequested ? { kind: 'dispatch_unknown', reason: 'guest_ack_missing' }
+      : { kind: 'not_dispatched', reason: 'preflight_failed' };
   }
 }
 
@@ -2020,6 +1617,7 @@ export class ChatReadbackRecoveryError extends Error {
 /** 用户显式恢复时只读原会话；不注入提示词、不上传、不调用发送器。 */
 export async function readStableChatAnswer(webview: WebviewHandle, prompt: string, conversationUrl: string, timeoutMs: number = 15_000,
   options?: { context: ChatReadbackContext; currentRunId?: () => string | undefined; signal?: AbortSignal; onCaptured?: (evidence: ChatReadbackResult) => Promise<void> }): Promise<string> {
+  webview = captureVideoPageOperation(webview);
   const startedAt = Date.now();
   let previous = '';
   let stable = 0;
@@ -2044,6 +1642,7 @@ export async function readStableChatAnswer(webview: WebviewHandle, prompt: strin
 
 /** 普通 Chat 的消息区快照，失败时不降级到整页文本或猜测发送结果。 */
 export async function getChatPageSnapshot(webview: WebviewHandle): Promise<ChatPageSnapshot> {
+  webview = captureVideoPageOperation(webview);
   return safeExecuteJS<ChatPageSnapshot>(webview, `(${readChatPage.toString()})(document)`, 8000, 'getChatPageSnapshot');
 }
 
@@ -2051,6 +1650,7 @@ export async function getChatPageSnapshot(webview: WebviewHandle): Promise<ChatP
 export async function getCurrentCreationConversation(webview: WebviewHandle, options: {
   signal?: AbortSignal; ensureCurrent?: () => void; timeoutMs?: number;
 } = {}): Promise<CurrentCreationConversationReadback> {
+  webview = captureVideoPageOperation(webview);
   const assertCurrent = (): void => {
     if (options.signal?.aborted) throw new DOMException('原媒体会话读取已暂停', 'AbortError');
     options.ensureCurrent?.();
@@ -2074,6 +1674,7 @@ export interface CreationReadbackSnapshotOptions {
 
 /** 已提交创作只读恢复用；通过当前会话列表补齐虚拟卸载的原消息，不影响发送前严格回执。 */
 export async function getCreationReadbackSnapshot(webview: WebviewHandle, options: CreationReadbackSnapshotOptions = {}): Promise<ChatPageSnapshot> {
+  webview = captureVideoPageOperation(webview);
   const conversationUrl = options.conversationUrl || webview.getURL();
   const assertCurrent = async (): Promise<void> => {
     if (options.signal?.aborted) throw new DOMException('原视频消息读取已取消', 'AbortError');
@@ -2122,6 +1723,7 @@ export async function getSubmissionEvidence(
   startTimeBeforeSubmit: number,
   messageCountBeforeSubmit: number,
 ): Promise<SubmissionEvidence> {
+  webview = captureVideoPageOperation(webview);
   const promptText = JSON.stringify(prompt.replace(/\s+/g, ' ').trim());
   const code = `
     (function() {
@@ -2165,6 +1767,7 @@ export async function getSubmissionEvidence(
 }
 
 export async function getGenerationStartTime(webview: WebviewHandle): Promise<number> {
+  webview = captureVideoPageOperation(webview);
   try {
     return await safeExecuteJS<number>(
       webview,
@@ -2179,6 +1782,7 @@ export async function getGenerationStartTime(webview: WebviewHandle): Promise<nu
 
 /** 与提交回读使用同一选择器的消息基线，不能复用综合生成检测的异构计数。 */
 export async function getSubmissionMessageCount(webview: WebviewHandle): Promise<number> {
+  webview = captureVideoPageOperation(webview);
   try {
     return await safeExecuteJS<number>(
       webview,
@@ -2193,6 +1797,7 @@ export async function getSubmissionMessageCount(webview: WebviewHandle): Promise
 
 /** 返回不含输入框的会话可见文本，用于新版页面没有稳定消息属性时的终态回读。 */
 export async function getConversationText(webview: WebviewHandle): Promise<string> {
+  webview = captureVideoPageOperation(webview);
   try {
     return await safeExecuteJS<string>(
       webview,
@@ -2217,6 +1822,7 @@ export async function getConversationText(webview: WebviewHandle): Promise<strin
  * 返回 generating=true 表示确定在生成，false 表示确定已完成，unknown 表示无法确定
  */
 export async function checkGenerating(webview: WebviewHandle): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   const result = await checkGeneratingDetailed(webview);
   if (result.status === 'unknown') {
     // 无法确定时保守返回 true（继续等待），避免提前结束
@@ -2240,6 +1846,7 @@ interface GeneratingResult {
  * 3. 最新消息是否包含产物图片
  */
 export async function checkGeneratingDetailed(webview: WebviewHandle): Promise<GeneratingResult> {
+  webview = captureVideoPageOperation(webview);
   const code = `
     (function() {
       try {
@@ -2364,6 +1971,7 @@ export async function checkGeneratingDetailed(webview: WebviewHandle): Promise<G
  * 返回 JSON 数组字符串，包含所有产物图片的直链
  */
 export async function getResultUrl(webview: WebviewHandle, timeoutMs: number = 10000, assistantImagesOnly: boolean = false): Promise<string> {
+  webview = captureVideoPageOperation(webview);
   try {
     const code = `
       (function() {
@@ -2627,6 +2235,7 @@ export async function waitForChatReady(
   webview: WebviewHandle,
   timeoutMs: number = 15000
 ): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   const startTime = Date.now();
 
   while (Date.now() - startTime < timeoutMs) {
@@ -2708,6 +2317,7 @@ export function switchMode(webview: WebviewHandle, mode: string): void {
 
 /** 只完成目标技能选择；模型、比例和时长由后续各自的就绪阶段读取。 */
 export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video', onDiagnostic?: (diagnostic: CreationModeEntryDiagnostic) => void): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   const startedAt = Date.now();
   const report = (diagnostic: CreationModeEntryDiagnostic): void => {
     try { onDiagnostic?.(diagnostic); }
@@ -2734,6 +2344,7 @@ export async function waitForModeReady(
   mode: string,
   timeoutMs: number = 20000
 ): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   const startTime = Date.now();
 
   // 对于 image/video，等待 chat 页面就绪
@@ -2763,6 +2374,7 @@ export async function waitForModeReady(
  * 检测当前豆包页面处于哪种模式
  */
 export async function detectCurrentMode(webview: WebviewHandle): Promise<string> {
+  webview = captureVideoPageOperation(webview);
   try {
     const currentUrl = webview.getURL();
     if (currentUrl.includes('/create-image')) return 'image';
@@ -2784,6 +2396,7 @@ export async function configureVideoOptions(
   config: { model: string; duration: string; aspectRatio: string },
   options?: { onReadiness?: (result: VideoControlReadinessResult) => void | Promise<void> },
 ): Promise<void> {
+  webview = captureVideoPageOperation(webview);
   // 2026-08 新版创作页把“比例 + 时长”收敛为同一个弹层；旧版三个
   // 独立下拉的兜底会在未回读时误报成功。统一走新版可见控件并逐项回读。
   return configureVideoOptionsV2(webview, config, options);
@@ -2869,6 +2482,7 @@ export function inspectDesktopDownloadPromotion(doc: Document, win: Window): Des
 export async function dismissKnownDesktopDownloadPromotion(
   webview: WebviewHandle,
 ): Promise<KnownPopupDismissResult> {
+  webview = captureVideoPageOperation(webview);
   const inspect = async (): Promise<DesktopDownloadPromotionSnapshot> => safeExecuteJS(
     webview,
     `(${inspectDesktopDownloadPromotion.toString()})(document,window)`,
@@ -2915,6 +2529,7 @@ export async function dismissKnownDesktopDownloadPromotion(
 export async function inspectMaterialAuthorization(
   webview: WebviewHandle,
 ): Promise<MaterialAuthorizationState> {
+  webview = captureVideoPageOperation(webview);
   return (await inspectMaterialAuthorizationTarget(webview)).state;
 }
 
@@ -3035,6 +2650,7 @@ export async function confirmMaterialAuthorizationIfAllowed(
   webview: WebviewHandle,
   input: { enabled: boolean; expectedConversationUrl: string; assetsValidated: boolean },
 ): Promise<MaterialAuthorizationConfirmResult> {
+  webview = captureVideoPageOperation(webview);
   const detectedAt = new Date().toISOString();
   const before = await inspectMaterialAuthorizationTarget(webview);
   const decision = decideMaterialAuthorizationAutoConfirm({
@@ -3086,6 +2702,7 @@ export async function confirmMaterialAuthorizationIfAllowed(
 export async function inspectGenerationConfirmation(
   webview: WebviewHandle,
 ): Promise<GenerationConfirmationEvidence> {
+  webview = captureVideoPageOperation(webview);
   try {
     const snapshot = await getChatPageSnapshot(webview);
     const latest = snapshot.messages.at(-1);
@@ -3151,7 +2768,10 @@ async function configureVideoOptionsV2(
   const probe = async (operation: VideoParameterOperation = 'snapshot', expected?: string, activate: boolean = false): Promise<VideoParameterSnapshot> => {
     attempts += 1;
     return page<VideoParameterSnapshot>(`(${videoParameterControlFromPage.toString()})(${JSON.stringify({ operation, expected, activate })})`, `video_parameters_${operation}`)
-      .catch((): VideoParameterSnapshot => ({ modelReady: false, aspectRatioReady: false, durationReady: false, menuOpen: false, failureReason: 'page_unavailable' }));
+      .catch((error: unknown): VideoParameterSnapshot => {
+        if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') throw error;
+        return { modelReady: false, aspectRatioReady: false, durationReady: false, menuOpen: false, failureReason: 'page_unavailable' };
+      });
   };
   const membershipBlocked = async (): Promise<boolean> => page<boolean>(`
     (function () {
@@ -3254,6 +2874,7 @@ export async function uploadReferenceImages(
   fileDataList: Array<{ name: string; base64: string; mime: string }>,
   options: { chat?: boolean; timeoutMs?: number; stableSamples?: number; onProgress?: (diagnostic: UploadReadinessDiagnostic) => void | Promise<void> } = {},
 ): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   if (!fileDataList || fileDataList.length === 0) return true;
   if (options.chat) return uploadChatImages(webview, fileDataList, options);
 
@@ -3394,6 +3015,7 @@ export async function uploadReferenceAudio(
   webview: WebviewHandle,
   fileData: { name: string; base64: string; mime: string }
 ): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   console.log(`[doubaoBridge] 上传参考音频: ${fileData.name}`);
 
   const fileJson = JSON.stringify(fileData);
@@ -3517,299 +3139,9 @@ export async function uploadReferenceAudio(
 
 // ==================== 15秒视频生成注入 ====================
 
-/**
- * 注入 15 秒视频生成补丁到豆包页面
- * 通过 monkey-patch fetch 和 XMLHttpRequest 拦截 /chat/completion 请求
- * 强制视频生成使用 15秒时长
- * 同时拦截 SSE 响应，提取 vid 和无水印视频地址存入 window.__doubaoVideoCache
- */
-export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boolean> {
-  void webview;
-  console.warn('[doubaoBridge] 15 秒请求改写能力已永久禁用；必须使用页面实时控件');
-  return false;
-  /* istanbul ignore next -- 历史实现不可达，待独立清理包删除。 */
-  const injectCode = `
-    (function() {
-      if (window.__doubao15sPatched) return;
-      window.__doubao15sPatched = true;
-      window.__doubao15sPatchEnabled = false;
-      window.__doubaoVideoCache = window.__doubaoVideoCache || {};
+/** 兼容旧插件调用，禁用的请求改写不保留可执行代码。 */
+export async function inject15sVideoPatch(_webview: WebviewHandle): Promise<boolean> { return false; }
 
-      function findVid(obj, depth) {
-        if (depth === undefined) depth = 0;
-        if (depth > 12 || !obj) return null;
-        if (Array.isArray(obj)) {
-          for (var i = 0; i < obj.length; i++) {
-            var f = findVid(obj[i], depth + 1);
-            if (f) return f;
-          }
-        } else if (typeof obj === 'object') {
-          var vid = obj.vid || obj.video_id || obj.videoId || obj.key;
-          if (vid && typeof vid === 'string' && vid.length >= 10) return vid;
-          for (var key in obj) {
-            if (obj.hasOwnProperty(key)) {
-              var f = findVid(obj[key], depth + 1);
-              if (f) return f;
-            }
-          }
-        }
-        return null;
-      }
-
-      function findAllPlayInfos(obj, results, depth) {
-        if (depth === undefined) depth = 0;
-        if (!results) results = [];
-        if (depth > 10 || !obj) return results;
-        if (Array.isArray(obj)) {
-          for (var i = 0; i < obj.length; i++) {
-            findAllPlayInfos(obj[i], results, depth + 1);
-          }
-        } else if (typeof obj === 'object') {
-          if (obj.play_info) results.push(obj.play_info);
-          for (var key in obj) {
-            if (obj.hasOwnProperty(key) && key !== 'play_info') {
-              findAllPlayInfos(obj[key], results, depth + 1);
-            }
-          }
-        }
-        return results;
-      }
-
-      function removeWatermark(url) {
-        if (!url || typeof url !== 'string') return url;
-        return url.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark');
-      }
-
-      function processVideoData(data) {
-        try {
-          var vid = findVid(data);
-          if (vid) {
-            window.__doubaoVideoCache.lastVid = vid;
-            // 1. 优先查找 original_media_info（平台明确返回的原始产物）
-            var om = findAllKey(data, 'original_media_info');
-            for (var oi = 0; oi < om.length; oi++) {
-              var omUrl = om[oi].main_url || om[oi].main || om[oi].url || om[oi].download_url;
-              if (omUrl && typeof omUrl === 'string') {
-                window.__doubaoVideoCache[vid] = omUrl;
-                window.__doubaoVideoCache.lastVideoUrl = omUrl;
-                window.__doubaoVideoCache.lastFieldSource = 'original_media_info';
-                console.log('[15sPatch] 找到原始视频:', vid, omUrl.substring(0, 80) + '...');
-                return;
-              }
-            }
-            // 2. 查找 download_url（明确下载地址）
-            var dlUrl = findFieldValue(data, 'download_url');
-            if (dlUrl) {
-              window.__doubaoVideoCache[vid] = dlUrl;
-              window.__doubaoVideoCache.lastVideoUrl = dlUrl;
-              window.__doubaoVideoCache.lastFieldSource = 'download_url';
-              console.log('[15sPatch] 找到下载地址:', vid, dlUrl.substring(0, 80) + '...');
-              return;
-            }
-            // 3. 回退到 play_info（普通播放地址，非原始产物）
-            var playInfos = findAllPlayInfos(data);
-            for (var i = 0; i < playInfos.length; i++) {
-              var pi = playInfos[i];
-              var mainUrl = pi.main || pi.main_url;
-              if (mainUrl && typeof mainUrl === 'string') {
-                window.__doubaoVideoCache[vid] = mainUrl;
-                window.__doubaoVideoCache.lastVideoUrl = mainUrl;
-                window.__doubaoVideoCache.lastFieldSource = 'play_info';
-                console.log('[15sPatch] 找到视频:', vid, mainUrl.substring(0, 80) + '...');
-                break;
-              }
-            }
-          }
-        } catch(e) {}
-      }
-
-      function findAllKey(obj, keyName, results, depth) {
-        if (depth === undefined) depth = 0;
-        if (!results) results = [];
-        if (depth > 10 || !obj) return results;
-        if (Array.isArray(obj)) {
-          for (var i = 0; i < obj.length; i++) findAllKey(obj[i], keyName, results, depth + 1);
-        } else if (typeof obj === 'object') {
-          if (obj[keyName] && typeof obj[keyName] === 'object') results.push(obj[keyName]);
-          for (var k in obj) {
-            if (obj.hasOwnProperty(k) && k !== keyName) findAllKey(obj[k], keyName, results, depth + 1);
-          }
-        }
-        return results;
-      }
-
-      function findFieldValue(obj, fieldName, depth) {
-        if (depth === undefined) depth = 0;
-        if (depth > 10 || !obj) return null;
-        if (Array.isArray(obj)) {
-          for (var i = 0; i < obj.length; i++) {
-            var v = findFieldValue(obj[i], fieldName, depth + 1);
-            if (v) return v;
-          }
-        } else if (typeof obj === 'object') {
-          if (obj[fieldName] && typeof obj[fieldName] === 'string') return obj[fieldName];
-          for (var k in obj) {
-            if (obj.hasOwnProperty(k) && k !== fieldName) {
-              var v2 = findFieldValue(obj[k], fieldName, depth + 1);
-              if (v2) return v2;
-            }
-          }
-        }
-        return null;
-      }
-
-      function patchBody(rawBody) {
-        try {
-          if (!window.__doubao15sPatchEnabled) {
-            return { changed: false, body: rawBody };
-          }
-          var payload = JSON.parse(rawBody);
-          var ability = payload.chat_ability;
-          if (!ability || Number(ability.ability_type) !== 17) {
-            return { changed: false, body: rawBody };
-          }
-          var param;
-          try { param = JSON.parse(ability.ability_param); } catch(e) { param = {}; }
-          param.duration = 15;
-          ability.ability_param = JSON.stringify(param);
-          console.log('[15sPatch] 已注入 15s 参数，保留页面当前模型');
-          return { changed: true, body: JSON.stringify(payload) };
-        } catch(e) {
-          return { changed: false, body: rawBody };
-        }
-      }
-
-      function readSSEStream(reader) {
-        var decoder = new TextDecoder();
-        var buffer = '';
-        function pump() {
-          return reader.read().then(function(result) {
-            if (result.done) return;
-            buffer += decoder.decode(result.value, { stream: true });
-            var lines = buffer.split('\\n');
-            buffer = lines.pop() || '';
-            for (var i = 0; i < lines.length; i++) {
-              var line = lines[i];
-              if (line.indexOf('data:') === 0) {
-                var jsonStr = line.substring(5).trim();
-                if (jsonStr) {
-                  try {
-                    var data = JSON.parse(jsonStr);
-                    processVideoData(data);
-                  } catch(e) {}
-                }
-              }
-            }
-            return pump();
-          });
-        }
-        pump().catch(function() {});
-      }
-
-      var originalFetch = window.fetch;
-      window.fetch = function patchedFetch(input, init) {
-        var url = typeof input === 'string' ? input : (input && input.url) || '';
-        var isCompletion = url.indexOf('/chat/completion') >= 0;
-        // 仅拦截明确的视频相关 API，避免误伤其他请求导致页面异常
-        var isVideoApi = isCompletion ||
-                         url.indexOf('get_play_info') >= 0 ||
-                         url.indexOf('play_info') >= 0 ||
-                         url.indexOf('/video/') >= 0;
-
-        if (isCompletion && init && init.body) {
-          try {
-            var patched = patchBody(init.body);
-            if (patched.changed) {
-              init = Object.assign({}, init, { body: patched.body });
-            }
-          } catch(e) {}
-        }
-
-        return originalFetch.apply(this, [input, init]).then(function(resp) {
-          if (isVideoApi && resp.body) {
-            try {
-              var ct = resp.headers.get('content-type') || '';
-              if (ct.indexOf('text/event-stream') >= 0) {
-                var teed = resp.body.tee();
-                readSSEStream(teed[1].getReader());
-                return new Response(teed[0], {
-                  status: resp.status,
-                  statusText: resp.statusText,
-                  headers: resp.headers,
-                });
-              } else if (ct.indexOf('application/json') >= 0) {
-                // 普通 JSON 响应（如 get_play_info），克隆一份解析
-                return resp.clone().json().then(function(data) {
-                  processVideoData(data);
-                  return resp;
-                }).catch(function() { return resp; });
-              }
-            } catch(e) {
-              // 任何异常都不影响原始响应
-              return resp;
-            }
-          }
-          return resp;
-        }).catch(function(err) {
-          throw err; // 透传原始错误
-        });
-      };
-
-      var originalXHROpen = XMLHttpRequest.prototype.open;
-      var originalXHRSend = XMLHttpRequest.prototype.send;
-      var xhrUrlMap = new WeakMap();
-
-      XMLHttpRequest.prototype.open = function(method, url) {
-        xhrUrlMap.set(this, url);
-        return originalXHROpen.apply(this, arguments);
-      };
-
-      XMLHttpRequest.prototype.send = function(body) {
-        var url = xhrUrlMap.get(this) || '';
-        var isCompletion = url.indexOf('/chat/completion') >= 0;
-
-        if (isCompletion && body) {
-          var patched = patchBody(body);
-          if (patched.changed) { body = patched.body; }
-        }
-
-        this.addEventListener('load', function() {
-          var xhrUrl = xhrUrlMap.get(this) || '';
-          if (xhrUrl.indexOf('chain/single') >= 0 ||
-              xhrUrl.indexOf('/chat/completion') >= 0 ||
-              xhrUrl.indexOf('get_play_info') >= 0 ||
-              xhrUrl.indexOf('play_info') >= 0 ||
-              xhrUrl.indexOf('media/') >= 0) {
-            try {
-              var resp = JSON.parse(this.responseText);
-              processVideoData(resp);
-            } catch(e) {}
-          }
-        });
-
-        return originalXHRSend.call(this, body);
-      };
-
-      console.log('[15sPatch] 15s 视频生成补丁已注入');
-    })();
-  `;
-
-  try {
-    await safeExecuteJS(webview, injectCode, 5000, 'inject15sPatch');
-    return true;
-  } catch (err: any) {
-    console.warn('[doubaoBridge] 注入15s补丁失败:', err.message);
-    return false;
-  }
-}
-
-/**
- * 每个自动化任务开始前创建独立新对话，避免产物和缓存串到上一条会话。
- */
-/**
- * 新对话就绪状态机结果。
- * ok=false 时必须携带脱敏、可定位的 reason，禁止把失败当作可继续发送。
- */
 export interface NewConversationResult {
   ok: boolean;
   /** 脱敏失败原因（如 PAGE_NOT_READY / EDITOR_NOT_FOUND / SESSION_NOT_EMPTY），不含页面内部 ID */
@@ -3875,6 +3207,7 @@ async function plainChatComposerProbe(allowExit: boolean, timeoutMs: number): Pr
 
 /** 开始前可退出一次已知媒体技能；上传和提交前只读回验，绝不在有正文时切换模式。 */
 export async function ensurePlainChatComposer(webview: WebviewHandle, allowExit: boolean = false, timeoutMs: number = 3000): Promise<NewConversationResult> {
+  webview = captureVideoPageOperation(webview);
   try {
     const result = await safeExecuteJS<NewConversationResult>(webview, `(${plainChatComposerProbe.toString()})(${allowExit},${timeoutMs})`, timeoutMs + 2000, 'ensurePlainChatComposer');
     return result?.ok === true ? { ok: true } : { ok: false, reason: result?.reason || 'CHAT_MODE_UNVERIFIED' };
@@ -3968,6 +3301,7 @@ export async function startNewConversation(
   ownedRepairDraft?: string,
   creationMode?: 'image' | 'video',
 ): Promise<NewConversationResult> {
+  webview = captureVideoPageOperation(webview);
   try {
     const deadline = Date.now() + Math.max(0, readinessTimeoutMs);
     const chatRoot = getPlatformChatRoot(webview);
@@ -4114,6 +3448,7 @@ export async function startNewConversation(
 
 /** 检测提交后出现的机器人/安全验证界面。 */
 export async function detectRobotVerification(webview: WebviewHandle): Promise<boolean> {
+  webview = captureVideoPageOperation(webview);
   try {
     return !!(await safeExecuteJS<boolean>(webview,
       `(${hasHumanVerificationEvidence.toString()})((${readHumanVerificationEvidence.toString()})(document,window))`,
@@ -4123,32 +3458,12 @@ export async function detectRobotVerification(webview: WebviewHandle): Promise<b
   }
 }
 
-/** 启用或关闭已经注入的 15 秒请求补丁。 */
-export async function set15sVideoPatchEnabled(webview: WebviewHandle, enabled: boolean): Promise<boolean> {
-  void webview;
-  void enabled;
-  return false;
-  /* istanbul ignore next -- 历史实现不可达。 */
-  try {
-    const result = await safeExecuteJS<boolean>(
-      webview,
-      `(function() {
-        window.__doubao15sPatchEnabled = ${enabled ? 'true' : 'false'};
-        console.log('[15sPatch] 手动开关:', window.__doubao15sPatchEnabled ? '开启' : '关闭');
-        return window.__doubao15sPatchEnabled;
-      })();`,
-      5000,
-      'set15sPatchEnabled'
-    );
-    return result === enabled;
-  } catch (err: any) {
-    console.warn('[doubaoBridge] 设置15s补丁开关失败:', err.message);
-    return false;
-  }
-}
+/** 兼容历史开关调用；不注入、不激活、不改写平台请求。 */
+export async function set15sVideoPatchEnabled(_webview: WebviewHandle, _enabled: boolean): Promise<boolean> { return false; }
 
 /** 每次自动视频任务提交前清空上一条视频缓存，避免把旧产物绑定到新任务。 */
 export async function resetVideoCaptureCache(webview: WebviewHandle): Promise<void> {
+  webview = captureVideoPageOperation(webview);
   try {
     await safeExecuteJS(
       webview,
@@ -4176,6 +3491,7 @@ export async function resetVideoCaptureCache(webview: WebviewHandle): Promise<vo
  * 此函数不清空视频缓存，仅更新基线长度。
  */
 export async function refreshBlockerBaseline(webview: WebviewHandle): Promise<void> {
+  webview = captureVideoPageOperation(webview);
   try {
     await safeExecuteJS(
       webview,
@@ -4286,6 +3602,7 @@ export function matchBlockerFromLayers(
 }
 
 export async function detectVideoGenerationBlocker(webview: WebviewHandle, context?: VideoBlockerReadbackContext): Promise<string | null> {
+  webview = captureVideoPageOperation(webview);
   if (context) {
     // 自动任务受理后只检查具体原会话，不把切页后的错误卡片归到本次运行。
     if (!isSameDoubaoConversation(webview.getURL(), context.conversationUrl)) return null;
@@ -4333,6 +3650,7 @@ export async function detectVideoGenerationBlocker(webview: WebviewHandle, conte
  * 同时返回 fieldSource，用于判定地址是否为平台明确返回的原始产物。
  */
 export async function getCachedVideoUrl(webview: WebviewHandle): Promise<{ vid: string; videoUrl: string; fieldSource?: string } | null> {
+  webview = captureVideoPageOperation(webview);
   const code = `
     (function() {
       var cache = window.__doubaoVideoCache;
@@ -4361,6 +3679,7 @@ export async function getCachedVideoUrl(webview: WebviewHandle): Promise<{ vid: 
  * 通过 vid 获取视频播放地址（备用方案，在 webview 页面上下文调用豆包 API）
  */
 export async function getVideoPlayUrl(webview: WebviewHandle, vid: string): Promise<string | null> {
+  webview = captureVideoPageOperation(webview);
   const code = `
     (function() {
       var vid = '${vid}';
@@ -4546,6 +3865,7 @@ export async function resolveVideoArtifact(
   webview: WebviewHandle,
   ctx: ResolveVideoArtifactContext = {},
 ): Promise<VideoArtifactResolution> {
+  webview = captureVideoPageOperation(webview);
   const matchesOriginalConversation = (): boolean => {
     if (!ctx.conversationUrl) return true;
     try { return isSameDoubaoConversation(webview.getURL(), ctx.conversationUrl); } catch { return false; }
@@ -4590,6 +3910,8 @@ async function resolveAnchoredVideoArtifact(webview: WebviewHandle, ctx: Resolve
   const cards = relatedVideoCards(page, readback);
   try { ctx.onDiagnostic?.({ ...diagnostic, stage: 'anchored_related_cards', relatedCardCount: cards.length }); } catch { /* 同上。 */ }
   attempts.push({ strategy: 'anchored_video_messages', result: cards.length ? 'success' : 'fail', reason: cards.length ? '已定位原消息关联卡' : '原消息关联视频卡尚未就绪' });
+  const advice = readVideoGenerationAdvice(page, readback);
+  if (advice) return { ...createFailedResolution('generation_not_started', advice.reason, attempts), evidenceKey: advice.evidenceKey };
   return resolveAnchoredVideoCards(webview, ctx, cards, attempts, deadline, matchesOriginalConversation);
 }
 
@@ -4791,7 +4113,7 @@ async function executePlayInfoStrategy(
       }
       const status = classifyVideoResolutionError(playInfoResult.status, playInfoResult.data);
       return {
-        attempt: { strategy: 'play_info', result: 'fail', reason: `status=${playInfoResult.status}, classified=${status}` },
+        attempt: { strategy: 'play_info', result: 'fail', status: status === 'resolved' ? 'unavailable' : status, reason: `status=${playInfoResult.status}, classified=${status}` },
         succeeded: false,
       };
     }
@@ -4856,7 +4178,7 @@ async function executeDownloadInfoStrategy(
       }
       const status = classifyVideoResolutionError(downloadResult.status, downloadResult.data);
       return {
-        attempt: { strategy: 'platform_download_info', result: 'fail', reason: `status=${downloadResult.status}, classified=${status}` },
+        attempt: { strategy: 'platform_download_info', result: 'fail', status: status === 'resolved' ? 'unavailable' : status, reason: `status=${downloadResult.status}, classified=${status}` },
         succeeded: false,
       };
     }
@@ -5027,7 +4349,9 @@ function selectBestCandidate(
   const reason = experimentalError
     ? `${lastError?.reason || '官方未开放无水印'}；实验直取未获得可验证源文件（实验模式，可能仍含水印）`
     : (lastError?.reason || '所有策略均未获取到视频地址');
-  return createFailedResolution('unavailable', reason, attempts, resolvedVid);
+  const actionable = attempts.find((attempt: ArtifactAttempt): boolean => attempt.status === 'unauthorized' || attempt.status === 'expired')
+    || attempts.find((attempt: ArtifactAttempt): boolean => attempt.status === 'retryable_error');
+  return createFailedResolution(actionable?.status || 'unavailable', actionable?.reason || reason, attempts, resolvedVid);
 }
 
 /** get_play_info 接口的原始返回 */
@@ -5338,6 +4662,7 @@ export async function manualResolveVideoArtifact(
   webview: WebviewHandle,
   ctx: ResolveVideoArtifactContext = {},
 ): Promise<VideoArtifactResolution> {
+  webview = captureVideoPageOperation(webview);
   if (ctx.signal?.aborted) {
     return createFailedResolution('unavailable', '手动提取已取消', []);
   }
@@ -5352,10 +4677,12 @@ export async function manualResolveVideoArtifact(
 
 // PetStory 复用原执行器，在任务执行中回读实际素材槽位和生成参数。
 export async function readPetStoryComposer(webview: WebviewHandle, operation: import('./petstoryControls').PetStoryComposerOperation = {}): Promise<import('./petstoryControls').PetStoryComposerSnapshot> {
+  webview = captureVideoPageOperation(webview);
   return safeExecuteJS(webview, `(${petStoryComposerProbe.toString()})(${JSON.stringify(operation)})`, 5000, 'petstory_visible_controls');
 }
 /** 图片模式切换后输入区会异步重建；等待真实控件稳定，不把固定动画等待当作就绪。 */
 export async function waitForPetStoryImageComposer(webview: WebviewHandle, signal: AbortSignal, timeoutMs: number = 15_000): Promise<import('./petstoryControls').PetStoryComposerSnapshot> {
+  webview = captureVideoPageOperation(webview);
   const deadline = Date.now() + timeoutMs;
   let stableSamples = 0;
   while (Date.now() < deadline) {
@@ -5372,6 +4699,7 @@ export async function waitForPetStoryImageComposer(webview: WebviewHandle, signa
 }
 /** 视频输入区在参数切换后会异步重建；按实际上传能力连续回读，不混淆逻辑首尾用途与原生槽。 */
 export async function waitForPetStoryVideoComposer(webview: WebviewHandle, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, signal: AbortSignal, timeoutMs: number = 6_000): Promise<import('./petstoryControls').PetStoryComposerSnapshot> {
+  webview = captureVideoPageOperation(webview);
   const deadline = Date.now() + Math.max(0, timeoutMs);
   let latest: import('./petstoryControls').PetStoryComposerSnapshot | undefined;
   let selectedMode = false; let stableSamples = 0; let stableKey = '';
@@ -5467,6 +4795,7 @@ async function checkedUploadFiles(files: Array<{ name: string; base64: string; m
   return { fileBytes, fileDigests };
 }
 export async function uploadPetStoryImages(webview: WebviewHandle, files: Array<{ name: string; base64: string; mime: string }>, mode: import('@doubao-studio/contracts').PetStoryResolvedMode | 'image', signal: AbortSignal, expectedSha256s?: string[]): Promise<PetStoryUploadReceipt[]> {
+  webview = captureVideoPageOperation(webview);
   const { fileBytes, fileDigests } = await checkedUploadFiles(files, mode, expectedSha256s);
   const uploadMode = await petStoryImageUploadMode(webview, mode);
   const receipts: PetStoryUploadReceipt[] = [];
@@ -5528,6 +4857,7 @@ function validatePetStoryUploadReceipts(compiled: import('@doubao-studio/contrac
 
 /** 依据逐文件上传回执绑定；每一个 @ 都必须由当前菜单创建真实节点。 */
 export async function bindPetStoryReferences(webview: WebviewHandle, compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt, receipts: PetStoryUploadReceipt[], signal: AbortSignal): Promise<{ compiled: import('@doubao-studio/contracts').PetStoryCompiledPrompt; bindings: import('@doubao-studio/contracts').PetStoryPageBinding[] }> {
+  webview = captureVideoPageOperation(webview);
   validatePetStoryUploadReceipts(compiled, receipts);
   const menuKeys = await resolvePetStoryReferenceMenu(webview, receipts);
   const bindings: import('@doubao-studio/contracts').PetStoryPageBinding[] = [];
@@ -5570,6 +4900,7 @@ export async function bindPetStoryReferences(webview: WebviewHandle, compiled: i
   return { compiled: resolved, bindings };
 }
 export async function verifyPetStoryReferenceBindings(webview: WebviewHandle, bindings: import('@doubao-studio/contracts').PetStoryPageBinding[]): Promise<void> {
+  webview = captureVideoPageOperation(webview);
   if (bindings.some((binding, index): boolean => binding.order !== index + 1)
     || bindings.some((binding): boolean => binding.reference === 'slot') && bindings.some((binding): boolean => binding.slot === 'reference')) throw new PetStoryControlError('提交前素材顺序或上传方式不一致，零提交');
   for (const binding of bindings) {
@@ -5590,6 +4921,7 @@ export async function verifyPetStoryReferenceBindings(webview: WebviewHandle, bi
 export class PetStoryControlError extends Error {}
 
 export async function verifyPetStoryUploads(webview: WebviewHandle, guard: import('@doubao-studio/contracts').PetStoryExecutionGuard, video: boolean): Promise<void> {
+  webview = captureVideoPageOperation(webview);
   const composer = await readPetStoryComposer(webview);
   checkPetStoryPageGuard(composer, guard, video);
   const sharedFrames = video && usesSharedPetStoryFrames(composer, guard.mode);
@@ -5607,6 +4939,7 @@ export async function readAcceptedImageOutputs(
   webview: WebviewHandle, conversationUrl: string, signal?: AbortSignal, timeoutMs: number = 15 * 60_000,
   context?: ImageArtifactReadbackContext, options?: ImageArtifactObservationOptions,
 ): Promise<string[]> {
+  webview = captureVideoPageOperation(webview);
   if (!context || !options?.ensureCurrent) throw new PetStoryControlError('缺少原图片请求或运行保护，未绑定产物');
   const ensureCurrent = (): void => {
     if (signal?.aborted) throw new DOMException('用户已暂停图片观察', 'AbortError');
@@ -5614,20 +4947,16 @@ export async function readAcceptedImageOutputs(
     const currentUrl = normalizeDoubaoConversationUrl(webview.getURL());
     if (currentUrl && !isSameDoubaoConversation(currentUrl, conversationUrl)) throw new PetStoryControlError('原图片会话已变化，未绑定其他会话产物');
   };
-  try {
-    const outputs = await waitForImageArtifactReadback({
-      context, ensureCurrent, signal, timeoutMs, wait: sleep, onProgress: options.onProgress, stopOnStableAmbiguity: options.stopOnStableAmbiguity,
-      read: (): Promise<ChatPageSnapshot> => getCreationReadbackSnapshot(webview, { conversationUrl, signal, ensureCurrent, allowProviderConversation: true }),
-    });
+  // 观察终态保留结构化原因，由正式协调器落盘暂停，不能压成通用控件错误再自动观察。
+  const outputs = await waitForImageArtifactReadback({
+    context, ensureCurrent, signal, timeoutMs, wait: sleep, onProgress: options.onProgress, stopOnStableAmbiguity: options.stopOnStableAmbiguity,
+    read: (): Promise<ChatPageSnapshot> => getCreationReadbackSnapshot(webview, { conversationUrl, signal, ensureCurrent, allowProviderConversation: true }),
+  });
+  ensureCurrent();
+  if (!isSameDoubaoConversation(webview.getURL(), conversationUrl)) {
+    const current = await getCurrentCreationConversation(webview, { signal, ensureCurrent });
     ensureCurrent();
-    if (!isSameDoubaoConversation(webview.getURL(), conversationUrl)) {
-      const current = await getCurrentCreationConversation(webview, { signal, ensureCurrent });
-      ensureCurrent();
-      if (!current.conversationUrl || !isSameDoubaoConversation(current.conversationUrl, conversationUrl)) throw new PetStoryControlError('原图片真实会话已变化，未绑定其他会话产物');
-    }
-    return outputs;
-  } catch (error: unknown) {
-    if (error instanceof ImageArtifactObservationError) throw new PetStoryControlError(error.message);
-    throw error;
+    if (!current.conversationUrl || !isSameDoubaoConversation(current.conversationUrl, conversationUrl)) throw new PetStoryControlError('原图片真实会话已变化，未绑定其他会话产物');
   }
+  return outputs;
 }

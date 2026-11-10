@@ -71,7 +71,7 @@ describe('验证码前后保存原已提交会话定位', (): void => {
   });
 
   it('发送受理和验证码检查前保存已匹配定位；验证后恢复始终只读且核对fresh原运行', (): void => {
-    const source = readFileSync(resolve(__dirname, '../../src/components/BrowserPanel.tsx'), 'utf8');
+    const source = readFileSync(resolve(__dirname, '../../src/components/BrowserPanel.tsx'), 'utf8') + '\n' + readFileSync(resolve(__dirname, '../../src/automation/TaskRecoveryCoordinator.ts'), 'utf8') + '\n' + readFileSync(resolve(__dirname, '../../src/automation/TaskExecutionCoordinator.ts'), 'utf8');
     const preserveAt = source.indexOf('await preserveSubmittedConversation?.().catch');
     expect(preserveAt).toBeGreaterThan(0);
     expect(source.indexOf('await assertNoHumanVerification(accountId, webview);', preserveAt)).toBeGreaterThan(preserveAt);

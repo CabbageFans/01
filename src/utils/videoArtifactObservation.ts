@@ -66,11 +66,16 @@ export async function observeVideoArtifact(options: VideoArtifactObservationOpti
   const deadline = startedAt + Math.max(0, options.timeoutMs);
   let last = createFailedResolution('unavailable', '原会话视频产物尚未就绪', []);
   let pollCount = 0;
+  let previousAdvice = '';
   while (Date.now() < deadline) {
     assertObserving(options);
     last = await resolveObservationSample(options, Math.min(8000, deadline - Date.now()));
     assertObserving(options);
     if (last.status === 'resolved' || last.status === 'expired' || last.status === 'unauthorized' || last.status === 'needs_manual_selection') return last;
+    if (last.status === 'generation_not_started' && last.evidenceKey) {
+      if (last.evidenceKey === previousAdvice) return last;
+      previousAdvice = last.evidenceKey;
+    } else previousAdvice = '';
     pollCount += 1;
     await options.onProgress({ pollCount, elapsedMs: Date.now() - startedAt, resolution: last });
     assertObserving(options);

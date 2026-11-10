@@ -72,7 +72,7 @@ describe('handleControlCommand', () => {
     let stored = [structuredClone(original)];
     const core = new TaskService({ store: { read: (): Task[] => structuredClone(stored), replace: (items: Task[]): boolean => { stored = structuredClone(items); return true; } }, defaultProjectId: (): string => 'project-1', now: (): string => now });
     const d = deps(stored); d.readTasks = async (): Promise<Task[]> => structuredClone(stored);
-    d.updateStatus = vi.fn(async (taskId: string, status: Task['status'], text: string): Promise<boolean> => core.updateStatus({ taskId, status, result: text }).success);
+    d.updateStatus = vi.fn(async (taskId: string, status: Task['status'], text: string): Promise<boolean> => core.updateStatus({ taskId, expectedRunId: original.runtime!.runId, status, result: text }).success);
     await expect(handleControlCommand(command('cancel'), d)).resolves.toMatchObject({ ok: true, code: 'CANCELLED', accepted: true });
     expect(d.start).not.toHaveBeenCalled(); expect(d.retry).not.toHaveBeenCalled(); expect(d.abortActive).not.toHaveBeenCalled();
     expect(stored).toHaveLength(1); expect(stored[0]).toEqual({ ...original, status: 'cancelled', result: '任务已由本机控制面取消', updatedAt: now });

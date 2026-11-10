@@ -41,7 +41,7 @@ function fixture(initial: Task, drift?: (value: Task) => void): { service: TaskS
 describe('媒体原消息耐久收据', (): void => {
   it.each(['image', 'video'] as const)('%s原消息定位跨服务重开保留，不要求地址栏URL或产物先就绪', (mode): void => {
     const original = task(mode); const test = fixture(original);
-    const saved = test.service.updateRuntime({ taskId: original.id, runtime: { mediaSubmissionReceipt: receipt() } });
+    const saved = test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, runtime: { mediaSubmissionReceipt: receipt() } });
     expect(saved.success).toBe(true);
     const restored = fixture(test.read()).read();
     expect(restored.runtime?.mediaSubmissionReceipt).toEqual(receipt());
@@ -65,7 +65,7 @@ describe('媒体原消息耐久收据', (): void => {
     { conversationUrl: 'https://evil.invalid/chat/OFFLINE' }, { conversationUrl: url + '?from=list' },
   ])('错误原消息身份不写入且历史归一化不升级：%j', (patch: object): void => {
     const original = task(); const invalid = { ...receipt(), ...patch } as Receipt; const test = fixture(original);
-    expect(test.service.updateRuntime({ taskId: original.id, status: 'generating', runtime: { mediaSubmissionReceipt: invalid } }).success).toBe(false);
+    expect(test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, status: 'generating', runtime: { mediaSubmissionReceipt: invalid } }).success).toBe(false);
     expect(test.writes()).toBe(0); expect(test.read().status).toBe('paused');
     original.runtime!.mediaSubmissionReceipt = invalid;
     const normalized = normalizeTasks([original], 'OFFLINE-project', observedAt).data[0];
@@ -75,7 +75,7 @@ describe('媒体原消息耐久收据', (): void => {
 
   it.each(['chat', 'music'] as const)('%s任务不能保存媒体原消息收据', (mode): void => {
     const original = task(mode); const test = fixture(original);
-    expect(test.service.updateRuntime({ taskId: original.id, runtime: { mediaSubmissionReceipt: receipt() } }).success).toBe(false);
+    expect(test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, runtime: { mediaSubmissionReceipt: receipt() } }).success).toBe(false);
     expect(test.writes()).toBe(0);
     original.runtime!.mediaSubmissionReceipt = receipt();
     expect(normalizeTasks([original], 'OFFLINE-project', observedAt).data[0].runtime?.mediaSubmissionReceipt).toBeUndefined();
@@ -83,7 +83,7 @@ describe('媒体原消息耐久收据', (): void => {
 
   it('尚未记录原提交时，不能把补造submittedAt和收据一次性写入', (): void => {
     const original = task(); original.runtime!.submittedAt = undefined; const test = fixture(original);
-    expect(test.service.updateRuntime({ taskId: original.id, runtime: { submittedAt, mediaSubmissionReceipt: receipt() } }).success).toBe(false);
+    expect(test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, runtime: { submittedAt, mediaSubmissionReceipt: receipt() } }).success).toBe(false);
     expect(test.writes()).toBe(0);
   });
 
@@ -97,28 +97,28 @@ describe('媒体原消息耐久收据', (): void => {
       lease: { ownerId: 'OFFLINE-owner', acquiredAt: observedAt, expiresAt: observedAt, lastHeartbeatAt: observedAt }, outcome: 'observing',
     };
     const test = fixture(original);
-    expect(test.service.updateRuntime({ taskId: original.id, runtime: { mediaSubmissionReceipt: receipt(),
+    expect(test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, runtime: { mediaSubmissionReceipt: receipt(),
       ...(change === 'runtime-input' ? { input: { ...original.runtime!.input, prompt: 'OFFLINE改写运行快照' } } : {}) } }).success).toBe(false);
     expect(test.writes()).toBe(0);
   });
 
-  it('同run后续patch不能让已保存收据失配；新run不继承原收据', (): void => {
+  it('同run后续patch不能让已保存收据失配；新run不能覆盖原提交', (): void => {
     const original = task(); original.runtime!.mediaSubmissionReceipt = receipt(); const test = fixture(original);
-    expect(test.service.updateRuntime({ taskId: original.id, runtime: { submittedAt: observedAt } }).success).toBe(false);
-    expect(test.service.updateRuntime({ taskId: original.id, runtime: { mediaSubmissionReceipt: undefined } }).success).toBe(false);
-    expect(test.service.updateRuntime({ taskId: original.id, runtime: { mediaSubmissionReceipt: receipt({ userMessageId: 'OFFLINE-later-message' }) } }).success).toBe(false);
+    expect(test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, runtime: { submittedAt: observedAt } }).success).toBe(false);
+    expect(test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, runtime: { mediaSubmissionReceipt: undefined } }).success).toBe(false);
+    expect(test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, runtime: { mediaSubmissionReceipt: receipt({ userMessageId: 'OFFLINE-later-message' }) } }).success).toBe(false);
     expect(test.writes()).toBe(0);
-    expect(test.service.updateRuntime({ taskId: original.id, runtime: { runId: 'OFFLINE-new-run', attempt: 2, stage: 'preparing_account',
-      message: 'OFFLINE新运行', startedAt: observedAt, stageStartedAt: observedAt, lastHeartbeatAt: observedAt, input: original.runtime!.input } }).success).toBe(true);
-    expect(test.read().runtime?.mediaSubmissionReceipt).toBeUndefined(); expect(test.read().runtime?.submittedAt).toBeUndefined();
+    expect(test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, runtime: { runId: 'OFFLINE-new-run', attempt: 2, stage: 'preparing_account',
+      message: 'OFFLINE新运行', startedAt: observedAt, stageStartedAt: observedAt, lastHeartbeatAt: observedAt, input: original.runtime!.input } }).success).toBe(false);
+    expect(test.read().runtime?.mediaSubmissionReceipt).toEqual(receipt()); expect(test.read().runtime?.submittedAt).toBe(submittedAt);
   });
 
   it('新run不能显式携带旧收据，写后收据身份漂移返回权威失败', (): void => {
     const original = task(); const test = fixture(original);
-    expect(test.service.updateRuntime({ taskId: original.id, runtime: { runId: 'OFFLINE-new-run', mediaSubmissionReceipt: receipt() } }).success).toBe(false);
+    expect(test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, runtime: { runId: 'OFFLINE-new-run', mediaSubmissionReceipt: receipt() } }).success).toBe(false);
     expect(test.writes()).toBe(0);
     const drifting = fixture(original, (value: Task): void => { value.runtime!.mediaSubmissionReceipt!.userMessageId = 'OFFLINE-other-message'; });
-    const saved = drifting.service.updateRuntime({ taskId: original.id, runtime: { mediaSubmissionReceipt: receipt() } });
+    const saved = drifting.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, runtime: { mediaSubmissionReceipt: receipt() } });
     expect(saved).toMatchObject({ success: false, error: '媒体原消息证据写入后回读不一致，禁止重新发送',
       task: { runtime: { mediaSubmissionReceipt: { userMessageId: 'OFFLINE-other-message' } } } });
   });
@@ -143,7 +143,7 @@ describe('媒体原消息耐久收据', (): void => {
     expect(test.read()).toMatchObject({ status: 'paused', errorInfo: { code: 'submission_uncertain' }, runtime: { runId: 'OFFLINE-run', submittedAt,
       mediaSubmissionReceipt: receipt(), input: original.runtime!.input } });
     expect(test.service.retry(original.id).success).toBe(false);
-    expect(test.service.updateRuntime({ taskId: original.id, status: 'manual_submission_observing', runtime: { stage: 'manual_submission_observing',
+    expect(test.service.updateRuntime({ taskId: original.id, expectedRunId: original.runtime!.runId, status: 'manual_submission_observing', runtime: { stage: 'manual_submission_observing',
       conversationUrl: receipt().conversationUrl, mediaSubmissionReceipt: receipt() } }).success).toBe(true);
     expect(test.read().runtime?.mediaSubmissionReceipt).toEqual(receipt());
   });

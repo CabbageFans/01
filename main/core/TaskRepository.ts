@@ -67,6 +67,13 @@ export class TaskRepository {
 
     this.writing = true;
     try {
+      const previous = new Map(current.map((task: Task): [string, Task] => [task.id, task]));
+      // 版本由唯一写边界授予；调用方不能携带旧版本覆盖其他命令的新事实。
+      for (const task of tasks) {
+        const old = previous.get(task.id);
+        if (!old || fingerprint([old]) !== fingerprint([task])) task.revision = (old?.revision || 0) + 1;
+        else task.revision = old.revision || 0;
+      }
       if (!this.deps.write(STORE_FILE, tasks)) return false;
       this.publishDiff(current, tasks);
       this.revisions.set(tasks, fingerprint(tasks));
@@ -93,6 +100,10 @@ export class TaskRepository {
       }
       if (old.runtime?.stage !== task.runtime?.stage && task.runtime?.stage) {
         this.deps.events.publish(task.id, 'task.stage_changed', { stage: task.runtime.stage });
+      }
+      if (JSON.stringify(old.runtime?.localMedia) !== JSON.stringify(task.runtime?.localMedia) && task.runtime?.localMedia) {
+        this.deps.events.publish(task.id, 'task.local_media_changed', { runId: task.runtime.runId, artifactId: task.runtime.localMedia.artifactId,
+          phase: task.runtime.localMedia.phase, state: task.runtime.localMedia.state });
       }
       const oldArtifacts = new Set((old.artifacts || []).map((artifact) => artifact.id));
       for (const artifact of task.artifacts || []) {

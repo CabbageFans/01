@@ -10,6 +10,7 @@ interface MaterialImagePage {
   webview: HTMLWebViewElement;
   ready: boolean;
   resources: WebviewResourceScope;
+  onStateChange: () => void;
   failure?: MaterialImagePageFailure;
 }
 
@@ -29,7 +30,7 @@ export class MaterialImagePages {
 
   /** 旧镜头已提交却缺定位时，账号页可能仍是唯一原现场，不能用新空页替换。 */
   uses(task: Task): boolean {
-    return usesIndependentImagePage(task) && (isMaterialImageTask(task) || !!this.get(task)
+    return (task.mode === 'video' && !!task.assignedAccountId || usesIndependentImagePage(task)) && (task.mode === 'video' && !task.runtime?.submittedAt || isMaterialImageTask(task) || !!this.get(task)
       || !task.runtime?.submittedAt || resolveTaskConversationTarget(task).ok);
   }
 
@@ -57,11 +58,16 @@ export class MaterialImagePages {
   ensure(task: Task, account: Account, container: HTMLDivElement, onStateChange: () => void): HTMLWebViewElement {
     if (!this.uses(task) || task.assignedAccountId !== account.id || account.platform === 'dola') throw new Error('图片执行页面缺少原账号或独立操作绑定');
     const existing = this.get(task);
-    if (existing) return existing;
+    if (existing) {
+      const page = this.pages.get(task.id);
+      if (page) page.onStateChange = onStateChange;
+      if (existing.parentElement !== container) container.appendChild(existing);
+      return existing;
+    }
     this.delete(task.id);
     const webview = document.createElement('webview') as HTMLWebViewElement;
     const resources = createWebviewResourceScope();
-    const page: MaterialImagePage = { accountId: account.id, runId: task.runtime?.runId || '', webview, ready: false, resources };
+    const page: MaterialImagePage = { accountId: account.id, runId: task.runtime?.runId || '', webview, ready: false, resources, onStateChange };
     // 分区必须在首次导航前设置，沿用本人的账号登录；新页面只隔离对话和DOM。
     webview.setAttribute('partition', `persist:doubao_${account.partition}`);
     const original = resolveTaskConversationTarget(task);
@@ -76,7 +82,7 @@ export class MaterialImagePages {
       page.failure = { taskId: task.id, accountId: account.id, runId: page.runId, code, message };
       // 错误为本运行的终态；迟到的did-stop-loading不能重新授予页面执行权。
       resources.dispose();
-      onStateChange();
+      page.onStateChange();
     };
     const firstDocumentTimer = awaitingDispatch ? setTimeout((): void => {
       fail('page_loading', '独立豆包对话未能在15秒内完成首次文档加载，已在执行前暂停');
@@ -87,7 +93,7 @@ export class MaterialImagePages {
       resources.clearTimer(firstDocumentTimer);
       firstDocumentLoaded = true;
       page.ready = true;
-      onStateChange();
+      page.onStateChange();
     };
     resources.listen(webview, 'did-fail-load', (event: Event): void => {
       const failure = event as Event & { isMainFrame?: boolean; errorCode?: number };
@@ -133,6 +139,18 @@ export class MaterialImagePages {
       if (!task || !accountIds.has(page.accountId) || task.runtime?.runId !== page.runId
         || id !== retainedTaskId && !needsOriginalPage && ['done', 'fail', 'cancelled'].includes(task.status)) this.delete(id);
     }
+  }
+
+  /** 展示组件卸载只移走任务页，不能撤销运行或销毁唯一原会话。 */
+  park(): void {
+    if (!this.pages.size) return;
+    let container = document.getElementById('doubao-task-page-host');
+    if (!container) {
+      container = document.createElement('div'); container.id = 'doubao-task-page-host';
+      container.style.cssText = 'position:fixed;left:-10000px;top:0;width:1440px;height:900px;pointer-events:none;';
+      document.body.appendChild(container);
+    }
+    for (const page of this.pages.values()) container.appendChild(page.webview);
   }
 
   dispose(): void { for (const id of this.pages.keys()) this.delete(id); }

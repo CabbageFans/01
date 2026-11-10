@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import type { AccountAvailability, AccountAvailabilitySource } from '@doubao-studio/contracts';
+import { AccountAvailabilityPauseError } from '../../src/automation/taskExecutionSupport';
 import { PageAvailabilityCoordinator, isAccountAvailabilityBlock } from '../../src/utils/pageAvailability';
 
 type Probe = (accountId: string, page: object, source: AccountAvailabilitySource) => Promise<AccountAvailability>;
@@ -53,7 +54,7 @@ function fixture(kind: 'account' | 'material', existing: AccountAvailability = e
     availabilityProbesRef: { current: coordinator }, registryRef: { current: registry },
     materialPagesRef: { current: { contains: (candidate: object): boolean => materialPages.has(candidate) } },
     probeAccountAvailability: read, isAccountAvailabilityBlock,
-    AccountAvailabilityPauseError: actual('AccountAvailabilityPauseError'),
+    AccountAvailabilityPauseError,
     message: { success: vi.fn(), warning: vi.fn() }, setTimeout: schedule,
   });
   return { probe, page, otherPage, coordinator, writeEntered: entered.promise, releaseWrite: write.resolve,

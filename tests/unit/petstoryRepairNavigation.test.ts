@@ -1,12 +1,9 @@
+import { resumableRepairDraft } from '../../src/automation/taskExecutionSupport';
 /** 选定自由回复修订的导航前草稿保护；离线页面替身不发送豆包请求。 */
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import fs from 'node:fs';
-import path from 'node:path';
-import vm from 'node:vm';
-import ts from 'typescript';
 import type { Task } from '@doubao-studio/contracts';
-import { startNewConversation, type WebviewHandle } from '../../src/utils/doubaoBridge';
+import { afterEach,describe,expect,it,vi } from 'vitest';
 import type { ChatPageSnapshot } from '../../src/utils/chatReadback';
+import { startNewConversation,type WebviewHandle } from '../../src/utils/doubaoBridge';
 import original from '../fixtures/storyboard-five-shots.json';
 
 function fixture(root: boolean = false): { view: WebviewHandle; snapshot: ChatPageSnapshot; holdDocument: () => void; releaseDocument: () => void } {
@@ -32,12 +29,7 @@ function fixture(root: boolean = false): { view: WebviewHandle; snapshot: ChatPa
 }
 
 /** 直接执行正式BrowserPanel的资格函数，不在测试中复制恢复判定。 */
-function ownedDraftQualification(): (task: Task | undefined, prompt: string, selectedReplyRepair: boolean) => string | undefined {
-  const source = ts.createSourceFile('BrowserPanel.tsx', fs.readFileSync(path.resolve('src/components/BrowserPanel.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
-  const declaration = source.statements.find((node): boolean => ts.isFunctionDeclaration(node) && node.name?.text === 'resumableRepairDraft');
-  if (!declaration) throw new Error('OFFLINE正式修订草稿恢复函数不存在');
-  return vm.runInNewContext(ts.transpileModule(declaration.getText(source) + '\nresumableRepairDraft;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText) as (task: Task | undefined, prompt: string, selectedReplyRepair: boolean) => string | undefined;
-}
+function ownedDraftQualification(): typeof resumableRepairDraft { return resumableRepairDraft; }
 function continuedTask(): Task {
   const now = '2026-10-30T01:00:00.000Z';
   return { id: 'OFFLINE-original-repair-task', prompt: original.mobileStory, promptReadback: 'exact', mode: 'chat', executionIntent: 'armed', assignedAccountId: 'OFFLINE-account', status: 'executing', outputs: [], result: null, createdAt: now, updatedAt: now,

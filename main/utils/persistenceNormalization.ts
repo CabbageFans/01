@@ -26,6 +26,7 @@ import type {
   TaskArtifact,
   TaskErrorInfo,
   TaskRunSnapshot,
+  TaskLocalMediaSnapshot,
   TaskRunRecord,
   TaskLock,
   GenerationMode,
@@ -538,6 +539,44 @@ function normalizeChatAdjustmentGuard(raw: unknown): TaskRunSnapshot['chatAdjust
     ...(typeof raw.allowedTaskId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(raw.allowedTaskId) ? { allowedTaskId: raw.allowedTaskId } : {}) };
 }
 
+/** 新提交事实只从读入适配层恢复；历史 submittedAt 仍保留为未知提交保护。 */
+function normalizeSubmission(raw: unknown, runId: unknown): TaskRunSnapshot['submission'] {
+  if (!isObject(raw) || raw.schemaVersion !== 1 || raw.runId !== runId || typeof raw.runId !== 'string'
+    || typeof raw.operationId !== 'string' || !raw.operationId.trim() || !isValidISODate(raw.updatedAt)
+    || !['intent_saved', 'not_dispatched', 'dispatch_unknown', 'accepted'].includes(String(raw.state))) return undefined;
+  return { schemaVersion: 1, runId: raw.runId, operationId: raw.operationId, state: raw.state as NonNullable<TaskRunSnapshot['submission']>['state'],
+    updatedAt: raw.updatedAt, ...(typeof raw.reason === 'string' ? { reason: raw.reason.slice(0, 500) } : {}) };
+}
+
+export function normalizeTaskLocalMediaInfo(raw: unknown): TaskLocalMediaSnapshot['mediaInfo'] {
+  if (!isObject(raw) || raw.decoded !== true || typeof raw.sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(raw.sha256)
+    || typeof raw.bytes !== 'number' || !Number.isSafeInteger(raw.bytes) || raw.bytes <= 0
+    || typeof raw.width !== 'number' || !Number.isSafeInteger(raw.width) || raw.width <= 0
+    || typeof raw.height !== 'number' || !Number.isSafeInteger(raw.height) || raw.height <= 0 || !isValidISODate(raw.checkedAt)
+    || raw.durationSeconds !== undefined && (typeof raw.durationSeconds !== 'number' || !Number.isFinite(raw.durationSeconds) || raw.durationSeconds <= 0)) return undefined;
+  return { decoded: true, sha256: raw.sha256, bytes: raw.bytes, width: raw.width, height: raw.height, checkedAt: raw.checkedAt,
+    ...(typeof raw.durationSeconds === 'number' ? { durationSeconds: raw.durationSeconds } : {}) };
+}
+
+function normalizeLocalMedia(raw: unknown, runId: unknown): TaskLocalMediaSnapshot | undefined {
+  const phases: TaskLocalMediaSnapshot['phase'][] = ['downloading', 'downloaded', 'validating', 'library', 'ready'];
+  const states: TaskLocalMediaSnapshot['state'][] = ['working', 'paused', 'failed', 'ready'];
+  if (!isObject(raw) || typeof raw.artifactId !== 'string' || !raw.artifactId || raw.operationId !== `media:${String(runId)}:${raw.artifactId}`
+    || !phases.includes(raw.phase as TaskLocalMediaSnapshot['phase']) || !states.includes(raw.state as TaskLocalMediaSnapshot['state']) || !isValidISODate(raw.updatedAt)) return undefined;
+  const mediaInfo = normalizeTaskLocalMediaInfo(raw.mediaInfo);
+  return { operationId: raw.operationId as string, artifactId: raw.artifactId, phase: raw.phase as TaskLocalMediaSnapshot['phase'], state: raw.state as TaskLocalMediaSnapshot['state'],
+    inputVersion: typeof raw.inputVersion === 'number' && Number.isSafeInteger(raw.inputVersion) ? raw.inputVersion : undefined,
+    inputDigest: typeof raw.inputDigest === 'string' && /^[a-f0-9]{64}$/i.test(raw.inputDigest) ? raw.inputDigest : undefined,
+    downloadJobId: asNonEmptyString(raw.downloadJobId) || undefined, assetId: asNonEmptyString(raw.assetId) || undefined,
+    sha256: typeof raw.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(raw.sha256) ? raw.sha256 : undefined,
+    mediaInfo, updatedAt: raw.updatedAt,
+    error: isObject(raw.error) && typeof raw.error.code === 'string' && typeof raw.error.message === 'string' ? { code: raw.error.code, message: raw.error.message } : undefined,
+    phaseHistory: Array.isArray(raw.phaseHistory) ? raw.phaseHistory.filter((entry: unknown): entry is Record<string, unknown> => isObject(entry)
+      && phases.includes(entry.phase as TaskLocalMediaSnapshot['phase']) && states.includes(entry.state as TaskLocalMediaSnapshot['state']) && isValidISODate(entry.enteredAt)).slice(-64)
+      .map((entry: Record<string, unknown>): NonNullable<TaskLocalMediaSnapshot['phaseHistory']>[number] => ({ phase: entry.phase as TaskLocalMediaSnapshot['phase'],
+        state: entry.state as TaskLocalMediaSnapshot['state'], enteredAt: entry.enteredAt as string, ...(isValidISODate(entry.leftAt) ? { leftAt: entry.leftAt } : {}) })) : undefined };
+}
+
 /** 归一化 TaskRunSnapshot（运行快照）；对话保护不依赖原运行状态。 */
 function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string, accountId: Task['assignedAccountId']): TaskRunSnapshot | undefined {
   if (!isObject(raw)) return undefined;
@@ -546,6 +585,13 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string, a
   const videoConfig = r.videoConfig ?? (isObject(input) ? input.videoConfig : undefined);
 
   return {
+    localMedia: normalizeLocalMedia(r.localMedia, r.runId),
+    submission: normalizeSubmission(r.submission, r.runId),
+    phaseHistory: Array.isArray(r.phaseHistory) ? r.phaseHistory.filter((entry: unknown): entry is Record<string, unknown> => isObject(entry)
+      && VALID_TASK_STAGES.includes(entry.stage as TaskStage) && isValidISODate(entry.enteredAt))
+      .slice(-64).map((entry: Record<string, unknown>): NonNullable<TaskRunSnapshot['phaseHistory']>[number] => ({
+        stage: entry.stage as TaskStage, enteredAt: entry.enteredAt as string, ...(isValidISODate(entry.leftAt) ? { leftAt: entry.leftAt } : {}),
+      })) : undefined,
     chatAdjustmentGuard: normalizeChatAdjustmentGuard(r.chatAdjustmentGuard),
     runId: asString(r.runId, ''),
     attempt: asNonNegativeNumber(r.attempt, 0),
@@ -589,6 +635,15 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string, a
         aspectRatio: asNonEmptyString(r.generationConfirmation.aspectRatio) ?? undefined,
       } : undefined,
     executionDiagnostics: isObject(r.executionDiagnostics) ? {
+      videoObservation: isObject(r.executionDiagnostics.videoObservation) && isValidISODate(r.executionDiagnostics.videoObservation.observedAt)
+        && typeof r.executionDiagnostics.videoObservation.status === 'string' ? {
+          status: r.executionDiagnostics.videoObservation.status.slice(0, 96),
+          reason: typeof r.executionDiagnostics.videoObservation.reason === 'string' ? r.executionDiagnostics.videoObservation.reason.slice(0, 500) : undefined,
+          pollCount: asNonNegativeNumber(r.executionDiagnostics.videoObservation.pollCount, 0),
+          elapsedMs: asNonNegativeNumber(r.executionDiagnostics.videoObservation.elapsedMs, 0),
+          observedAt: r.executionDiagnostics.videoObservation.observedAt,
+          source: typeof r.executionDiagnostics.videoObservation.source === 'string' ? r.executionDiagnostics.videoObservation.source.slice(0, 96) : undefined,
+        } : undefined,
       initializationQueueWaitMs: asNonNegativeNumber(r.executionDiagnostics.initializationQueueWaitMs, 0) || undefined,
       initializationLimit: asNonNegativeNumber(r.executionDiagnostics.initializationLimit, 0) || undefined,
       upload: isObject(r.executionDiagnostics.upload) ? {
@@ -623,6 +678,8 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string, a
     chatReadback: normalizeChatReadback(r.chatReadback, r, taskMode),
     chatReadbackReview: normalizeChatReadbackReview(r.chatReadbackReview, r, taskMode),
     input: {
+      videoInputSnapshot: isObject(input) && isObject(input.videoInputSnapshot) && input.videoInputSnapshot.schemaVersion === 1
+        ? structuredClone(input.videoInputSnapshot) as unknown as Task['videoInputSnapshot'] : undefined,
       petstory: isObject(input) ? input.petstory as Task['petstory'] : undefined,
       promptReadback: isObject(input) && input.promptReadback === 'exact' ? 'exact' : undefined,
       prompt: asString(isObject(input) ? input.prompt : '', ''),
@@ -731,6 +788,7 @@ function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: str
   // 基础字段
   const id = asNonEmptyString(raw.id);
   task.id = id ?? `recovered-${now}-${Math.random().toString(36).slice(2, 10)}`;
+  task.revision = typeof raw.revision === 'number' && Number.isSafeInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0;
   task.prompt = asString(raw.prompt, '');
   task.assignedAccountId = asNonEmptyString(raw.assignedAccountId) ?? null;
   task.mode = oneOf(raw.mode, VALID_GENERATION_MODES, 'chat');
@@ -875,6 +933,11 @@ function normalizeDownloadJobObject(raw: Record<string, unknown>, now: string): 
 
   job.id = asNonEmptyString(raw.id) ?? `recovered-${now}-${Math.random().toString(36).slice(2, 10)}`;
   job.taskId = asString(raw.taskId, '');
+  job.projectId = asNonEmptyString(raw.projectId) ?? undefined;
+  job.batchId = asNonEmptyString(raw.batchId) ?? undefined;
+  job.runId = asNonEmptyString(raw.runId) ?? undefined;
+  job.artifactId = asNonEmptyString(raw.artifactId) ?? undefined;
+  job.inputVersion = typeof raw.inputVersion === 'number' && Number.isInteger(raw.inputVersion) && raw.inputVersion > 0 ? raw.inputVersion : undefined;
   job.accountId = asNonEmptyString(raw.accountId) ?? null;
   job.mode = oneOf(raw.mode, VALID_GENERATION_MODES, 'chat');
   job.url = asString(raw.url, '');
@@ -883,6 +946,7 @@ function normalizeDownloadJobObject(raw: Record<string, unknown>, now: string): 
   job.saveDir = asString(raw.saveDir, '');
   job.filePath = asNonEmptyString(raw.filePath) ?? undefined;
   job.bytes = typeof raw.bytes === 'number' && raw.bytes >= 0 ? raw.bytes : undefined;
+  job.sha256 = typeof raw.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(raw.sha256) ? raw.sha256 : undefined;
   job.error = asNonEmptyString(raw.error) ?? undefined;
   job.createdAt = asISODate(raw.createdAt, now);
   job.updatedAt = asISODate(raw.updatedAt, now);

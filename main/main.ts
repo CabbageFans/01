@@ -9,7 +9,7 @@
  * 4. 窗口生命周期管理
  */
 
-import { app, BrowserWindow, ipcMain, Menu, session, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, session, shell, protocol } from 'electron';
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -22,6 +22,7 @@ import {
 } from './ipc/tasks';
 import { loadProjects, registerProjectIPC } from './ipc/projects';
 import { registerPetStoryIPC } from './ipc/petstory';
+import { registerLocalMediaScheme, installLocalMediaProtocol } from './utils/LocalMediaProtocol';
 import { registerSystemIPC } from './ipc/system';
 import { writeCrashLog } from './utils/logger';
 import { replaceIpcHandlers } from './ipc/lifecycle';
@@ -56,6 +57,7 @@ if (developmentProfile) {
 
 /** 豆包网页地址 */
 const DOUBAO_URL = 'https://www.doubao.com';
+registerLocalMediaScheme(protocol);
 
 // 必须在 app ready 前设置 Chromium 开关。默认关闭；地址固定为 IPv4 loopback，
 // 不接受远端地址参数。该入口仅用于短时人工验收，用后随应用进程退出。
@@ -365,6 +367,7 @@ if (!gotLock) {
   // ==================== 应用生命周期 ====================
 
   app.whenReady().then(async () => {
+    installLocalMediaProtocol(protocol);
     if (process.platform === 'darwin') {
       // Mac 使用系统 getaddrinfo，并行尝试 IPv4/IPv6；避免不可达 IPv6 阻断页面资源。
       // 只影响本应用，沿用系统 DNS/代理与正常证书校验，不设置自定义 DNS 地址。

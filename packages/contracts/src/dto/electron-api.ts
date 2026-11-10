@@ -142,10 +142,12 @@ export interface ElectronAPI {
       taskId: string,
       status: string,
       result?: string,
-      outputs?: string[]
-    ) => Promise<TaskOperationResult>;
+      outputs?: string[],
+      identity?: { expectedRunId?: string; expectedRevision?: number }
+    ) => Promise<TaskResult>;
     updateRuntime: (taskId: string, patch: {
       expectedRunId?: string;
+      expectedRevision?: number;
       status?: TaskStatus;
       runtime?: Partial<TaskRunSnapshot>;
       errorInfo?: TaskErrorInfo | null;
@@ -162,7 +164,7 @@ export interface ElectronAPI {
     update: (taskId: string, updates: TaskUpdateInput) => Promise<TaskResult>;
     delete: (taskId: string) => Promise<TaskOperationResult>;
     retry: (taskId: string) => Promise<TaskResult>;
-    batchPause: () => Promise<{ success: boolean }>;
+    batchPause: () => Promise<import('./tasks').TaskBatchPauseResult>;
     getCompletedOutputs: () => Promise<CompletedOutput[]>;
     selectImages: () => Promise<FileSelectResult>;
     selectAudio: () => Promise<AudioSelectResult>;
@@ -170,9 +172,10 @@ export interface ElectronAPI {
     downloadOutputs: (outputs: CompletedOutput[], saveDir?: string) => Promise<TaskDownloadOutputsResult>;
     downloadPublicShareMedia: (shareUrl: string, saveDir?: string) => Promise<PublicShareMediaDownloadResult>;
     listDownloads: () => Promise<DownloadJob[]>;
+    readDownloadedMedia: (jobId: string) => Promise<import('./tasks').TaskReadDownloadedMediaResult>;
     exportDiagnostics: () => Promise<ExportDiagnosticsResult>;
     validateArtifact: (taskId: string, artifactId: string) => Promise<TaskValidateArtifactResult>;
-    saveAdapterReport: (accountId: string, report: AdapterSelfCheckReport) => Promise<{ success: boolean }>;
+    saveAdapterReport: (accountId: string, report: AdapterSelfCheckReport, identity?: { taskId?: string; runId?: string; projectId?: string; shotId?: string; stepId?: string }) => Promise<{ success: boolean; error?: string }>;
     selectAdapterRules: () => Promise<TaskSelectAdapterRulesResult>;
     selectSaveDir: () => Promise<SelectSaveDirResult>;
   };

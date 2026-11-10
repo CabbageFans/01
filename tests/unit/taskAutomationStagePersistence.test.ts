@@ -24,7 +24,7 @@ function writeRuntime(taskId: string, patch: Omit<TaskUpdateRuntimeParams, 'task
 function seed(guarded: boolean = false): void {
   id = `TEST-stage-${++sequence}`;
   const mode = guarded ? 'chat' : 'video';
-  const task: Task = { id, projectId: 'TEST-studio', assignedAccountId: ACCOUNT, prompt: 'TEST immutable input', mode, status: 'paused', executionIntent: 'armed',
+  const task: Task = { id, projectId: 'TEST-studio', assignedAccountId: ACCOUNT, prompt: 'TEST immutable input', mode, status: 'queued', executionIntent: 'armed',
     videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' }, attachments: ['TEST-first.png'], result: null, outputs: [], createdAt: NOW, updatedAt: NOW,
     runtime: { runId: `TEST-run-${id}`, attempt: 1, stage: 'preparing_account', message: 'TEST preparing', startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW,
       input: { prompt: 'TEST immutable input', mode, attachments: ['TEST-first.png'], videoConfig: { model: 'seedance-2.0', duration: '5s', aspectRatio: '9:16' } } } };
@@ -32,9 +32,9 @@ function seed(guarded: boolean = false): void {
   core = new TaskService({ store: { read: (): Task[] => [read()], replace: (items: Task[]): boolean => { if (failWrites) return false; persisted = JSON.stringify(items); return true; } },
     defaultProjectId: (): string => 'TEST-studio', now: (): string => new Date().toISOString() });
   if (guarded) core.setConversationGuard(id, 'TEST-creative-project', 'TEST-adjustment', true);
-  expect(core.updateRuntime({ taskId: id, status: 'executing' }).success).toBe(true);
+  expect(core.updateRuntime({ taskId: id, expectedRunId: read().runtime?.runId, status: 'executing' }).success).toBe(true);
   useTaskStore.setState({ ...initial, tasks: [structuredClone(read())], executingTasks: { [ACCOUNT]: id }, accountAutomationState: {}, accountAutoMessage: {}, processQueue: vi.fn() });
-  vi.stubGlobal('window', { electronAPI: { tasks: { updateRuntime: vi.fn(async (taskId: string, patch: Omit<TaskUpdateRuntimeParams, 'taskId'>): Promise<RuntimeWriteResult> => writeRuntime(taskId, patch)) } } });
+  vi.stubGlobal('window', { electronAPI: { tasks: { updateRuntime: vi.fn(async (taskId: string, patch: Omit<TaskUpdateRuntimeParams, 'taskId'>): Promise<RuntimeWriteResult> => writeRuntime(taskId, patch)) }, logs: { append: vi.fn(async (): Promise<void> => undefined) }, accounts: { setStatus: vi.fn(async (): Promise<void> => undefined) } } });
 }
 
 beforeEach((): void => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
@@ -45,7 +45,7 @@ describe('自动化阶段只持久化自身字段', (): void => {
     seed(guarded); const before = read(); const runtime = structuredClone(before.runtime!);
     expect(Object.prototype.hasOwnProperty.call(runtime, 'chatAdjustmentGuard')).toBe(true);
     runtime.stage = 'configuring';
-    expect(core.updateRuntime({ taskId: id, runtime })).toMatchObject({ success: false, error: '对话保护只能由对应创作调整操作更新' });
+    expect(core.updateRuntime({ taskId: id, expectedRunId: read().runtime?.runId, runtime })).toMatchObject({ success: false, error: '对话保护只能由对应创作调整操作更新' });
     expect(read()).toEqual(before);
   });
 
@@ -70,7 +70,9 @@ describe('自动化阶段只持久化自身字段', (): void => {
     await vi.waitFor((): void => expect(read().runtime!.message).toBe('TEST saved stage'));
     useTaskStore.getState().setAccountAutomationState(ACCOUNT, 'injecting', 'TEST throttled heartbeat', 'configuring', id);
     await Promise.resolve(); expect(read().runtime!.message).toBe('TEST saved stage');
-    expect(window.electronAPI.tasks.updateRuntime).toHaveBeenCalledTimes(2);
+    // 原阶段失败后额外保存可恢复暂停命令；该命令同样失败，不能伪报暂停。
+    expect(window.electronAPI.tasks.updateRuntime).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(window.electronAPI.tasks.updateRuntime).mock.calls[1][1]).toMatchObject({ status: 'paused', errorInfo: { code: 'runtime_save_failed' } });
     await vi.advanceTimersByTimeAsync(15_000);
     useTaskStore.getState().setAccountAutomationState(ACCOUNT, 'injecting', 'TEST renewed heartbeat', 'configuring', id);
     await vi.waitFor((): void => expect(read().runtime!.message).toBe('TEST renewed heartbeat'));
@@ -80,7 +82,7 @@ describe('自动化阶段只持久化自身字段', (): void => {
     seed(); useTaskStore.getState().setAccountAutomationState(ACCOUNT, 'injecting', 'TEST first run', 'configuring', id);
     await vi.waitFor((): void => expect(read().runtime!.stage).toBe('configuring'));
     const before = read().runtime!;
-    expect(core.updateRuntime({ taskId: id, runtime: { runId: 'TEST-new-run', attempt: 2, stage: 'configuring', message: 'TEST new run', startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW, input: before.input } }).success).toBe(true);
+    expect(core.updateRuntime({ taskId: id, expectedRunId: read().runtime?.runId, runtime: { runId: 'TEST-new-run', attempt: 2, stage: 'configuring', message: 'TEST new run', startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW, input: before.input } }).success).toBe(true);
     refresh(); useTaskStore.getState().setAccountAutomationState(ACCOUNT, 'injecting', 'TEST same stage new run', 'configuring', id);
     await vi.waitFor((): void => expect(read().runtime!.message).toBe('TEST same stage new run'));
     expect(read().runtime!.runId).toBe('TEST-new-run'); expect(read().runtime!.input).toEqual(before.input);
@@ -93,7 +95,7 @@ describe('自动化阶段只持久化自身字段', (): void => {
       release = (): void => { resolve(writeRuntime(taskId, patch)); };
     }));
     useTaskStore.getState().setAccountAutomationState(ACCOUNT, 'injecting', 'TEST late old stage', 'configuring', id);
-    expect(core.updateRuntime({ taskId: id, runtime: { runId: 'TEST-replacement-run', attempt: 2, stage: 'preparing_account', message: 'TEST new runtime', startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW, input: old.runtime!.input } }).success).toBe(true);
+    expect(core.updateRuntime({ taskId: id, expectedRunId: read().runtime?.runId, runtime: { runId: 'TEST-replacement-run', attempt: 2, stage: 'preparing_account', message: 'TEST new runtime', startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW, input: old.runtime!.input } }).success).toBe(true);
     refresh(); const current = read(); release(); await Promise.resolve(); await Promise.resolve();
     expect(read()).toEqual(current); expect(useTaskStore.getState().error).toBeNull();
     expect(core.updateRuntime({ taskId: id, expectedRunId: old.runtime!.runId, runtime: { message: 'TEST must reject' } })).toMatchObject({ success: false, error: '原任务运行已变化，未更新运行状态' });
@@ -124,7 +126,7 @@ describe('自动化阶段只持久化自身字段', (): void => {
   });
 
   it.each([false, true])('submitting仅携带正式已有的提交意图，不因阶段展示生成新意图（existing=%s）', async (existing: boolean): Promise<void> => {
-    seed(); if (existing) expect(core.updateRuntime({ taskId: id, runtime: { submittedAt: NOW } }).success).toBe(true);
+    seed(); if (existing) expect(core.updateRuntime({ taskId: id, expectedRunId: read().runtime?.runId, runtime: { submittedAt: NOW } }).success).toBe(true);
     refresh(); useTaskStore.getState().setAccountAutomationState(ACCOUNT, 'submitting', 'TEST submitting', 'submitting', id);
     await vi.waitFor((): void => expect(read().runtime!.stage).toBe('submitting'));
     expect(read().runtime!.submittedAt).toBe(existing ? NOW : undefined);
@@ -135,8 +137,8 @@ describe('自动化阶段只持久化自身字段', (): void => {
 
   it.each([false, true])('原媒体回执不会被陈旧快照覆盖，阶段写入成功或失败重入均保留原证据（failFirst=%s）', async (failFirst: boolean): Promise<void> => {
     seed(); const before = read(); const conversationUrl = 'https://www.doubao.com/chat/TEST-stage-original';
-    expect(core.updateRuntime({ taskId: id, runtime: { submittedAt: NOW, conversationUrl } }).success).toBe(true);
-    expect(core.updateRuntime({ taskId: id, runtime: { mediaSubmissionReceipt: { schemaVersion: 1, source: 'published_message', accountId: ACCOUNT,
+    expect(core.updateRuntime({ taskId: id, expectedRunId: read().runtime?.runId, runtime: { submittedAt: NOW, conversationUrl } }).success).toBe(true);
+    expect(core.updateRuntime({ taskId: id, expectedRunId: read().runtime?.runId, runtime: { mediaSubmissionReceipt: { schemaVersion: 1, source: 'published_message', accountId: ACCOUNT,
       runId: before.runtime!.runId, submittedAt: NOW, observedAt: NOW, conversationUrl, userMessageId: 'TEST-original-message' } } }).success).toBe(true);
     const receipt = read().runtime!.mediaSubmissionReceipt;
     expect(receipt).toBeDefined(); failWrites = failFirst;
@@ -157,7 +159,7 @@ describe('自动化阶段只持久化自身字段', (): void => {
 
   it('仅续租已有observing绑定，原受理依据不变且不发送专用保护或其他证据', async (): Promise<void> => {
     seed(); const before = read();
-    expect(core.updateRuntime({ taskId: id, runtime: { submittedAt: NOW, conversationUrl: 'https://www.doubao.com/chat/TEST-stage-observation', acceptanceObservation: {
+    expect(core.updateRuntime({ taskId: id, expectedRunId: read().runtime?.runId, runtime: { submittedAt: NOW, conversationUrl: 'https://www.doubao.com/chat/TEST-stage-observation', acceptanceObservation: {
       schemaVersion: 1, accountId: ACCOUNT, runId: before.runtime!.runId, conversationUrl: 'https://www.doubao.com/chat/TEST-stage-observation', acceptedAt: NOW,
       evidence: { kind: 'generation_started', messageCount: 1 }, cursor: { messageCount: 1, pollCount: 2 }, expectedArtifact: { kind: 'video', runId: before.runtime!.runId },
       lease: { ownerId: 'TEST-observer', acquiredAt: NOW, expiresAt: NOW, lastHeartbeatAt: NOW }, outcome: 'observing',

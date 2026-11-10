@@ -307,7 +307,7 @@ describe('产品运行时按钮到主进程请求', (): void => {
     task.status = 'paused'; task.runtime!.submittedAt = now; task.runtime!.conversationUrl = url;
     const beforeCount = tasks.length; const prompt = task.prompt; const runId = task.runtime!.runId;
     await usePetStoryStore.getState().recoverChat(job.id);
-    expect(dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'reconcile-task-submission', options: { detail: { taskId: task.id, useCurrentPage: !url?.includes('OFFLINE-original') } } }));
+    expect(dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'reconcile-task-submission', options: { detail: { taskId: task.id, runId, submittedAt: now, accountId: task.assignedAccountId, useCurrentPage: !url?.includes('OFFLINE-original') } } }));
     expect(tasks).toHaveLength(beforeCount); expect(task.prompt).toBe(prompt); expect(task.runtime!.runId).toBe(runId); expect(task.runtime!.submittedAt).toBe(now);
     expect(prepareRuntime).toHaveBeenCalledTimes(1); expect(generateMaterials).not.toHaveBeenCalled();
   });

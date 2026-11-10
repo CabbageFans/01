@@ -251,7 +251,7 @@ export const CanvasPromptEditor: React.FC<{
   return <div className="canvas-prompt" id={`prompt-${shot.id}-${kind}`} data-prompt-kind={kind} data-candidate={candidateJob ? 'true' : undefined}>
     <div className="canvas-field-label"><strong>{canvasPromptNames[kind]}</strong><button type="button" disabled={!displayed} aria-label={`放大镜头${shot.order}${canvasPromptNames[kind]}`} onClick={(): void => setExpanded(true)}><ExpandOutlined /> 全文</button></div>
     <div className="canvas-source"><span>{promptDisplayLabel(prompt, candidate, !!invalidJob, retainedCandidate)}</span>{displayed && <span>{displayed.length} 字</span>}</div>
-    {displayed ? <pre tabIndex={0} aria-label={`${title}${invalidJob ? '校验未通过全文' : candidate ? '候选全文' : '当前正文'}`} className={`canvas-prompt-readonly ${candidate ? 'is-candidate' : ''}`}>{displayed}</pre> : <p className="canvas-hint">{job && !job.endedWaitingAt && job.resultStatus !== 'stale' ? '本镜提示词尚未准备完成。' : '本镜提示词尚未生成，可使用顶部提示词按钮补齐。'}</p>}
+    {displayed ? <pre tabIndex={0} aria-label={`${title}${invalidJob ? '校验未通过全文' : candidate ? '候选全文' : '当前正文'}`} className={`canvas-prompt-readonly ${candidate ? 'is-candidate' : ''}`}>{displayed}</pre> : <p className="canvas-hint">{job && !job.endedWaitingAt && job.resultStatus !== 'stale' ? '本镜提示词尚未准备完成。' : `点击本镜${kind === 'video' ? '生成视频' : '生成图片'}时会准备所需提示词。`}</p>}
     {candidate && prompt.final && !retainedCandidate && <p className="canvas-hint">{prompt.edited ? '确认后将替换当前手改正文，原版本保留。' : '确认前继续使用原正文，已有图片和视频保留。'}</p>}
     <CanvasPromptProgress project={project} job={job} task={task} disabled={disabled || generationBlocked} />
     {actions}
