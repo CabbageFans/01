@@ -679,7 +679,7 @@ export class PetStoryProductionService {
     const media = requireValue(shots[shot.id]);
     const previous = shots[requireValue(shot.previousShotId)];
     const video = p.assets.find((asset): boolean => asset.id === previous?.videoId && asset.kind === 'video' && asset.shotId === shot.previousShotId);
-    if (!video?.taskId || !video.runId) throw new Error('本镜连续首帧依赖前镜实际视频／末帧；请先完成或选择前镜实际视频，再制作本镜，不能使用计划尾帧');
+    if (!video || video.origin !== 'user_upload' && (!video.taskId || !video.runId)) throw new Error('本镜连续首帧依赖前镜实际视频／末帧；请先完成或选择前镜实际视频，再制作本镜，不能使用计划尾帧');
     if (video.needsReview) throw new Error('前镜素材已替换，请先复核前镜视频，再制作连续镜头');
     const source = await this.assetFile(p, video.id, 'video');
     const frameId = randomUUID();

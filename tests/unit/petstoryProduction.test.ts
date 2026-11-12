@@ -153,6 +153,17 @@ beforeEach(async (): Promise<void> => {
 });
 
 describe('P4 实际入口和请求模式', (): void => {
+  it('用户上传的前镜视频支持真实末帧接力，不伪造平台任务来源', async (): Promise<void> => {
+    p = await projects.addShotVideo(p.id, p.revision, 'TEST-shot-1', video); const uploaded = p.assets.at(-1)!;
+    p.promptCapability = capability(); seedOfflinePromptContracts(p, { shotId: 'TEST-shot-2', promptKind: 'firstFrame' }); p = await projects.write(p);
+    const prepared = await service.generateShotMedia(p.id, p.revision, 'TEST-shot-2', 'firstFrame', capability());
+    const media = prepared.project!.production!.shots['TEST-shot-2'];
+    const frame = prepared.project!.assets.find((asset): boolean => asset.id === media.actualEndFrameId)!;
+    expect(frame.sourceVideo).toMatchObject({ assetId: uploaded.id, sha256: uploaded.validation!.sha256, atSeconds: 4.9 });
+    expect(frame.sourceVideo?.taskId).toBeUndefined(); expect(frame.sourceVideo?.runId).toBeUndefined();
+    expect(frame.validation?.decoded).toBe(true); expect(tasks).toEqual([]);
+    expect(prepared.project!.selectedVideos?.['TEST-shot-1']).toBe(uploaded.id);
+  });
   it('同一采用图的旧人物设计文字变化不撤销当前制作，实际角色剧情改变仍拒绝原授权', async (): Promise<void> => {
     await approve(); const originalHash = p.production!.planHash; const materialHash = p.production!.materialHash;
     p.plan!.characters[0].description = 'TEST仅修改已被采用图替代的旧造型文字';
@@ -1217,6 +1228,21 @@ describe('制作长操作与界面分离', (): void => {
 });
 
 describe('旧媒体异步回执隔离', (): void => {
+  it('结束原制作后上传视频，迟到的原下载不能覆盖用户选中视频', async (): Promise<void> => {
+    await approve(); const original = await advanceToVideo(); await complete(original.taskId!);
+    const network = download.getMockImplementation(); if (!network) throw new Error('TEST下载fixture缺失');
+    let release!: () => void; const gate = new Promise<void>((done): void => { release = done; });
+    download.mockClear(); download.mockImplementationOnce(async (params: unknown): Promise<unknown> => { await gate; return network(params); });
+    const pending = service.advance(p.id); await vi.waitFor((): void => expect(download).toHaveBeenCalled());
+    const ended = await service.end(p.id); const uploaded = await projects.addShotVideo(p.id, ended.project!.revision, 'TEST-shot-1', video);
+    const selected = uploaded.selectedVideos?.['TEST-shot-1']; release(); await pending;
+    const stored = await projects.read(p.id);
+    expect(stored.selectedVideos?.['TEST-shot-1']).toBe(selected);
+    expect(stored.assets.find((asset): boolean => asset.id === selected)?.origin).toBe('user_upload');
+    expect(stored.production).toBeUndefined(); expect(stored.productionHistory?.some((run): boolean => run.steps.some((step): boolean => step.taskId === original.taskId))).toBe(true);
+    expect(jobs.some((job): boolean => job.taskId === original.taskId && job.status === 'done')).toBe(true);
+    expect(list().find((task): boolean => task.id === original.taskId)?.runtime?.submittedAt).toBeTruthy();
+  });
   it('结束不等待网络，迟到原下载保留且不能越过结束命令覆盖新制作', async (): Promise<void> => {
     await approve(); const original = await advanceToVideo(); await complete(original.taskId!);
     const network = download.getMockImplementation(); if (!network) throw new Error('TEST下载fixture缺失');

@@ -1,6 +1,6 @@
 import { buildPetStoryDiagnostics } from './petstoryDiagnostics';
 import fs from 'node:fs/promises';
-import { migrateLocalMediaSources } from './localMediaSource';
+import { assertLocalMediaSource, migrateLocalMediaSources } from './localMediaSource';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -32,6 +32,34 @@ function prepareEditableAutoModeTargets(project: PetStoryProject): void {
     }
   }
   ensurePetStoryAutoModeTargets(project.plan);
+}
+
+/** 旧公共槽里的明确图片制作不因视频上传而结束；未知整批继续保护原授权。 */
+function videoUploadProductionState(production: PetStoryProduction | undefined): 'image' | 'locked' | 'available' {
+  if (!production) return 'available';
+  const containsVideo = production.target?.kind === 'video' || production.steps.some((step: PetStoryProductionStep): boolean => step.kind === 'video');
+  if (!containsVideo && (production.imageOperationId || production.phase === 'materials'
+    || production.target?.kind === 'firstFrame' || production.target?.kind === 'lastFrame')) return 'image';
+  return production.state === 'complete' || production.state === 'ended' ? 'available' : 'locked';
+}
+
+export interface PetStoryVideoUploadBasis {
+  projectId: string; accountId: string; studioProjectId: string;
+  shot: NonNullable<PetStoryProject['plan']>['shots'][number];
+  selectedVideo?: PetStoryAsset;
+}
+/** 与正式媒体投影一致，未保存显式指针时仍核对当前/历史制作及最后本地视频。 */
+export function capturePetStoryVideoUploadBasis(project: PetStoryProject, shotId: string): PetStoryVideoUploadBasis {
+  const shot = project.plan?.shots.find((item: NonNullable<PetStoryProject['plan']>['shots'][number]): boolean => item.id === shotId);
+  if (!shot) throw new Error('镜头不存在，未上传视频');
+  const prior = [project.production, ...(project.productionHistory || []).slice().reverse()].find((run: PetStoryProduction | undefined): boolean => !!run?.shots[shotId])?.shots[shotId];
+  const selectedId = project.selectedVideos?.[shotId] || prior?.videoId;
+  const selectedVideo = selectedId ? project.assets.find((asset: PetStoryAsset): boolean => asset.id === selectedId && asset.shotId === shotId && asset.kind === 'video')
+    : [...project.assets].reverse().find((asset: PetStoryAsset): boolean => asset.shotId === shotId && asset.kind === 'video');
+  return structuredClone({ projectId: project.id, accountId: project.accountId, studioProjectId: project.studioProjectId, shot, selectedVideo });
+}
+export function assertPetStoryVideoUploadBasis(project: PetStoryProject, basis: PetStoryVideoUploadBasis): void {
+  if (!isDeepStrictEqual(capturePetStoryVideoUploadBasis(project, basis.shot.id), basis)) throw new Error('项目归属、镜头或当前视频已变化，请重新选择上传视频');
 }
 
 /** 手动改剧情后，原样带回的旧判断不再冒充针对新剧情的分析结果。 */
@@ -244,7 +272,9 @@ function validateAssets(result: PetStoryProject): Set<string> {
       || !(legacyPath.test(asset.relativePath) || (!!asset.materialId && /^materials\/[a-zA-Z0-9_-]+\.(png|jpg|jpeg|webp)$/i.test(asset.relativePath)))) throw new Error('项目素材路径或类型无效');
     if (asset.kind === 'character' && (!assetCharacterIds(asset).length || assetCharacterIds(asset).some((id: string): boolean => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id)))) throw new Error('身份参考角色映射无效');
     ids.add(asset.id);
-    if (asset.kind === 'video' && (!asset.taskId || !asset.runId || !asset.validation || !asset.downloadJobId || !asset.artifactId)) throw new Error('视频素材缺少真实产物归属');
+    if (asset.origin === 'user_upload') assertLocalMediaSource(result, asset);
+    else if (asset.uploadSource) throw new Error('用户上传视频来源类型不符');
+    else if (asset.kind === 'video' && (!asset.taskId || !asset.runId || !asset.validation || !asset.downloadJobId || !asset.artifactId)) throw new Error('视频素材缺少真实产物归属');
     if (asset.validation && (asset.validation.decoded !== true || !/^[a-f0-9]{64}$/.test(asset.validation.sha256) || !(asset.validation.bytes > 0) || !(asset.validation.width > 0) || !(asset.validation.height > 0))) throw new Error('媒体校验记录无效');
     if (asset.kind === 'actualEndFrame' && (!asset.sourceVideo || !(asset.sourceVideo.atSeconds >= 0))) throw new Error('真实末帧缺少源视频信息');
     validateImageReview(asset, result);
@@ -702,6 +732,55 @@ export class PetStoryProjects {
     if ((await mediaDigest(file)).sha256 !== validation.sha256) throw new Error('图片复制校验失败，原采用图保留');
     p.assets.push(asset);
     return this.write(p);
+  }
+  /** 上传直接成为本镜选中视频；先结束原制作，避免原运行的迟到产物改写用户选择。 */
+  async addShotVideo(id: string, revision: number, shotId: string, sourcePath: string, expectedBasis?: PetStoryVideoUploadBasis): Promise<PetStoryProject> {
+    let p = await this.read(id);
+    if (p.revision !== revision) throw new Error('项目版本已变化，请重新上传视频');
+    const basis = expectedBasis || capturePetStoryVideoUploadBasis(p, shotId);
+    if (basis.shot.id !== shotId) throw new Error('上传视频的镜头归属不符');
+    assertPetStoryVideoUploadBasis(p, basis);
+    let productionState = videoUploadProductionState(p.production);
+    if (productionState === 'locked') throw new Error('请先结束本次制作，再上传视频；原任务和产物会保留');
+    const info = await fs.lstat(sourcePath);
+    if (!info.isFile() || info.isSymbolicLink() || !info.size || path.extname(sourcePath).toLowerCase() !== '.mp4') throw new Error('请选择真实的 MP4 视频文件');
+    const validation = await validatePetStoryMedia(sourcePath, 'video', { userUpload: true });
+    const assetId = randomUUID(); const relativePath = `shots/${shotId}/${assetId}.mp4`;
+    const asset: PetStoryAsset = { id: assetId, kind: 'video', shotId, relativePath, validation, origin: 'user_upload',
+      uploadSource: { projectId: p.id, accountId: p.accountId, shotId, sha256: validation.sha256, uploadedAt: new Date().toISOString() } };
+    const destination = await projectPath(this.directory(id), relativePath);
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    await projectPath(this.directory(id), relativePath);
+    try {
+      await fs.copyFile(sourcePath, destination, 1);
+      if ((await mediaDigest(destination)).sha256 !== validation.sha256) throw new Error('视频复制校验失败，原选中视频保留');
+      // 对话框、解码期间的无关后台写盘可保留；目标和原视频变化不能借新版本覆盖。
+      p = await this.read(id); assertPetStoryVideoUploadBasis(p, basis);
+      productionState = videoUploadProductionState(p.production);
+      if (productionState === 'locked') throw new Error('请先结束本次制作，再上传视频；原任务和产物会保留');
+      if (productionState !== 'image') archiveCompletedPetStoryProduction(p);
+      // 原素材全部保留；只有实际依赖本镜视频的连续镜头退出当前有效依据。
+      const affected = new Set<string>([shotId]); let changed = true;
+      while (changed) {
+        changed = false;
+        for (const shot of p.plan?.shots || []) if (shot.transition === 'continue' && shot.previousShotId && affected.has(shot.previousShotId) && !affected.has(shot.id)) {
+          affected.add(shot.id); changed = true;
+        }
+      }
+      for (const previous of p.assets) if (previous.shotId && previous.shotId !== shotId && affected.has(previous.shotId)) {
+        if (['video', 'actualEndFrame'].includes(previous.kind)) previous.needsReview = true;
+        // 连续镜头的旧关键帧也来自旧视频边界；普通复核标记会被历史采用决定兼容，
+        // 因此退出当前有效图依据，保留原图和原采用事实供历史查看。
+        if (['firstFrame', 'plannedEndImage'].includes(previous.kind)) previous.visualBasisStale = true;
+      }
+      p.assets.push(asset); p.selectedVideos = { ...p.selectedVideos, [shotId]: asset.id };
+      return await this.write(p);
+    } catch (error: unknown) {
+      // 写后回读失败时仍保留已登记文件，不把一次读取故障变成真实媒体丢失。
+      const saved = await this.read(id).catch((): null => null);
+      if (saved && !saved.assets.some((item: PetStoryAsset): boolean => item.id === asset.id)) await fs.rm(destination, { force: true });
+      throw error;
+    }
   }
   private async adoptProjectImage(p: PetStoryProject, target: PetStoryImageTarget, assetId: string): Promise<void> {
     const asset = p.assets.find((item): boolean => item.id === assetId);

@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PetStoryAsset, PetStoryPlan, PetStoryProject, Task } from '@doubao-studio/contracts';
 import { CanvasMediaNode, CanvasMediaPreview } from '../../src/components/PetStoryCanvasMedia';
@@ -63,6 +63,37 @@ describe('项目内视频播放', (): void => {
     await waitFor((): void => expect(play).toHaveBeenCalledOnce());
     expect(play.mock.instances[0]).toBe(player);
     expect(generate).not.toHaveBeenCalled(); expect(project.assets).toEqual(before);
+  });
+
+  it('替换选中视频后忽略旧文件迟到的播放拒绝，保留新播放器', async (): Promise<void> => {
+    let rejectOld: (reason: Error) => void = (): void => undefined;
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementationOnce((): Promise<void> => new Promise((_resolve, reject): void => { rejectOld = reject; }));
+    const read = vi.mocked(window.electronAPI.petstory.readMedia);
+    read.mockImplementation(async (_id: string, assetId: string): Promise<{ success: true; data: string; mimeType: string }> => ({
+      success: true, data: `doubao-media://asset/${assetId === asset.id ? 'a'.repeat(64) : 'b'.repeat(64)}`, mimeType: 'video/mp4' }));
+    const view = render(<CanvasMediaNode project={project} shot={project.plan!.shots[0]} kind="video" disabled={false} />);
+    await screen.findByLabelText('镜头 1 镜头视频'); fireEvent.click(screen.getByRole('button', { name: '查看视频' }));
+    const replacement = { ...structuredClone(asset), id: 'TEST-uploaded-replacement', relativePath: 'TEST-replacement.mp4' };
+    project = { ...project, revision: project.revision + 1, assets: [...project.assets, replacement], selectedVideos: { [project.plan!.shots[0].id]: replacement.id } };
+    act((): void => { usePetStoryStore.setState({ project }); });
+    view.rerender(<CanvasMediaNode project={project} shot={project.plan!.shots[0]} kind="video" disabled={false} />);
+    const player = await screen.findByLabelText('镜头 1 镜头视频'); expect(player.getAttribute('src')).toBe(`doubao-media://asset/${'b'.repeat(64)}`);
+    const aborted = new Error('TEST 旧视频切源被中止'); aborted.name = 'AbortError';
+    await act(async (): Promise<void> => { rejectOld(aborted); });
+    expect(screen.queryByRole('alert')).toBeNull(); expect(player.getAttribute('src')).toBe(`doubao-media://asset/${'b'.repeat(64)}`);
+  });
+
+  it('新视频读取完成后旧媒体IPC迟到，不恢复旧播放来源或旧错误', async (): Promise<void> => {
+    let finishOld: (result: { success: false; data: string; error: string }) => void = (): void => undefined;
+    const read = vi.mocked(window.electronAPI.petstory.readMedia);
+    read.mockImplementationOnce((): ReturnType<typeof window.electronAPI.petstory.readMedia> => new Promise((resolve): void => { finishOld = resolve; }));
+    const view = render(<CanvasMediaPreview project={project} asset={asset} name="TEST 当前视频" />);
+    const replacement = { ...asset, id: 'TEST-current-upload', relativePath: 'TEST-current.mp4' };
+    read.mockResolvedValueOnce({ success: true, data: `doubao-media://asset/${'b'.repeat(64)}`, mimeType: 'video/mp4' });
+    view.rerender(<CanvasMediaPreview project={project} asset={replacement} name="TEST 当前视频" />);
+    const player = await screen.findByLabelText('TEST 当前视频'); expect(player.getAttribute('src')).toBe(`doubao-media://asset/${'b'.repeat(64)}`);
+    await act(async (): Promise<void> => { finishOld({ success: false, data: source, error: 'TEST 旧媒体读取错误' }); });
+    expect(player.getAttribute('src')).toBe(`doubao-media://asset/${'b'.repeat(64)}`); expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('手机改成 5 秒后保留可播放文件，明确真实 5.06 秒与原请求 7 秒，不拿当前计划替代原请求', async (): Promise<void> => {

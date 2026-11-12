@@ -18,14 +18,12 @@ let chat: Task;
 let video: Task;
 let opened: Task[];
 let locateRequests: Task[];
-let sourceChecks: Array<(() => boolean) | undefined>;
 let selectAccount: ReturnType<typeof vi.fn<(id: string | null) => void>>;
 let generate: ReturnType<typeof vi.fn<() => Promise<void>>>;
 const dirtyChanged = (): void => undefined;
 const captureConversation = (event: Event): void => {
-  const detail = (event as CustomEvent<{ task: Task; locateSubmittedMedia?: boolean; isCurrentSource?: () => boolean }>).detail;
+  const detail = (event as CustomEvent<{ task: Task; locateSubmittedMedia?: boolean }>).detail;
   opened.push(detail.task); if (detail.locateSubmittedMedia) locateRequests.push(detail.task);
-  sourceChecks.push(detail.isCurrentSource);
 };
 
 function makeTask(name: string, mode: 'chat' | 'video'): Task {
@@ -89,7 +87,7 @@ beforeEach((): void => {
     source: { kind: 'script', url: '', status: 'review_required' }, mobileStory: { id: 'TEST-story', text: 'TEST 剧本', importedAt: now }, plan, assets: [], jobs: [] };
   chat = makeTask('source-chat', 'chat'); video = makeTask('current-video', 'video');
   project.jobs = [makeJob(chat)]; shot.prompts.video.sourceJobId = project.jobs[0].id; project.production = makeProduction(video);
-  opened = []; locateRequests = []; sourceChecks = []; window.addEventListener('open-task-conversation', captureConversation);
+  opened = []; locateRequests = []; window.addEventListener('open-task-conversation', captureConversation);
   selectAccount = vi.fn((id: string | null): void => { useAccountStore.setState({ selectedAccountId: id }); });
   generate = vi.fn(async (): Promise<void> => undefined);
   useAccountStore.setState({ ...original.accounts, accounts: [account], selectedAccountId: null, selectAccount });
@@ -153,65 +151,28 @@ describe('画布视频正文和视频产物的直接会话入口', (): void => {
     expect(opened).toEqual([]); expect(selectAccount).not.toHaveBeenCalled(); expectNoProductionAction();
   });
 
-  it('重发请求尚未发送时保留独立原请求入口，两个任务不会共用同一Chat按钮', (): void => {
-    const replacement = replaceOriginalVideo(); const before = structuredClone([video, replacement]); render(mediaNode());
+  it.each([false, true])('原请求已有具体URL=%s时移除额外入口，未发送的重发请求不会冒用原对话', (knownUrl: boolean): void => {
+    const replacement = replaceOriginalVideo();
+    if (knownUrl) video.runtime!.conversationUrl = 'https://www.doubao.com/chat/TEST-before-resend';
+    const before = structuredClone({ tasks: [video, replacement], history: project.production!.steps[0].resubmissionHistory });
+    render(mediaNode());
     const current = screen.getByRole('button', { name: '进入豆包对话' });
     expect(current.hasAttribute('disabled')).toBe(true); expect(current.getAttribute('title')).toContain('本次重发请求尚未发送');
-    const originalButton = screen.getByRole('button', { name: '原请求豆包对话' }); expect(originalButton.hasAttribute('disabled')).toBe(false);
-    fireEvent.click(originalButton); expect(locateRequests.map((task: Task): string => task.id)).toEqual([video.id]);
-    expect(selectAccount).not.toHaveBeenCalled(); expectNoProductionAction(); expect([video, replacement]).toEqual(before);
-    expect(screen.getByText('本次重发请求尚未发送；原请求对话单独保留。')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '原请求豆包对话' })).toBeNull();
+    expect(screen.queryByText('本次重发请求尚未发送；原请求对话单独保留。')).toBeNull();
+    fireEvent.click(current);
+    expect(opened).toEqual([]); expect(locateRequests).toEqual([]); expect(selectAccount).not.toHaveBeenCalled(); expectNoProductionAction();
+    expect({ tasks: [video, replacement], history: project.production!.steps[0].resubmissionHistory }).toEqual(before);
   });
 
-  it('原请求已有具体URL时单独打开原Chat，不冒充本次重发请求', (): void => {
-    replaceOriginalVideo(); video.runtime!.conversationUrl = 'https://www.doubao.com/chat/TEST-before-resend'; render(mediaNode());
-    fireEvent.click(screen.getByRole('button', { name: '原请求豆包对话' }));
-    expect(opened.map((task: Task): string => task.id)).toEqual([video.id]); expect(locateRequests).toEqual([]); expectNoProductionAction();
-  });
-
-  it.each(['backlink', 'history', 'authorization', 'source_run', 'source_submit', 'source_account', 'source_project', 'source_step', 'current_run'] as const)('重发关系%s不符时不提供原请求入口', (change): void => {
-    const replacement = replaceOriginalVideo();
-    if (change === 'backlink') video.resubmittedAs = [];
-    if (change === 'history') project.production!.steps[0].resubmissionHistory = [];
-    if (change === 'authorization') replacement.resubmissionOf!.authorizationId = 'TEST-other-authorization';
-    if (change === 'source_run') video.runtime!.runId = 'TEST-other-run';
-    if (change === 'source_submit') video.runtime!.submittedAt = '2026-11-08T00:01:00.000Z';
-    if (change === 'source_account') video.assignedAccountId = 'TEST-other-account';
-    if (change === 'source_project') video.projectId = 'TEST-other-studio';
-    if (change === 'source_step') video.petstory!.stepId = 'TEST-other-step';
-    if (change === 'current_run') replacement.runtime!.runId = 'TEST-other-current-run';
-    render(mediaNode()); expect(screen.queryByRole('button', { name: '原请求豆包对话' })).toBeNull(); expect(opened).toEqual([]);
-  });
-
-  it('原请求按钮点击前重发来源关联变化时拒绝旧入口', (): void => {
-    const replacement = replaceOriginalVideo(); render(mediaNode()); const button = screen.getByRole('button', { name: '原请求豆包对话' });
-    const changed = structuredClone(replacement); changed.resubmissionOf!.runId = 'TEST-other-run';
-    act((): void => { useTaskStore.setState({ tasks: [chat, video, changed] }); fireEvent.click(button); });
-    expect(opened).toEqual([]); expect(selectAccount).not.toHaveBeenCalled(); expectNoProductionAction();
-  });
-
-  it.each([false, true])('原请求已知URL=%s的异步打开携带来源检查，普通revision不误停而迟到改绑失效', (knownUrl: boolean): void => {
-    const replacement = replaceOriginalVideo();
-    if (knownUrl) video.runtime!.conversationUrl = 'https://www.doubao.com/chat/TEST-known-original';
-    render(mediaNode()); fireEvent.click(screen.getByRole('button', { name: '原请求豆包对话' }));
-    const isCurrentSource = sourceChecks[0]; if (!isCurrentSource) throw new Error('TEST 来源谓词未传到打开事件');
-    expect(isCurrentSource()).toBe(true);
-    act((): void => { usePetStoryStore.setState({ project: { ...project, revision: project.revision + 1 } }); });
-    expect(isCurrentSource()).toBe(true);
-    const saved = structuredClone(video); saved.runtime!.conversationUrl = 'https://www.doubao.com/chat/TEST-verified-original';
-    act((): void => { useTaskStore.setState({ tasks: [chat, saved, replacement] }); });
-    expect(isCurrentSource()).toBe(true);
+  it('重发来源关联变化后仍不提供额外入口，不打开原会话或启动制作', (): void => {
+    const replacement = replaceOriginalVideo(); const view = render(mediaNode());
     const changed = structuredClone(replacement); changed.resubmissionOf!.authorizationId = 'TEST-later-authorization';
-    act((): void => { useTaskStore.setState({ tasks: [chat, saved, changed] }); });
-    expect(isCurrentSource()).toBe(false); expectNoProductionAction();
-  });
-
-  it.each([false, true])('原请求已知URL=%s的异步打开在切换项目后失效', (knownUrl: boolean): void => {
-    replaceOriginalVideo(); if (knownUrl) video.runtime!.conversationUrl = 'https://www.doubao.com/chat/TEST-known-original';
-    render(mediaNode()); fireEvent.click(screen.getByRole('button', { name: '原请求豆包对话' }));
-    const isCurrentSource = sourceChecks[0]; if (!isCurrentSource) throw new Error('TEST 来源谓词未传到打开事件');
-    act((): void => { usePetStoryStore.setState({ project: { ...project, id: 'TEST-switched-project' } }); });
-    expect(isCurrentSource()).toBe(false); expectNoProductionAction();
+    act((): void => { useTaskStore.setState({ tasks: [chat, video, changed] }); });
+    view.rerender(mediaNode());
+    expect(screen.queryByRole('button', { name: '原请求豆包对话' })).toBeNull();
+    const current = screen.getByRole('button', { name: '进入豆包对话' }); expect(current.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(current); expect(opened).toEqual([]); expect(locateRequests).toEqual([]); expect(selectAccount).not.toHaveBeenCalled(); expectNoProductionAction();
   });
 
   it('后续文字请求失败时仍打开当前正文的已采用来源', (): void => {
