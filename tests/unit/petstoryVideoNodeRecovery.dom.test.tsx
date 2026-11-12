@@ -90,7 +90,8 @@ describe('视频节点直接处理原会话确认与结果', (): void => {
     });
     usePetStoryStore.setState({ resumeProduction: resume }); const { container } = render(<Node />);
     expect(screen.getByRole('status').textContent).toBe(task.errorInfo!.message);
-    expect(container.querySelectorAll('.canvas-media-actions button')).toHaveLength(3);
+    expect(container.querySelectorAll('.canvas-media-actions button')).toHaveLength(4);
+    expect(screen.getByRole('button', { name: '上传视频' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: '结束本次制作' })).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: '检查原视频结果' }));
     await waitFor((): void => expect(screen.getByRole('button', { name: '查看视频' })).toBeDefined());

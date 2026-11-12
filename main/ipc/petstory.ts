@@ -7,7 +7,7 @@ import { BrowserWindow, dialog, ipcMain, nativeImage, shell } from 'electron';
 import { buildPetStoryPromptExport, writePetStoryPromptExport } from '../utils/petstoryExport';
 import type { IpcMainInvokeEvent } from 'electron';
 import type { PetStoryChatJob, PetStoryPlan, PetStoryPromptKind, PetStoryResult } from '@doubao-studio/contracts';
-import { PetStoryProjects, projectPath } from '../utils/petstoryProject';
+import { assertPetStoryVideoUploadBasis, capturePetStoryVideoUploadBasis, PetStoryProjects, projectPath } from '../utils/petstoryProject';
 import { PetStoryChatService } from '../utils/petstoryChat';
 import { PetStoryAdjustmentService } from '../utils/petstoryAdjustment';
 import { PetStoryExistingMediaService } from '../utils/petstoryExistingMedia';
@@ -47,7 +47,7 @@ function dialogOwner(event: IpcMainInvokeEvent): BrowserWindow {
 }
 export function registerPetStoryIPC(): () => void {
   setPetStoryDiagnosticsProvider((): Promise<object[]> => projects.diagnostics());
-  const dispose = replaceIpcHandlers(ipcMain, [...CHANNELS, ...RUNTIME_CHANNELS, 'petstory:importAdjustmentImages', 'petstory:beginImageOperation', 'petstory:advanceImageOperation', 'petstory:resumeImageOperation', 'petstory:pauseImageOperation', 'petstory:endImageOperation']);
+  const dispose = replaceIpcHandlers(ipcMain, [...CHANNELS, ...RUNTIME_CHANNELS, 'petstory:addShotVideo', 'petstory:importAdjustmentImages', 'petstory:beginImageOperation', 'petstory:advanceImageOperation', 'petstory:resumeImageOperation', 'petstory:pauseImageOperation', 'petstory:endImageOperation']);
   ipcMain.handle('petstory:endImageOperation', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => projects.serial(String(p.id), (): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => imageOperations.end(String(p.id), String(p.operationId)))));
   ipcMain.handle('petstory:pauseImageOperation', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => projects.serial(String(p.id), (): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => imageOperations.pause(String(p.id), String(p.operationId)))));
   ipcMain.handle('petstory:beginImageOperation', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => projects.serial(String(p.id), (): Promise<import('@doubao-studio/contracts').PetStoryImageOperationResult> => imageOperations.begin(String(p.id), Number(p.revision), p.request as import('@doubao-studio/contracts').PetStoryImageOperationRequest, p.capability as PetStoryCapability | undefined))));
@@ -63,6 +63,17 @@ export function registerPetStoryIPC(): () => void {
     const selected = await dialog.showOpenDialog(dialogOwner(event), { title: '选择待预览的关键帧图片', properties: ['openFile'], filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] });
     if (selected.canceled) return { success: false, error: '已取消' };
     return projects.serial(String(p.id), async (): Promise<PetStoryResult> => ({ success: true, project: await projects.addShotImage(String(p.id), Number(p.revision), String(p.shotId), p.kind as 'firstFrame' | 'lastFrame', selected.filePaths[0]) }));
+  }));
+  ipcMain.handle('petstory:addShotVideo', hostGuard(async (event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => {
+    const before = await projects.read(String(p.id));
+    if (before.revision !== Number(p.revision)) throw new Error('项目版本已变化，请重新上传视频');
+    const basis = capturePetStoryVideoUploadBasis(before, String(p.shotId));
+    const selected = await dialog.showOpenDialog(dialogOwner(event), { title: '上传镜头视频（MP4，5～10 秒）', properties: ['openFile'], filters: [{ name: 'MP4 视频', extensions: ['mp4'] }] });
+    if (selected.canceled || !selected.filePaths[0]) return { success: false, error: '已取消' };
+    return projects.serial(before.id, async (): Promise<PetStoryResult> => {
+      const latest = await projects.read(before.id); assertPetStoryVideoUploadBasis(latest, basis);
+      return { success: true, project: await projects.addShotVideo(latest.id, latest.revision, basis.shot.id, selected.filePaths[0], basis) };
+    });
   }));
   ipcMain.handle('petstory:adoptImage', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<PetStoryResult> => projects.serial(String(p.id), async (): Promise<PetStoryResult> => ({ success: true, project: await projects.adoptImage(String(p.id), Number(p.revision), p.target as import('@doubao-studio/contracts').PetStoryImageTarget, String(p.assetId)) }))));
   ipcMain.handle('petstory:inspectGeneration', hostGuard(async (_event: IpcMainInvokeEvent, p: Record<string, unknown>): Promise<import('@doubao-studio/contracts').PetStoryGenerationEligibilityResult> => production.inspectGeneration(String(p.id), Number(p.revision), p.target as import('@doubao-studio/contracts').PetStoryRuntimeTarget, p.capability as PetStoryCapability | undefined, p.fallbacks as Record<string, 'first_frame' | 'reference'> | undefined)));

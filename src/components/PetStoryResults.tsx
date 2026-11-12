@@ -12,6 +12,8 @@ import { CanvasMediaPreview } from './PetStoryCanvasMedia';
 type ResultNavigate = (stage: PetStoryJourneyStage, shotId?: string, kind?: PetStoryPromptKind) => void;
 
 function resultTask(project: PetStoryProject, shotId: string, kind: PetStoryPromptKind, asset: PetStoryAsset | undefined, tasks: Task[]): Task | undefined {
+  // 已选上传文件没有平台生成任务，不能借用同镜头的历史制作记录。
+  if (asset?.origin === 'user_upload') return undefined;
   const steps = [...(project.productionHistory || []).flatMap((production) => production.steps), ...(project.production?.steps || [])];
   const step = [...steps].reverse().find((item): boolean => item.shotId === shotId && item.kind === kind);
   const taskId = asset?.taskId || step?.taskId;
@@ -21,6 +23,7 @@ function resultTask(project: PetStoryProject, shotId: string, kind: PetStoryProm
 }
 
 function resultGenerationLabel(asset: PetStoryAsset | undefined, task: Task | undefined, candidate: boolean, hasTaskRecord: boolean): string {
+  if (asset?.kind === 'video' && asset.origin === 'user_upload') return '用户上传视频';
   if (task?.outputs.length) return '平台产物已读取';
   if (task?.status === 'done') return '任务已完成，产物待核对';
   if (task?.status === 'fail') return '任务失败，平台结果需核对';
@@ -33,7 +36,8 @@ function resultGenerationLabel(asset: PetStoryAsset | undefined, task: Task | un
 }
 
 function resultReviewReason(asset: PetStoryAsset, prompt: PetStoryPrompt | undefined): string {
-  if (asset.needsReview) return '制作依据已更新，请复核这项成果；原文件已保留。';
+  if (asset.needsReview || asset.visualBasisStale) return '制作依据已更新，请复核这项成果；原文件已保留。';
+  if (asset.kind === 'video' && asset.origin === 'user_upload') return '文件尚无有效解码校验记录。';
   if (prompt?.needsReview) return '当前提示词仍有待复核问题，请先处理对应提示词。';
   if (asset.generationFinal === undefined) return '旧产物未记录对应提示词，不能确认与当前版本一致。';
   return asset.generationFinal !== prompt?.final ? '当前提示词已变化，此文件保留供查看。' : '文件尚无有效解码校验记录。';
@@ -62,7 +66,7 @@ const ResultAsset: React.FC<{ project: PetStoryProject; shotId: string; kind: Pe
       <p className="my-2"><Tag color={current ? 'green' : 'orange'}>{current ? '对应当前内容' : '内容需要复核'}</Tag></p>
       {preview ? <CanvasMediaPreview project={project} asset={asset} name={title} /> : <Button size="small" onClick={(): void => setPreview(true)}>{asset.kind === 'video' ? '播放镜头视频' : '查看图片'}</Button>}
       {!current && <p className="my-2 canvas-error">{resultReviewReason(asset, prompt)}<Button type="link" size="small" onClick={onContinue}>核对并继续制作</Button></p>}
-      <details className="petstory-secondary-tools"><summary>提示词与文件详情</summary><p>项目内位置：{asset.relativePath}</p>{prompt && <pre className="prompt-readonly">{prompt.final || '尚无已采用提示词'}</pre>}{asset.validation && <p>文件检查：{asset.validation.width} × {asset.validation.height}{asset.validation.durationSeconds ? ` · ${asset.validation.durationSeconds.toFixed(2)} 秒` : ''}</p>}{asset.needsReview && <p>参考素材已更新，请核对这项成果。</p>}</details>
+      <details className="petstory-secondary-tools"><summary>提示词与文件详情</summary><p>项目内位置：{asset.relativePath}</p>{prompt && asset.origin !== 'user_upload' && <pre className="prompt-readonly">{prompt.final || '尚无已采用提示词'}</pre>}{asset.validation && <p>文件检查：{asset.validation.width} × {asset.validation.height}{asset.validation.durationSeconds ? ` · ${asset.validation.durationSeconds.toFixed(2)} 秒` : ''}</p>}{asset.needsReview && <p>参考素材已更新，请核对这项成果。</p>}</details>
       <Button size="small" onClick={(): void => { void locate(); }}>在文件夹中定位</Button>{feedback && <p role="status" className="mt-2">{feedback}</p>}
     </>}
   </section>;
@@ -103,7 +107,7 @@ export const PetStoryResults: React.FC<{ project: PetStoryProject; onNavigate: R
       {feedback && <p role="status" className="mt-2">{feedback}</p>}{state.exportStatus && <p role="status" className="mt-2">{state.exportStatus}</p>}
     </Card>
     {journey.shots.map((item): React.ReactNode => {
-      const task = tasks.find((candidate): boolean => candidate.id === item.video?.taskId && candidate.runtime?.runId === item.video?.runId);
+      const task = item.video?.origin === 'user_upload' ? undefined : tasks.find((candidate: Task): boolean => candidate.id === item.video?.taskId && candidate.runtime?.runId === item.video?.runId);
       return <Card size="small" key={item.shot.id} title={`镜头 ${item.shot.order} · ${item.shot.scene}`}>
         <p className="mb-3">{item.shot.action}</p>
         {item.missing.length > 0 && <p className="mb-3 canvas-error">待处理：{item.missing.join('；')}</p>}

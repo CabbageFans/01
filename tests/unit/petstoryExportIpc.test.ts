@@ -4,9 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { IpcMainInvokeEvent } from 'electron';
-import type { PetStoryProject, PetStoryResult } from '@doubao-studio/contracts';
+import type { PetStoryProduction, PetStoryProject, PetStoryResult } from '@doubao-studio/contracts';
 import { PetStoryProjects } from '../../main/utils/petstoryProject';
 import { syncMaterials } from '../../main/utils/petstoryMaterials';
+import { mediaCommand } from '../../main/utils/petstoryMedia';
+import { localMediaStreams } from '../../main/utils/LocalMediaProtocol';
 
 const desktop = vi.hoisted(() => {
   type Handler = (event: unknown, args: object) => Promise<unknown>;
@@ -108,6 +110,111 @@ it('keeps cancel and non-host frame calls free of writes or media tasks', async 
   expect(desktop.picker).toHaveBeenCalledTimes(2);
   expect(await fs.readdir(destination)).toEqual([]);
   expect(desktop.createTask).not.toHaveBeenCalled();
+});
+
+it('uploads one user-selected MP4 through the host picker without accepting caller file paths or creating platform tasks', async (): Promise<void> => {
+  const file = path.join(root, 'TEST-user-video.mp4');
+  await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=blue:s=32x48:r=5:d=5', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', file]);
+  desktop.picker.mockResolvedValueOnce({ canceled: false, filePaths: [file] });
+  const result = await invoke('addShotVideo', { id: p.id, revision: p.revision, shotId: 'door', path: '/TEST-caller-path-is-ignored.mp4' });
+  expect(result.success).toBe(true); const asset = result.project!.assets.at(-1)!;
+  expect(asset).toMatchObject({ kind: 'video', shotId: 'door', origin: 'user_upload', validation: { decoded: true } });
+  expect(result.project!.selectedVideos?.door).toBe(asset.id); expect(asset.taskId).toBeUndefined();
+  expect(desktop.picker.mock.calls[1]).toEqual([desktop.owner, { title: '上传镜头视频（MP4，5～10 秒）', properties: ['openFile'], filters: [{ name: 'MP4 视频', extensions: ['mp4'] }] }]);
+  expect(desktop.createTask).not.toHaveBeenCalled(); expect(JSON.stringify(result)).not.toContain(file);
+  const media = await invoke('readMedia', { id: p.id, assetId: asset.id }) as PetStoryResult & { data?: string; mimeType?: string };
+  expect(media).toMatchObject({ success: true, mimeType: 'video/mp4' }); expect(media.data).toMatch(/^doubao-media:\/\/asset\/[a-f0-9]{64}$/);
+  const response = await localMediaStreams.respond(new Request(media.data!, { headers: { range: 'bytes=0-63' } }));
+  expect(response.status).toBe(206); expect(response.headers.get('content-type')).toBe('video/mp4');
+  expect(Buffer.from(await response.arrayBuffer())).toEqual((await fs.readFile(file)).subarray(0, 64));
+});
+
+async function uploadFile(): Promise<string> {
+  const file = path.join(root, 'TEST-concurrent-user-video.mp4');
+  await mediaCommand('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=blue:s=32x48:r=5:d=5', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', file]);
+  return file;
+}
+function uploadProduction(): PetStoryProduction {
+  const supported = { state: 'supported' as const, reason: 'TEST' };
+  return { phase: 'shots', state: 'complete', planHash: '0'.repeat(64), approvedAt: new Date().toISOString(), steps: [], message: 'TEST已完成原制作', fallbacks: {},
+    capability: { accountId: p.accountId, image: supported, modes: { first_frame: supported, first_last_frame: supported, reference: supported }, durations: [5] },
+    shots: { door: { requestedMode: 'first_frame', resolvedMode: 'first_frame', reason: 'TEST' } } };
+}
+
+it('rebases only unrelated background material writes during the native picker without losing progress or creating tasks', async (): Promise<void> => {
+  const file = await uploadFile(); const revision = p.revision; const shot = structuredClone(p.plan!.shots[0]);
+  desktop.picker.mockImplementationOnce(async (): Promise<object> => {
+    p.materials![0].prompt.optimized = 'TEST后台基础素材候选已回读'; p = await projects.write(p);
+    return { canceled: false, filePaths: [file] };
+  });
+  const result = await invoke('addShotVideo', { id: p.id, revision, shotId: 'door' });
+  expect(result.success).toBe(true); expect(result.project!.plan!.shots[0]).toEqual(shot);
+  expect(result.project!.materials![0].prompt.optimized).toBe('TEST后台基础素材候选已回读');
+  expect(result.project!.selectedVideos?.door).toBe(result.project!.assets.at(-1)!.id);
+  expect(desktop.createTask).not.toHaveBeenCalled();
+});
+
+it('rejects an already stale upload revision before opening a native picker', async (): Promise<void> => {
+  const before = await fs.readFile(path.join(source, 'project.json'), 'utf8');
+  expect(await invoke('addShotVideo', { id: p.id, revision: p.revision - 1, shotId: 'door' })).toMatchObject({ success: false, error: expect.stringContaining('项目版本已变化') });
+  expect(desktop.picker).toHaveBeenCalledTimes(1); expect(desktop.createTask).not.toHaveBeenCalled();
+  expect(await fs.readFile(path.join(source, 'project.json'), 'utf8')).toBe(before);
+});
+
+it.each(['shot', 'deleted-shot', 'account', 'studio', 'video-lock'] as const)('rejects %s changes while selecting without overriding the new project state', async (change: 'shot' | 'deleted-shot' | 'account' | 'studio' | 'video-lock'): Promise<void> => {
+  const file = await uploadFile(); const revision = p.revision;
+  desktop.picker.mockImplementationOnce(async (): Promise<object> => {
+    if (change === 'shot') p.plan!.shots[0].action = 'TEST用户已修改目标动作';
+    if (change === 'deleted-shot') { p.plan = undefined; p.materials = undefined; }
+    if (change === 'account') p.accountId = 'TEST-other-account';
+    if (change === 'studio') p.studioProjectId = 'TEST-other-studio';
+    if (change === 'video-lock') { p.production = uploadProduction(); p.production.state = 'paused'; p.production.target = { shotId: 'door', kind: 'video' }; }
+    p = await projects.write(p); return { canceled: false, filePaths: [file] };
+  });
+  const result = await invoke('addShotVideo', { id: p.id, revision, shotId: 'door' });
+  expect(result.success).toBe(false); expect(result.error).toContain(change === 'deleted-shot' ? '镜头不存在' : change === 'video-lock' ? '请先结束' : '已变化');
+  expect((await projects.read(p.id)).revision).toBe(p.revision); expect((await projects.read(p.id)).assets).toEqual(p.assets);
+  expect(desktop.createTask).not.toHaveBeenCalled();
+});
+
+it.each(['explicit', 'production', 'history', 'latest-asset'] as const)('rejects changed selected video from %s fallback during the picker', async (selection: 'explicit' | 'production' | 'history' | 'latest-asset'): Promise<void> => {
+  const file = await uploadFile(); p = await projects.addShotVideo(p.id, p.revision, 'door', file); const first = p.assets.at(-1)!;
+  p = await projects.addShotVideo(p.id, p.revision, 'door', file); const second = p.assets.at(-1)!;
+  p.selectedVideos = selection === 'explicit' ? { door: first.id } : undefined;
+  if (selection === 'production') { p.production = uploadProduction(); p.production.shots.door.videoId = first.id; }
+  if (selection === 'history') { const history = uploadProduction(); history.shots.door.videoId = first.id; p.productionHistory = [history]; }
+  p = await projects.write(p); const revision = p.revision;
+  desktop.picker.mockImplementationOnce(async (): Promise<object> => {
+    if (selection === 'explicit') p.selectedVideos = { door: second.id };
+    if (selection === 'production') p.production!.shots.door.videoId = second.id;
+    if (selection === 'history') p.productionHistory![0].shots.door.videoId = second.id;
+    if (selection === 'latest-asset') p.assets = [second, first];
+    p = await projects.write(p); return { canceled: false, filePaths: [file] };
+  });
+  const result = await invoke('addShotVideo', { id: p.id, revision, shotId: 'door' });
+  expect(result).toMatchObject({ success: false, error: expect.stringContaining('当前视频已变化') });
+  expect((await projects.read(p.id)).assets).toEqual(p.assets); expect((await projects.read(p.id)).selectedVideos).toEqual(p.selectedVideos);
+  expect(desktop.createTask).not.toHaveBeenCalled();
+});
+
+it('cancel after unrelated progress keeps that progress and never creates an upload or platform task', async (): Promise<void> => {
+  const revision = p.revision;
+  desktop.picker.mockImplementationOnce(async (): Promise<object> => {
+    p.materials![0].prompt.optimized = 'TEST后台进度保留'; p = await projects.write(p);
+    return { canceled: true, filePaths: [] };
+  });
+  expect(await invoke('addShotVideo', { id: p.id, revision, shotId: 'door' })).toMatchObject({ success: false, error: '已取消' });
+  const saved = await projects.read(p.id); expect(saved.revision).toBe(p.revision); expect(saved.materials![0].prompt.optimized).toBe('TEST后台进度保留');
+  expect(saved.assets).toEqual([]); expect(saved.selectedVideos).toBeUndefined(); expect(desktop.createTask).not.toHaveBeenCalled();
+});
+
+it('cancelled upload and non-host calls preserve the project without starting any platform work', async (): Promise<void> => {
+  const before = await fs.readFile(path.join(source, 'project.json'), 'utf8');
+  desktop.picker.mockResolvedValueOnce({ canceled: true, filePaths: [] });
+  expect(await invoke('addShotVideo', { id: p.id, revision: p.revision, shotId: 'door' })).toMatchObject({ success: false, error: '已取消' });
+  expect(await invoke('addShotVideo', { id: p.id, revision: p.revision, shotId: 'door' }, { sender: event.sender, senderFrame: {} } as IpcMainInvokeEvent)).toMatchObject({ success: false, error: '仅宿主窗口可访问项目' });
+  expect(desktop.picker).toHaveBeenCalledTimes(2); expect(desktop.createTask).not.toHaveBeenCalled();
+  expect(await fs.readFile(path.join(source, 'project.json'), 'utf8')).toBe(before);
 });
 
 it('opens the selected project.json through the same project reader without writes or task dispatch', async (): Promise<void> => {

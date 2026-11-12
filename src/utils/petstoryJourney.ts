@@ -56,6 +56,10 @@ export function journeyAssetMatchesPrompt(asset: PetStoryAsset | undefined, prom
     return asset.imageReview.sha256 === asset.validation.sha256 && !!asset.imageReview.adoptedAt;
   }
   if (asset.needsReview) return false;
+  // 用户上传的视频以当前明确选用的本地文件为依据，不伪造生成正文或任务来源。
+  if (asset.kind === 'video' && asset.origin === 'user_upload') {
+    return asset.uploadSource?.sha256 === asset.validation.sha256 && !!asset.uploadSource?.uploadedAt;
+  }
   // 上传图片的采用事实独立于模型提示词；缺少生成正文不代表图片未确认。
   if (asset.imageReview?.state === 'adopted' && (!asset.taskId || !!asset.imageReview.sourceReply)) return true;
   return !!prompt?.final.trim() && !prompt.needsReview && asset.generationFinal === prompt.final;

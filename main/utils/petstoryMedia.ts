@@ -55,7 +55,7 @@ export async function mediaDigest(filename: string): Promise<{ sha256: string; b
   finally { await file.close(); }
   return { sha256: hash.digest('hex'), bytes: stat.size };
 }
-export async function validatePetStoryMedia(filename: string, kind: 'image' | 'video'): Promise<PetStoryMediaValidation> {
+export async function validatePetStoryMedia(filename: string, kind: 'image' | 'video', options: { userUpload?: boolean } = {}): Promise<PetStoryMediaValidation> {
   const digest = await mediaDigest(filename);
   const data = JSON.parse(await mediaCommand('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', filename])) as {
     streams?: { codec_type: string; codec_name: string; width?: number; height?: number; duration?: string }[];
@@ -65,7 +65,11 @@ export async function validatePetStoryMedia(filename: string, kind: 'image' | 'v
   if (!stream || !stream.width || !stream.height) throw new MediaProcessingError('MEDIA_CONTENT_INVALID', '媒体没有真实可解码画面尺寸');
   const duration = Number(stream.duration || data.format?.duration);
   if (kind === 'video' && (!data.format?.format_name?.split(',').some((format): boolean => ['mov', 'mp4'].includes(format))
-    || ['png', 'mjpeg', 'webp', 'gif'].includes(stream.codec_name) || !Number.isFinite(duration) || duration < 5 || duration > 10)) throw new MediaProcessingError('MEDIA_CONTENT_INVALID', '真实视频必须为 MP4、实际时长 5～10 秒；素材保留并阻断下游，不重新生成');
+    || ['png', 'mjpeg', 'webp', 'gif'].includes(stream.codec_name) || !Number.isFinite(duration) || duration < 5 || duration > 10)) throw new MediaProcessingError('MEDIA_CONTENT_INVALID', options.userUpload
+      ? '请选择实际时长 5～10 秒的 MP4 视频，原视频保持不变。'
+      : '真实视频必须为 MP4、实际时长 5～10 秒；素材保留并阻断下游，不重新生成');
+  // FFmpeg 可解码不代表 Chromium 可播放；只拒绝真实播放器已证实不支持的上传编码。
+  if (kind === 'video' && options.userUpload && stream.codec_name === 'mpeg4') throw new Error('当前播放器不支持该 MP4 的 MPEG-4 Part 2 编码，请转为 H.264 编码的 MP4 后上传；原文件未修改');
   if (kind === 'image' && !['png', 'mjpeg', 'webp'].includes(stream.codec_name)) throw new MediaProcessingError('MEDIA_CONTENT_INVALID', '产物不是可用的 PNG/JPEG/WebP 图片');
   // ffprobe 元数据不等于可解码；完整解码全部视频画面，损坏不能用缩略图补过。
   await mediaCommand('ffmpeg', ['-v', 'error', '-xerror', '-err_detect', 'explode', '-i', filename, '-map', '0:v:0', ...(kind === 'image' ? ['-frames:v', '1'] : []), '-f', 'null', '-']);

@@ -49,6 +49,7 @@ interface PetStoryState {
   endChatAdjustment: () => Promise<void>;
   chatReadbackError: string;
   uploadShotImage: (shotId: string, kind: 'firstFrame' | 'lastFrame') => Promise<void>;
+  uploadShotVideo: (shotId: string) => Promise<void>;
   adoptShotImage: (shotId: string, kind: 'firstFrame' | 'lastFrame', assetId: string) => Promise<void>;
   continuePromptStage: () => Promise<void>;
   generateCanvasPrompts: () => Promise<void>;
@@ -1769,6 +1770,31 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     uploadShotImage: async (shotId: string, kind: 'firstFrame' | 'lastFrame'): Promise<void> => run(async (): Promise<void> => {
       const p = get().project; if (p) await uploadImageTarget(p, { shotId, kind }, (): Promise<PetStoryResult> => window.electronAPI.petstory.addShotImage(p.id, p.revision, shotId, kind)); set({ productionCounts: null });
     }),
+    uploadShotVideo: async (shotId: string): Promise<void> => {
+      const projectId = get().project?.id;
+      if (!projectId) return;
+      await run(async (): Promise<void> => {
+        const p = get().project;
+        if (p?.id !== projectId) return;
+        try {
+          const api = window.electronAPI?.petstory;
+          // 开发页面可先热更新，而 contextBridge 和主进程仍属于旧实例；不可改走不受控上传。
+          if (typeof api?.addShotVideo !== 'function') {
+            set({ error: '视频上传功能尚未加载，请关闭并重新打开工作室后再上传。' });
+            return;
+          }
+          const result = await api.addShotVideo(p.id, p.revision, shotId);
+          // 文件选择与完整解码可能较慢，迟到结果只保存原项目，不切回用户已经离开的项目。
+          if (get().project?.id !== p.id || !result.success && result.error === '已取消') return;
+          accept(result);
+          if (result.success) set({ productionCounts: null });
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : '视频上传失败，请重试。';
+          if (get().project?.id === p.id) set({ error: /No handler registered for ['"]petstory:addShotVideo['"]/.test(message)
+            ? '视频上传功能尚未加载，请关闭并重新打开工作室后再上传。' : message });
+        }
+      });
+    },
     adoptShotImage: async (shotId: string, kind: 'firstFrame' | 'lastFrame', assetId: string): Promise<void> => run(async (): Promise<void> => {
       const p = get().project;
       if (p) await adoptImageTargets(p, [{ target: { shotId, kind }, assetId }], (): Promise<PetStoryResult> => window.electronAPI.petstory.adoptImage(p.id, p.revision, { shotId, kind }, assetId));

@@ -365,6 +365,45 @@ function frame(state: 'candidate' | 'adopted'): PetStoryAsset {
 }
 
 describe('成果按实际采用、任务与文件分别交接', (): void => {
+  it('当前上传视频显示真实文件来源，不借用同镜头历史任务或生成提示词', (): void => {
+    const shot = project.plan!.shots[0];
+    const uploaded: PetStoryAsset = { id: 'TEST-uploaded-video', kind: 'video', origin: 'user_upload', shotId: shot.id, relativePath: 'TEST/uploaded.mp4',
+      uploadSource: { projectId: project.id, accountId: project.accountId, shotId: shot.id, sha256: 'TEST-uploaded-sha', uploadedAt: now },
+      validation: { decoded: true, sha256: 'TEST-uploaded-sha', bytes: 100, width: 720, height: 1280, durationSeconds: 6, checkedAt: now } };
+    project.assets.push(uploaded); project.selectedVideos = { [shot.id]: uploaded.id };
+    shot.prompts.video.final = 'TEST 与上传视频无生成关系的正文'; shot.prompts.video.needsReview = true;
+    const task: Task = { id: 'TEST-historical-video', projectId: project.studioProjectId, assignedAccountId: project.accountId, mode: 'video', status: 'done',
+      prompt: 'TEST 原生成请求', outputs: ['https://TEST.invalid/old.mp4'], result: null, createdAt: now, updatedAt: now,
+      runtime: { runId: 'TEST-old-run', attempt: 1, stage: 'completed', message: '', startedAt: now, stageStartedAt: now, lastHeartbeatAt: now,
+        input: { mode: 'video', prompt: 'TEST 原生成请求', attachments: [] } } };
+    const entry = { state: 'unknown' as const, reason: 'TEST' };
+    project.productionHistory = [{ state: 'complete', planHash: 'TEST', approvedAt: now,
+      capability: { accountId: project.accountId, image: entry, modes: { first_frame: entry, first_last_frame: entry, reference: entry }, durations: [] },
+      fallbacks: {}, shots: {}, message: 'TEST 历史制作', steps: [{ id: 'TEST-old-step', kind: 'video', shotId: shot.id, taskId: task.id, runId: task.runtime!.runId,
+        status: 'complete', inputHash: 'TEST', attachmentAssetIds: [] }] }];
+    useTaskStore.setState({ tasks: [task] }); const before = structuredClone(project);
+    render(<PetStoryResults project={project} onNavigate={(): void => undefined} />);
+    const video = screen.getByRole('region', { name: '本镜视频' });
+    expect(within(video).getByText('用户上传视频')).toBeDefined();
+    expect(within(video).getByText('文件校验通过')).toBeDefined(); expect(within(video).getByText('对应当前内容')).toBeDefined();
+    expect(within(video).queryByText('平台产物已读取')).toBeNull(); expect(within(video).queryByText('TEST 与上传视频无生成关系的正文')).toBeNull();
+    expect(screen.queryByRole('button', { name: '查看原任务与质量确认' })).toBeNull(); expect(project).toEqual(before);
+  });
+
+  it.each(['needsReview', 'visualBasisStale'] as const)('上传视频%s时显示制作依据复核并保留播放入口', (flag): void => {
+    const shot = project.plan!.shots[0];
+    const uploaded: PetStoryAsset = { id: 'TEST-uploaded-video', kind: 'video', origin: 'user_upload', shotId: shot.id, relativePath: 'TEST/uploaded.mp4',
+      uploadSource: { projectId: project.id, accountId: project.accountId, shotId: shot.id, sha256: 'TEST-sha', uploadedAt: now },
+      validation: { decoded: true, sha256: 'TEST-sha', bytes: 100, width: 720, height: 1280, durationSeconds: 6, checkedAt: now }, [flag]: true };
+    project.assets.push(uploaded); project.selectedVideos = { [shot.id]: uploaded.id };
+    render(<PetStoryResults project={project} onNavigate={(): void => undefined} />);
+    const video = screen.getByRole('region', { name: '本镜视频' });
+    expect(within(video).getByText('用户上传视频')).toBeDefined();
+    expect(within(video).getByText('制作依据已更新，请复核这项成果；原文件已保留。')).toBeDefined();
+    expect(within(video).getByRole('button', { name: '播放镜头视频' })).toBeDefined();
+    expect(within(video).queryByText('旧产物未记录对应提示词，不能确认与当前版本一致。')).toBeNull();
+  });
+
   it('已保存候选没有正式文件时，入口回到当前镜头采用，浏览不推断已采用', (): void => {
     project.assets.push(frame('candidate'));
     const navigate = vi.fn();

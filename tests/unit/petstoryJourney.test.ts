@@ -77,6 +77,28 @@ describe('六阶段与实际成果的只读导航投影', (): void => {
     const p = project(); p.assets.push(asset(p, 0, 'video')); p.plan!.shots[0].prompts.video.needsReview = true;
     expect(selectPetStoryJourney(p).counts.videos).toMatchObject({ present: 1, validated: 1, current: 0 });
   });
+  it('用户上传视频不依赖生成正文或任务，明确选用后计入当前视频与文件校验', (): void => {
+    const p = project(); const shot = p.plan!.shots[0]; const uploaded = asset(p, 0, 'video');
+    delete uploaded.taskId; delete uploaded.runId; delete uploaded.generationFinal;
+    uploaded.origin = 'user_upload'; uploaded.uploadSource = { projectId: p.id, accountId: p.accountId, shotId: shot.id, sha256: uploaded.validation!.sha256, uploadedAt: now };
+    p.assets.push(uploaded); p.selectedVideos = { [shot.id]: uploaded.id }; shot.prompts.video.final = ''; shot.prompts.video.needsReview = true;
+    const before = structuredClone(p); const projected = selectPetStoryJourney(p);
+    expect(projected.counts.videos).toMatchObject({ present: 1, validated: 1, current: 1 });
+    expect(projected.counts.quality.confirmed).toBe(0); expect(projected.shots[0].video).toBe(uploaded);
+    expect(p).toEqual(before);
+  });
+  it.each(['needsReview', 'visualBasisStale', 'decoded', 'digest', 'date'] as const)('上传视频%s变化后保留文件但不误计当前成果', (change): void => {
+    const p = project(); const shot = p.plan!.shots[0]; const uploaded = asset(p, 0, 'video');
+    delete uploaded.taskId; delete uploaded.runId; delete uploaded.generationFinal;
+    uploaded.origin = 'user_upload'; uploaded.uploadSource = { projectId: p.id, accountId: p.accountId, shotId: shot.id, sha256: uploaded.validation!.sha256, uploadedAt: now };
+    if (change === 'needsReview' || change === 'visualBasisStale') uploaded[change] = true;
+    if (change === 'decoded') delete uploaded.validation;
+    if (change === 'digest') uploaded.uploadSource.sha256 = 'TEST-other-digest';
+    if (change === 'date') uploaded.uploadSource.uploadedAt = '';
+    p.assets.push(uploaded); p.selectedVideos = { [shot.id]: uploaded.id };
+    expect(selectPetStoryJourney(p).counts.videos).toMatchObject({ present: 1, current: 0 });
+    expect(journeyShotAsset(p, shot, 'video')).toBe(uploaded);
+  });
   it('手改正文保留与真实待采用候选分别计数，旧optimized不冒充新候选', (): void => {
     const p = project(); const prompt = p.plan!.shots[0].prompts.firstFrame;
     prompt.final = 'TEST 手改保留'; prompt.optimized = 'TEST 新候选'; prompt.edited = true;

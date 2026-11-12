@@ -33,6 +33,14 @@ export function migrateLocalMediaSources(project: PetStoryProject): void {
   }
 }
 export function assertLocalMediaSource(project: PetStoryProject, asset: PetStoryAsset): void {
+  if (asset.origin === 'user_upload') {
+    const upload = asset.uploadSource;
+    if (asset.kind !== 'video' || !upload || upload.projectId !== project.id || upload.accountId !== project.accountId
+      || upload.shotId !== asset.shotId || !/^[a-zA-Z0-9_-]{1,80}$/.test(upload.shotId)
+      || !asset.validation || upload.sha256 !== asset.validation.sha256 || !Number.isFinite(Date.parse(upload.uploadedAt))
+      || asset.taskId || asset.runId || asset.artifactId || asset.downloadJobId || asset.sourceSnapshot) throw new Error('用户上传视频来源记录不符，请重新上传原文件');
+    return;
+  }
   const source = asset.sourceSnapshot;
   if (!source || source.schemaVersion !== 1 || source.projectId !== project.id || source.accountId !== project.accountId
     || source.taskId !== asset.taskId || source.runId !== asset.runId || source.artifactId !== asset.artifactId || source.shotId !== asset.shotId) throw new Error('本地视频来源记录不符，请重新打开项目核对');

@@ -272,7 +272,9 @@ export interface PetStoryAsset {
   generationPrompt?: string;
   /** 关联已有任务时保留历史正文，不能冒充当前 final 的新生成。 */
   generationFinal?: string;
-  origin?: 'historical_task';
+  origin?: 'historical_task' | 'user_upload';
+  /** 用户上传仅保存项目内文件来源，不补造平台任务或提交记录。 */
+  uploadSource?: { projectId: string; accountId: string; shotId: string; sha256: string; uploadedAt: string };
   promptJobId?: string;
   relativePath: string;
   atSeconds?: number;
@@ -292,7 +294,7 @@ export interface PetStoryAsset {
   needsReview?: boolean;
   /** 实际角色图被替换；旧关键帧保留历史但不再代表当前形象。 */
   visualBasisStale?: boolean;
-  sourceVideo?: { assetId: string; taskId: string; runId: string; sha256: string; atSeconds: number };
+  sourceVideo?: { assetId: string; taskId?: string; runId?: string; sha256: string; atSeconds: number };
 }
 export interface PetStoryMediaSourceSnapshot {
   schemaVersion: 1;
@@ -695,6 +697,7 @@ export interface PetStoryAPI {
   adoptAdjustmentReply: (projectId: string, revision: number, adjustmentId: string, replyKey: string) => Promise<PetStoryAdjustmentResult>;
   endAdjustment: (projectId: string, revision: number, adjustmentId: string) => Promise<PetStoryAdjustmentResult>;
   addShotImage: (projectId: string, revision: number, shotId: string, kind: 'firstFrame' | 'lastFrame') => Promise<PetStoryResult>;
+  addShotVideo: (projectId: string, revision: number, shotId: string) => Promise<PetStoryResult>;
   adoptImage: (projectId: string, revision: number, target: PetStoryImageTarget, assetId: string) => Promise<PetStoryResult>;
   inspectGeneration: (projectId: string, revision: number, target: PetStoryRuntimeTarget, capability?: PetStoryCapability, fallbacks?: Record<string, 'first_frame' | 'reference'>) => Promise<PetStoryGenerationEligibilityResult>;
   revealAsset: (projectId: string, assetId: string) => Promise<PetStoryResult>;
