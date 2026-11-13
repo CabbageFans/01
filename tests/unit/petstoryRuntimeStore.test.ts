@@ -96,6 +96,16 @@ it.each([false, 'unknown', undefined])('新建与重开文字任务忽略遗留�
   expect(usePetStoryStore.getState()).not.toHaveProperty('capabilityCheckedInSession');
   expect(usePetStoryStore.getState().capability).toBeNull();
 });
+it.each(['firstFrame', 'lastFrame'] as const)('单独生成%s提示词仅启动本项后台文字任务，原正文和素材保留', async (kind: 'firstFrame' | 'lastFrame'): Promise<void> => {
+  const shot = project.plan!.shots.find((item): boolean => !!item.prompts[kind])!;
+  const before = structuredClone({ plan: project.plan, assets: project.assets });
+  await usePetStoryStore.getState().generateShotPrompt(shot.id, kind);
+  expect(prepareRuntime).toHaveBeenCalledExactlyOnceWith(project.id, 8, 'optimize', { shotId: shot.id, promptKind: kind, background: 'canvas' });
+  expect(usePetStoryStore.getState().error).toBe('');
+  expect(tasks).toHaveLength(1); expect(tasks[0].mode).toBe('chat'); expect(generateMaterials).not.toHaveBeenCalled();
+  expect(project.jobs[0]).toMatchObject({ shotId: shot.id, promptKind: kind, background: 'canvas' });
+  expect({ plan: project.plan, assets: project.assets }).toEqual(before);
+});
 it('新建可显式选择账号与关联项目，并保留用户当前浏览账号与全局项目', async (): Promise<void> => {
   const selectedBefore = useAccountStore.getState().selectedAccountId;
   const activeBefore = useProjectStore.getState().activeProjectId;

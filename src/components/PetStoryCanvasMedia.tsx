@@ -5,7 +5,6 @@ import type { Account, PetStoryAsset, PetStoryCompiledPrompt, PetStoryPlan, PetS
 import { petStoryResubmissionTask, petStoryUnsubmittedVideoTask, usePetStoryStore } from '../store/usePetStoryStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { PetStoryImageReview } from './PetStoryImageReview';
-import { needsPetStoryReferenceAdaptation } from '../utils/petstoryVisualBasis';
 import { pendingImageCandidates } from '../utils/petstoryImageCandidates';
 import { canvasJobLabel, isCanvasPlanEditLocked, isPetStoryPromptPreparationMessage, petStoryVideoRecoveryMessage } from './petStoryCanvasShared';
 import { usePetStoryGenerationEligibility } from './usePetStoryGenerationEligibility';
@@ -295,7 +294,7 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
     ? petStoryResubmissionTask(project, tasks, [...Object.values(taskState.executingTasks), ...(taskState.activeTaskId ? [taskState.activeTaskId] : [])]) : undefined;
   const nodeResubmissionTask = recoverySnapshot && sameSubmittedVideoRecovery(resubmissionTask, recoverySnapshot) ? resubmissionTask : undefined;
   const hasCandidate = !video && pendingImageCandidates(project, { shotId: shot.id, kind: kind as 'firstFrame' | 'lastFrame' }, asset?.id).length > 0;
-  const promptBlocker = !shot.prompts[kind]?.final.trim() ? readiness.eligibility?.blockers.find((item): boolean => item.code === 'prompt')?.message : undefined;
+  const promptBlocker = (!video || !shot.prompts[kind]?.final.trim()) ? readiness.eligibility?.blockers.find((item): boolean => item.code === 'prompt')?.message : undefined;
   const repairingPrompt = !!state.promptRepairJobIds?.some((id): boolean => project.jobs.some((job): boolean => job.id === id && job.shotId === shot.id && job.promptKind === kind));
   const promptPreparing = repairingPrompt || !!promptBlocker?.includes('正在后台准备并校验');
   const promptNotice = repairingPrompt ? '视频提示词正在后台修订并校验，通过后请确认使用。' : promptBlocker;
@@ -397,12 +396,13 @@ export const CanvasMediaNode: React.FC<{ project: PetStoryProject; shot: PetStor
     {video && pendingTask?.status === 'manual_submission_observing' && <p className="canvas-hint" role="status">{pendingTask.runtime?.message || '正在同步原会话并检查视频结果，请稍候。'}</p>}
     {video && <details className="petstory-secondary-tools"><summary>本镜制作设置</summary><CanvasVideoSettings project={project} shot={shot} onDirtyChange={setSettingsDirty} /></details>}
     {!video ? <PetStoryImageReview project={project} target={{ shotId: shot.id, kind: kind as 'firstFrame' | 'lastFrame' }} title={`镜头 ${shot.order} · ${kind === 'firstFrame' ? '首帧' : '尾帧'}`} currentAssetId={asset?.id}
-      disabled={disabled} generationDisabled={waiting || promptPreparing || (!needsPetStoryReferenceAdaptation(project, shot.id, kind) && !readiness.eligibility?.ready)} generating={readiness.loading}
+      disabled={disabled} generationDisabled={waiting || promptPreparing || !shot.prompts[kind]?.final.trim() || !readiness.eligibility?.ready} generating={readiness.loading}
       onUpload={async (): Promise<void> => state.uploadShotImage(shot.id, kind as 'firstFrame' | 'lastFrame')}
       onGenerate={async (): Promise<void> => state.generateShotMedia(shot.id, kind)}
       onAdopt={async (assetId: string): Promise<void> => state.adoptShotImage(shot.id, kind as 'firstFrame' | 'lastFrame', assetId)}
       onAdjust={async (): Promise<void> => state.openChatAdjustment({ shotId: shot.id, promptKind: kind })} />
       : asset ? <ExistingMedia project={project} shot={shot} asset={asset} kind={kind} /> : !readOnlyRecovery && <div className="canvas-empty-media"><PlayCircleOutlined /><strong>{recoverableTask ? '生成前准备未完成，尚未发送' : waiting ? '等待原任务产物' : '尚无镜头视频'}</strong></div>}
+    {!video && (promptBlocker || !shot.prompts[kind]?.final.trim()) && <p className="canvas-hint">{promptBlocker || '请先在对应提示词节点点击“生成提示词”，确认使用后再生成图片。'}</p>}
     {waiting && asset && <p className="canvas-hint">{recoverableTask ? '新请求尚未发送；仍保留原有成果。' : `新请求：${canvasJobLabel(pendingTask?.status)}；下方仍展示原有成果。`}</p>}
     {video && <CanvasVideoResolution project={project} shot={shot} eligibility={readiness.eligibility} />}
     {video && !asset && !recoverableTask && !readOnlyRecovery && promptNotice && <p className={promptPreparing || isPetStoryPromptPreparationMessage(promptNotice) ? 'canvas-hint' : 'canvas-error'} role={promptPreparing || isPetStoryPromptPreparationMessage(promptNotice) ? 'status' : 'alert'}>{promptNotice}</p>}

@@ -27,6 +27,22 @@ beforeEach((): void => {
 afterEach((): void => { usePetStoryStore.setState(initial.pet); useTaskStore.setState(initial.tasks); useAccountStore.setState(initial.accounts); vi.restoreAllMocks(); });
 
 describe('画布候选与自然语言修改', (): void => {
+  it.each(['firstFrame', 'lastFrame'] as const)('%s提供独立生成提示词入口，保留原正文与图片且不启动出图', (kind: 'firstFrame' | 'lastFrame'): void => {
+    const shot = project.plan!.shots[0];
+    shot.prompts[kind] ||= structuredClone(shot.prompts.firstFrame);
+    const before = structuredClone(project);
+    const generatePrompt = vi.fn(async (): Promise<void> => undefined);
+    const generateMedia = vi.fn(async (): Promise<void> => undefined);
+    const adopt = vi.fn(async (): Promise<void> => undefined);
+    usePetStoryStore.setState({ generateShotPrompt: generatePrompt, generateShotMedia: generateMedia, adoptPromptCandidate: adopt });
+    const { rerender } = render(<CanvasPromptEditor project={project} shot={shot} kind={kind} disabled={false} generationBlocked={false} dirtyChanged={dirtyChanged} />);
+    fireEvent.click(screen.getByRole('button', { name: '生成提示词' }));
+    expect(generatePrompt).toHaveBeenCalledExactlyOnceWith(shot.id, kind);
+    expect(generateMedia).not.toHaveBeenCalled(); expect(adopt).not.toHaveBeenCalled(); expect(project).toEqual(before);
+    rerender(<CanvasPromptEditor project={project} shot={shot} kind={kind} disabled={false} generationBlocked dirtyChanged={dirtyChanged} />);
+    expect((screen.getByRole('button', { name: '生成提示词' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('节点直接显示完整候选，确认才采用，普通视图没有诊断和专业编辑器', (): void => {
     const adopt = vi.fn(async (): Promise<void> => undefined);
     usePetStoryStore.setState({ adoptPromptCandidate: adopt });
@@ -116,6 +132,7 @@ describe('画布候选与自然语言修改', (): void => {
     expect(screen.getByText('正在后台修订并校验…')).toBeDefined();
     expect(view.container.querySelector('.canvas-prompt-progress .anticon-loading')).not.toBeNull();
     expect((screen.getByRole('button', { name: '修改要求' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '生成提示词' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole('button', { name: '按原要求修复' })).toBeNull();
     act((): void => usePetStoryStore.setState({ promptRepairJobIds: [] }));
     expect(screen.getByText('提示词待后台修订')).toBeDefined();

@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PetStoryGenerationEligibilityResult, PetStoryPlan, PetStoryProject } from '@doubao-studio/contracts';
 import { CanvasMediaNode } from '../../src/components/PetStoryCanvasMedia';
+import { CanvasPromptEditor } from '../../src/components/PetStoryCanvasPrompt';
 import { isPetStoryPromptPreparationMessage } from '../../src/components/petStoryCanvasShared';
 import { usePetStoryStore } from '../../src/store/usePetStoryStore';
 import { useTaskStore } from '../../src/store/useTaskStore';
@@ -50,14 +51,46 @@ async function startWithError(message: string): Promise<void> {
 }
 
 describe('视频节点的后台提示词准备', (): void => {
-  it('缺少关键帧正文时正常图片按钮可进入文字准备，不被媒体预检的缺正文状态卡住', async (): Promise<void> => {
-    const shot = project.plan!.shots[0]; shot.prompts.firstFrame.final = '';
+  it.each(['firstFrame', 'lastFrame'] as const)('%s先独立生成并确认提示词，再由生成图片按钮出图', async (kind: 'firstFrame' | 'lastFrame'): Promise<void> => {
+    const shot = project.plan!.shots[0]; shot.prompts[kind] ||= structuredClone(shot.prompts.firstFrame);
+    shot.prompts[kind]!.final = ''; shot.prompts[kind]!.optimized = '';
+    blocker = '请先点击“生成提示词”，确认使用后再生成图片。';
     const generate = vi.fn(async (): Promise<void> => undefined);
-    usePetStoryStore.setState({ project, generateShotMedia: generate });
-    render(<CanvasMediaNode project={project} shot={shot} kind="firstFrame" disabled={false} />);
-    const button = await screen.findByRole('button', { name: '生成图片' });
+    const generatePrompt = vi.fn(async (): Promise<void> => {
+      const saved = structuredClone(usePetStoryStore.getState().project!); saved.revision++;
+      const prompt = saved.plan!.shots[0].prompts[kind]!;
+      prompt.optimized = 'TEST 本次完整生图提示词'; prompt.candidateJobId = 'TEST-frame-candidate';
+      saved.jobs.push({ id: prompt.candidateJobId, taskId: 'TEST-frame-chat', kind: 'optimize', shotId: shot.id, promptKind: kind,
+        status: 'applied', resultStatus: 'candidate', inputHash: 'TEST', sourceUrl: '', parsedResult: { optimized: prompt.optimized } });
+      usePetStoryStore.setState({ project: saved });
+    });
+    const adopt = vi.fn(async (): Promise<void> => {
+      const saved = structuredClone(usePetStoryStore.getState().project!); saved.revision++;
+      const prompt = saved.plan!.shots[0].prompts[kind]!; prompt.final = prompt.optimized;
+      saved.jobs[0].resultStatus = 'adopted'; blocker = ''; usePetStoryStore.setState({ project: saved });
+    });
+    usePetStoryStore.setState({ project, generateShotMedia: generate, generateShotPrompt: generatePrompt, adoptPromptCandidate: adopt });
+    const FrameNodes: React.FC = (): React.ReactElement => {
+      const current = usePetStoryStore((state) => state.project);
+      if (!current?.plan) return <></>;
+      const currentShot = current.plan.shots[0];
+      return <><CanvasPromptEditor project={current} shot={currentShot} kind={kind} disabled={false} generationBlocked={false} dirtyChanged={(): void => undefined} />
+        <CanvasMediaNode project={current} shot={currentShot} kind={kind} disabled={false} /></>;
+    };
+    render(<FrameNodes />);
+    const button = screen.getByRole('button', { name: '生成图片' });
+    await screen.findByText(blocker); expect(button.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(button); expect(generate).not.toHaveBeenCalled(); expect(generatePrompt).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '生成提示词' }));
+    await screen.findByRole('button', { name: '确认使用' });
+    expect(generatePrompt).toHaveBeenCalledExactlyOnceWith(shot.id, kind);
+    expect(button.hasAttribute('disabled')).toBe(true); expect(generate).not.toHaveBeenCalled();
+    expect(usePetStoryStore.getState().project!.plan!.shots[0].prompts[kind]!.final).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: '确认使用' }));
     await waitFor((): void => expect(button.hasAttribute('disabled')).toBe(false));
-    fireEvent.click(button); expect(generate).toHaveBeenCalledExactlyOnceWith(shot.id, 'firstFrame');
+    expect(adopt).toHaveBeenCalledExactlyOnceWith('TEST-frame-candidate'); expect(generate).not.toHaveBeenCalled();
+    fireEvent.click(button); expect(generate).toHaveBeenCalledExactlyOnceWith(shot.id, kind);
+    expect(generatePrompt).toHaveBeenCalledOnce();
   });
   it('没有正式正文仍可启动本镜制作；后台修订进度由实际在途记录呈现，不增加修复按钮', async (): Promise<void> => {
     const generate = vi.fn(async (): Promise<void> => {

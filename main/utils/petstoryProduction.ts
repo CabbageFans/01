@@ -204,7 +204,9 @@ function pendingShotPromptMessage(p: PetStoryProject, job: PetStoryChatJob, labe
   if (task.errorInfo?.code === 'submission_uncertain') return `${label}的原文字任务是否受理尚未确认，请检查原结果；不会自动重发。`;
   if (task.status === 'waiting_verification') return `${label}后台准备已暂停：请先完成原账号登录或人机验证。`;
   if (['fail', 'paused', 'cancelled'].includes(task.status)) return `${label}后台准备已暂停：${task.errorInfo?.message || job.error || '原文字任务尚未完成'}。`;
-  if (task.status === 'queued' && task.executionIntent === 'hold') return `${label}文字任务等待继续；开始本镜制作后将接续原任务。`;
+  if (task.status === 'queued' && task.executionIntent === 'hold') return job.promptKind === 'video'
+    ? `${label}文字任务等待继续；开始本镜制作后将接续原任务。`
+    : `${label}文字任务等待继续；请在对应提示词节点重试原任务，确认使用后再生成图片。`;
   return `${label}正在后台准备并校验，校验通过后请确认使用。`;
 }
 function missingShotPromptMessage(p: PetStoryProject, shot: PetStoryShot, kind: PetStoryPromptKind, tasks: Task[]): string {
@@ -212,7 +214,7 @@ function missingShotPromptMessage(p: PetStoryProject, shot: PetStoryShot, kind: 
   const job = currentShotPromptReply(p, shot, kind);
   if (job?.status === 'invalid') {
     if (job.rawText && job.requestId && job.validationDetails?.length && job.validationDetails.every((issue): boolean => issue.repairable)) {
-      return `${label}尚未通过校验；开始本镜制作后，软件会在后台按原要求持续修订并校验，通过后请确认使用。`;
+      return `${label}尚未通过校验；${kind === 'video' ? '开始本镜制作后，' : ''}软件会在后台按原要求持续修订并校验，通过后请确认使用。`;
     }
     const reason = job.validationDetails?.find((issue): boolean => !issue.repairable)?.message || job.error || '原回复缺少可核验的归属或完整校验记录';
     return `${label}后台准备已暂停：${reason}。请先查看豆包对话并核对原结果。`;
@@ -222,7 +224,8 @@ function missingShotPromptMessage(p: PetStoryProject, shot: PetStoryShot, kind: 
     return `${label}已有待采用候选，请先在对应提示词节点“确认使用”，再生成媒体。`;
   }
   if (job && ['bound', 'captured'].includes(job.status)) return pendingShotPromptMessage(p, job, label, tasks);
-  return `${label}尚未准备；开始本镜制作后将先在后台准备并校验，通过后请确认使用。`;
+  return kind === 'video' ? `${label}尚未准备；开始本镜制作后将先在后台准备并校验，通过后请确认使用。`
+    : `${label}尚未准备；请先点击“生成提示词”，确认使用后再生成图片。`;
 }
 function checkPlannedReferences(p: PetStoryProject, capability: PetStoryCapability, fallbacks: Record<string, 'first_frame' | 'reference'>): void {
   for (const shot of requireValue(p.plan).shots) {
