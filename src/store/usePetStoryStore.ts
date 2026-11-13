@@ -53,6 +53,7 @@ interface PetStoryState {
   adoptShotImage: (shotId: string, kind: 'firstFrame' | 'lastFrame', assetId: string) => Promise<void>;
   continuePromptStage: () => Promise<void>;
   generateCanvasPrompts: () => Promise<void>;
+  generateShotPrompt: (shotId: string, kind: 'firstFrame' | 'lastFrame') => Promise<void>;
   inspectPromptStageTargets: (scope?: 'shots') => Promise<PetStoryResult>;
   resumeCanvasPrompt: (jobId: string) => Promise<void>;
   adoptPromptBatchCandidates: () => Promise<void>;
@@ -1977,14 +1978,26 @@ export const usePetStoryStore = create<PetStoryState>((set, get) => {
     regenerateMaterialPrompt: async (materialId: string, editIntent?: PetStoryMaterialEditIntent): Promise<void> => run(async (): Promise<void> => {
       await prepareRuntime('materialPrompt', { materialId, ...(editIntent ? { editIntent } : {}) });
     }),
+    generateShotPrompt: async (shotId: string, kind: 'firstFrame' | 'lastFrame'): Promise<void> => {
+      const projectId = get().project?.id;
+      await run(async (): Promise<void> => {
+        const project = get().project;
+        if (!project || project.id !== projectId) throw new Error('请先打开原项目');
+        if (!project.plan?.shots.find((shot: PetStoryShot): boolean => shot.id === shotId)?.prompts[kind]) throw new Error('镜头提示词不存在，请重新选择当前镜头');
+        if (pendingPetStoryDrafts(project.id).length) throw new Error('请先保存或放弃尚未保存的修改，再生成提示词');
+        // 仅创作所选关键帧的文字候选；确认使用和图片生成仍由用户分别操作。
+        await prepareRuntime('optimize', { shotId, promptKind: kind, background: 'canvas' });
+      });
+    },
     saveShotPrompt: async (shotId: string, kind: PetStoryPromptKind, final: string, basis?: PetStoryPromptEditBasis): Promise<void> => run(async (): Promise<void> => {
       const p = get().project; if (p) accept(await window.electronAPI.petstory.saveShotPrompt(p.id, p.revision, shotId, kind, final, basis));
     }),
     generateShotMedia: async (shotId: string, kind: PetStoryPromptKind): Promise<void> => {
       if (kind === 'firstFrame' || kind === 'lastFrame') {
-        // 与基础图及图片修改共用真实进度、后台宿主和原任务恢复，不另建执行器。
+        // 只按当前正式正文生成图片；缺少正文时不创建文字任务或自动采用候选。
         await runImageTarget({ shotId, kind }, async (request: ImageTargetRequest): Promise<void> => {
-          if (!await prepareShotPrompt(shotId, kind, (): boolean => ownsImageRequest(request)) || !ownsImageRequest(request)) return;
+          const prompt = get().project?.plan?.shots.find((shot: PetStoryShot): boolean => shot.id === shotId)?.prompts[kind];
+          if (!prompt?.final.trim()) throw new Error(`请先生成${kind === 'firstFrame' ? '首帧生图' : '尾帧编辑'}提示词并确认使用，再生成图片。`);
           await beginImageOperation({ shotId, kind }, undefined, undefined, request);
         });
         await tickPetStoryImageOperation();

@@ -223,6 +223,16 @@ describe('单次图片意图的后台接力', (): void => {
     await expect(queuedDispatch(prepared)).rejects.toThrow('本轮文字准备已停止');
     expect(usePetStoryStore.getState().activeImageOperationIds).toEqual([project.imageOperations![1].id]);
   });
+  it.each(['firstFrame', 'lastFrame'] as const)('画布%s缺少已确认正文时不创建文字或图片任务，也不自动采用已有候选', async (kind: 'firstFrame' | 'lastFrame'): Promise<void> => {
+    const shot = project.plan!.shots.find((item): boolean => !!item.prompts[kind])!;
+    shot.prompts[kind]!.final = ''; shot.prompts[kind]!.optimized = 'TEST 尚未确认使用的候选';
+    const before = structuredClone(project);
+    await usePetStoryStore.getState().generateShotMedia(shot.id, kind);
+    expect(usePetStoryStore.getState().error).toContain('提示词并确认使用，再生成图片');
+    expect(prepareRuntime).not.toHaveBeenCalled(); expect(begin).not.toHaveBeenCalled(); expect(adoptPrompt).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled(); expect(tasks).toEqual([]); expect(project).toEqual(before);
+    expect(usePetStoryStore.getState().pendingImageTargets).toEqual([]);
+  });
   it.each(['firstFrame', 'lastFrame'] as const)('画布%s生成复用图片操作和进度，不进入旧制作调度或打开浏览器', async (kind): Promise<void> => {
     const shot = project.plan!.shots.find((item): boolean => !!item.prompts[kind])!;
     const target = { shotId: shot.id, kind };
@@ -232,6 +242,7 @@ describe('单次图片意图的后台接力', (): void => {
     expect(begin).toHaveBeenCalledExactlyOnceWith(project.id, 1, { target, requestId: expect.any(String) }, undefined);
     expect(start).toHaveBeenCalledOnce(); expect(bindProduction).toHaveBeenCalledOnce();
     expect(tasks.map((item): Task['mode'] => item.mode)).toEqual(['image']); expect(project.jobs).toEqual([]);
+    expect(prepareRuntime).not.toHaveBeenCalled(); expect(adoptPrompt).not.toHaveBeenCalled();
     const state = usePetStoryStore.getState(); const op = state.project!.imageOperations!.at(-1)!;
     expect(state.activeImageOperationId).toBe(op.id);
     expect(petStoryImageProgress(state.project!, target, tasks, state.activeImageOperationId)).toMatchObject({ busy: true, stage: 'generating', task: { id: tasks[0].id } });

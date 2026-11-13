@@ -246,12 +246,13 @@ export const CanvasPromptEditor: React.FC<{
     {candidateJob && !retainedCandidate && <Button size="small" type="primary" disabled={actionDisabled || state.busy} onClick={(): void => { void adopt(); }}>确认使用</Button>}
     <Button size="small" disabled={actionDisabled || !manualBody} onClick={openManual}>{manualBody && manualBody !== displayed ? '手动修改当前正文' : '手动修改'}</Button>
     <Button size="small" disabled={actionDisabled || !displayed} onClick={openFeedback}>修改要求</Button>
+    {kind !== 'video' && <Button size="small" disabled={actionDisabled || state.busy} onClick={(): void => { void state.generateShotPrompt(shot.id, kind); }}>生成提示词</Button>}
     {kind === 'video' && <PetStoryConversationButton projectId={project.id} task={conversationTask} unavailableHint="当前提示词尚无可定位的原豆包任务" />}
   </div>;
   return <div className="canvas-prompt" id={`prompt-${shot.id}-${kind}`} data-prompt-kind={kind} data-candidate={candidateJob ? 'true' : undefined}>
     <div className="canvas-field-label"><strong>{canvasPromptNames[kind]}</strong><button type="button" disabled={!displayed} aria-label={`放大镜头${shot.order}${canvasPromptNames[kind]}`} onClick={(): void => setExpanded(true)}><ExpandOutlined /> 全文</button></div>
     <div className="canvas-source"><span>{promptDisplayLabel(prompt, candidate, !!invalidJob, retainedCandidate)}</span>{displayed && <span>{displayed.length} 字</span>}</div>
-    {displayed ? <pre tabIndex={0} aria-label={`${title}${invalidJob ? '校验未通过全文' : candidate ? '候选全文' : '当前正文'}`} className={`canvas-prompt-readonly ${candidate ? 'is-candidate' : ''}`}>{displayed}</pre> : <p className="canvas-hint">{job && !job.endedWaitingAt && job.resultStatus !== 'stale' ? '本镜提示词尚未准备完成。' : `点击本镜${kind === 'video' ? '生成视频' : '生成图片'}时会准备所需提示词。`}</p>}
+    {displayed ? <pre tabIndex={0} aria-label={`${title}${invalidJob ? '校验未通过全文' : candidate ? '候选全文' : '当前正文'}`} className={`canvas-prompt-readonly ${candidate ? 'is-candidate' : ''}`}>{displayed}</pre> : <p className="canvas-hint">{job && !job.endedWaitingAt && job.resultStatus !== 'stale' ? '本镜提示词尚未准备完成。' : kind === 'video' ? '点击本镜生成视频时会准备所需提示词。' : '点击“生成提示词”，确认使用后再生成图片。'}</p>}
     {candidate && prompt.final && !retainedCandidate && <p className="canvas-hint">{prompt.edited ? '确认后将替换当前手改正文，原版本保留。' : '确认前继续使用原正文，已有图片和视频保留。'}</p>}
     <CanvasPromptProgress project={project} job={job} task={task} disabled={disabled || generationBlocked} />
     {actions}

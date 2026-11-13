@@ -207,6 +207,15 @@ describe('P4 实际入口和请求模式', (): void => {
     await expect(service.generateShotMedia(p.id, p.revision, shot.id, kind, capability())).rejects.toThrow('已有待采用候选，请先在对应提示词节点“确认使用”');
     expect(await projects.read(p.id)).toEqual(before); expect(tasks).toEqual([]); expect(createdInputs).toEqual([]);
   });
+  it.each(['firstFrame', 'lastFrame'] as const)('缺少%s正文时要求独立生成并确认提示词，不引导图片按钮准备文字', async (kind: 'firstFrame' | 'lastFrame'): Promise<void> => {
+    const shot = p.plan!.shots[2]; shot.prompts[kind]!.final = '';
+    p = await projects.write(p); const before = structuredClone(p);
+    const message = '请先点击“生成提示词”，确认使用后再生成图片';
+    await expect(service.generateShotMedia(p.id, p.revision, shot.id, kind, capability())).rejects.toThrow(message);
+    const inspected = await service.inspectGeneration(p.id, p.revision, { shotId: shot.id, promptKind: kind }, capability());
+    expect(inspected.eligibility?.blockers.find((item): boolean => item.code === 'prompt')?.message).toContain(message);
+    expect(await projects.read(p.id)).toEqual(before); expect(tasks).toEqual([]); expect(createdInputs).toEqual([]);
+  });
   it.each(['absent', 'stale', 'wrong-target', 'changed-facts'] as const)('空final且原回复%s时不提供失效的修复或候选采用引导', async (scenario): Promise<void> => {
     const shot = p.plan!.shots[2]; const kind = 'video'; p.promptCapability = capability();
     seedOfflinePromptContracts(p, { shotId: shot.id, promptKind: kind }, { completeVideoBody: true });
